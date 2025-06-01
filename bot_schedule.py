@@ -77,8 +77,6 @@ async def check_for_updates():
         elif current_hash != last_hash:
             await bot.send_message(admin, f"[{now}] 📌 Таблица обновилась!", parse_mode='HTML')
             last_hash = current_hash
-        else:
-            await bot.send_message(admin, f"[{now}] ✅ Без изменений.", parse_mode='HTML')
     except Exception as e:
         print(f"[{datetime.now()}] ❌ Ошибка при загрузке: {e}")
 
