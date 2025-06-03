@@ -26,6 +26,8 @@ logging.basicConfig(level=logging.INFO)
 # === Переменные окружения ============================================================================================
 API_TOKEN = os.getenv('BOT_TOKEN')
 admin     = int(os.getenv('ADMIN_ID', '0'))  # ADMIN_ID должен быть числом
+SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
+SHEET_NAME     = os.getenv('SHEET_NAME')
 
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязателен.")
