@@ -237,7 +237,7 @@ if __name__ == '__main__':
 
     # Настраиваем планировщик
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_for_updates, "interval", minutes=5)
+    scheduler.add_job(check_for_updates, "interval", minutes=1)
     scheduler.add_job(generate_report, CronTrigger(day="10,20,30", hour=9, minute=0))
     scheduler.start()
     print("🔄 Планировщик запущен.")
