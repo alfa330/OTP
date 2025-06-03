@@ -11,28 +11,40 @@ from io import StringIO
 
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton,InlineKeyboardMarkup
+from aiogram.dispatcher import FSMContext
 from flask import Flask
 
-# === Логирование ===
+# === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO)
 
-# === Переменные окружения ===
+
+
+
+
+# === Переменные окружения ============================================================================================
 API_TOKEN = os.getenv('BOT_TOKEN')
 admin     = int(os.getenv('ADMIN_ID', '0'))  # ADMIN_ID должен быть числом
-SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
-SHEET_NAME     = os.getenv('SHEET_NAME')
 
-if not API_TOKEN or not SPREADSHEET_ID or not SHEET_NAME:
-    raise Exception("Переменные окружения BOT_TOKEN, SPREADSHEET_ID и SHEET_NAME обязательны.")
+if not API_TOKEN:
+    raise Exception("Переменная окружения BOT_TOKEN обязателен.")
 
 FETCH_URL = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet={SHEET_NAME}"
 
-# === Инициализация бота и диспетчера ===
+
+
+
+
+# === Инициализация бота и диспетчера =================================================================================
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+dp = Dispatcher(bot=bot, storage=storage)
 
-# === Flask-сервер для Render — для пинга ===
+
+
+
+# === Flask-сервер для Render — для пинга =============================================================================
 app = Flask(__name__)
 
 @app.route('/')
@@ -42,20 +54,145 @@ def index():
 def run_flask():
     app.run(host='0.0.0.0', port=8080)
 
-# === Глобальное состояние ===
+
+
+
+# === Глобальное состояние ============================================================================================
 last_hash = None
 
-# === Команды ===
+
+
+
+# === Классы ==========================================================================================================
+
+class new_sv(StatesGroup):
+    svname = State()
+    svid   = State()
+
+class sv(StatesGroup):
+    delete = State()
+
+class SV:
+    def __init__(self, name,id):
+        self.name=name
+        self.id=id
+        self.table=''
+
+SVlist={}
+
+
+
+# === Команды =========================================================================================================
 @dp.message_handler(commands=['start'])
 async def start_command(message: types.Message):
+    await message.delete()
     if message.from_user.id == admin:
+        kb=ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add(KeyboardButton('Добавить СВ➕'))
+        kb.add(KeyboardButton('Убрать СВ❌'))
         await bot.send_message(
-            chat_id=message.from_user.id,
-            text="<b>Бобро пожаловать!</b>\nЭто бот для прослушки прослушек.",
-            parse_mode='HTML'
+            chat_id=      message.from_user.id,
+            text=         "<b>Бобро пожаловать!</b>\nЭто бот для прослушки прослушек.",
+            parse_mode=   'HTML',
+            reply_markup= kb 
+        )
+    else:
+        await bot.send_message(
+            chat_id=      message.from_user.id,
+            text=         f"<b>Бобро пожаловать!</b>\nТвой <b>ID</b> что бы присоедениться к команде:\n\n<pre>{message.from_user.id}</pre>",
+            parse_mode=   'HTML'
         )
 
-# === Работа с таблицей ===
+
+
+
+# === Админка =========================================================================================================
+@dp.message_handler(regexp='Добавить СВ➕')                              #Добавление нового СВ
+async def newSv(message: types.message):
+    await bot.send_message(text='<b>Добавление СВ, этап</b>: 1 из 2📍\n\nФИО нового СВ🖊',
+                            chat_id=message.from_user.id,
+                            parse_mode='HTML',
+                            reply_markup= ReplyKeyboardRemove())
+    await new_sv.svname.set()
+
+@dp.message_handler(state=new_sv.svname)                                #ИМЯ
+async def newSVname(message: types.message, state: FSMContext):
+    async with state.proxy() as data:
+        data['svname'] = message.text
+    await message.answer(text=f'Класс, ФИО - <b>{message.text}</b>\n\n<b>Добавление СВ, этап</b>: 2 из 2📍\n\nНапишите <b>ID</b> нового СВ🆔',parse_mode='HTML')
+    await new_sv.next()
+    await message.delete()
+
+@dp.message_handler(state=new_sv.svid)                                  #id
+async def newSVid(message: types.message, state: FSMContext):
+    kb=ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton('Добавить таблицу📑'))
+    try:
+        async with state.proxy() as data:
+            data['svid'] = int(message.text)
+        await bot.send_message(
+                chat_id=      int(message.text),
+                text=         f"Принятие в команду прошло успешно <b>успешно✅</b>\n\nОсталось отправить таблицу вашей группы. Нажмите <b>Добавить таблицу📑</b> что бы сделать это.",
+                parse_mode=   'HTML',
+                reply_markup= kb
+        )
+
+        SVlist[data['svid']] = SV(data['svname'],data['svid'])          #Добавил в лист СВ
+
+        await message.answer(text=f'Класс, ID - <b>{message.text}</b>\n\n<b>Добавление СВ прошло <b>успешно✅</b>. Новому супервайзеру осталось лишь отправить таблицу этого месяца👌🏼',parse_mode='HTML')
+        await state.finish()
+    except: 
+        await message.answer('Ой, похоже вы отправили не тот <b>ID</b>❌\n\n<b>Пожалуйста повторите попытку!</b>')
+    await message.delete()
+
+@dp.message_handler(regexp='Убрать СВ❌')                                #Удаление СВ
+async def delSv(message: types.message):
+    await bot.send_message(text='<b>Выберете СВ которого надо исключить🖊</b>',
+                            chat_id=admin,
+                            parse_mode='HTML',
+                            reply_markup= ReplyKeyboardRemove()
+                            )
+    if SVlist:
+        ikb=InlineKeyboardMarkup(row_width=1)
+        for i in SVlist:
+            ikb.insert(InlineKeyboardButton(text=SVlist[i].name,callback_data=str(i)))
+        await bot.send_message(text='<b>Лист СВ:</b>',
+                                chat_id=admin,
+                                parse_mode='HTML',
+                                reply_markup=ikb
+                                )
+    else:
+        await bot.send_message(text='<b>В команде нет СВ🤥</b>',
+                                chat_id=admin,
+                                parse_mode='HTML'
+                                )
+    await sv.delete.set()
+    await message.delete()
+    
+@dp.callback_query_handler(state=sv.delete)
+async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
+    SV = SVlist[int(callback.data)]
+    del SVlist[int(callback.data)]
+    await bot.send_message(text=f"Супервайзер <b>{SV.name}</b> успешно исключен из вашей команды✅",
+                            chat_id=admin,
+                            parse_mode='HTML'
+    )
+
+    await bot.delete_message(chat_id = callback.from_user.id, message_id = callback.message.message_id)
+
+    await bot.send_message(text=f"Вы были исключены из команды❌",
+                           chat_id=SV.id,
+                           parse_mode='HTML',
+                           reply_markup= ReplyKeyboardRemove()
+    )
+    await state.finish()
+
+
+
+# === Работа с СВ =====================================================================================================
+
+
+# === Работа с таблицей ===============================================================================================
 def sync_fetch_text():
     response = requests.get(FETCH_URL)
     response.raise_for_status()
@@ -89,7 +226,11 @@ async def generate_report():
     except Exception as e:
         print(f"[{datetime.now()}] ⚠️ Ошибка при генерации отчета: {e}")
 
-# === Главный запуск ===
+
+
+
+
+# === Главный запуск ==================================================================================================
 if __name__ == '__main__':
     # Запускаем Flask-сервер в отдельном потоке
     threading.Thread(target=run_flask).start()
