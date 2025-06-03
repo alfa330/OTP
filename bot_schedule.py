@@ -91,7 +91,7 @@ async def start_command(message: types.Message):
     if message.from_user.id == admin:
         kb=ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add(KeyboardButton('Добавить СВ➕'))
-        kb.add(KeyboardButton('Убрать СВ❌'))
+        kb.insert(KeyboardButton('Убрать СВ❌'))
         await bot.send_message(
             chat_id=      message.from_user.id,
             text=         "<b>Бобро пожаловать!</b>\nЭто бот для прослушки прослушек.",
@@ -140,8 +140,13 @@ async def newSVid(message: types.message, state: FSMContext):
         )
 
         SVlist[data['svid']] = SV(data['svname'],data['svid'])          #Добавил в лист СВ
-
-        await message.answer(text=f'Класс, ID - <b>{message.text}</b>\n\nДобавление СВ прошло <b>успешно✅</b>. Новому супервайзеру осталось лишь отправить таблицу этого месяца👌🏼',parse_mode='HTML')
+        kb=ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add(KeyboardButton('Добавить СВ➕'))
+        kb.insert(KeyboardButton('Убрать СВ❌'))
+        await message.answer(text=f'Класс, ID - <b>{message.text}</b>\n\nДобавление СВ прошло <b>успешно✅</b>. Новому супервайзеру осталось лишь отправить таблицу этого месяца👌🏼',
+                             parse_mode='HTML',
+                             reply_markup= kb
+                             )
         await state.finish()
     except: 
         await message.answer(text='Ой, похоже вы отправили не тот <b>ID</b>❌\n\n<b>Пожалуйста повторите попытку!</b>',parse_mode='HTML')
