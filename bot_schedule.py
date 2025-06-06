@@ -72,6 +72,7 @@ class new_sv(StatesGroup):
     svid   = State()
 
 class sv(StatesGroup):
+    crtable = State()
     delete = State()
 
 class SV:
@@ -154,12 +155,12 @@ async def newSVid(message: types.message, state: FSMContext):
 
 @dp.message_handler(regexp='Убрать СВ❌')                                #Удаление СВ
 async def delSv(message: types.message):
-    await bot.send_message(text='<b>Выберете СВ которого надо исключить🖊</b>',
+    if SVlist:
+        await bot.send_message(text='<b>Выберете СВ которого надо исключить🖊</b>',
                             chat_id=admin,
                             parse_mode='HTML',
                             reply_markup= ReplyKeyboardRemove()
                             )
-    if SVlist:
         ikb=InlineKeyboardMarkup(row_width=1)
         for i in SVlist:
             ikb.insert(InlineKeyboardButton(text=SVlist[i].name,callback_data=str(i)))
@@ -168,21 +169,29 @@ async def delSv(message: types.message):
                                 parse_mode='HTML',
                                 reply_markup=ikb
                                 )
+        await sv.delete.set()
     else:
+        kb=ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add(KeyboardButton('Добавить СВ➕'))
+        kb.insert(KeyboardButton('Убрать СВ❌'))
         await bot.send_message(text='<b>В команде нет СВ🤥</b>',
                                 chat_id=admin,
-                                parse_mode='HTML'
+                                parse_mode='HTML',
+                                reply_markup= kb
                                 )
-    await sv.delete.set()
     await message.delete()
     
 @dp.callback_query_handler(state=sv.delete)
 async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
     SV = SVlist[int(callback.data)]
     del SVlist[int(callback.data)]
+    kb=ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton('Добавить СВ➕'))
+    kb.insert(KeyboardButton('Убрать СВ❌'))
     await bot.send_message(text=f"Супервайзер <b>{SV.name}</b> успешно исключен из вашей команды✅",
                             chat_id=admin,
-                            parse_mode='HTML'
+                            parse_mode='HTML',
+                            reply_markup= kb
     )
 
     await bot.delete_message(chat_id = callback.from_user.id, message_id = callback.message.message_id)
@@ -197,7 +206,25 @@ async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
 
 
 # === Работа с СВ =====================================================================================================
+@dp.message_handler(regexp='Добавить таблицу📑')                            
+async def crtablee(message: types.message):
+    await bot.send_message(text='<b>Отправьте вашу таблицу ОКК🖊</b>',
+                            chat_id = message.from_user.id,
+                            parse_mode = 'HTML',
+                            reply_markup= ReplyKeyboardRemove()
+                            )
+    await sv.crtable.set()
+    await message.delete()
 
+@dp.message_handler(state = sv.crtable)
+async def tableName(message: types.message, state: FSMContext):
+    SVlist[data['svid']].table=message.text
+    await state.finish()
+    await bot.send_message(text='<b>Таблица успешно получена✅</b>',
+                            chat_id = message.from_user.id,
+                            parse_mode = 'HTML'
+                            )
+    await message.delete()
 
 # === Работа с таблицей ===============================================================================================
 def sync_fetch_text():
