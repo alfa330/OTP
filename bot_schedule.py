@@ -206,6 +206,16 @@ async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
 
 
 # === Работа с СВ =====================================================================================================
+@dp.message_handler(regexp='Добавить таблицу📑')                            
+async def crtablee(message: types.message):
+    await bot.send_message(text='<b>Отправьте вашу таблицу ОКК🖊</b>',
+                            chat_id = message.from_user.id,
+                            parse_mode = 'HTML',
+                            reply_markup= ReplyKeyboardRemove()
+                            )
+    await sv.crtable.set()
+    await message.delete()
+
 @dp.message_handler(state=sv.crtable)
 async def tableName(message: types.Message, state: FSMContext):
     try:
