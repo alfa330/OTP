@@ -219,11 +219,12 @@ async def crtablee(message: types.message):
 @dp.message_handler(state = sv.crtable)
 async def tableName(message: types.message, state: FSMContext):
     SVlist[data['svid']].table=message.text
-    await state.finish()
+    
     await bot.send_message(text='<b>Таблица успешно получена✅</b>',
                             chat_id = message.from_user.id,
                             parse_mode = 'HTML'
                             )
+    await state.finish()
     await message.delete()
 
 # === Работа с таблицей ===============================================================================================
