@@ -218,7 +218,7 @@ async def crtablee(message: types.message):
 
 @dp.message_handler(state = sv.crtable)
 async def tableName(message: types.message, state: FSMContext):
-    SVlist[data['svid']].table=message.text
+    SVlist[message.from_user_id].table=message.text
     
     await bot.send_message(text='<b>Таблица успешно получена✅</b>',
                             chat_id = message.from_user.id,
