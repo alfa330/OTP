@@ -206,26 +206,48 @@ async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
 
 
 # === Работа с СВ =====================================================================================================
-@dp.message_handler(regexp='Добавить таблицу📑')                            
-async def crtablee(message: types.message):
-    await bot.send_message(text='<b>Отправьте вашу таблицу ОКК🖊</b>',
-                            chat_id = message.from_user.id,
-                            parse_mode = 'HTML',
-                            reply_markup= ReplyKeyboardRemove()
-                            )
-    await sv.crtable.set()
-    await message.delete()
+@dp.message_handler(state=sv.crtable)
+async def tableName(message: types.Message, state: FSMContext):
+    try:
+        # Проверяем, существует ли пользователь в SVlist
+        if message.from_user.id not in SVlist:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="Ошибка: Вы не зарегистрированы как супервайзер! Пожалуйста, добавьтесь через администратора.",
+                parse_mode="HTML"
+            )
+            await state.finish()
+            return
 
-@dp.message_handler(state = sv.crtable)
-async def tableName(message: types.message, state: FSMContext):
-    SVlist[message.from_user_id].table=message.text
+        # Сохраняем таблицу
+        SVlist[message.from_user.id].table = message.text
+
+        # Отправляем подтверждение
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text='<b>Таблица успешно получена✅</b>',
+            parse_mode='HTML'
+        )
+
+        # Удаляем сообщение пользователя
+        try:
+            await message.delete()
+        except Exception as e:
+            print(f"Ошибка при удалении сообщения: {e}")
+
+        # Завершаем состояние
+        await state.finish()
+
+    except Exception as e:
+        # Логируем ошибку для диагностики
+        print(f"Ошибка в tableName: {e}")
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="Произошла ошибка при обработке таблицы. Попробуйте снова или свяжитесь с администратором.",
+            parse_mode="HTML"
+        )
+        await state.finish()
     
-    await bot.send_message(text='<b>Таблица успешно получена✅</b>',
-                            chat_id = message.from_user.id,
-                            parse_mode = 'HTML'
-                            )
-    await state.finish()
-    await message.delete()
 
 # === Работа с таблицей ===============================================================================================
 def sync_fetch_text():
