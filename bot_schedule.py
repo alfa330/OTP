@@ -114,7 +114,7 @@ def receive_call_evaluation():
             f"💯 Оценка: <b>{data['score']}</b>\n"
         )
         if data['score'] < 100 and data['comment']:
-            message += f"\n💬 Комментарий: {data['comment']}\n"
+            message += f"\n💬 Комментарий: \n{data['comment']}\n"
         message+="\n"+hint
 
         # Send message to Telegram via HTTP request
