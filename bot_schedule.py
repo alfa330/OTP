@@ -40,6 +40,19 @@ bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot=bot, storage=storage)
 
+# === В роли ДБ ====================================================================================================
+
+
+SVlist = {}
+
+class SV:
+    def __init__(self, name, id):
+        self.name = name
+        self.id = id
+        self.table = ''
+        self.calls = {}
+
+
 # === Flask-сервер ====================================================================================================
 app = Flask(__name__)
 
@@ -70,10 +83,28 @@ def receive_call_evaluation():
         for field in required_fields:
             if not isinstance(data[field], (str, int, float)):
                 return jsonify({"error": f"Invalid type for {field}"}), 400
+        b=1
+        hint=""
+        for t in SVList:
+            if SVList[t].name == data['evaluator']:
+                b=0
+                if data['month'] in SVList[t].calls:
+                    if data['call_number'] in SVlist[t].calls[data['month']] :
+                        hint+=" - Корректировка оценки!"
+                    else:
+                        SVlist[t].calls[data['month']]['call_number']=data
+                else:
+                    SVlist[t].calls[data['month']]={}
+                    SVlist[t].calls[data['month']]['call_number']=data
+                break
+        
+        if b:
+            hint+=" Оценивающего нет в списке супервайзеров!"
+                
 
         # Construct message
         message = (
-            f"📞 <b>Оценка звонка</b>\n"
+            f"📞 <b>Оценка звонка</b>\n" 
             f"👤 Оценивающий: <b>{data['evaluator']}</b>\n"
             f"📋 Оператор: <b>{data['operator']}</b>\n"
             f"📄 За месяц: <b>{data['month']}</b>\n"
@@ -83,6 +114,7 @@ def receive_call_evaluation():
         )
         if data['score'] < 100 and data['comment']:
             message += f"\n💬 Комментарий: {data['comment']}\n"
+        message+="\n"+hint
 
         # Send message to Telegram via HTTP request
         telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
@@ -110,6 +142,7 @@ def run_flask():
     app.run(host='0.0.0.0', port=8080, debug=False)
 
 # === Глобальное состояние ============================================================================================
+
 last_hash = None
 
 # === Классы ==========================================================================================================
@@ -120,14 +153,6 @@ class new_sv(StatesGroup):
 class sv(StatesGroup):
     crtable = State()
     delete = State()
-
-class SV:
-    def __init__(self, name, id):
-        self.name = name
-        self.id = id
-        self.table = ''
-
-SVlist = {}
 
 # Helper function to create cancel keyboard
 def get_cancel_keyboard():
@@ -181,7 +206,7 @@ async def start_command(message: types.Message):
         )
 
 # === Админка =========================================================================================================
-@dp.message_handler(regexp='Добавить СВ➕')
+@dp.message_handler(regexp='Добавить СВ➕') #Добавление СВ
 async def newSv(message: types.Message):
     await bot.send_message(
         text='<b>Добавление СВ, этап</b>: 1 из 2📍\n\nФИО нового СВ🖊',
@@ -210,7 +235,7 @@ async def newSVid(message: types.Message, state: FSMContext):
         async with state.proxy() as data:
             data['svid'] = sv_id
         kb_sv = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb_sv.add(KeyboardButton('Добавить таблицу📑'))
+        kb_sv.add(KeyboardButton('Добавить таблицу📑'))   #Отправка сообщения СВ
         await bot.send_message(
             chat_id=sv_id,
             text=f"Принятие в команду прошло успешно <b>успешно✅</b>\n\nОсталось отправить таблицу вашей группы. Нажмите <b>Добавить таблицу📑</b> что бы сделать это.",
@@ -232,7 +257,7 @@ async def newSVid(message: types.Message, state: FSMContext):
         )
     await message.delete()
 
-@dp.message_handler(regexp='Убрать СВ❌')
+@dp.message_handler(regexp='Убрать СВ❌') #Удаление СВ
 async def delSv(message: types.Message):
     if SVlist:
         await bot.send_message(
@@ -260,7 +285,7 @@ async def delSv(message: types.Message):
         )
     await message.delete()
 
-@dp.callback_query_handler(state=sv.delete)
+@dp.callback_query_handler(state=sv.delete) 
 async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
     SV = SVlist[int(callback.data)]
     del SVlist[int(callback.data)]
@@ -270,7 +295,7 @@ async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
         parse_mode='HTML',
         reply_markup=get_admin_keyboard()
     )
-    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id) #Отправка сообщения СВ
     await bot.send_message(
         text=f"Вы были исключены из команды❌",
         chat_id=SV.id,
