@@ -13,6 +13,7 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.dispatcher import FSMContext
+from aiogram.utils.exceptions import TelegramAPIError
 from flask import Flask, request, jsonify
 from functools import wraps
 
@@ -57,14 +58,19 @@ def index():
 
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
-async def receive_call_evaluation():
+def receive_call_evaluation():  # Synchronous function
     try:
         data = request.get_json()
         required_fields = ['evaluator', 'operator', 'month', 'call_number', 'phone_number', 'score', 'comment']
-        if not all(field in data for field in required_fields):
-            return jsonify({"error": "Missing required fields"}), 400
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing or invalid required fields"}), 400
 
-        # Sanitize inputs to prevent injection
+        # Sanitize inputs
+        for field in required_fields:
+            if not isinstance(data[field], (str, int, float)):
+                return jsonify({"error": f"Invalid type for {field}"}), 400
+
+        # Construct message
         message = (
             f"📞 <b>Оценка звонка</b>\n"
             f"👤 Оценивающий: <b>{data['evaluator']}</b>\n"
@@ -77,16 +83,27 @@ async def receive_call_evaluation():
         if data['score'] < 100 and data['comment']:
             message += f"\n💬 Комментарий: {data['comment']}\n"
 
-        # Send message to Telegram
-        await bot.send_message(
-            chat_id=admin,
-            text=message,
-            parse_mode='HTML'
-        )
+        # Run async bot.send_message in a new event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(
+                bot.send_message(
+                    chat_id=admin,
+                    text=message,
+                    parse_mode='HTML'
+                )
+            )
+        finally:
+            loop.close()
+
         return jsonify({"status": "success"}), 200
+    except TelegramAPIError as te:
+        logging.error(f"Telegram API error: {te}")
+        return jsonify({"error": f"Failed to send Telegram message: {str(te)}"}), 500
     except Exception as e:
         logging.error(f"Error processing call evaluation: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 def run_flask():
     app.run(host='0.0.0.0', port=8080, debug=False)
