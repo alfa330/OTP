@@ -535,9 +535,11 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
         message_text += "\n<b>Операторы с недостаточным количеством звонков:</b>"
         for op in operators_with_issues:
             btn_text = f"{op['name']} ({op['call_count']}/{op['expected']})"
+            op_name=op['name'].split(" ")[1]
+            callback_data=f"notify_sv_{sv_id}_{op_name}"
             ikb.add(InlineKeyboardButton(
                 text=btn_text,
-                callback_data=f"notify_sv_{sv_id}_{op['name'].replace(' ', '_')}"
+                callback_data=callback_data
             ))
 
     await bot.send_message(
