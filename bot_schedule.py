@@ -85,179 +85,203 @@ SVlist={}
 
 
 
+# Helper function to create cancel keyboard
+def get_cancel_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    kb.add(KeyboardButton('Отмена ❌'))
+    return kb
+
+# Helper function to create admin keyboard
+def get_admin_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton('Добавить СВ➕'))
+    kb.insert(KeyboardButton('Убрать СВ❌'))
+    return kb
+
+# Global cancel handler
+@dp.message_handler(regexp='Отмена ❌', state='*')
+async def cancel_handler(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        return
+    await state.finish()
+    # Restore appropriate keyboard based on user
+    kb = get_admin_keyboard() if message.from_user.id == admin else ReplyKeyboardRemove()
+    await bot.send_message(
+        chat_id=message.from_user.id,
+        text="Действие отменено.",
+        parse_mode='HTML',
+        reply_markup=kb
+    )
+    await message.delete()
+
 # === Команды =========================================================================================================
 @dp.message_handler(commands=['start'])
 async def start_command(message: types.Message):
     await message.delete()
     if message.from_user.id == admin:
-        kb=ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add(KeyboardButton('Добавить СВ➕'))
-        kb.insert(KeyboardButton('Убрать СВ❌'))
         await bot.send_message(
-            chat_id=      message.from_user.id,
-            text=         "<b>Бобро пожаловать!</b>\nЭто бот для прослушки прослушек.",
-            parse_mode=   'HTML',
-            reply_markup= kb 
+            chat_id=message.from_user.id,
+            text="<b>Бобро пожаловать!</b>\nЭто бот для прослушки прослушек.",
+            parse_mode='HTML',
+            reply_markup=get_admin_keyboard()
         )
     else:
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        if message.from_user.id in SVlist:
+            kb.add(KeyboardButton('Добавить таблицу📑'))
         await bot.send_message(
-            chat_id=      message.from_user.id,
-            text=         f"<b>Бобро пожаловать!</b>\nТвой <b>ID</b> что бы присоедениться к команде:\n\n<pre>{message.from_user.id}</pre>",
-            parse_mode=   'HTML'
+            chat_id=message.from_user.id,
+            text=f"<b>Бобро пожаловать!</b>\nТвой <b>ID</b> что бы присоединиться к команде:\n\n<pre>{message.from_user.id}</pre>",
+            parse_mode='HTML',
+            reply_markup=kb
         )
 
-
-
-
 # === Админка =========================================================================================================
-@dp.message_handler(regexp='Добавить СВ➕')                              #Добавление нового СВ
-async def newSv(message: types.message):
-    await bot.send_message(text='<b>Добавление СВ, этап</b>: 1 из 2📍\n\nФИО нового СВ🖊',
-                            chat_id=message.from_user.id,
-                            parse_mode='HTML',
-                            reply_markup= ReplyKeyboardRemove())
+@dp.message_handler(regexp='Добавить СВ➕')
+async def newSv(message: types.Message):
+    await bot.send_message(
+        text='<b>Добавление СВ, этап</b>: 1 из 2📍\n\nФИО нового СВ🖊',
+        chat_id=message.from_user.id,
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
     await new_sv.svname.set()
 
-@dp.message_handler(state=new_sv.svname)                                #ИМЯ
-async def newSVname(message: types.message, state: FSMContext):
+@dp.message_handler(state=new_sv.svname)
+async def newSVname(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['svname'] = message.text
-    await message.answer(text=f'Класс, ФИО - <b>{message.text}</b>\n\n<b>Добавление СВ, этап</b>: 2 из 2📍\n\nНапишите <b>ID</b> нового СВ🆔',parse_mode='HTML')
+    await message.answer(
+        text=f'Класс, ФИО - <b>{message.text}</b>\n\n<b>Добавление СВ, этап</b>: 2 из 2📍\n\nНапишите <b>ID</b> нового СВ🆔',
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
     await new_sv.next()
     await message.delete()
 
-@dp.message_handler(state=new_sv.svid)                                  #id
-async def newSVid(message: types.message, state: FSMContext):
-    kb=ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton('Добавить таблицу📑'))
+@dp.message_handler(state=new_sv.svid)
+async def newSVid(message: types.Message, state: FSMContext):
     try:
+        sv_id = int(message.text)
         async with state.proxy() as data:
-            data['svid'] = int(message.text)
+            data['svid'] = sv_id
+        kb_sv = ReplyKeyboardMarkup(resize_keyboard=True)
+        kb_sv.add(KeyboardButton('Добавить таблицу📑'))
         await bot.send_message(
-                chat_id=      int(message.text),
-                text=         f"Принятие в команду прошло успешно <b>успешно✅</b>\n\nОсталось отправить таблицу вашей группы. Нажмите <b>Добавить таблицу📑</b> что бы сделать это.",
-                parse_mode=   'HTML',
-                reply_markup= kb
+            chat_id=sv_id,
+            text=f"Принятие в команду прошло успешно <b>успешно✅</b>\n\nОсталось отправить таблицу вашей группы. Нажмите <b>Добавить таблицу📑</b> что бы сделать это.",
+            parse_mode='HTML',
+            reply_markup=kb_sv
         )
-
-        SVlist[data['svid']] = SV(data['svname'],data['svid'])          #Добавил в лист СВ
-        kb=ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add(KeyboardButton('Добавить СВ➕'))
-        kb.insert(KeyboardButton('Убрать СВ❌'))
-        await message.answer(text=f'Класс, ID - <b>{message.text}</b>\n\nДобавление СВ прошло <b>успешно✅</b>. Новому супервайзеру осталось лишь отправить таблицу этого месяца👌🏼',
-                             parse_mode='HTML',
-                             reply_markup= kb
-                             )
+        SVlist[sv_id] = SV(data['svname'], sv_id)
+        await message.answer(
+            text=f'Класс, ID - <b>{message.text}</b>\n\nДобавление СВ прошло <b>успешно✅</b>. Новому супервайзеру осталось лишь отправить таблицу этого месяца👌🏼',
+            parse_mode='HTML',
+            reply_markup=get_admin_keyboard()
+        )
         await state.finish()
-    except: 
-        await message.answer(text='Ой, похоже вы отправили не тот <b>ID</b>❌\n\n<b>Пожалуйста повторите попытку!</b>',parse_mode='HTML')
+    except:
+        await message.answer(
+            text='Ой, похоже вы отправили не тот <b>ID</b>❌\n\n<b>Пожалуйста повторите попытку!</b>',
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
     await message.delete()
 
-@dp.message_handler(regexp='Убрать СВ❌')                                #Удаление СВ
-async def delSv(message: types.message):
+@dp.message_handler(regexp='Убрать СВ❌')
+async def delSv(message: types.Message):
     if SVlist:
-        await bot.send_message(text='<b>Выберете СВ которого надо исключить🖊</b>',
-                            chat_id=admin,
-                            parse_mode='HTML',
-                            reply_markup= ReplyKeyboardRemove()
-                            )
-        ikb=InlineKeyboardMarkup(row_width=1)
+        await bot.send_message(
+            text='<b>Выберете СВ которого надо исключить🖊</b>',
+            chat_id=admin,
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        ikb = InlineKeyboardMarkup(row_width=1)
         for i in SVlist:
-            ikb.insert(InlineKeyboardButton(text=SVlist[i].name,callback_data=str(i)))
-        await bot.send_message(text='<b>Лист СВ:</b>',
-                                chat_id=admin,
-                                parse_mode='HTML',
-                                reply_markup=ikb
-                                )
+            ikb.insert(InlineKeyboardButton(text=SVlist[i].name, callback_data=str(i)))
+        await bot.send_message(
+            text='<b>Лист СВ:</b>',
+            chat_id=admin,
+            parse_mode='HTML',
+            reply_markup=ikb
+        )
         await sv.delete.set()
     else:
-        kb=ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add(KeyboardButton('Добавить СВ➕'))
-        kb.insert(KeyboardButton('Убрать СВ❌'))
-        await bot.send_message(text='<b>В команде нет СВ🤥</b>',
-                                chat_id=admin,
-                                parse_mode='HTML',
-                                reply_markup= kb
-                                )
+        await bot.send_message(
+            text='<b>В команде нет СВ🤥</b>',
+            chat_id=admin,
+            parse_mode='HTML',
+            reply_markup=get_admin_keyboard()
+        )
     await message.delete()
-    
+
 @dp.callback_query_handler(state=sv.delete)
 async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
     SV = SVlist[int(callback.data)]
     del SVlist[int(callback.data)]
-    kb=ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton('Добавить СВ➕'))
-    kb.insert(KeyboardButton('Убрать СВ❌'))
-    await bot.send_message(text=f"Супервайзер <b>{SV.name}</b> успешно исключен из вашей команды✅",
-                            chat_id=admin,
-                            parse_mode='HTML',
-                            reply_markup= kb
+    await bot.send_message(
+        text=f"Супервайзер <b>{SV.name}</b> успешно исключен из вашей команды✅",
+        chat_id=admin,
+        parse_mode='HTML',
+        reply_markup=get_admin_keyboard()
     )
-
-    await bot.delete_message(chat_id = callback.from_user.id, message_id = callback.message.message_id)
-
-    await bot.send_message(text=f"Вы были исключены из команды❌",
-                           chat_id=SV.id,
-                           parse_mode='HTML',
-                           reply_markup= ReplyKeyboardRemove()
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+    await bot.send_message(
+        text=f"Вы были исключены из команды❌",
+        chat_id=SV.id,
+        parse_mode='HTML',
+        reply_markup=ReplyKeyboardRemove()
     )
     await state.finish()
 
-
-
 # === Работа с СВ =====================================================================================================
-@dp.message_handler(regexp='Добавить таблицу📑')                            
-async def crtablee(message: types.message):
-    await bot.send_message(text='<b>Отправьте вашу таблицу ОКК🖊</b>',
-                            chat_id = message.from_user.id,
-                            parse_mode = 'HTML',
-                            reply_markup= ReplyKeyboardRemove()
-                            )
+@dp.message_handler(regexp='Добавить таблицу📑')
+async def crtablee(message: types.Message):
+    await bot.send_message(
+        text='<b>Отправьте вашу таблицу ОКК🖊</b>',
+        chat_id=message.from_user.id,
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
     await sv.crtable.set()
     await message.delete()
 
 @dp.message_handler(state=sv.crtable)
 async def tableName(message: types.Message, state: FSMContext):
     try:
-        # Проверяем, существует ли пользователь в SVlist
         if message.from_user.id not in SVlist:
             await bot.send_message(
                 chat_id=message.from_user.id,
                 text="Ошибка: Вы не зарегистрированы как супервайзер! Пожалуйста, добавьтесь через администратора.",
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardRemove()
             )
             await state.finish()
             return
-
-        # Сохраняем таблицу
         SVlist[message.from_user.id].table = message.text
-
-        # Отправляем подтверждение
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add(KeyboardButton('Добавить таблицу📑'))
         await bot.send_message(
             chat_id=message.from_user.id,
             text='<b>Таблица успешно получена✅</b>',
-            parse_mode='HTML'
+            parse_mode='HTML',
+            reply_markup=kb
         )
-
-        # Удаляем сообщение пользователя
         try:
             await message.delete()
         except Exception as e:
             print(f"Ошибка при удалении сообщения: {e}")
-
-        # Завершаем состояние
         await state.finish()
-
     except Exception as e:
-        # Логируем ошибку для диагностики
         print(f"Ошибка в tableName: {e}")
         await bot.send_message(
             chat_id=message.from_user.id,
             text="Произошла ошибка при обработке таблицы. Попробуйте снова или свяжитесь с администратором.",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=get_cancel_keyboard()
         )
-        await state.finish()
-    
 
 # === Работа с таблицей ===============================================================================================
 def sync_fetch_text():
@@ -274,7 +298,6 @@ async def check_for_updates():
         content = await fetch_text_async()
         current_hash = hash(content)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
         if last_hash is None:
             await bot.send_message(admin, f"[{now}] ✅ Первая загрузка данных.", parse_mode='HTML')
             last_hash = current_hash
