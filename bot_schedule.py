@@ -8,82 +8,108 @@ from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from io import StringIO
-
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton,InlineKeyboardMarkup
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.dispatcher import FSMContext
-from flask import Flask
+from flask import Flask, request, jsonify
+from functools import wraps
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO)
 
-
-
-
-
 # === Переменные окружения ============================================================================================
 API_TOKEN = os.getenv('BOT_TOKEN')
-admin     = int(os.getenv('ADMIN_ID', '0'))  # ADMIN_ID должен быть числом
+admin = int(os.getenv('ADMIN_ID', '0'))
 SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
-SHEET_NAME     = os.getenv('SHEET_NAME')
+SHEET_NAME = os.getenv('SHEET_NAME')
+FLASK_API_KEY = os.getenv('FLASK_API_KEY')
 
 if not API_TOKEN:
-    raise Exception("Переменная окружения BOT_TOKEN обязателен.")
+    raise Exception("Переменная окружения BOT_TOKEN обязательна.")
+if not FLASK_API_KEY:
+    raise Exception("Переменная окружения FLASK_API_KEY обязательна.")
 
 FETCH_URL = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet={SHEET_NAME}"
-
-
-
-
 
 # === Инициализация бота и диспетчера =================================================================================
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot=bot, storage=storage)
 
-
-
-
-# === Flask-сервер для Render — для пинга =============================================================================
+# === Flask-сервер ====================================================================================================
 app = Flask(__name__)
+
+def require_api_key(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        api_key = request.headers.get('X-API-Key')
+        if api_key and api_key == FLASK_API_KEY:
+            return f(*args, **kwargs)
+        else:
+            return jsonify({"error": "Invalid or missing API key"}), 401
+    return decorated
 
 @app.route('/')
 def index():
     return "Bot is alive!", 200
 
+@app.route('/api/call_evaluation', methods=['POST'])
+@require_api_key
+async def receive_call_evaluation():
+    try:
+        data = request.get_json()
+        required_fields = ['evaluator', 'operator', 'month', 'call_number', 'phone_number', 'score', 'comment']
+        if not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        # Sanitize inputs to prevent injection
+        message = (
+            f"📞 <b>Оценка звонка</b>\n"
+            f"👤 Оценивающий: <b>{data['evaluator']}</b>\n"
+            f"📋 Оператор: <b>{data['operator']}</b>\n"
+            f"📄 За месяц: <b>{data['month']}</b>\n"
+            f"📞 Звонок: <b>№{data['call_number']}</b>\n"
+            f"📱 Номер телефона: <b>{data['phone_number']}</b>\n"
+            f"💯 Оценка: <b>{data['score']}</b>\n"
+        )
+        if data['score'] < 100 and data['comment']:
+            message += f"\n💬 Комментарий: {data['comment']}\n"
+
+        # Send message to Telegram
+        await bot.send_message(
+            chat_id=admin,
+            text=message,
+            parse_mode='HTML'
+        )
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        logging.error(f"Error processing call evaluation: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
 def run_flask():
-    app.run(host='0.0.0.0', port=8080)
-
-
-
+    app.run(host='0.0.0.0', port=8080, debug=False)
 
 # === Глобальное состояние ============================================================================================
 last_hash = None
 
-
-
-
 # === Классы ==========================================================================================================
-
 class new_sv(StatesGroup):
     svname = State()
-    svid   = State()
+    svid = State()
 
 class sv(StatesGroup):
     crtable = State()
     delete = State()
 
 class SV:
-    def __init__(self, name,id):
-        self.name=name
-        self.id=id
-        self.table=''
+    def __init__(self, name, id):
+        self.name = name
+        self.id = id
+        self.table = ''
 
-SVlist={}
-
-
+SVlist = {}
 
 # Helper function to create cancel keyboard
 def get_cancel_keyboard():
@@ -105,7 +131,6 @@ async def cancel_handler(message: types.Message, state: FSMContext):
     if current_state is None:
         return
     await state.finish()
-    # Restore appropriate keyboard based on user
     kb = get_admin_keyboard() if message.from_user.id == admin else ReplyKeyboardRemove()
     await bot.send_message(
         chat_id=message.from_user.id,
@@ -316,21 +341,12 @@ async def generate_report():
     except Exception as e:
         print(f"[{datetime.now()}] ⚠️ Ошибка при генерации отчета: {e}")
 
-
-
-
-
 # === Главный запуск ==================================================================================================
 if __name__ == '__main__':
-    # Запускаем Flask-сервер в отдельном потоке
     threading.Thread(target=run_flask).start()
-
-    # Настраиваем планировщик
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_for_updates, "interval", minutes=1)
     scheduler.add_job(generate_report, CronTrigger(day="10,20,30", hour=9, minute=0))
     scheduler.start()
     print("🔄 Планировщик запущен.")
-
-    # Запускаем бота
     executor.start_polling(dp, skip_updates=True)
