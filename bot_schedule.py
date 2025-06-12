@@ -154,11 +154,8 @@ class sv(StatesGroup):
 
 def get_current_week_of_month():
     today = datetime.now()
-    first_day = today.replace(day=1)
-    first_day_weekday = first_day.weekday()  # 0-6 (понедельник-воскресенье)
-    
-    # Номер недели (1-4 или 5)
-    week_number = (today.day + first_day_weekday - 1) // 7 + 1
+    # Делим день месяца на 7, округляя вверх
+    week_number = (today.day - 1) // 7 + 1
     return week_number
 
 def get_expected_calls(week_number):
