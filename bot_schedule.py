@@ -52,7 +52,7 @@ class SV:
         self.table = ''
         self.calls = {}
 
-# === Flask-сервер (без изменений) ===============================================================================
+# === Flask-сервер ===================================================================================================
 app = Flask(__name__)
 
 def require_api_key(f):
@@ -148,7 +148,8 @@ class new_sv(StatesGroup):
 class sv(StatesGroup):
     crtable = State()
     delete = State()
-    verify_table = State()  # New state for table verification
+    verify_table = State()
+    view_evaluations = State()  # New state for viewing evaluations
 
 # Helper function to create cancel keyboard
 def get_cancel_keyboard():
@@ -159,8 +160,8 @@ def get_cancel_keyboard():
 # Helper function to create admin keyboard
 def get_admin_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton('Добавить СВ➕'))
-    kb.insert(KeyboardButton('Убрать СВ❌'))
+    kb.add(KeyboardButton('Редактор СВ📝'))
+    kb.insert(KeyboardButton('Оценки📊'))
     return kb
 
 # Helper function to create verification keyboard
@@ -171,6 +172,14 @@ def get_verify_keyboard():
         InlineKeyboardButton("Нет ❌", callback_data="verify_no")
     )
     return ikb
+
+# Helper function to create editor keyboard
+def get_editor_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton('Добавить СВ➕'))
+    kb.insert(KeyboardButton('Убрать СВ❌'))
+    kb.add(KeyboardButton('Назад 🔙'))
+    return kb
 
 # Global cancel handler
 @dp.message_handler(regexp='Отмена ❌', state='*')
@@ -210,16 +219,40 @@ async def start_command(message: types.Message):
             reply_markup=kb
         )
 
-# === Админка (без изменений) =================================================================================
+# === Админка ========================================================================================================
+@dp.message_handler(regexp='Редактор СВ📝')
+async def editor_sv(message: types.Message):
+    if message.from_user.id == admin:
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text='<b>Редактор супервайзеров</b>',
+            parse_mode='HTML',
+            reply_markup=get_editor_keyboard()
+        )
+    await message.delete()
+
+@dp.message_handler(regexp='Назад 🔙')
+async def back_to_admin(message: types.Message):
+    if message.from_user.id == admin:
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text='<b>Главное меню</b>',
+            parse_mode='HTML',
+            reply_markup=get_admin_keyboard()
+        )
+    await message.delete()
+
 @dp.message_handler(regexp='Добавить СВ➕')
 async def newSv(message: types.Message):
-    await bot.send_message(
-        text='<b>Добавление СВ, этап</b>: 1 из 2📍\n\nФИО нового СВ🖊',
-        chat_id=message.from_user.id,
-        parse_mode='HTML',
-        reply_markup=get_cancel_keyboard()
-    )
-    await new_sv.svname.set()
+    if message.from_user.id == admin:
+        await bot.send_message(
+            text='<b>Добавление СВ, этап</b>: 1 из 2📍\n\nФИО нового СВ🖊',
+            chat_id=message.from_user.id,
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        await new_sv.svname.set()
+    await message.delete()
 
 @dp.message_handler(state=new_sv.svname)
 async def newSVname(message: types.Message, state: FSMContext):
@@ -251,7 +284,7 @@ async def newSVid(message: types.Message, state: FSMContext):
         await message.answer(
             text=f'Класс, ID - <b>{message.text}</b>\n\nДобавление СВ прошло <b>успешно✅</b>. Новому супервайзеру осталось лишь отправить таблицу этого месяца👌🏼',
             parse_mode='HTML',
-            reply_markup=get_admin_keyboard()
+            reply_markup=get_editor_keyboard()
         )
         await state.finish()
     except:
@@ -264,30 +297,31 @@ async def newSVid(message: types.Message, state: FSMContext):
 
 @dp.message_handler(regexp='Убрать СВ❌')
 async def delSv(message: types.Message):
-    if SVlist:
-        await bot.send_message(
-            text='<b>Выберете СВ которого надо исключить🖊</b>',
-            chat_id=admin,
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-        ikb = InlineKeyboardMarkup(row_width=1)
-        for i in SVlist:
-            ikb.insert(InlineKeyboardButton(text=SVlist[i].name, callback_data=str(i)))
-        await bot.send_message(
-            text='<b>Лист СВ:</b>',
-            chat_id=admin,
-            parse_mode='HTML',
-            reply_markup=ikb
-        )
-        await sv.delete.set()
-    else:
-        await bot.send_message(
-            text='<b>В команде нет СВ🤥</b>',
-            chat_id=admin,
-            parse_mode='HTML',
-            reply_markup=get_admin_keyboard()
-        )
+    if message.from_user.id == admin:
+        if SVlist:
+            await bot.send_message(
+                text='<b>Выберете СВ которого надо исключить🖊</b>',
+                chat_id=admin,
+                parse_mode='HTML',
+                reply_markup=get_cancel_keyboard()
+            )
+            ikb = InlineKeyboardMarkup(row_width=1)
+            for i in SVlist:
+                ikb.insert(InlineKeyboardButton(text=SVlist[i].name, callback_data=str(i)))
+            await bot.send_message(
+                text='<b>Лист СВ:</b>',
+                chat_id=admin,
+                parse_mode='HTML',
+                reply_markup=ikb
+            )
+            await sv.delete.set()
+        else:
+            await bot.send_message(
+                text='<b>В команде нет СВ🤥</b>',
+                chat_id=admin,
+                parse_mode='HTML',
+                reply_markup=get_editor_keyboard()
+            )
     await message.delete()
 
 @dp.callback_query_handler(state=sv.delete)
@@ -298,7 +332,7 @@ async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
         text=f"Супервайзер <b>{SV.name}</b> успешно исключен из вашей команды✅",
         chat_id=admin,
         parse_mode='HTML',
-        reply_markup=get_admin_keyboard()
+        reply_markup=get_editor_keyboard()
     )
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await bot.send_message(
@@ -307,6 +341,79 @@ async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
         parse_mode='HTML',
         reply_markup=ReplyKeyboardRemove()
     )
+    await state.finish()
+
+@dp.message_handler(regexp='Оценки📊')
+async def view_evaluations(message: types.Message):
+    if message.from_user.id == admin:
+        if SVlist:
+            await bot.send_message(
+                text='<b>Выберите чьи оценки просмотреть</b>',
+                chat_id=admin,
+                parse_mode='HTML',
+                reply_markup=get_cancel_keyboard()
+            )
+            ikb = InlineKeyboardMarkup(row_width=1)
+            for i in SVlist:
+                ikb.insert(InlineKeyboardButton(text=SVlist[i].name, callback_data=f"eval_{i}"))
+            await bot.send_message(
+                text='<b>Лист СВ:</b>',
+                chat_id=admin,
+                parse_mode='HTML',
+                reply_markup=ikb
+            )
+            await sv.view_evaluations.set()
+        else:
+            await bot.send_message(
+                text='<b>В команде нет СВ🤥</b>',
+                chat_id=admin,
+                parse_mode='HTML',
+                reply_markup=get_admin_keyboard()
+            )
+    await message.delete()
+
+@dp.callback_query_handler(state=sv.view_evaluations)
+async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
+    sv_id = int(callback.data.split('_')[1])
+    sv = SVlist[sv_id]
+    
+    # Get operators from SV's table
+    sheet_name, operators, error = extract_fio_and_links(sv.table) if sv.table else (None, [], "Таблица не найдена")
+    
+    if error:
+        await bot.send_message(
+            chat_id=admin,
+            text=f"Ошибка: {error}",
+            parse_mode='HTML',
+            reply_markup=get_admin_keyboard()
+        )
+        await state.finish()
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+        return
+
+    # Count calls per operator
+    operator_counts = {op['name']: 0 for op in operators}
+    for month in sv.calls:
+        for call in sv.calls[month].values():
+            operator_name = call['operator']
+            if operator_name in operator_counts:
+                operator_counts[operator_name] += 1
+
+    # Format message
+    message_text = f"<b>Оценки {sv.name}:</b>\n\n"
+    for op_name, count in operator_counts.items():
+        message_text += f"👤 {op_name} - {count} прослушенных звонков\n"
+    
+    if not operator_counts:
+        message_text += "Оценок пока нет\n"
+
+    await bot.send_message(
+        chat_id=admin,
+        text=message_text,
+        parse_mode='HTML',
+        reply_markup=get_admin_keyboard()
+    )
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await state.finish()
 
 # === Работа с СВ и таблицами =====================================================================================
@@ -462,7 +569,7 @@ async def verify_table(callback: types.CallbackQuery, state: FSMContext):
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
         await sv.crtable.set()
 
-# === Работа с таблицей (без изменений) ===============================================================================
+# === Работа с таблицей ==============================================================================================
 def sync_fetch_text():
     response = requests.get(FETCH_URL)
     response.raise_for_status()
