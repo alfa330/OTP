@@ -2,6 +2,7 @@ import logging
 import os
 import threading
 import asyncio
+from asyncio import new_event_loop, set_event_loop
 import pandas as pd
 import requests
 from datetime import datetime
@@ -56,18 +57,6 @@ def require_api_key(f):
 def index():
     return "Bot is alive!", 200
 
-async def send_telegram_message(chat_id, message):
-    """Helper function to send Telegram message asynchronously."""
-    try:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=message,
-            parse_mode='HTML'
-        )
-    except TelegramAPIError as te:
-        logging.error(f"Telegram API error: {te}")
-        raise
-
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
 def receive_call_evaluation():
@@ -95,26 +84,24 @@ def receive_call_evaluation():
         if data['score'] < 100 and data['comment']:
             message += f"\n💬 Комментарий: {data['comment']}\n"
 
-        # Check if aiogram event loop is available
-        if dp.loop is None:
-            logging.error("aiogram event loop is not initialized")
-            return jsonify({"error": "Internal server error: aiogram event loop not initialized"}), 500
-
-        # Run async send_telegram_message in aiogram's event loop
-        future = asyncio.run_coroutine_threadsafe(
-            send_telegram_message(admin, message),
-            dp.loop
-        )
-        try:
-            future.result(timeout=30)  # Wait up to 30 seconds
-        except asyncio.TimeoutError:
-            logging.error("Telegram message sending timed out")
-            return jsonify({"error": "Telegram message sending timed out"}), 500
-        except Exception as e:
-            logging.error(f"Error in async task: {e}")
-            return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        # Send message to Telegram via HTTP request
+        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": admin,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        response = requests.post(telegram_url, json=payload, timeout=10)
+        
+        if response.status_code != 200:
+            error_detail = response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error: {error_detail}")
+            return jsonify({"error": f"Failed to send Telegram message: {error_detail}"}), 500
 
         return jsonify({"status": "success"}), 200
+    except requests.RequestException as re:
+        logging.error(f"HTTP request error: {re}")
+        return jsonify({"error": f"Failed to send Telegram message: {str(re)}"}), 500
     except Exception as e:
         logging.error(f"Error processing call evaluation: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
