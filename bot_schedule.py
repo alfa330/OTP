@@ -86,8 +86,8 @@ def receive_call_evaluation():
                 return jsonify({"error": f"Invalid type for {field}"}), 400
         b=1
         hint=""
-        for t in SVList:
-            if SVList[t].name == data['evaluator']:
+        for t in SVlist:
+            if SVlist[t].name == data['evaluator']:
                 b=0
                 if data['month'] in SVList[t].calls:
                     if data['call_number'] in SVlist[t].calls[data['month']] :
