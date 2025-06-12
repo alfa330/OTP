@@ -490,19 +490,17 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
             try:
                 score_val = float(score) if score else None
             except (ValueError, TypeError):
-                score_val = None
+                score_val = 0
 
             # Определяем цвет иконки на основе количества звонков и оценки
             if call_count < expected_calls:
                 # Недостаточно звонков
                 if call_count == 0:
-                    color_icon = "🔴"  # Нет звонков
+                    c_color_icon = "🔴"  # Нет звонков
                 elif call_count < (expected_calls * 0.5):
-                    color_icon = "🟠"  # Менее половины
+                    c_color_icon = "🟠"  # Менее половины
                 else:
-                    color_icon = "🟡"  # Более половины, но не все
-                
-                # Добавляем оператора в список для кнопок
+                    c_color_icon = "🟡"  # Более половины, но не все
                 operators_with_issues.append({
                     'name': name,
                     'sv_id': sv_id,
@@ -510,23 +508,24 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
                     'expected': expected_calls
                 })
             else:
-                # Достаточно звонков, смотрим оценку
-                if score_val is None:
-                    color_icon = "-"
-                    score_str = "-"
-                elif score_val < 60:
-                    color_icon = "🔴"
-                    score_str = f"{score_val:.2f}"
-                elif score_val < 90:
-                    color_icon = "🟡"
-                    score_str = f"{score_val:.2f}"
-                else:
-                    color_icon = "🟢"
-                    score_str = f"{score_val:.2f}"
+                c_color_icon="🟢"
+            # Достаточно звонков, смотрим оценку
+            if score_val is None:
+                color_icon = "-"
+                score_str = "-"
+            elif score_val < 60:
+                color_icon = "🔴"
+                score_str = f"{score_val:.2f}"
+            elif score_val < 90:
+                color_icon = "🟡"
+                score_str = f"{score_val:.2f}"
+            else:
+                color_icon = "🟢"
+                score_str = f"{score_val:.2f}"
 
             # Формирование строки
             message_text += f"👤 {display_name}\n"
-            message_text += f"   {str(call_count).rjust(max_count_length)} звон. | {score_str.rjust(max_score_length)} {color_icon}\n\n"
+            message_text += f"   {str(call_count).rjust(max_count_length)} {c_color_icon} звон. | {score_str.rjust(max_score_length)} {color_icon}\n\n"
     else:
         message_text += "Операторов в таблице нет\n"
 
