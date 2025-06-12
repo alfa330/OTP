@@ -17,6 +17,8 @@ from aiogram.dispatcher import FSMContext
 from aiogram.utils.exceptions import TelegramAPIError
 from flask import Flask, request, jsonify
 from functools import wraps
+from openpyxl import load_workbook
+import re
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO)
@@ -40,9 +42,7 @@ bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot=bot, storage=storage)
 
-# === В роли ДБ ====================================================================================================
-
-
+# === В роли ДБ =====================================================================================================
 SVlist = {}
 
 class SV:
@@ -52,8 +52,7 @@ class SV:
         self.table = ''
         self.calls = {}
 
-
-# === Flask-сервер ====================================================================================================
+# === Flask-сервер (без изменений) ===============================================================================
 app = Flask(__name__)
 
 def require_api_key(f):
@@ -80,30 +79,27 @@ def receive_call_evaluation():
         if not data or not all(field in data for field in required_fields):
             return jsonify({"error": "Missing or invalid required fields"}), 400
 
-        # Sanitize inputs
         for field in required_fields:
             if not isinstance(data[field], (str, int, float)):
                 return jsonify({"error": f"Invalid type for {field}"}), 400
-        b=1
-        hint=""
+        b = 1
+        hint = ""
         for t in SVlist:
             if SVlist[t].name == data['evaluator']:
-                b=0
+                b = 0
                 if data['month'] in SVlist[t].calls:
-                    if data['call_number'] in SVlist[t].calls[data['month']] :
-                        hint+=" - Корректировка оценки!"
+                    if data['call_number'] in SVlist[t].calls[data['month']]:
+                        hint += " - Корректировка оценки!"
                     else:
-                        SVlist[t].calls[data['month']][data['call_number']]=data
+                        SVlist[t].calls[data['month']][data['call_number']] = data
                 else:
-                    SVlist[t].calls[data['month']]={}
-                    SVlist[t].calls[data['month']][data['call_number']]=data
+                    SVlist[t].calls[data['month']] = {}
+                    SVlist[t].calls[data['month']][data['call_number']] = data
                 break
         
         if b:
-            hint+=" Оценивающего нет в списке супервайзеров!"
+            hint += " Оценивающего нет в списке супервайзеров!"
                 
-
-        # Construct message
         message = (
             f"📞 <b>Оценка звонка</b>\n" 
             f"👤 Оценивающий: <b>{data['evaluator']}</b>\n"
@@ -115,9 +111,8 @@ def receive_call_evaluation():
         )
         if data['score'] < 100 and data['comment']:
             message += f"\n💬 Комментарий: \n{data['comment']}\n"
-        message+="\n"+hint
+        message += "\n" + hint
 
-        # Send message to Telegram via HTTP request
         telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
         payload = {
             "chat_id": admin,
@@ -143,7 +138,6 @@ def run_flask():
     app.run(host='0.0.0.0', port=8080, debug=False)
 
 # === Глобальное состояние ============================================================================================
-
 last_hash = None
 
 # === Классы ==========================================================================================================
@@ -154,6 +148,7 @@ class new_sv(StatesGroup):
 class sv(StatesGroup):
     crtable = State()
     delete = State()
+    verify_table = State()  # New state for table verification
 
 # Helper function to create cancel keyboard
 def get_cancel_keyboard():
@@ -167,6 +162,15 @@ def get_admin_keyboard():
     kb.add(KeyboardButton('Добавить СВ➕'))
     kb.insert(KeyboardButton('Убрать СВ❌'))
     return kb
+
+# Helper function to create verification keyboard
+def get_verify_keyboard():
+    ikb = InlineKeyboardMarkup(row_width=2)
+    ikb.add(
+        InlineKeyboardButton("Да ✅", callback_data="verify_yes"),
+        InlineKeyboardButton("Нет ❌", callback_data="verify_no")
+    )
+    return ikb
 
 # Global cancel handler
 @dp.message_handler(regexp='Отмена ❌', state='*')
@@ -206,8 +210,8 @@ async def start_command(message: types.Message):
             reply_markup=kb
         )
 
-# === Админка =========================================================================================================
-@dp.message_handler(regexp='Добавить СВ➕') #Добавление СВ
+# === Админка (без изменений) =================================================================================
+@dp.message_handler(regexp='Добавить СВ➕')
 async def newSv(message: types.Message):
     await bot.send_message(
         text='<b>Добавление СВ, этап</b>: 1 из 2📍\n\nФИО нового СВ🖊',
@@ -236,7 +240,7 @@ async def newSVid(message: types.Message, state: FSMContext):
         async with state.proxy() as data:
             data['svid'] = sv_id
         kb_sv = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb_sv.add(KeyboardButton('Добавить таблицу📑'))   #Отправка сообщения СВ
+        kb_sv.add(KeyboardButton('Добавить таблицу📑'))
         await bot.send_message(
             chat_id=sv_id,
             text=f"Принятие в команду прошло успешно <b>успешно✅</b>\n\nОсталось отправить таблицу вашей группы. Нажмите <b>Добавить таблицу📑</b> что бы сделать это.",
@@ -258,7 +262,7 @@ async def newSVid(message: types.Message, state: FSMContext):
         )
     await message.delete()
 
-@dp.message_handler(regexp='Убрать СВ❌') #Удаление СВ
+@dp.message_handler(regexp='Убрать СВ❌')
 async def delSv(message: types.Message):
     if SVlist:
         await bot.send_message(
@@ -286,7 +290,7 @@ async def delSv(message: types.Message):
         )
     await message.delete()
 
-@dp.callback_query_handler(state=sv.delete) 
+@dp.callback_query_handler(state=sv.delete)
 async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
     SV = SVlist[int(callback.data)]
     del SVlist[int(callback.data)]
@@ -296,7 +300,7 @@ async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
         parse_mode='HTML',
         reply_markup=get_admin_keyboard()
     )
-    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id) #Отправка сообщения СВ
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await bot.send_message(
         text=f"Вы были исключены из команды❌",
         chat_id=SV.id,
@@ -305,7 +309,63 @@ async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
     )
     await state.finish()
 
-# === Работа с СВ =====================================================================================================
+# === Работа с СВ и таблицами =====================================================================================
+def extract_fio_and_links(spreadsheet_url):
+    try:
+        # Extract file_id from Google Sheets URL
+        match = re.search(r"/d/([a-zA-Z0-9_-]+)", spreadsheet_url)
+        if not match:
+            return None, None, "Ошибка: Неверный формат ссылки на Google Sheets."
+        file_id = match.group(1)
+        export_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
+
+        # Download the file
+        response = requests.get(export_url)
+        if response.status_code != 200:
+            return None, None, "Ошибка: Не удалось скачать таблицу. Проверьте, доступна ли таблица публично."
+        
+        # Save the file temporarily
+        temp_file = "temp_table.xlsx"
+        with open(temp_file, "wb") as f:
+            f.write(response.content)
+
+        # Load the Excel file
+        wb = load_workbook(temp_file)
+        ws = wb.worksheets[-1]  # Use the last sheet
+        sheet_name = ws.title
+
+        # Find the ФИО column
+        fio_column = None
+        for col in ws.iter_cols(min_row=1, max_row=1):
+            for cell in col:
+                if cell.value and "ФИО" in str(cell.value).strip():
+                    fio_column = cell.column
+                    break
+            if fio_column:
+                break
+
+        if not fio_column:
+            os.remove(temp_file)
+            return None, None, "Ошибка: Колонка ФИО не найдена на листе."
+
+        # Extract ФИО and hyperlinks
+        operators = []
+        for row in ws.iter_rows(min_row=2):
+            cell = row[fio_column - 1]
+            if not cell.value:
+                break
+            operator_info = {
+                "name": cell.value,
+                "link": cell.hyperlink.target if cell.hyperlink else None
+            }
+            operators.append(operator_info)
+
+        # Clean up
+        os.remove(temp_file)
+        return sheet_name, operators, None
+    except Exception as e:
+        return None, None, f"Ошибка при обработке таблицы: {str(e)}"
+
 @dp.message_handler(regexp='Добавить таблицу📑')
 async def crtablee(message: types.Message):
     await bot.send_message(
@@ -329,30 +389,80 @@ async def tableName(message: types.Message, state: FSMContext):
             )
             await state.finish()
             return
-        SVlist[message.from_user.id].table = message.text
-        kb = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add(KeyboardButton('Добавить таблицу📑'))
+
+        # Extract ФИО and links from the provided spreadsheet URL
+        sheet_name, operators, error = extract_fio_and_links(message.text)
+        
+        if error:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text=f"{error}\n\n<b>Пожалуйста, отправьте корректную ссылку на таблицу.</b>",
+                parse_mode="HTML",
+                reply_markup=get_cancel_keyboard()
+            )
+            return
+
+        # Store the table URL temporarily in state for verification
+        async with state.proxy() as data:
+            data['table_url'] = message.text
+
+        # Format the message
+        message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
+        for op in operators:
+            if op['link']:
+                message_text += f"👤 {op['name']} → <a href='{op['link']}'>Ссылка</a>\n"
+            else:
+                message_text += f"👤 {op['name']} → Ссылка отсутствует\n"
+        message_text += "\n<b>Это все ваши операторы?</b>"
+
+        # Send the message with verification buttons
         await bot.send_message(
             chat_id=message.from_user.id,
-            text='<b>Таблица успешно получена✅</b>',
-            parse_mode='HTML',
-            reply_markup=kb
+            text=message_text,
+            parse_mode="HTML",
+            reply_markup=get_verify_keyboard(),
+            disable_web_page_preview=True
         )
-        try:
-            await message.delete()
-        except Exception as e:
-            print(f"Ошибка при удалении сообщения: {e}")
-        await state.finish()
+        await sv.verify_table.set()
+        await message.delete()
     except Exception as e:
-        print(f"Ошибка в tableName: {e}")
+        logging.error(f"Ошибка в tableName: {e}")
         await bot.send_message(
             chat_id=message.from_user.id,
-            text="Произошла ошибка при обработке таблицы. Попробуйте снова или свяжитесь с администратора.",
+            text="Произошла ошибка при обработке таблицы. Попробуйте снова или свяжитесь с администратором.",
             parse_mode="HTML",
             reply_markup=get_cancel_keyboard()
         )
 
-# === Работа с таблицей ===============================================================================================
+@dp.callback_query_handler(state=sv.verify_table)
+async def verify_table(callback: types.CallbackQuery, state: FSMContext):
+    async with state.proxy() as data:
+        table_url = data.get('table_url')
+    
+    if callback.data == "verify_yes":
+        # Save the table URL to SVlist
+        SVlist[callback.from_user.id].table = table_url
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add(KeyboardButton('Добавить таблицу📑'))
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text='<b>Таблица успешно подтверждена и сохранена✅</b>',
+            parse_mode='HTML',
+            reply_markup=kb
+        )
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+        await state.finish()
+    elif callback.data == "verify_no":
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text='<b>Отправьте корректную ссылку на таблицу ОКК🖊</b>',
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+        await sv.crtable.set()
+
+# === Работа с таблицей (без изменений) ===============================================================================
 def sync_fetch_text():
     response = requests.get(FETCH_URL)
     response.raise_for_status()
@@ -381,6 +491,7 @@ async def check_for_updates():
 async def generate_report():
     try:
         content = await fetch_text_async()
+        Alist of dictionaries is not iterable
         df = pd.read_csv(StringIO(content))
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await bot.send_message(admin, f"[{now}] 📊 Отчет: {len(df)} строк, {len(df.columns)} столбцов.", parse_mode='HTML')
