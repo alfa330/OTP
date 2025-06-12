@@ -150,7 +150,7 @@ class sv(StatesGroup):
     delete = State()
     verify_table = State()
     view_evaluations = State()
-    change_table = State()  # New state for changing SV table
+    change_table = State()
 
 # Helper function to create cancel keyboard
 def get_cancel_keyboard():
@@ -179,7 +179,7 @@ def get_editor_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Добавить СВ➕'))
     kb.insert(KeyboardButton('Убрать СВ❌'))
-    kb.add(KeyboardButton('Изменить таблицу СВ🔄'))  # New button
+    kb.add(KeyboardButton('Изменить таблицу СВ🔄'))
     kb.add(KeyboardButton('Назад 🔙'))
     return kb
 
@@ -422,7 +422,7 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
     sv_id = int(callback.data.split('_')[1])
     sv = SVlist[sv_id]
     
-    # Get operators from SV's table
+    # Get operators, call counts, and average scores from SV's table
     sheet_name, operators, error = extract_fio_and_links(sv.table) if sv.table else (None, [], "Таблица не найдена")
     
     if error:
@@ -436,28 +436,22 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
         return
 
-    # Count calls per operator
-    operator_counts = {op['name']: 0 for op in operators}
-    for month in sv.calls:
-        for call in sv.calls[month].values():
-            operator_name = call['operator']
-            if operator_name in operator_counts:
-                operator_counts[operator_name] += 1
-
-    # Format message with right-aligned counts
+    # Format message with right-aligned counts and average scores
     max_name_length = 20  # Max length before truncation
+    max_count_length = 5  # Max length for call count
+    max_score_length = 5  # Max length for average score
     message_text = f"<b>Оценки {sv.name}:</b>\n\n"
-    if operator_counts:
-        # Find max count length for alignment
-        max_count_length = max(len(str(count)) for count in operator_counts.values())
-        for op_name, count in operator_counts.items():
+    
+    if operators:
+        for op in operators:
             # Truncate name if too long
-            display_name = op_name[:max_name_length] + '…' if len(op_name) > max_name_length else op_name
-            # Right-align count
-            formatted_count = str(count).rjust(max_count_length)
-            message_text += f"👤 {display_name.ljust(max_name_length)} {formatted_count}\n"
+            display_name = op['name'][:max_name_length] + '…' if len(op['name']) > max_name_length else op['name']
+            # Right-align count and score
+            call_count = str(op.get('call_count', 0)).rjust(max_count_length)
+            avg_score = str(op.get('avg_score', '-')).rjust(max_score_length)
+            message_text += f"👤 {display_name.ljust(max_name_length)} | {call_count} | {avg_score}\n"
     else:
-        message_text += "Оценок пока нет\n"
+        message_text += "Операторов в таблице нет\n"
 
     await bot.send_message(
         chat_id=admin,
@@ -493,29 +487,41 @@ def extract_fio_and_links(spreadsheet_url):
         ws = wb.worksheets[-1]  # Use the last sheet
         sheet_name = ws.title
 
-        # Find the ФИО column
+        # Find the ФИО column and columns for calls and average score
         fio_column = None
+        calls_column = None
+        score_column = None
         for col in ws.iter_cols(min_row=1, max_row=1):
             for cell in col:
-                if cell.value and "ФИО" in str(cell.value).strip():
-                    fio_column = cell.column
-                    break
-            if fio_column:
+                if cell.value:
+                    value = str(cell.value).strip()
+                    if "ФИО" in value:
+                        fio_column = cell.column
+                    elif "Прослушано" in value:
+                        calls_column = cell.column
+                    elif "Средний балл" in value:
+                        score_column = cell.column
+            if fio_column and calls_column:
                 break
 
         if not fio_column:
             os.remove(temp_file)
             return None, None, "Ошибка: Колонка ФИО не найдена на листе."
+        if not calls_column:
+            os.remove(temp_file)
+            return None, None, "Ошибка: Колонка с количеством прослушанных звонков не найдена."
 
-        # Extract ФИО and hyperlinks
+        # Extract ФИО, hyperlinks, call counts, and average scores
         operators = []
         for row in ws.iter_rows(min_row=2):
-            cell = row[fio_column - 1]
-            if not cell.value:
+            fio_cell = row[fio_column - 1]
+            if not fio_cell.value:
                 break
             operator_info = {
-                "name": cell.value,
-                "link": cell.hyperlink.target if cell.hyperlink else None
+                "name": fio_cell.value,
+                "link": fio_cell.hyperlink.target if fio_cell.hyperlink else None,
+                "call_count": row[calls_column - 1].value if calls_column else 0,
+                "avg_score": row[score_column - 1].value if score_column else None
             }
             operators.append(operator_info)
 
@@ -551,7 +557,7 @@ async def tableName(message: types.Message, state: FSMContext):
             await state.finish()
             return
 
-        # Extract ФИО and links from the provided spreadsheet URL
+        # Extract ФИО, links, call counts, and scores from the spreadsheet
         sheet_name, operators, error = extract_fio_and_links(message.text)
         
         if error:
@@ -567,7 +573,7 @@ async def tableName(message: types.Message, state: FSMContext):
         async with state.proxy() as data:
             data['table_url'] = message.text
             if is_admin_changing:
-                data.setdefault('sv_id', user_id)  # Preserve sv_id if set
+                data.setdefault('sv_id', user_id)
 
         # Format the message
         message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
@@ -601,7 +607,7 @@ async def tableName(message: types.Message, state: FSMContext):
 async def verify_table(callback: types.CallbackQuery, state: FSMContext):
     async with state.proxy() as data:
         table_url = data.get('table_url')
-        sv_id = data.get('sv_id', callback.from_user.id)  # Use sv_id if set, else user_id
+        sv_id = data.get('sv_id', callback.from_user.id)
     
     if callback.data == "verify_yes":
         # Save the table URL to SVlist
