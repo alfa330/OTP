@@ -73,6 +73,7 @@ def index():
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
 def receive_call_evaluation():
+    global SVlist
     try:
         data = request.get_json()
         required_fields = ['evaluator', 'operator', 'month', 'call_number', 'phone_number', 'score', 'comment']
