@@ -56,6 +56,18 @@ def require_api_key(f):
 def index():
     return "Bot is alive!", 200
 
+async def send_telegram_message(chat_id, message):
+    """Helper function to send Telegram message asynchronously."""
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=message,
+            parse_mode='HTML'
+        )
+    except TelegramAPIError as te:
+        logging.error(f"Telegram API error: {te}")
+        raise
+
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
 def receive_call_evaluation():
@@ -83,26 +95,24 @@ def receive_call_evaluation():
         if data['score'] < 100 and data['comment']:
             message += f"\n💬 Комментарий: {data['comment']}\n"
 
-        # Create a new event loop for this request
-        loop = asyncio.new_event_loop()
+        # Check if aiogram event loop is available
+        if dp.loop is None:
+            logging.error("aiogram event loop is not initialized")
+            return jsonify({"error": "Internal server error: aiogram event loop not initialized"}), 500
+
+        # Run async send_telegram_message in aiogram's event loop
+        future = asyncio.run_coroutine_threadsafe(
+            send_telegram_message(admin, message),
+            dp.loop
+        )
         try:
-            asyncio.set_event_loop(loop)
-            # Run the async send_message coroutine
-            loop.run_until_complete(
-                bot.send_message(
-                    chat_id=admin,
-                    text=message,
-                    parse_mode='HTML'
-                )
-            )
-        except TelegramAPIError as te:
-            logging.error(f"Telegram API error: {te}")
-            return jsonify({"error": f"Failed to send Telegram message: {str(te)}"}), 500
+            future.result(timeout=30)  # Wait up to 30 seconds
+        except asyncio.TimeoutError:
+            logging.error("Telegram message sending timed out")
+            return jsonify({"error": "Telegram message sending timed out"}), 500
         except Exception as e:
-            logging.error(f"Error in async operation: {e}")
+            logging.error(f"Error in async task: {e}")
             return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-        finally:
-            loop.close()
 
         return jsonify({"status": "success"}), 200
     except Exception as e:
