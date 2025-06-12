@@ -482,8 +482,8 @@ def extract_fio_and_links(spreadsheet_url):
         with open(temp_file, "wb") as f:
             f.write(response.content)
 
-        # Load the Excel file
-        wb = load_workbook(temp_file)
+        # Load the Excel file with data_only=True to get computed values
+        wb = load_workbook(temp_file, data_only=True)
         ws = wb.worksheets[-1]  # Use the last sheet
         sheet_name = ws.title
 
@@ -497,9 +497,9 @@ def extract_fio_and_links(spreadsheet_url):
                     value = str(cell.value).strip()
                     if "ФИО" in value:
                         fio_column = cell.column
-                    elif "Прослушано" in value:
+                    elif "Количество прослушанных звонков" in value or "Прослушано" in value:
                         calls_column = cell.column
-                    elif "Средний балл" in value:
+                    elif "Средний балл" in value or "Средняя оценка" in value:
                         score_column = cell.column
             if fio_column and calls_column:
                 break
