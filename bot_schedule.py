@@ -444,12 +444,25 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
     
     if operators:
         for op in operators:
-            # Truncate name if too long
-            display_name = op['name'][:max_name_length] + '…' if len(op['name']) > max_name_length else op['name']
-            # Right-align count and score
+            if op.get('call_count') in [None, 0]:
+                op['call_count'] = 0
+                op['avg_score'] = 0
+
+            name = op.get('name', '')
+            display_name = (name[:max_name_length - 1] + '…') if len(name) > max_name_length else name.ljust(max_name_length)
+
             call_count = str(op.get('call_count', 0)).rjust(max_count_length)
-            avg_score = str(op.get('avg_score', '-')).rjust(max_score_length)
-            message_text += f"👤 {display_name.ljust(max_name_length)} | {call_count} | {avg_score}\n"
+
+            score = op.get('avg_score')
+            if score in [None, "#DIV/0!"]:
+                avg_score = "-".rjust(max_score_length)
+            else:
+                try:
+                    avg_score = f"{float(score):.2f}".rjust(max_score_length)
+                except:
+                    avg_score = "-".rjust(max_score_length)
+
+            message_text += f"👤 {display_name} | {call_count} | {avg_score}\n"
     else:
         message_text += "Операторов в таблице нет\n"
 
