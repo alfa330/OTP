@@ -89,7 +89,7 @@ def receive_call_evaluation():
         for t in SVlist:
             if SVlist[t].name == data['evaluator']:
                 b=0
-                if data['month'] in SVList[t].calls:
+                if data['month'] in SVlist[t].calls:
                     if data['call_number'] in SVlist[t].calls[data['month']] :
                         hint+=" - Корректировка оценки!"
                     else:
