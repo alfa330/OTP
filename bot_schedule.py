@@ -491,7 +491,6 @@ async def check_for_updates():
 async def generate_report():
     try:
         content = await fetch_text_async()
-        Alist of dictionaries is not iterable
         df = pd.read_csv(StringIO(content))
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await bot.send_message(admin, f"[{now}] 📊 Отчет: {len(df)} строк, {len(df.columns)} столбцов.", parse_mode='HTML')
