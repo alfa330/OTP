@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 import asyncio
-from asyncio import new_event_loop, set_event_loop
+from hashlib import sha256
 import pandas as pd
 import requests
 from datetime import datetime
@@ -23,7 +23,7 @@ import re
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO)
 
-# === Переменные окружения ============================================================================================
+# === Переменные окружения =========================================================================================
 API_TOKEN = os.getenv('BOT_TOKEN')
 admin = int(os.getenv('ADMIN_ID', '0'))
 SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
@@ -37,12 +37,12 @@ if not FLASK_API_KEY:
 
 FETCH_URL = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet={SHEET_NAME}"
 
-# === Инициализация бота и диспетчера =================================================================================
+# === Инициализация бота и диспетчера =============================================================================
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot=bot, storage=storage)
 
-# === В роли ДБ =====================================================================================================
+# === В роли ДБ ==================================================================================================
 SVlist = {}
 
 class SV:
@@ -52,7 +52,7 @@ class SV:
         self.table = ''
         self.calls = {}
 
-# === Flask-сервер ===================================================================================================
+# === Flask-сервер ===============================
 app = Flask(__name__)
 
 def require_api_key(f):
@@ -137,10 +137,10 @@ def receive_call_evaluation():
 def run_flask():
     app.run(host='0.0.0.0', port=8080, debug=False)
 
-# === Глобальное состояние ============================================================================================
+# === Глобальное состояние =======================================================================================
 last_hash = None
 
-# === Классы ==========================================================================================================
+# === Классы =====================================================================================================
 class new_sv(StatesGroup):
     svname = State()
     svid = State()
@@ -149,7 +149,8 @@ class sv(StatesGroup):
     crtable = State()
     delete = State()
     verify_table = State()
-    view_evaluations = State()  # New state for viewing evaluations
+    view_evaluations = State()
+    change_table = State()  # New state for changing SV table
 
 # Helper function to create cancel keyboard
 def get_cancel_keyboard():
@@ -178,6 +179,7 @@ def get_editor_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Добавить СВ➕'))
     kb.insert(KeyboardButton('Убрать СВ❌'))
+    kb.add(KeyboardButton('Изменить таблицу СВ🔄'))  # New button
     kb.add(KeyboardButton('Назад 🔙'))
     return kb
 
@@ -197,7 +199,7 @@ async def cancel_handler(message: types.Message, state: FSMContext):
     )
     await message.delete()
 
-# === Команды =========================================================================================================
+# === Команды ====================================================================================================
 @dp.message_handler(commands=['start'])
 async def start_command(message: types.Message):
     await message.delete()
@@ -219,7 +221,7 @@ async def start_command(message: types.Message):
             reply_markup=kb
         )
 
-# === Админка ========================================================================================================
+# === Админка ===================================================================================================
 @dp.message_handler(regexp='Редактор СВ📝')
 async def editor_sv(message: types.Message):
     if message.from_user.id == admin:
@@ -343,6 +345,49 @@ async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
     )
     await state.finish()
 
+@dp.message_handler(regexp='Изменить таблицу СВ🔄')
+async def change_sv_table(message: types.Message):
+    if message.from_user.id == admin:
+        if SVlist:
+            await bot.send_message(
+                text='<b>Выберите СВ, чью таблицу нужно изменить🖊</b>',
+                chat_id=admin,
+                parse_mode='HTML',
+                reply_markup=get_cancel_keyboard()
+            )
+            ikb = InlineKeyboardMarkup(row_width=1)
+            for i in SVlist:
+                ikb.insert(InlineKeyboardButton(text=SVlist[i].name, callback_data=f"change_table_{i}"))
+            await bot.send_message(
+                text='<b>Лист СВ:</b>',
+                chat_id=admin,
+                parse_mode='HTML',
+                reply_markup=ikb
+            )
+            await sv.change_table.set()
+        else:
+            await bot.send_message(
+                text='<b>В команде нет СВ🤥</b>',
+                chat_id=admin,
+                parse_mode='HTML',
+                reply_markup=get_editor_keyboard()
+            )
+    await message.delete()
+
+@dp.callback_query_handler(state=sv.change_table)
+async def select_sv_for_table_change(callback: types.CallbackQuery, state: FSMContext):
+    sv_id = int(callback.data.split('_')[2])
+    async with state.proxy() as data:
+        data['sv_id'] = sv_id
+    await bot.send_message(
+        chat_id=admin,
+        text=f'<b>Отправьте новую таблицу ОКК для {SVlist[sv_id].name}🖊</b>',
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+    await sv.crtable.set()
+
 @dp.message_handler(regexp='Оценки📊')
 async def view_evaluations(message: types.Message):
     if message.from_user.id == admin:
@@ -399,12 +444,19 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
             if operator_name in operator_counts:
                 operator_counts[operator_name] += 1
 
-    # Format message
+    # Format message with right-aligned counts
+    max_name_length = 20  # Max length before truncation
     message_text = f"<b>Оценки {sv.name}:</b>\n\n"
-    for op_name, count in operator_counts.items():
-        message_text += f"👤 {op_name} - {count} прослушенных звонков\n"
-    
-    if not operator_counts:
+    if operator_counts:
+        # Find max count length for alignment
+        max_count_length = max(len(str(count)) for count in operator_counts.values())
+        for op_name, count in operator_counts.items():
+            # Truncate name if too long
+            display_name = op_name[:max_name_length] + '…' if len(op_name) > max_name_length else op_name
+            # Right-align count
+            formatted_count = str(count).rjust(max_count_length)
+            message_text += f"👤 {display_name.ljust(max_name_length)} {formatted_count}\n"
+    else:
         message_text += "Оценок пока нет\n"
 
     await bot.send_message(
@@ -416,7 +468,7 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await state.finish()
 
-# === Работа с СВ и таблицами =====================================================================================
+# === Работа с СВ и таблицами ===================================================================================
 def extract_fio_and_links(spreadsheet_url):
     try:
         # Extract file_id from Google Sheets URL
@@ -487,9 +539,11 @@ async def crtablee(message: types.Message):
 @dp.message_handler(state=sv.crtable)
 async def tableName(message: types.Message, state: FSMContext):
     try:
-        if message.from_user.id not in SVlist:
+        user_id = message.from_user.id
+        is_admin_changing = await state.get_state() == sv.change_table.state and user_id == admin
+        if not is_admin_changing and user_id not in SVlist:
             await bot.send_message(
-                chat_id=message.from_user.id,
+                chat_id=user_id,
                 text="Ошибка: Вы не зарегистрированы как супервайзер! Пожалуйста, добавьтесь через администратора.",
                 parse_mode="HTML",
                 reply_markup=ReplyKeyboardRemove()
@@ -502,16 +556,18 @@ async def tableName(message: types.Message, state: FSMContext):
         
         if error:
             await bot.send_message(
-                chat_id=message.from_user.id,
+                chat_id=user_id,
                 text=f"{error}\n\n<b>Пожалуйста, отправьте корректную ссылку на таблицу.</b>",
                 parse_mode="HTML",
                 reply_markup=get_cancel_keyboard()
             )
             return
 
-        # Store the table URL temporarily in state for verification
+        # Store the table URL and target SV ID (if admin)
         async with state.proxy() as data:
             data['table_url'] = message.text
+            if is_admin_changing:
+                data.setdefault('sv_id', user_id)  # Preserve sv_id if set
 
         # Format the message
         message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
@@ -524,7 +580,7 @@ async def tableName(message: types.Message, state: FSMContext):
 
         # Send the message with verification buttons
         await bot.send_message(
-            chat_id=message.from_user.id,
+            chat_id=user_id,
             text=message_text,
             parse_mode="HTML",
             reply_markup=get_verify_keyboard(),
@@ -545,31 +601,34 @@ async def tableName(message: types.Message, state: FSMContext):
 async def verify_table(callback: types.CallbackQuery, state: FSMContext):
     async with state.proxy() as data:
         table_url = data.get('table_url')
+        sv_id = data.get('sv_id', callback.from_user.id)  # Use sv_id if set, else user_id
     
     if callback.data == "verify_yes":
         # Save the table URL to SVlist
-        SVlist[callback.from_user.id].table = table_url
+        SVlist[sv_id].table = table_url
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add(KeyboardButton('Добавить таблицу📑'))
+        reply_markup = kb if sv_id == callback.from_user.id else get_editor_keyboard()
+        target_id = callback.from_user.id if sv_id == callback.from_user.id else admin
         await bot.send_message(
-            chat_id=callback.from_user.id,
-            text='<b>Таблица успешно подтверждена и сохранена✅</b>',
+            chat_id=target_id,
+            text=f'<b>Таблица успешно подтверждена и сохранена для {SVlist[sv_id].name}✅</b>',
             parse_mode='HTML',
-            reply_markup=kb
+            reply_markup=reply_markup
         )
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
         await state.finish()
     elif callback.data == "verify_no":
         await bot.send_message(
             chat_id=callback.from_user.id,
-            text='<b>Отправьте корректную ссылку на таблицу ОКК🖊</b>',
+            text=f'<b>Отправьте корректную таблицу ОКК для {SVlist[sv_id].name}🖊</b>',
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
         await sv.crtable.set()
 
-# === Работа с таблицей ==============================================================================================
+# === Работа с таблицей ==========================================================================================
 def sync_fetch_text():
     response = requests.get(FETCH_URL)
     response.raise_for_status()
@@ -582,7 +641,7 @@ async def check_for_updates():
     global last_hash
     try:
         content = await fetch_text_async()
-        current_hash = hash(content)
+        current_hash = sha256(content.encode()).hexdigest()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if last_hash is None:
             await bot.send_message(admin, f"[{now}] ✅ Первая загрузка данных.", parse_mode='HTML')
@@ -604,7 +663,7 @@ async def generate_report():
     except Exception as e:
         print(f"[{datetime.now()}] ⚠️ Ошибка при генерации отчета: {e}")
 
-# === Главный запуск ==================================================================================================
+# === Главный запуск =============================================================================================
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
     scheduler = AsyncIOScheduler()
