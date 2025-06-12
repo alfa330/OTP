@@ -56,18 +56,6 @@ def require_api_key(f):
 def index():
     return "Bot is alive!", 200
 
-async def send_telegram_message(chat_id, message):
-    """Helper function to send Telegram message asynchronously."""
-    try:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=message,
-            parse_mode='HTML'
-        )
-    except TelegramAPIError as te:
-        logging.error(f"Telegram API error: {te}")
-        raise
-
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
 def receive_call_evaluation():
@@ -95,20 +83,26 @@ def receive_call_evaluation():
         if data['score'] < 100 and data['comment']:
             message += f"\n💬 Комментарий: {data['comment']}\n"
 
-        # Run async send_telegram_message in the aiogram event loop
-        loop = dp.loop  # Use aiogram's event loop
-        future = asyncio.run_coroutine_threadsafe(
-            send_telegram_message(admin, message),
-            loop
-        )
+        # Create a new event loop for this request
+        loop = asyncio.new_event_loop()
         try:
-            future.result(timeout=30)  # Wait up to 30 seconds for the result
-        except asyncio.TimeoutError:
-            logging.error("Telegram message sending timed out")
-            return jsonify({"error": "Telegram message sending timed out"}), 500
+            asyncio.set_event_loop(loop)
+            # Run the async send_message coroutine
+            loop.run_until_complete(
+                bot.send_message(
+                    chat_id=admin,
+                    text=message,
+                    parse_mode='HTML'
+                )
+            )
+        except TelegramAPIError as te:
+            logging.error(f"Telegram API error: {te}")
+            return jsonify({"error": f"Failed to send Telegram message: {str(te)}"}), 500
         except Exception as e:
-            logging.error(f"Error in async task: {e}")
+            logging.error(f"Error in async operation: {e}")
             return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        finally:
+            loop.close()
 
         return jsonify({"status": "success"}), 200
     except Exception as e:
@@ -330,7 +324,7 @@ async def tableName(message: types.Message, state: FSMContext):
         print(f"Ошибка в tableName: {e}")
         await bot.send_message(
             chat_id=message.from_user.id,
-            text="Произошла ошибка при обработке таблицы. Попробуйте снова или свяжитесь с администратором.",
+            text="Произошла ошибка при обработке таблицы. Попробуйте снова или свяжитесь с администратора.",
             parse_mode="HTML",
             reply_markup=get_cancel_keyboard()
         )
@@ -356,6 +350,8 @@ async def check_for_updates():
         elif current_hash != last_hash:
             await bot.send_message(admin, f"[{now}] 📌 Таблица обновилась!", parse_mode='HTML')
             last_hash = current_hash
+        else:
+            logging.info(f"[{now}] No changes in spreadsheet data.")
     except Exception as e:
         print(f"[{datetime.now()}] ❌ Ошибка при загрузке: {e}")
 
