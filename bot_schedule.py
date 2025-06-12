@@ -56,9 +56,21 @@ def require_api_key(f):
 def index():
     return "Bot is alive!", 200
 
+async def send_telegram_message(chat_id, message):
+    """Helper function to send Telegram message asynchronously."""
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=message,
+            parse_mode='HTML'
+        )
+    except TelegramAPIError as te:
+        logging.error(f"Telegram API error: {te}")
+        raise
+
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
-def receive_call_evaluation():  # Synchronous function
+def receive_call_evaluation():
     try:
         data = request.get_json()
         required_fields = ['evaluator', 'operator', 'month', 'call_number', 'phone_number', 'score', 'comment']
@@ -83,24 +95,22 @@ def receive_call_evaluation():  # Synchronous function
         if data['score'] < 100 and data['comment']:
             message += f"\n💬 Комментарий: {data['comment']}\n"
 
-        # Run async bot.send_message in a new event loop
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Run async send_telegram_message in the aiogram event loop
+        loop = dp.loop  # Use aiogram's event loop
+        future = asyncio.run_coroutine_threadsafe(
+            send_telegram_message(admin, message),
+            loop
+        )
         try:
-            loop.run_until_complete(
-                bot.send_message(
-                    chat_id=admin,
-                    text=message,
-                    parse_mode='HTML'
-                )
-            )
-        finally:
-            loop.close()
+            future.result(timeout=30)  # Wait up to 30 seconds for the result
+        except asyncio.TimeoutError:
+            logging.error("Telegram message sending timed out")
+            return jsonify({"error": "Telegram message sending timed out"}), 500
+        except Exception as e:
+            logging.error(f"Error in async task: {e}")
+            return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
         return jsonify({"status": "success"}), 200
-    except TelegramAPIError as te:
-        logging.error(f"Telegram API error: {te}")
-        return jsonify({"error": f"Failed to send Telegram message: {str(te)}"}), 500
     except Exception as e:
         logging.error(f"Error processing call evaluation: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
