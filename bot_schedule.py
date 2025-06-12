@@ -5,7 +5,7 @@ import asyncio
 from hashlib import sha256
 import pandas as pd
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from io import StringIO
@@ -151,6 +151,19 @@ class sv(StatesGroup):
     verify_table = State()
     view_evaluations = State()
     change_table = State()
+
+def get_current_week_of_month():
+    today = datetime.now()
+    first_day = today.replace(day=1)
+    first_day_weekday = first_day.weekday()  # 0-6 (понедельник-воскресенье)
+    
+    # Номер недели (1-4 или 5)
+    week_number = (today.day + first_day_weekday - 1) // 7 + 1
+    return week_number
+
+def get_expected_calls(week_number):
+    # Ожидаемое количество звонков на текущую неделю (5 звонков в неделю)
+    return week_number * 5
 
 # Helper function to create cancel keyboard
 def get_cancel_keyboard():
@@ -422,6 +435,10 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
     sv_id = int(callback.data.split('_')[1])
     sv = SVlist[sv_id]
     
+    # Получаем текущую неделю месяца
+    current_week = get_current_week_of_month()
+    expected_calls = get_expected_calls(current_week)
+    
     # Get operators, call counts, and average scores from SV's table
     sheet_name, operators, error = extract_fio_and_links(sv.table) if sv.table else (None, [], "Таблица не найдена")
     
@@ -436,44 +453,151 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
         return
 
-    # Format message with right-aligned counts and average scores
-    max_name_length = 20  # Max length before truncation
-    max_count_length = 5  # Max length for call count
-    max_score_length = 5  # Max length for average score
-    message_text = f"<b>Оценки {sv.name}:</b>\n\n"
+    # Формируем сообщение с выравниванием
+    max_name_length = 20  # Максимальная длина имени перед сокращением
+    max_count_length = 5  # Максимальная длина для количества звонков
+    max_score_length = 5  # Максимальная длина для средней оценки
+    
+    message_text = (
+        f"<b>Оценки {sv.name} (неделя {current_week}):</b>\n"
+        f"<i>Ожидается: {expected_calls} звонков (по 5 в неделю)</i>\n\n"
+    )
+    
+    # Список операторов с недостаточным количеством звонков
+    operators_with_issues = []
     
     if operators:
         for op in operators:
-            if op.get('call_count') in [None, 0]:
-                op['call_count'] = 0
-                op['avg_score'] = 0
+            name = op.get('name', '').strip()
+            if not name:
+                continue
 
-            name = op.get('name', '')
-            display_name = (name[:max_name_length - 1] + '…') if len(name) > max_name_length else name.ljust(max_name_length)
+            # Сокращаем и выравниваем ФИО
+            display_name = (name[:max_name_length - 1] + '…') if len(name) > max_name_length else name
 
-            call_count = str(op.get('call_count', 0)).rjust(max_count_length)
-
+            # Обработка значений
+            call_count = op.get('call_count')
             score = op.get('avg_score')
-            if score in [None, "#DIV/0!"]:
-                avg_score = "-".rjust(max_score_length)
+
+            if call_count in [None, "#DIV/0!"]:
+                call_count = 0
             else:
                 try:
-                    avg_score = f"{float(score):.2f}".rjust(max_score_length)
-                except:
-                    avg_score = "-".rjust(max_score_length)
+                    call_count = int(call_count)
+                except (ValueError, TypeError):
+                    call_count = 0
 
-            message_text += f"👤 {display_name} | {call_count} | {avg_score}\n"
+            try:
+                score_val = float(score) if score else None
+            except (ValueError, TypeError):
+                score_val = None
+
+            # Определяем цвет иконки на основе количества звонков и оценки
+            if call_count < expected_calls:
+                # Недостаточно звонков
+                if call_count == 0:
+                    color_icon = "🔴"  # Нет звонков
+                elif call_count < (expected_calls * 0.5):
+                    color_icon = "🟠"  # Менее половины
+                else:
+                    color_icon = "🟡"  # Более половины, но не все
+                
+                # Добавляем оператора в список для кнопок
+                operators_with_issues.append({
+                    'name': name,
+                    'sv_id': sv_id,
+                    'call_count': call_count,
+                    'expected': expected_calls
+                })
+            else:
+                # Достаточно звонков, смотрим оценку
+                if score_val is None:
+                    color_icon = "-"
+                    score_str = "-"
+                elif score_val < 60:
+                    color_icon = "🔴"
+                    score_str = f"{score_val:.2f}"
+                elif score_val < 90:
+                    color_icon = "🟡"
+                    score_str = f"{score_val:.2f}"
+                else:
+                    color_icon = "🟢"
+                    score_str = f"{score_val:.2f}"
+
+            # Формирование строки
+            message_text += f"👤 {display_name}\n"
+            message_text += f"   {str(call_count).rjust(max_count_length)} звон. | {score_str.rjust(max_score_length)} {color_icon}\n\n"
     else:
         message_text += "Операторов в таблице нет\n"
+
+    # Создаем клавиатуру с операторами, у которых проблемы
+    ikb = InlineKeyboardMarkup(row_width=1)
+    if operators_with_issues:
+        message_text += "\n<b>Операторы с недостаточным количеством звонков:</b>"
+        for op in operators_with_issues:
+            btn_text = f"{op['name']} ({op['call_count']}/{op['expected']})"
+            ikb.add(InlineKeyboardButton(
+                text=btn_text,
+                callback_data=f"notify_sv_{sv_id}_{op['name'].replace(' ', '_')}"
+            ))
 
     await bot.send_message(
         chat_id=admin,
         text=message_text,
         parse_mode='HTML',
-        reply_markup=get_admin_keyboard()
+        reply_markup=ikb if operators_with_issues else get_admin_keyboard()
     )
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await state.finish()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('notify_sv_'))
+async def notify_supervisor(callback: types.CallbackQuery):
+    try:
+        # Разбираем данные из callback_data: notify_sv_{sv_id}_{operator_name}
+        parts = callback.data.split('_')
+        sv_id = int(parts[2])
+        operator_name = ' '.join(parts[3:])  # Восстанавливаем пробелы в имени
+        
+        # Получаем текущую неделю и ожидаемое количество звонков
+        current_week = get_current_week_of_month()
+        expected_calls = get_expected_calls(current_week)
+        
+        # Отправляем уведомление СВ
+        if sv_id in SVlist:
+            sv = SVlist[sv_id]
+            notification_text = (
+                f"⚠️ <b>Требуется внимание!</b>\n\n"
+                f"У оператора <b>{operator_name}</b> недостаточно прослушанных звонков.\n"
+                f"Текущая неделя: {current_week}\n"
+                f"Ожидается: {expected_calls} звонков (по 5 в неделю)\n\n"
+                f"Пожалуйста, проверьте и прослушайте недостающие звонки."
+            )
+            
+            await bot.send_message(
+                chat_id=sv_id,
+                text=notification_text,
+                parse_mode='HTML'
+            )
+            
+            # Подтверждаем админу
+            await bot.answer_callback_query(
+                callback.id,
+                text=f"Уведомление отправлено СВ {sv.name}",
+                show_alert=False
+            )
+        else:
+            await bot.answer_callback_query(
+                callback.id,
+                text="Ошибка: СВ не найден",
+                show_alert=True
+            )
+    except Exception as e:
+        logging.error(f"Ошибка в notify_supervisor: {e}")
+        await bot.answer_callback_query(
+            callback.id,
+            text="Произошла ошибка при отправке уведомления",
+            show_alert=True
+        )
 
 # === Работа с СВ и таблицами ===================================================================================
 def extract_fio_and_links(spreadsheet_url):
