@@ -540,8 +540,8 @@ async def crtablee(message: types.Message):
 async def tableName(message: types.Message, state: FSMContext):
     try:
         user_id = message.from_user.id
-        is_admin_changing = await state.get_state() == sv.change_table.state and user_id == admin
-        if not is_admin_changing or user_id not in SVlist:
+        is_admin_changing = await state.get_state() == sv.crtable.state and user_id == admin
+        if not is_admin_changing and user_id not in SVlist:
             await bot.send_message(
                 chat_id=user_id,
                 text="Ошибка: Вы не зарегистрированы как супервайзер! Пожалуйста, добавьтесь через администратора.",
