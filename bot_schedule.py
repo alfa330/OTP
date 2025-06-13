@@ -548,6 +548,36 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await state.finish()
 
+@dp.callback_query_handler(lambda c: c.data == 'generate_monthly_report', state=sv.view_evaluations)
+async def handle_generate_monthly_report(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        await bot.send_message(
+            chat_id=admin,
+            text="📊 Генерирую недельный отчет...",
+            parse_mode='HTML'
+        )
+        await generate_weekly_report()  # Вызываем существующую функцию для генерации отчета
+        await bot.answer_callback_query(
+            callback.id,
+            text="Отчет успешно отправлен!",
+            show_alert=False
+        )
+    except Exception as e:
+        logging.error(f"Ошибка при генерации отчета: {e}")
+        await bot.answer_callback_query(
+            callback.id,
+            text="Ошибка при генерации отчета",
+            show_alert=True
+        )
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+    await bot.send_message(
+        chat_id=admin,
+        text='<b>Главное меню</b>',
+        parse_mode='HTML',
+        reply_markup=get_admin_keyboard()
+    )
+    await state.finish()
+
 @dp.callback_query_handler(lambda c: c.data.startswith('notify_sv_'))
 async def notify_supervisor(callback: types.CallbackQuery):
     try:
@@ -775,6 +805,76 @@ def sync_fetch_text():
     response.raise_for_status()
     return response.text
 
+async def generate_weekly_report():
+    try:
+        output = BytesIO()
+        workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+        header_format = workbook.add_format({
+            'bold': True,
+            'bg_color': '#D3D3D3',
+            'border': 1
+        })
+        cell_format = workbook.add_format({'border': 1})
+        current_week = get_current_week_of_month()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        for sv_id, sv in SVlist.items():
+            if not sv.table:
+                continue
+            sheet_name, operators, error = extract_fio_and_links(sv.table)
+            if error:
+                logging.error(f"Error processing table for SV {sv.name}: {error}")
+                continue
+            safe_sheet_name = sv.name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
+            worksheet = workbook.add_worksheet(safe_sheet_name)
+            headers = ['ФИО', 'Количество звонков', 'Средний балл']
+            for col, header in enumerate(headers):
+                worksheet.write(0, col, header, header_format)
+            for row, op in enumerate(operators, start=1):
+                name = op.get('name', '')
+                call_count = op.get('call_count', 0)
+                avg_score = op.get('avg_score', None)
+                if call_count in [None, "#DIV/0!"]:
+                    call_count = 0
+                else:
+                    try:
+                        call_count = int(call_count)
+                    except (ValueError, TypeError):
+                        call_count = 0
+                try:
+                    score_val = float(avg_score) if avg_score else ''
+                except (ValueError, TypeError):
+                    score_val = ''
+                worksheet.write(row, 0, name, cell_format)
+                worksheet.write(row, 1, call_count, cell_format)
+                worksheet.write(row, 2, score_val, cell_format)
+            worksheet.set_column('A:A', 30)
+            worksheet.set_column('B:B', 20)
+            worksheet.set_column('C:C', 15)
+        workbook.close()
+        output.seek(0)
+        if output.getvalue():
+            filename = f"Weekly_Report_Week{current_week}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+            await bot.send_document(
+                chat_id=admin,
+                document=('report.xlsx', output),
+                caption=f"[{now}] 📊 Еженедельный отчет за {current_week}-ю неделю",
+                parse_mode='HTML'
+            )
+        else:
+            await bot.send_message(
+                chat_id=admin,
+                text=f"[{now}] ⚠️ Нет данных для отчета за {current_week}-ю неделю",
+                parse_mode='HTML'
+            )
+    except Exception as e:
+        logging.error(f"Error generating weekly report: {e}")
+        await bot.send_message(
+            chat_id=admin,
+            text=f"[{now}] ❌ Ошибка при генерации еженедельного отчета: {str(e)}",
+            parse_mode='HTML'
+        )
+
 async def fetch_text_async():
     return await asyncio.to_thread(sync_fetch_text)
 
@@ -810,6 +910,7 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_for_updates, "interval", minutes=1)
     scheduler.add_job(generate_report, CronTrigger(day="10,20,30", hour=9, minute=0))
+    scheduler.add_job(generate_weekly_report, CronTrigger(day_of_week='mon', hour=9, minute=0))  # Run every Monday at 9 AM
     scheduler.start()
     print("🔄 Планировщик запущен.")
     executor.start_polling(dp, skip_updates=True)
