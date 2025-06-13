@@ -8,7 +8,7 @@ import requests
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from io import StringIO
+from io import StringIO, BytesIO
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
@@ -20,7 +20,7 @@ from functools import wraps
 from openpyxl import load_workbook
 import re
 import xlsxwriter
-from io import BytesIO
+import threading
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO)
@@ -46,6 +46,7 @@ dp = Dispatcher(bot=bot, storage=storage)
 
 # === В роли ДБ ==================================================================================================
 SVlist = {}
+SVlist_lock = threading.Lock()  # Lock for thread-safe access to SVlist
 
 class SV:
     def __init__(self, name, id):
@@ -53,8 +54,9 @@ class SV:
         self.id = id
         self.table = ''
         self.calls = {}
+        self.lock = threading.Lock()  # Per-SV lock for thread-safe access to calls
 
-# === Flask-сервер ===============================
+# === Flask-сервер ===============================================================================================
 app = Flask(__name__)
 
 def require_api_key(f):
@@ -74,7 +76,6 @@ def index():
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
 def receive_call_evaluation():
-    global SVlist
     try:
         data = request.get_json()
         required_fields = ['evaluator', 'operator', 'month', 'call_number', 'phone_number', 'score', 'comment']
@@ -84,23 +85,27 @@ def receive_call_evaluation():
         for field in required_fields:
             if not isinstance(data[field], (str, int, float)):
                 return jsonify({"error": f"Invalid type for {field}"}), 400
-        b = 1
-        hint = ""
-        for t in SVlist:
-            if SVlist[t].name == data['evaluator']:
-                b = 0
-                if data['month'] in SVlist[t].calls:
-                    if data['call_number'] in SVlist[t].calls[data['month']]:
-                        hint += " - Корректировка оценки!"
-                    else:
-                        SVlist[t].calls[data['month']][data['call_number']] = data
-                else:
-                    SVlist[t].calls[data['month']] = {}
-                    SVlist[t].calls[data['month']][data['call_number']] = data
-                break
         
-        if b:
-            hint += " Оценивающего нет в списке супервайзеров!"
+        with SVlist_lock:
+            b = 1
+            hint = ""
+            for sv_id in SVlist:
+                sv = SVlist[sv_id]
+                if sv.name == data['evaluator']:
+                    b = 0
+                    with sv.lock:
+                        if data['month'] in sv.calls:
+                            if data['call_number'] in sv.calls[data['month']]:
+                                hint += " - Корректировка оценки!"
+                            else:
+                                sv.calls[data['month']][data['call_number']] = data
+                        else:
+                            sv.calls[data['month']] = {}
+                            sv.calls[data['month']][data['call_number']] = data
+                    break
+        
+            if b:
+                hint += " Оценивающего нет в списке супервайзеров!"
                 
         message = (
             f"📞 <b>Оценка звонка</b>\n" 
@@ -137,10 +142,11 @@ def receive_call_evaluation():
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 def run_flask():
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
 
 # === Глобальное состояние =======================================================================================
 last_hash = None
+last_hash_lock = threading.Lock()  # Lock for thread-safe access to last_hash
 
 # === Классы =====================================================================================================
 class new_sv(StatesGroup):
@@ -156,21 +162,17 @@ class sv(StatesGroup):
 
 def get_current_week_of_month():
     today = datetime.now()
-    # Делим день месяца на 7, округляя вверх
     week_number = (today.day - 1) // 7 + 1
     return week_number
 
 def get_expected_calls(week_number):
-    # Ожидаемое количество звонков на текущую неделю (5 звонков в неделю)
     return week_number * 5
 
-# Helper function to create cancel keyboard
 def get_cancel_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     kb.add(KeyboardButton('Отмена ❌'))
     return kb
 
-# Helper function to create admin keyboard
 def get_admin_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Редактор СВ📝'))
@@ -183,7 +185,6 @@ def get_evaluations_keyboard():
     kb.add(KeyboardButton('Назад 🔙'))
     return kb
 
-# Helper function to create verification keyboard
 def get_verify_keyboard():
     ikb = InlineKeyboardMarkup(row_width=2)
     ikb.add(
@@ -192,7 +193,6 @@ def get_verify_keyboard():
     )
     return ikb
 
-# Helper function to create editor keyboard
 def get_editor_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Добавить СВ➕'))
@@ -201,7 +201,6 @@ def get_editor_keyboard():
     kb.add(KeyboardButton('Назад 🔙'))
     return kb
 
-# Global cancel handler
 @dp.message_handler(regexp='Отмена ❌', state='*')
 async def cancel_handler(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
@@ -221,6 +220,8 @@ async def cancel_handler(message: types.Message, state: FSMContext):
 @dp.message_handler(commands=['start'])
 async def start_command(message: types.Message):
     await message.delete()
+    with SVlist_lock:
+        is_sv = message.from_user.id in SVlist
     if message.from_user.id == admin:
         await bot.send_message(
             chat_id=message.from_user.id,
@@ -230,7 +231,7 @@ async def start_command(message: types.Message):
         )
     else:
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
-        if message.from_user.id in SVlist:
+        if is_sv:
             kb.add(KeyboardButton('Добавить таблицу📑'))
         await bot.send_message(
             chat_id=message.from_user.id,
@@ -300,7 +301,8 @@ async def newSVid(message: types.Message, state: FSMContext):
             parse_mode='HTML',
             reply_markup=kb_sv
         )
-        SVlist[sv_id] = SV(data['svname'], sv_id)
+        with SVlist_lock:
+            SVlist[sv_id] = SV(data['svname'], sv_id)
         await message.answer(
             text=f'Класс, ID - <b>{message.text}</b>\n\nДобавление СВ прошло <b>успешно✅</b>. Новому супервайзеру осталось лишь отправить таблицу этого месяца👌🏼',
             parse_mode='HTML',
@@ -318,78 +320,83 @@ async def newSVid(message: types.Message, state: FSMContext):
 @dp.message_handler(regexp='Убрать СВ❌')
 async def delSv(message: types.Message):
     if message.from_user.id == admin:
-        if SVlist:
-            await bot.send_message(
-                text='<b>Выберете СВ которого надо исключить🖊</b>',
-                chat_id=admin,
-                parse_mode='HTML',
-                reply_markup=get_cancel_keyboard()
-            )
-            ikb = InlineKeyboardMarkup(row_width=1)
-            for i in SVlist:
-                ikb.insert(InlineKeyboardButton(text=SVlist[i].name, callback_data=str(i)))
-            await bot.send_message(
-                text='<b>Лист СВ:</b>',
-                chat_id=admin,
-                parse_mode='HTML',
-                reply_markup=ikb
-            )
-            await sv.delete.set()
-        else:
-            await bot.send_message(
-                text='<b>В команде нет СВ🤥</b>',
-                chat_id=admin,
-                parse_mode='HTML',
-                reply_markup=get_editor_keyboard()
-            )
+        with SVlist_lock:
+            if SVlist:
+                await bot.send_message(
+                    text='<b>Выберете СВ которого надо исключить🖊</b>',
+                    chat_id=admin,
+                    parse_mode='HTML',
+                    reply_markup=get_cancel_keyboard()
+                )
+                ikb = InlineKeyboardMarkup(row_width=1)
+                for i in SVlist:
+                    ikb.insert(InlineKeyboardButton(text=SVlist[i].name, callback_data=str(i)))
+                await bot.send_message(
+                    text='<b>Лист СВ:</b>',
+                    chat_id=admin,
+                    parse_mode='HTML',
+                    reply_markup=ikb
+                )
+                await sv.delete.set()
+            else:
+                await bot.send_message(
+                    text='<b>В команде нет СВ🤥</b>',
+                    chat_id=admin,
+                    parse_mode='HTML',
+                    reply_markup=get_editor_keyboard()
+                )
     await message.delete()
 
 @dp.callback_query_handler(state=sv.delete)
 async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
-    SV = SVlist[int(callback.data)]
-    del SVlist[int(callback.data)]
-    await bot.send_message(
-        text=f"Супервайзер <b>{SV.name}</b> успешно исключен из вашей команды✅",
-        chat_id=admin,
-        parse_mode='HTML',
-        reply_markup=get_editor_keyboard()
-    )
-    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-    await bot.send_message(
-        text=f"Вы были исключены из команды❌",
-        chat_id=SV.id,
-        parse_mode='HTML',
-        reply_markup=ReplyKeyboardRemove()
-    )
+    with SVlist_lock:
+        sv_id = int(callback.data)
+        sv = SVlist.get(sv_id)
+        if sv:
+            del SVlist[sv_id]
+            await bot.send_message(
+                text=f"Супервайзер <b>{sv.name}</b> успешно исключен из вашей команды✅",
+                chat_id=admin,
+                parse_mode='HTML',
+                reply_markup=get_editor_keyboard()
+            )
+            await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+            await bot.send_message(
+                text=f"Вы были исключены из команды❌",
+                chat_id=sv.id,
+                parse_mode='HTML',
+                reply_markup=ReplyKeyboardRemove()
+            )
     await state.finish()
 
 @dp.message_handler(regexp='Изменить таблицу СВ🔄')
 async def change_sv_table(message: types.Message):
     if message.from_user.id == admin:
-        if SVlist:
-            await bot.send_message(
-                text='<b>Выберите СВ, чью таблицу нужно изменить🖊</b>',
-                chat_id=admin,
-                parse_mode='HTML',
-                reply_markup=get_cancel_keyboard()
-            )
-            ikb = InlineKeyboardMarkup(row_width=1)
-            for i in SVlist:
-                ikb.insert(InlineKeyboardButton(text=SVlist[i].name, callback_data=f"change_table_{i}"))
-            await bot.send_message(
-                text='<b>Лист СВ:</b>',
-                chat_id=admin,
-                parse_mode='HTML',
-                reply_markup=ikb
-            )
-            await sv.change_table.set()
-        else:
-            await bot.send_message(
-                text='<b>В команде нет СВ🤥</b>',
-                chat_id=admin,
-                parse_mode='HTML',
-                reply_markup=get_editor_keyboard()
-            )
+        with SVlist_lock:
+            if SVlist:
+                await bot.send_message(
+                    text='<b>Выберите СВ, чью таблицу нужно изменить🖊</b>',
+                    chat_id=admin,
+                    parse_mode='HTML',
+                    reply_markup=get_cancel_keyboard()
+                )
+                ikb = InlineKeyboardMarkup(row_width=1)
+                for i in SVlist:
+                    ikb.insert(InlineKeyboardButton(text=SVlist[i].name, callback_data=f"change_table_{i}"))
+                await bot.send_message(
+                    text='<b>Лист СВ:</b>',
+                    chat_id=admin,
+                    parse_mode='HTML',
+                    reply_markup=ikb
+                )
+                await sv.change_table.set()
+            else:
+                await bot.send_message(
+                    text='<b>В команде нет СВ🤥</b>',
+                    chat_id=admin,
+                    parse_mode='HTML',
+                    reply_markup=get_editor_keyboard()
+                )
     await message.delete()
 
 @dp.callback_query_handler(state=sv.change_table)
@@ -409,30 +416,31 @@ async def select_sv_for_table_change(callback: types.CallbackQuery, state: FSMCo
 @dp.message_handler(regexp='Оценки📊')
 async def view_evaluations(message: types.Message):
     if message.from_user.id == admin:
-        if SVlist:
-            await bot.send_message(
-                text='<b>Выберите чьи оценки просмотреть или сгенерируйте отчет</b>',
-                chat_id=admin,
-                parse_mode='HTML',
-                reply_markup=get_evaluations_keyboard()
-            )
-            ikb = InlineKeyboardMarkup(row_width=1)
-            for i in SVlist:
-                ikb.insert(InlineKeyboardButton(text=SVlist[i].name, callback_data=f"eval_{i}"))
-            await bot.send_message(
-                text='<b>Лист СВ:</b>',
-                chat_id=admin,
-                parse_mode='HTML',
-                reply_markup=ikb
-            )
-            await sv.view_evaluations.set()
-        else:
-            await bot.send_message(
-                text='<b>В команде нет СВ🤥</b>',
-                chat_id=admin,
-                parse_mode='HTML',
-                reply_markup=get_admin_keyboard()
-            )
+        with SVlist_lock:
+            if SVlist:
+                await bot.send_message(
+                    text='<b>Выберите чьи оценки просмотреть или сгенерируйте отчет</b>',
+                    chat_id=admin,
+                    parse_mode='HTML',
+                    reply_markup=get_evaluations_keyboard()
+                )
+                ikb = InlineKeyboardMarkup(row_width=1)
+                for i in SVlist:
+                    ikb.insert(InlineKeyboardButton(text=SVlist[i].name, callback_data=f"eval_{i}"))
+                await bot.send_message(
+                    text='<b>Лист СВ:</b>',
+                    chat_id=admin,
+                    parse_mode='HTML',
+                    reply_markup=ikb
+                )
+                await sv.view_evaluations.set()
+            else:
+                await bot.send_message(
+                    text='<b>В команде нет СВ🤥</b>',
+                    chat_id=admin,
+                    parse_mode='HTML',
+                    reply_markup=get_admin_keyboard()
+                )
     await message.delete()
 
 @dp.message_handler(regexp='Отчет за месяц📅', state='*')
@@ -471,13 +479,22 @@ async def handle_generate_monthly_report(message: types.Message, state: FSMConte
 @dp.callback_query_handler(state=sv.view_evaluations)
 async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
     sv_id = int(callback.data.split('_')[1])
-    sv = SVlist[sv_id]
+    with SVlist_lock:
+        sv = SVlist.get(sv_id)
     
-    # Получаем текущую неделю месяца
+    if not sv:
+        await bot.send_message(
+            chat_id=admin,
+            text="Ошибка: СВ не найден.",
+            parse_mode='HTML',
+            reply_markup=get_admin_keyboard()
+        )
+        await state.finish()
+        return
+    
     current_week = get_current_week_of_month()
     expected_calls = get_expected_calls(current_week)
     
-    # Get operators, call counts, and average scores from SV's table
     sheet_name, operators, error = extract_fio_and_links(sv.table) if sv.table else (None, [], "Таблица не найдена")
     
     if error:
@@ -491,17 +508,15 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
         return
 
-    # Формируем сообщение с выравниванием
-    max_name_length = 20  # Максимальная длина имени перед сокращением
-    max_count_length = 5  # Максимальная длина для количества звонков
-    max_score_length = 5  # Максимальная длина для средней оценки
+    max_name_length = 32
+    max_count_length = 5
+    max_score_length = 5
     
     message_text = (
         f"<b>Оценки {sv.name} (неделя {current_week}):</b>\n"
         f"<i>Ожидается: {expected_calls} звонков (по 5 в неделю)</i>\n\n"
     )
     
-    # Список операторов с недостаточным количеством звонков
     operators_with_issues = []
     
     if operators:
@@ -510,10 +525,8 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
             if not name:
                 continue
 
-            # Сокращаем и выравниваем ФИО
             display_name = (name[:max_name_length - 1] + '…') if len(name) > max_name_length else name
 
-            # Обработка значений
             call_count = op.get('call_count')
             score = op.get('avg_score')
 
@@ -530,15 +543,13 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
             except (ValueError, TypeError):
                 score_val = 0
 
-            # Определяем цвет иконки на основе количества звонков и оценки
             if call_count < expected_calls:
-                # Недостаточно звонков
                 if call_count == 0:
-                    c_color_icon = "🔴"  # Нет звонков
+                    c_color_icon = "🔴"
                 elif call_count < (expected_calls * 0.5):
-                    c_color_icon = "🟠"  # Менее половины
+                    c_color_icon = "🟠"
                 else:
-                    c_color_icon = "🟡"  # Более половины, но не все
+                    c_color_icon = "🟡"
                 operators_with_issues.append({
                     'name': name,
                     'sv_id': sv_id,
@@ -546,8 +557,8 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
                     'expected': expected_calls
                 })
             else:
-                c_color_icon="🟢"
-            # Достаточно звонков, смотрим оценку
+                c_color_icon = "🟢"
+
             if score_val is None:
                 color_icon = "-"
                 score_str = "-"
@@ -561,20 +572,18 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
                 color_icon = "🟢"
                 score_str = f"{score_val:.2f}"
 
-            # Формирование строки
             message_text += f"👤 {display_name}\n"
             message_text += f"   {str(call_count).rjust(max_count_length)} {c_color_icon} звон. | {score_str.rjust(max_score_length)} {color_icon}\n\n"
     else:
         message_text += "Операторов в таблице нет\n"
 
-    # Создаем клавиатуру с операторами, у которых проблемы
     ikb = InlineKeyboardMarkup(row_width=1)
     if operators_with_issues:
         message_text += "\n<b>Операторы с недостаточным количеством звонков:</b>"
         for op in operators_with_issues:
             btn_text = f"{op['name']} ({op['call_count']}/{op['expected']})"
-            op_name=op['name'].split(" ")[1]
-            callback_data=f"notify_sv_{sv_id}_{op_name}"
+            op_name = op['name'].split(" ")[1]
+            callback_data = f"notify_sv_{sv_id}_{op_name}"
             ikb.add(InlineKeyboardButton(
                 text=btn_text,
                 callback_data=callback_data
@@ -622,44 +631,41 @@ async def handle_generate_monthly_report(callback: types.CallbackQuery, state: F
 @dp.callback_query_handler(lambda c: c.data.startswith('notify_sv_'))
 async def notify_supervisor(callback: types.CallbackQuery):
     try:
-        # Разбираем данные из callback_data: notify_sv_{sv_id}_{operator_name}
         parts = callback.data.split('_')
         sv_id = int(parts[2])
-        operator_name = ' '.join(parts[3:])  # Восстанавливаем пробелы в имени
+        operator_name = ' '.join(parts[3:])
         
-        # Получаем текущую неделю и ожидаемое количество звонков
         current_week = get_current_week_of_month()
         expected_calls = get_expected_calls(current_week)
         
-        # Отправляем уведомление СВ
-        if sv_id in SVlist:
-            sv = SVlist[sv_id]
-            notification_text = (
-                f"⚠️ <b>Требуется внимание!</b>\n\n"
-                f"У оператора <b>{operator_name}</b> недостаточно прослушанных звонков.\n"
-                f"Текущая неделя: {current_week}\n"
-                f"Ожидается: {expected_calls} звонков (по 5 в неделю)\n\n"
-                f"Пожалуйста, проверьте и прослушайте недостающие звонки."
-            )
-            
-            await bot.send_message(
-                chat_id=sv_id,
-                text=notification_text,
-                parse_mode='HTML'
-            )
-            
-            # Подтверждаем админу
-            await bot.answer_callback_query(
-                callback.id,
-                text=f"Уведомление отправлено СВ {sv.name}",
-                show_alert=False
-            )
-        else:
-            await bot.answer_callback_query(
-                callback.id,
-                text="Ошибка: СВ не найден",
-                show_alert=True
-            )
+        with SVlist_lock:
+            sv = SVlist.get(sv_id)
+            if sv:
+                notification_text = (
+                    f"⚠️ <b>Требуется внимание!</b>\n\n"
+                    f"У оператора <b>{operator_name}</b> недостаточно прослушанных звонков.\n"
+                    f"Текущая неделя: {current_week}\n"
+                    f"Ожидается: {expected_calls} звонков (по 5 в неделю)\n\n"
+                    f"Пожалуйста, проверьте и прослушайте недостающие звонки."
+                )
+                
+                await bot.send_message(
+                    chat_id=sv_id,
+                    text=notification_text,
+                    parse_mode='HTML'
+                )
+                
+                await bot.answer_callback_query(
+                    callback.id,
+                    text=f"Уведомление отправлено СВ {sv.name}",
+                    show_alert=False
+                )
+            else:
+                await bot.answer_callback_query(
+                    callback.id,
+                    text="Ошибка: СВ не найден",
+                    show_alert=True
+                )
     except Exception as e:
         logging.error(f"Ошибка в notify_supervisor: {e}")
         await bot.answer_callback_query(
@@ -668,32 +674,26 @@ async def notify_supervisor(callback: types.CallbackQuery):
             show_alert=True
         )
 
-# === Работа с СВ и таблицами ===================================================================================
 def extract_fio_and_links(spreadsheet_url):
     try:
-        # Extract file_id from Google Sheets URL
         match = re.search(r"/d/([a-zA-Z0-9_-]+)", spreadsheet_url)
         if not match:
             return None, None, "Ошибка: Неверный формат ссылки на Google Sheets."
         file_id = match.group(1)
         export_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
 
-        # Download the file
         response = requests.get(export_url)
         if response.status_code != 200:
             return None, None, "Ошибка: Не удалось скачать таблицу. Проверьте, доступна ли таблица публично."
         
-        # Save the file temporarily
-        temp_file = "temp_table.xlsx"
+        temp_file = f"temp_table_{threading.current_thread().ident}.xlsx"  # Unique temp file per thread
         with open(temp_file, "wb") as f:
             f.write(response.content)
 
-        # Load the Excel file with data_only=True to get computed values
         wb = load_workbook(temp_file, data_only=True)
-        ws = wb.worksheets[-1]  # Use the last sheet
+        ws = wb.worksheets[-1]
         sheet_name = ws.title
 
-        # Find the ФИО column and score columns (1 to 20)
         fio_column = None
         score_columns = []
         for col in ws.iter_cols(min_row=1, max_row=1):
@@ -705,7 +705,6 @@ def extract_fio_and_links(spreadsheet_url):
                         fio_column = cell.column
                     else:
                         try:
-                            # Try to convert the header to a float and check if it's an integer between 1 and 20
                             num = float(value)
                             if 1 <= int(num) <= 20:
                                 score_columns.append(cell.column)
@@ -720,7 +719,6 @@ def extract_fio_and_links(spreadsheet_url):
             logging.error(f"Score columns not found. Available headers: {[str(cell.value).strip() for col in ws.iter_cols(min_row=1, max_row=1) for cell in col if cell.value is not None]}")
             return None, None, "Ошибка: Столбцы с оценками (1-20) не найдены."
 
-        # Extract ФИО, hyperlinks, call counts, and average scores
         operators = []
         for row in ws.iter_rows(min_row=2):
             fio_cell = row[fio_column - 1]
@@ -745,10 +743,11 @@ def extract_fio_and_links(spreadsheet_url):
             }
             operators.append(operator_info)
 
-        # Clean up
         os.remove(temp_file)
         return sheet_name, operators, None
     except Exception as e:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
         logging.error(f"Ошибка при обработке таблицы: {str(e)}")
         return None, None, f"Ошибка при обработке таблицы: {str(e)}"
 
@@ -768,17 +767,17 @@ async def tableName(message: types.Message, state: FSMContext):
     try:
         user_id = message.from_user.id
         is_admin_changing = await state.get_state() == sv.crtable.state and user_id == admin
-        if not is_admin_changing and user_id not in SVlist:
-            await bot.send_message(
-                chat_id=user_id,
-                text="Ошибка: Вы не зарегистрированы как супервайзер! Пожалуйста, добавьтесь через администратора.",
-                parse_mode="HTML",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            await state.finish()
-            return
+        with SVlist_lock:
+            if not is_admin_changing and user_id not in SVlist:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text="Ошибка: Вы не зарегистрированы как супервайзер! Пожалуйста, добавьтесь через администратора.",
+                    parse_mode="HTML",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                await state.finish()
+                return
 
-        # Extract ФИО, links, call counts, and scores from the spreadsheet
         sheet_name, operators, error = extract_fio_and_links(message.text)
         
         if error:
@@ -790,13 +789,11 @@ async def tableName(message: types.Message, state: FSMContext):
             )
             return
 
-        # Store the table URL and target SV ID (if admin)
         async with state.proxy() as data:
             data['table_url'] = message.text
             if is_admin_changing:
                 data.setdefault('sv_id', user_id)
 
-        # Format the message
         message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
         for op in operators:
             if op['link']:
@@ -805,7 +802,6 @@ async def tableName(message: types.Message, state: FSMContext):
                 message_text += f"👤 {op['name']} → Ссылка отсутствует\n"
         message_text += "\n<b>Это все ваши операторы?</b>"
 
-        # Send the message with verification buttons
         await bot.send_message(
             chat_id=user_id,
             text=message_text,
@@ -831,8 +827,8 @@ async def verify_table(callback: types.CallbackQuery, state: FSMContext):
         sv_id = data.get('sv_id', callback.from_user.id)
     
     if callback.data == "verify_yes":
-        # Save the table URL to SVlist
-        SVlist[sv_id].table = table_url
+        with SVlist_lock:
+            SVlist[sv_id].table = table_url
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
         kb.add(KeyboardButton('Добавить таблицу📑'))
         reply_markup = kb if sv_id == callback.from_user.id else get_editor_keyboard()
@@ -855,12 +851,6 @@ async def verify_table(callback: types.CallbackQuery, state: FSMContext):
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
         await sv.crtable.set()
 
-# === Работа с таблицей ==========================================================================================
-def sync_fetch_text():
-    response = requests.get(FETCH_URL)
-    response.raise_for_status()
-    return response.text
-
 async def generate_weekly_report():
     try:
         output = BytesIO()
@@ -870,11 +860,14 @@ async def generate_weekly_report():
             'bg_color': '#D3D3D3',
             'border': 1
         })
-        cell_format = workbook.add_format({'border': 1})
+        cell_format = workbook.add_format({'border': 1, 'num_format': '0.00'})  # Format for two decimal places
         current_week = get_current_week_of_month()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        for sv_id, sv in SVlist.items():
+        with SVlist_lock:
+            sv_list_copy = dict(SVlist)  # Create a snapshot to avoid holding the lock during processing
+        
+        for sv_id, sv in sv_list_copy.items():
             if not sv.table:
                 continue
             sheet_name, operators, error = extract_fio_and_links(sv.table)
@@ -940,16 +933,17 @@ async def check_for_updates():
         content = await fetch_text_async()
         current_hash = sha256(content.encode()).hexdigest()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if last_hash is None:
-            await bot.send_message(admin, f"[{now}] ✅ Первая загрузка данных.", parse_mode='HTML')
-            last_hash = current_hash
-        elif current_hash != last_hash:
-            await bot.send_message(admin, f"[{now}] 📌 Таблица обновилась!", parse_mode='HTML')
-            last_hash = current_hash
-        else:
-            logging.info(f"[{now}] No changes in spreadsheet data.")
+        with last_hash_lock:
+            if last_hash is None:
+                await bot.send_message(admin, f"[{now}] ✅ Первая загрузка данных.", parse_mode='HTML')
+                last_hash = current_hash
+            elif current_hash != last_hash:
+                await bot.send_message(admin, f"[{now}] 📌 Таблица обновилась!", parse_mode='HTML')
+                last_hash = current_hash
+            else:
+                logging.info(f"[{now}] No changes in spreadsheet data.")
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ Ошибка при загрузке: {e}")
+        logging.error(f"[{now}] ❌ Ошибка при загрузке: {e}")
 
 async def generate_report():
     try:
@@ -958,11 +952,11 @@ async def generate_report():
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await bot.send_message(admin, f"[{now}] 📊 Отчет: {len(df)} строк, {len(df.columns)} столбцов.", parse_mode='HTML')
     except Exception as e:
-        print(f"[{datetime.now()}] ⚠️ Ошибка при генерации отчета: {e}")
+        logging.error(f"[{datetime.now()}] ⚠️ Ошибка при генерации отчета: {e}")
 
 # === Главный запуск =============================================================================================
 if __name__ == '__main__':
-    threading.Thread(target=run_flask).start()
+    threading.Thread(target=run_flask, daemon=True).start()
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_for_updates, "interval", minutes=1)
     scheduler.add_job(generate_report, CronTrigger(day="10,20,30", hour=9, minute=0))
