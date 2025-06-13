@@ -177,6 +177,12 @@ def get_admin_keyboard():
     kb.insert(KeyboardButton('Оценки📊'))
     return kb
 
+def get_evaluations_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton('Отчет за месяц📅'))  # Новая кнопка
+    kb.add(KeyboardButton('Назад 🔙'))
+    return kb
+
 # Helper function to create verification keyboard
 def get_verify_keyboard():
     ikb = InlineKeyboardMarkup(row_width=2)
@@ -405,10 +411,10 @@ async def view_evaluations(message: types.Message):
     if message.from_user.id == admin:
         if SVlist:
             await bot.send_message(
-                text='<b>Выберите чьи оценки просмотреть</b>',
+                text='<b>Выберите чьи оценки просмотреть или сгенерируйте отчет</b>',
                 chat_id=admin,
                 parse_mode='HTML',
-                reply_markup=get_cancel_keyboard()
+                reply_markup=get_evaluations_keyboard()  # Новая клавиатура
             )
             ikb = InlineKeyboardMarkup(row_width=1)
             for i in SVlist:
@@ -427,6 +433,39 @@ async def view_evaluations(message: types.Message):
                 parse_mode='HTML',
                 reply_markup=get_admin_keyboard()
             )
+    await message.delete()
+
+@dp.message_handler(regexp='Отчет за месяц📅', state='*')
+async def handle_generate_monthly_report(message: types.Message, state: FSMContext):
+    if message.from_user.id == admin:
+        try:
+            await bot.send_message(
+                chat_id=admin,
+                text="📊 Генерирую отчет за месяц...",
+                parse_mode='HTML'
+            )
+            await generate_weekly_report()  # Используем существующую функцию, переименуйте, если нужен другой отчет
+            await bot.send_message(
+                chat_id=admin,
+                text="Отчет успешно отправлен!",
+                parse_mode='HTML',
+                reply_markup=get_admin_keyboard()
+            )
+        except Exception as e:
+            logging.error(f"Ошибка при генерации отчета: {e}")
+            await bot.send_message(
+                chat_id=admin,
+                text=f"❌ Ошибка при генерации отчета: {str(e)}",
+                parse_mode='HTML',
+                reply_markup=get_admin_keyboard()
+            )
+        await state.finish()
+    else:
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="Ошибка: Эта команда доступна только администратору.",
+            parse_mode='HTML'
+        )
     await message.delete()
 
 @dp.callback_query_handler(state=sv.view_evaluations)
