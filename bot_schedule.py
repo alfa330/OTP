@@ -704,12 +704,10 @@ def extract_fio_and_links(spreadsheet_url):
                         try:
                             # Try to convert the header to a float and check if it's an integer between 1 and 20
                             num = float(value)
-                            if num.is_integer() and 1 <= int(num) <= 20:
+                            if 1 <= int(num) <= 20:
                                 score_columns.append(cell.column)
                         except (ValueError, TypeError):
                             continue
-            if fio_column:
-                break
 
         if not fio_column:
             os.remove(temp_file)
