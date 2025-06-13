@@ -19,6 +19,8 @@ from flask import Flask, request, jsonify
 from functools import wraps
 from openpyxl import load_workbook
 import re
+import xlsxwriter
+from io import BytesIO
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO)
