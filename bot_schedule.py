@@ -20,7 +20,6 @@ from functools import wraps
 from openpyxl import load_workbook
 import re
 import xlsxwriter
-import threading
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO)
@@ -851,6 +850,11 @@ async def verify_table(callback: types.CallbackQuery, state: FSMContext):
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
         await sv.crtable.set()
 
+def sync_fetch_text():
+    response = requests.get(FETCH_URL)
+    response.raise_for_status()
+    return response.text
+
 async def generate_weekly_report():
     try:
         output = BytesIO()
@@ -929,10 +933,10 @@ async def fetch_text_async():
 
 async def check_for_updates():
     global last_hash
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         content = await fetch_text_async()
         current_hash = sha256(content.encode()).hexdigest()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with last_hash_lock:
             if last_hash is None:
                 await bot.send_message(admin, f"[{now}] ✅ Первая загрузка данных.", parse_mode='HTML')
@@ -944,15 +948,17 @@ async def check_for_updates():
                 logging.info(f"[{now}] No changes in spreadsheet data.")
     except Exception as e:
         logging.error(f"[{now}] ❌ Ошибка при загрузке: {e}")
+        await bot.send_message(admin, f"[{now}] ❌ Ошибка при загрузке: {str(e)}", parse_mode='HTML')
 
 async def generate_report():
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         content = await fetch_text_async()
         df = pd.read_csv(StringIO(content))
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await bot.send_message(admin, f"[{now}] 📊 Отчет: {len(df)} строк, {len(df.columns)} столбцов.", parse_mode='HTML')
     except Exception as e:
-        logging.error(f"[{datetime.now()}] ⚠️ Ошибка при генерации отчета: {e}")
+        logging.error(f"[{now}] ⚠️ Ошибка при генерации отчета: {e}")
+        await bot.send_message(admin, f"[{now}] ⚠️ Ошибка при генерации отчета: {str(e)}", parse_mode='HTML')
 
 # === Главный запуск =============================================================================================
 if __name__ == '__main__':
