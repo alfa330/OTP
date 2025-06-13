@@ -179,7 +179,7 @@ def get_admin_keyboard():
 
 def get_evaluations_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton('Отчет за месяц📅'))  # Новая кнопка
+    kb.add(KeyboardButton('Отчет за месяц📅'))
     kb.add(KeyboardButton('Назад 🔙'))
     return kb
 
@@ -414,7 +414,7 @@ async def view_evaluations(message: types.Message):
                 text='<b>Выберите чьи оценки просмотреть или сгенерируйте отчет</b>',
                 chat_id=admin,
                 parse_mode='HTML',
-                reply_markup=get_evaluations_keyboard()  # Новая клавиатура
+                reply_markup=get_evaluations_keyboard()
             )
             ikb = InlineKeyboardMarkup(row_width=1)
             for i in SVlist:
@@ -444,7 +444,7 @@ async def handle_generate_monthly_report(message: types.Message, state: FSMConte
                 text="📊 Генерирую отчет за месяц...",
                 parse_mode='HTML'
             )
-            await generate_weekly_report()  # Используем существующую функцию, переименуйте, если нужен другой отчет
+            await generate_weekly_report()
             await bot.send_message(
                 chat_id=admin,
                 text="Отчет успешно отправлен!",
@@ -492,7 +492,7 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
         return
 
     # Формируем сообщение с выравниванием
-    max_name_length = 20  # Максимальная длина имени перед сокращением
+    max_name_length = 32  # Максимальная длина имени перед сокращением
     max_count_length = 5  # Максимальная длина для количества звонков
     max_score_length = 5  # Максимальная длина для средней оценки
     
@@ -509,9 +509,6 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
             name = op.get('name', '').strip()
             if not name:
                 continue
-
-            # Сокращаем и выравниваем ФИО
-            display_name = (name[:max_name_length - 1] + '…') if len(name) > max_name_length else name
 
             # Обработка значений
             call_count = op.get('call_count')
@@ -597,7 +594,7 @@ async def handle_generate_monthly_report(callback: types.CallbackQuery, state: F
             text="📊 Генерирую недельный отчет...",
             parse_mode='HTML'
         )
-        await generate_weekly_report()  # Вызываем существующую функцию для генерации отчета
+        await generate_weekly_report()
         await bot.answer_callback_query(
             callback.id,
             text="Отчет успешно отправлен!",
@@ -693,29 +690,26 @@ def extract_fio_and_links(spreadsheet_url):
         ws = wb.worksheets[-1]  # Use the last sheet
         sheet_name = ws.title
 
-        # Find the ФИО column and columns for calls and average score
+        # Find the ФИО column
         fio_column = None
-        calls_column = None
-        score_column = None
+        score_columns = []
         for col in ws.iter_cols(min_row=1, max_row=1):
             for cell in col:
                 if cell.value:
                     value = str(cell.value).strip()
                     if "ФИО" in value:
                         fio_column = cell.column
-                    elif "Количество прослушанных звонков" in value or "Прослушано" in value:
-                        calls_column = cell.column
-                    elif "Средний балл" in value or "Средняя оценка" in value:
-                        score_column = cell.column
-            if fio_column and calls_column:
+                    elif value in [str(i) for i in range(1, 21)]:  # Look for columns labeled 1 to 20
+                        score_columns.append(cell.column)
+            if fio_column:
                 break
 
         if not fio_column:
             os.remove(temp_file)
             return None, None, "Ошибка: Колонка ФИО не найдена на листе."
-        if not calls_column:
+        if not score_columns:
             os.remove(temp_file)
-            return None, None, "Ошибка: Колонка с количеством прослушанных звонков не найдена."
+            return None, None, "Ошибка: Столбцы с оценками (1-20) не найдены."
 
         # Extract ФИО, hyperlinks, call counts, and average scores
         operators = []
@@ -723,11 +717,22 @@ def extract_fio_and_links(spreadsheet_url):
             fio_cell = row[fio_column - 1]
             if not fio_cell.value:
                 break
+            scores = []
+            for col_idx in score_columns:
+                score_cell = row[col_idx - 1]
+                try:
+                    score = float(score_cell.value) if score_cell.value else None
+                    if score is not None:
+                        scores.append(score)
+                except (ValueError, TypeError):
+                    continue
+            call_count = len(scores)
+            avg_score = sum(scores) / call_count if scores else None
             operator_info = {
                 "name": fio_cell.value,
                 "link": fio_cell.hyperlink.target if fio_cell.hyperlink else None,
-                "call_count": row[calls_column - 1].value if calls_column else 0,
-                "avg_score": row[score_column - 1].value if score_column else None
+                "call_count": call_count,
+                "avg_score": avg_score
             }
             operators.append(operator_info)
 
@@ -951,7 +956,7 @@ if __name__ == '__main__':
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_for_updates, "interval", minutes=1)
     scheduler.add_job(generate_report, CronTrigger(day="10,20,30", hour=9, minute=0))
-    scheduler.add_job(generate_weekly_report, CronTrigger(day_of_week='mon', hour=9, minute=0))  # Run every Monday at 9 AM
+    scheduler.add_job(generate_weekly_report, CronTrigger(day_of_week='mon', hour=9, minute=0))
     scheduler.start()
     print("🔄 Планировщик запущен.")
     executor.start_polling(dp, skip_updates=True)
