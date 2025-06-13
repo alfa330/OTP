@@ -20,6 +20,7 @@ from functools import wraps
 from openpyxl import load_workbook
 import re
 import xlsxwriter
+import json
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO)
@@ -71,6 +72,135 @@ def require_api_key(f):
 @app.route('/')
 def index():
     return "Bot is alive!", 200
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    try:
+        data = request.get_json()
+        if not data or 'key' not in data:
+            return jsonify({"error": "Missing key field"}), 400
+
+        key = data['key']
+        with SVlist_lock:
+            if key == FLASK_API_KEY:
+                return jsonify({"status": "success", "role": "admin", "id": admin, "name": "Admin"})
+            for sv_id, sv in SVlist.items():
+                if str(sv_id) == str(key):
+                    return jsonify({"status": "success", "role": "sv", "id": sv_id, "name": sv.name})
+            return jsonify({"error": "Invalid key or ID"}), 401
+    except Exception as e:
+        logging.error(f"Login error: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/admin/sv_list', methods=['GET'])
+@require_api_key
+def get_sv_list():
+    try:
+        with SVlist_lock:
+            sv_data = [{"id": sv_id, "name": sv.name, "table": sv.table} for sv_id, sv in SVlist.items()]
+        return jsonify({"status": "success", "sv_list": sv_data})
+    except Exception as e:
+        logging.error(f"Error fetching SV list: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/admin/add_sv', methods=['POST'])
+@require_api_key
+def add_sv():
+    try:
+        data = request.get_json()
+        required_fields = ['name', 'id']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        sv_id = int(data['id'])
+        sv_name = data['name']
+        with SVlist_lock:
+            if sv_id in SVlist:
+                return jsonify({"error": "SV with this ID already exists"}), 400
+            SVlist[sv_id] = SV(sv_name, sv_id)
+            asyncio.run_coroutine_threadsafe(
+                bot.send_message(sv_id, f"Принятие в команду прошло успешно <b>успешно✅</b>", parse_mode='HTML'),
+                asyncio.get_event_loop()
+            )
+        return jsonify({"status": "success", "message": f"SV {sv_name} added"})
+    except Exception as e:
+        logging.error(f"Error adding SV: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/admin/remove_sv', methods=['POST'])
+@require_api_key
+def remove_sv():
+    try:
+        data = request.get_json()
+        if not data or 'id' not in data:
+            return jsonify({"error": "Missing ID field"}), 400
+
+        sv_id = int(data['id'])
+        with SVlist_lock:
+            if sv_id not in SVlist:
+                return jsonify({"error": "SV not found"}), 404
+            sv_name = SVlist[sv_id].name
+            del SVlist[sv_id]
+            asyncio.run_coroutine_threadsafe(
+                bot.send_message(sv_id, f"Вы были исключены из команды❌", parse_mode='HTML'),
+                asyncio.get_event_loop()
+            )
+        return jsonify({"status": "success", "message": f"SV {sv_name} removed"})
+    except Exception as e:
+        logging.error(f"Error removing SV: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/sv/data', methods=['GET'])
+def get_sv_data():
+    try:
+        sv_id = request.args.get('id')
+        if not sv_id:
+            return jsonify({"error": "Missing ID parameter"}), 400
+        sv_id = int(sv_id)
+        with SVlist_lock:
+            sv = SVlist.get(sv_id)
+            if not sv:
+                return jsonify({"error": "SV not found"}), 404
+            sheet_name, operators, error = extract_fio_and_links(sv.table) if sv.table else (None, [], "No table set")
+            if error:
+                return jsonify({"error": error}), 400
+            return jsonify({
+                "status": "success",
+                "name": sv.name,
+                "table": sv.table,
+                "operators": operators,
+                "calls": sv.calls
+            })
+    except Exception as e:
+        logging.error(f"Error fetching SV data: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/sv/update_table', methods=['POST'])
+def update_sv_table():
+    try:
+        data = request.get_json()
+        required_fields = ['id', 'table_url']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        sv_id = int(data['id'])
+        table_url = data['table_url']
+        with SVlist_lock:
+            sv = SVlist.get(sv_id)
+            if not sv:
+                return jsonify({"error": "SV not found"}), 404
+            sheet_name, operators, error = extract_fio_and_links(table_url)
+            if error:
+                return jsonify({"error": error}), 400
+            sv.table = table_url
+            asyncio.run_coroutine_threadsafe(
+                bot.send_message(sv_id, f"Таблица успешно обновлена <b>успешно✅</b>", parse_mode='HTML'),
+                asyncio.get_event_loop()
+            )
+        return jsonify({"status": "success", "message": "Table updated", "operators": operators})
+    except Exception as e:
+        logging.error(f"Error updating SV table: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
@@ -141,7 +271,7 @@ def receive_call_evaluation():
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 def run_flask():
-    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False, use_reloader=False)
 
 # === Глобальное состояние =======================================================================================
 last_hash = None
@@ -685,7 +815,7 @@ def extract_fio_and_links(spreadsheet_url):
         if response.status_code != 200:
             return None, None, "Ошибка: Не удалось скачать таблицу. Проверьте, доступна ли таблица публично."
         
-        temp_file = f"temp_table_{threading.current_thread().ident}.xlsx"  # Unique temp file per thread
+        temp_file = f"temp_table_{threading.current_thread().ident}.xlsx"
         with open(temp_file, "wb") as f:
             f.write(response.content)
 
@@ -735,7 +865,7 @@ def extract_fio_and_links(spreadsheet_url):
             call_count = len(scores)
             avg_score = sum(scores) / call_count if scores else None
             operator_info = {
-                "name": fio_cell.value,
+                "name": str(fio_cell.value),
                 "link": fio_cell.hyperlink.target if fio_cell.hyperlink else None,
                 "call_count": call_count,
                 "avg_score": avg_score
@@ -864,8 +994,8 @@ async def generate_weekly_report():
             'bg_color': '#D3D3D3',
             'border': 1
         })
-        cell_format_int = workbook.add_format({'border': 1, 'num_format': '0'})  # Integer format
-        cell_format_float = workbook.add_format({'border': 1, 'num_format': '0.00'})  # Two decimal places
+        cell_format_int = workbook.add_format({'border': 1, 'num_format': '0'})
+        cell_format_float = workbook.add_format({'border': 1, 'num_format': '0.00'})
         current_week = get_current_week_of_month()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         

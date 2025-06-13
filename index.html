@@ -1,0 +1,337 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OTP Bot Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/babel-standalone@6/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body className="bg-gray-100">
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // Replace with your Render Flask API URL
+        const API_BASE_URL = window.location.origin; // Assumes Flask serves both API and static site
+
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [key, setKey] = useState('');
+            const [error, setError] = useState('');
+            const [svList, setSvList] = useState([]);
+            const [svData, setSvData] = useState(null);
+            const [newSvName, setNewSvName] = useState('');
+            const [newSvId, setNewSvId] = useState('');
+            const [newTableUrl, setNewTableUrl] = useState('');
+
+            const login = async () => {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/login`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ key })
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        setUser({ role: data.role, id: data.id, name: data.name });
+                        setError('');
+                    } else {
+                        setError(data.error || 'Invalid key or ID');
+                    }
+                } catch (err) {
+                    setError('Failed to connect to server');
+                }
+            };
+
+            const logout = () => {
+                setUser(null);
+                setSvList([]);
+                setSvData(null);
+                setKey('');
+                setError('');
+            };
+
+            const fetchSvList = async () => {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/admin/sv_list`, {
+                        headers: { 'X-API-Key': key }
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        setSvList(data.sv_list);
+                    } else {
+                        setError(data.error);
+                    }
+                } catch (err) {
+                    setError('Failed to fetch SV list');
+                }
+            };
+
+            const fetchSvData = async () => {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/sv/data?id=${user.id}`);
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        setSvData(data);
+                    } else {
+                        setError(data.error);
+                    }
+                } catch (err) {
+                    setError('Failed to fetch SV data');
+                }
+            };
+
+            const addSv = async () => {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/admin/add_sv`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-API-Key': key
+                        },
+                        body: JSON.stringify({ name: newSvName, id: newSvId })
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        fetchSvList();
+                        setNewSvName('');
+                        setNewSvId('');
+                        setError('');
+                    } else {
+                        setError(data.error);
+                    }
+                } catch (err) {
+                    setError('Failed to add SV');
+                }
+            };
+
+            const removeSv = async (svId) => {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/admin/remove_sv`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-API-Key': key
+                        },
+                        body: JSON.stringify({ id: svId })
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        fetchSvList();
+                        setError('');
+                    } else {
+                        setError(data.error);
+                    }
+                } catch (err) {
+                    setError('Failed to remove SV');
+                }
+            };
+
+            const updateTable = async () => {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/sv/update_table`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: user.id, table_url: newTableUrl })
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        fetchSvData();
+                        setNewTableUrl('');
+                        setError('');
+                    } else {
+                        setError(data.error);
+                    }
+                } catch (err) {
+                    setError('Failed to update table');
+                }
+            };
+
+            useEffect(() => {
+                if (user && user.role === 'admin') {
+                    fetchSvList();
+                } else if (user && user.role === 'sv') {
+                    fetchSvData();
+                }
+            }, [user]);
+
+            if (!user) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-gray-100">
+                        <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
+                            <h1 className="text-2xl font-bold mb-6 text-center">OTP Bot Login</h1>
+                            <input
+                                type="text"
+                                placeholder="Enter API Key or Telegram ID"
+                                value={key}
+                                onChange={(e) => setKey(e.target.value)}
+                                className="w-full p-2 mb-4 border rounded"
+                            />
+                            <button
+                                onClick={login}
+                                className="w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600"
+                            >
+                                Login
+                            </button>
+                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                        </div>
+                    </div>
+                );
+            }
+
+            if (user.role === 'admin') {
+                return (
+                    <div className="min-h-screen bg-gray-100 p-6">
+                        <div className="flex justify-between items-center mb-6">
+                            <h1 className="text-3xl font-bold">Admin Dashboard</h1>
+                            <button
+                                onClick={logout}
+                                className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                            >
+                                Logout
+                            </button>
+                        </div>
+                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                            <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
+                            <input
+                                type="text"
+                                placeholder="SV Name"
+                                value={newSvName}
+                                onChange={(e) => setNewSvName(e.target.value)}
+                                className="w-full p-2 mb-4 border rounded"
+                            />
+                            <input
+                                type="text"
+                                placeholder="SV Telegram ID"
+                                value={newSvId}
+                                onChange={(e) => setNewSvId(e.target.value)}
+                                className="w-full p-2 mb-4 border rounded"
+                            />
+                            <button
+                                onClick={addSv}
+                                className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
+                            >
+                                Add SV
+                            </button>
+                        </div>
+                        <div className="bg-white p-6 rounded-lg shadow-lg">
+                            <h2 className="text-xl font-semibold mb-4">Supervisors</h2>
+                            {svList.length === 0 ? (
+                                <p>No supervisors found.</p>
+                            ) : (
+                                <ul>
+                                    {svList.map(sv => (
+                                        <li key={sv.id} className="flex justify-between items-center mb-2">
+                                            <span>{sv.name} (ID: {sv.id})</span>
+                                            <button
+                                                onClick={() => removeSv(sv.id)}
+                                                className="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600"
+                                            >
+                                                Remove
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                        {error && <p className="text-red-500 mt-4">{error}</p>}
+                    </div>
+                );
+            }
+
+            if (user.role === 'sv') {
+                return (
+                    <div className="min-h-screen bg-gray-100 p-6">
+                        <div className="flex justify-between items-center mb-6">
+                            <h1 className="text-3xl font-bold">Supervisor Dashboard</h1>
+                            <button
+                                onClick={logout}
+                                className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                            >
+                                Logout
+                            </button>
+                        </div>
+                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                            <h2 className="text-xl font-semibold mb-4">Update Table</h2>
+                            <input
+                                type="text"
+                                placeholder="Google Sheets URL"
+                                value={newTableUrl}
+                                onChange={(e) => setNewTableUrl(e.target.value)}
+                                className="w-full p-2 mb-4 border rounded"
+                            />
+                            <button
+                                onClick={updateTable}
+                                className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                            >
+                                Update Table
+                            </button>
+                        </div>
+                        <div className="bg-white p-6 rounded-lg shadow-lg">
+                            <h2 className="text-xl font-semibold mb-4">Your Operators</h2>
+                            {svData && svData.operators && svData.operators.length > 0 ? (
+                                <ul>
+                                    {svData.operators.map((op, index) => (
+                                        <li key={index} className="mb-2">
+                                            <span>{op.name} (Calls: {op.call_count}, Avg Score: {op.avg_score ? op.avg_score.toFixed(2) : '-'})</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            ) : (
+                                <p>No operators found.</p>
+                            )}
+                        </div>
+                        {error && <p className="text-red-500 mt-4">{error}</p>}
+                    </div>
+                );
+            }
+
+            return null;
+        };
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
