@@ -864,12 +864,13 @@ async def generate_weekly_report():
             'bg_color': '#D3D3D3',
             'border': 1
         })
-        cell_format = workbook.add_format({'border': 1, 'num_format': '0.00'})  # Format for two decimal places
+        cell_format_int = workbook.add_format({'border': 1, 'num_format': '0'})  # Integer format
+        cell_format_float = workbook.add_format({'border': 1, 'num_format': '0.00'})  # Two decimal places
         current_week = get_current_week_of_month()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         with SVlist_lock:
-            sv_list_copy = dict(SVlist)  # Create a snapshot to avoid holding the lock during processing
+            sv_list_copy = dict(SVlist)
         
         for sv_id, sv in sv_list_copy.items():
             if not sv.table:
@@ -898,9 +899,9 @@ async def generate_weekly_report():
                     score_val = float(avg_score) if avg_score else ''
                 except (ValueError, TypeError):
                     score_val = ''
-                worksheet.write(row, 0, name, cell_format)
-                worksheet.write(row, 1, call_count, cell_format)
-                worksheet.write(row, 2, score_val, cell_format)
+                worksheet.write(row, 0, name, cell_format_int)
+                worksheet.write(row, 1, call_count, cell_format_int)
+                worksheet.write(row, 2, score_val, cell_format_float)
             worksheet.set_column('A:A', 30)
             worksheet.set_column('B:B', 20)
             worksheet.set_column('C:C', 15)
