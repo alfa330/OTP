@@ -700,8 +700,14 @@ def extract_fio_and_links(spreadsheet_url):
                     logging.info(f"Header value: '{value}' (type: {type(cell.value)})")
                     if "ФИО" in value:
                         fio_column = cell.column
-                    elif value in [str(i) for i in range(1, 21)] or (isinstance(cell.value, (int, float)) and 1 <= int(cell.value) <= 20):
-                        score_columns.append(cell.column)
+                    else:
+                        try:
+                            # Try to convert the header to a float and check if it's an integer between 1 and 20
+                            num = float(value)
+                            if num.is_integer() and 1 <= int(num) <= 20:
+                                score_columns.append(cell.column)
+                        except (ValueError, TypeError):
+                            continue
             if fio_column:
                 break
 
