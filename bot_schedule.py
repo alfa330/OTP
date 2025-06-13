@@ -15,7 +15,8 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.dispatcher import FSMContext
 from aiogram.utils.exceptions import TelegramAPIError
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 from functools import wraps
 from openpyxl import load_workbook
 import re
@@ -58,6 +59,7 @@ class SV:
 
 # === Flask-сервер ===============================================================================================
 app = Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins": "https://alfa330.github.io"}})
 
 def require_api_key(f):
     @wraps(f)
@@ -79,7 +81,6 @@ def login():
         data = request.get_json()
         if not data or 'key' not in data:
             return jsonify({"error": "Missing key field"}), 400
-
         key = data['key']
         with SVlist_lock:
             if key == FLASK_API_KEY:
