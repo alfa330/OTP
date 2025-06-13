@@ -492,7 +492,7 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
         return
 
     # Формируем сообщение с выравниванием
-    max_name_length = 32  # Максимальная длина имени перед сокращением
+    max_name_length = 20  # Максимальная длина имени перед сокращением
     max_count_length = 5  # Максимальная длина для количества звонков
     max_score_length = 5  # Максимальная длина для средней оценки
     
@@ -509,6 +509,9 @@ async def show_evaluations(callback: types.CallbackQuery, state: FSMContext):
             name = op.get('name', '').strip()
             if not name:
                 continue
+
+            # Сокращаем и выравниваем ФИО
+            display_name = (name[:max_name_length - 1] + '…') if len(name) > max_name_length else name
 
             # Обработка значений
             call_count = op.get('call_count')
