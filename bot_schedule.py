@@ -690,16 +690,17 @@ def extract_fio_and_links(spreadsheet_url):
         ws = wb.worksheets[-1]  # Use the last sheet
         sheet_name = ws.title
 
-        # Find the ФИО column
+        # Find the ФИО column and score columns (1 to 20)
         fio_column = None
         score_columns = []
         for col in ws.iter_cols(min_row=1, max_row=1):
             for cell in col:
-                if cell.value:
+                if cell.value is not None:
                     value = str(cell.value).strip()
+                    logging.info(f"Header value: '{value}' (type: {type(cell.value)})")
                     if "ФИО" in value:
                         fio_column = cell.column
-                    elif value in [str(i) for i in range(1, 21)]:  # Look for columns labeled 1 to 20
+                    elif value in [str(i) for i in range(1, 21)] or (isinstance(cell.value, (int, float)) and 1 <= int(cell.value) <= 20):
                         score_columns.append(cell.column)
             if fio_column:
                 break
@@ -709,6 +710,7 @@ def extract_fio_and_links(spreadsheet_url):
             return None, None, "Ошибка: Колонка ФИО не найдена на листе."
         if not score_columns:
             os.remove(temp_file)
+            logging.error(f"Score columns not found. Available headers: {[str(cell.value).strip() for col in ws.iter_cols(min_row=1, max_row=1) for cell in col if cell.value is not None]}")
             return None, None, "Ошибка: Столбцы с оценками (1-20) не найдены."
 
         # Extract ФИО, hyperlinks, call counts, and average scores
@@ -740,6 +742,7 @@ def extract_fio_and_links(spreadsheet_url):
         os.remove(temp_file)
         return sheet_name, operators, None
     except Exception as e:
+        logging.error(f"Ошибка при обработке таблицы: {str(e)}")
         return None, None, f"Ошибка при обработке таблицы: {str(e)}"
 
 @dp.message_handler(regexp='Добавить таблицу📑')
