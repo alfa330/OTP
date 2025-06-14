@@ -119,10 +119,17 @@ def add_sv():
             if sv_id in SVlist:
                 return jsonify({"error": "SV with this ID already exists"}), 400
             SVlist[sv_id] = SV(sv_name, sv_id)
-            asyncio.run_coroutine_threadsafe(
-                bot.send_message(sv_id, f"Принятие в команду прошло успешно <b>успешно✅</b>", parse_mode='HTML'),
-                asyncio.get_event_loop()
-            )
+            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": sv_id,
+                "text": f"Принятие в команду прошло успешно <b>успешно✅</b>",
+                "parse_mode": "HTML"
+            }
+            response = requests.post(telegram_url, json=payload, timeout=10)
+            if response.status_code != 200:
+                error_detail = response.json().get('description', 'Unknown error')
+                logging.error(f"Telegram API error: {error_detail}")
+                return jsonify({"error": f"Failed to send Telegram message: {error_detail}"}), 500
         return jsonify({"status": "success", "message": f"SV {sv_name} added"})
     except Exception as e:
         logging.error(f"Error adding SV: {e}")
@@ -142,10 +149,17 @@ def remove_sv():
                 return jsonify({"error": "SV not found"}), 404
             sv_name = SVlist[sv_id].name
             del SVlist[sv_id]
-            asyncio.run_coroutine_threadsafe(
-                bot.send_message(sv_id, f"Вы были исключены из команды❌", parse_mode='HTML'),
-                asyncio.get_event_loop()
-            )
+            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": sv_id,
+                "text": f"Вы были исключены из команды❌",
+                "parse_mode": "HTML"
+            }
+            response = requests.post(telegram_url, json=payload, timeout=10)
+            if response.status_code != 200:
+                error_detail = response.json().get('description', 'Unknown error')
+                logging.error(f"Telegram API error: {error_detail}")
+                return jsonify({"error": f"Failed to send Telegram message: {error_detail}"}), 500
         return jsonify({"status": "success", "message": f"SV {sv_name} removed"})
     except Exception as e:
         logging.error(f"Error removing SV: {e}")
@@ -194,10 +208,17 @@ def update_sv_table():
             if error:
                 return jsonify({"error": error}), 400
             sv.table = table_url
-            asyncio.run_coroutine_threadsafe(
-                bot.send_message(sv_id, f"Таблица успешно обновлена <b>успешно✅</b>", parse_mode='HTML'),
-                asyncio.get_event_loop()
-            )
+            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": sv_id,
+                "text": f"Таблица успешно обновлена <b>успешно✅</b>",
+                "parse_mode": "HTML"
+            }
+            response = requests.post(telegram_url, json=payload, timeout=10)
+            if response.status_code != 200:
+                error_detail = response.json().get('description', 'Unknown error')
+                logging.error(f"Telegram API error: {error_detail}")
+                return jsonify({"error": f"Failed to send Telegram message: {error_detail}"}), 500
         return jsonify({"status": "success", "message": "Table updated", "operators": operators})
     except Exception as e:
         logging.error(f"Error updating SV table: {e}")
@@ -273,10 +294,6 @@ def receive_call_evaluation():
 
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False, use_reloader=False)
-
-# === Глобальное состояние =======================================================================================
-last_hash = None
-last_hash_lock = threading.Lock()  # Lock for thread-safe access to last_hash
 
 # === Классы =====================================================================================================
 class new_sv(StatesGroup):
@@ -981,11 +998,6 @@ async def verify_table(callback: types.CallbackQuery, state: FSMContext):
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
         await sv.crtable.set()
 
-def sync_fetch_text():
-    response = requests.get(FETCH_URL)
-    response.raise_for_status()
-    return response.text
-
 async def generate_weekly_report():
     try:
         output = BytesIO()
@@ -1060,44 +1072,10 @@ async def generate_weekly_report():
             parse_mode='HTML'
         )
 
-async def fetch_text_async():
-    return await asyncio.to_thread(sync_fetch_text)
-
-async def check_for_updates():
-    global last_hash
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        content = await fetch_text_async()
-        current_hash = sha256(content.encode()).hexdigest()
-        with last_hash_lock:
-            if last_hash is None:
-                await bot.send_message(admin, f"[{now}] ✅ Первая загрузка данных.", parse_mode='HTML')
-                last_hash = current_hash
-            elif current_hash != last_hash:
-                await bot.send_message(admin, f"[{now}] 📌 Таблица обновилась!", parse_mode='HTML')
-                last_hash = current_hash
-            else:
-                logging.info(f"[{now}] No changes in spreadsheet data.")
-    except Exception as e:
-        logging.error(f"[{now}] ❌ Ошибка при загрузке: {e}")
-        await bot.send_message(admin, f"[{now}] ❌ Ошибка при загрузке: {str(e)}", parse_mode='HTML')
-
-async def generate_report():
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        content = await fetch_text_async()
-        df = pd.read_csv(StringIO(content))
-        await bot.send_message(admin, f"[{now}] 📊 Отчет: {len(df)} строк, {len(df.columns)} столбцов.", parse_mode='HTML')
-    except Exception as e:
-        logging.error(f"[{now}] ⚠️ Ошибка при генерации отчета: {e}")
-        await bot.send_message(admin, f"[{now}] ⚠️ Ошибка при генерации отчета: {str(e)}", parse_mode='HTML')
-
 # === Главный запуск =============================================================================================
 if __name__ == '__main__':
     threading.Thread(target=run_flask, daemon=True).start()
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_for_updates, "interval", minutes=1)
-    scheduler.add_job(generate_report, CronTrigger(day="10,20,30", hour=9, minute=0))
     scheduler.add_job(generate_weekly_report, CronTrigger(day_of_week='mon', hour=9, minute=0))
     scheduler.start()
     print("🔄 Планировщик запущен.")
