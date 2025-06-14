@@ -28,6 +28,7 @@
             const [newSvId, setNewSvId] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
             const [isLoading, setIsLoading] = useState(false);
+            const [isAdminDataLoading, setIsAdminDataLoading] = useState(false);
             const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
             const [selectedSvId, setSelectedSvId] = useState('');
             const [selectedSvData, setSelectedSvData] = useState(null);
@@ -66,7 +67,7 @@
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
-                        setUser({ role: data.role, id: data.id, name: data.name });
+                        setUser({ role: data.role, id: data.id, name: data.name, apiKey: key.trim() });
                         setKey('');
                     } else {
                         setError(data.error || 'Invalid key or ID');
@@ -94,11 +95,11 @@
             };
 
             const fetchSvList = async () => {
-                setIsLoading(true);
+                setIsAdminDataLoading(true);
                 clearMessages();
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/admin/sv_list`, {
-                        headers: { 'X-API-Key': key || FLASK_API_KEY }
+                        headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
@@ -109,7 +110,7 @@
                 } catch (err) {
                     setError('Failed to fetch supervisor list');
                 } finally {
-                    setIsLoading(false);
+                    setIsAdminDataLoading(false);
                 }
             };
 
@@ -136,11 +137,11 @@
                     setSelectedSvData(null);
                     return;
                 }
-                setIsLoading(true);
+                setIsAdminDataLoading(true);
                 clearMessages();
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/sv/data?id=${svId}`, {
-                        headers: { 'X-API-Key': key || FLASK_API_KEY }
+                        headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
@@ -151,7 +152,7 @@
                 } catch (err) {
                     setError('Failed to fetch supervisor data');
                 } finally {
-                    setIsLoading(false);
+                    setIsAdminDataLoading(false);
                 }
             };
 
@@ -171,7 +172,7 @@
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-API-Key': key || FLASK_API_KEY
+                            'X-API-Key': user.apiKey
                         },
                         body: JSON.stringify({ name: newSvName.trim(), id: newSvId.trim() })
                     });
@@ -200,7 +201,7 @@
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-API-Key': key || FLASK_API_KEY
+                            'X-API-Key': user.apiKey
                         },
                         body: JSON.stringify({ id: svId })
                     });
@@ -359,7 +360,7 @@
                         </div>
                         <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                             <h2 className="text-xl font-semibold mb-4">Supervisors</h2>
-                            {isLoading ? (
+                            {isAdminDataLoading ? (
                                 <p className="text-center">Loading...</p>
                             ) : svList.length === 0 ? (
                                 <p className="text-center">No supervisors found.</p>
@@ -405,552 +406,14 @@
                                 value={selectedSvId}
                                 onChange={(e) => setSelectedSvId(e.target.value)}
                                 className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
+                                disabled={isLoading || isAdminDataLoading}
                             >
                                 <option value="">Select Supervisor</option>
                                 {svList.map(sv => (
                                     <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
                                 ))}
                             </select>
-                            {isLoading ? (
-                                <p className="text-center">Loading...</p>
-                            ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
-                                <div className="overflow-x-auto">
-                                    <table className="min-w-full border-collapse bg-white">
-                                        <thead>
-                                            <tr className="bg-gray-200">
-                                                <th className="p-3 border-b text-left">Name</th>
-                                                <th className="p-3 border-b text-left">Calls</th>
-                                                <th className="p-3 border-b text-left">Avg Score</th>
-                                                <th className="p-3 border-b text-left">Link</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {selectedSvData.operators.map((op, index) => (
-                                                <tr key={index} className="hover:bg-gray-50">
-                                                    <td className="p-3 border-b">{op.name}</td>
-                                                    <td className="p-3 border-b">{op.call_count}</td>
-                                                    <td className="p-3 border-b">
-                                                        <span className={getScoreColor(op.avg_score)}>
-                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                        </span>
-                                                    </td>
-                                                    <td className="p-3 border-b">
-                                                        {op.link ? (
-                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                        ) : '-'}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            ) : selectedSvId ? (
-                                <p className="text-center">No operators found for this supervisor.</p>
-                            ) : null}
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                        </div>
-                    </div>
-                );
-            }
-
-            if (user.role === 'sv') {
-                return (
-                    <div className="min-h-screen bg-gray-100 p-6">
-                        <div className="flex justify-between items-center mb-6">
-                            <h1 className="text-3xl font-bold">Supervisor Dashboard</h1>
-                            <button
-                                onClick={handleLogout}
-                                className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
-                            >
-                                Logout
-                            </button>
-                        </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg mb-8">
-                            <h2 className="text-xl font-semibold mb-4">Update Table</h2>
-                            <input
-                                type="text"
-                                placeholder="Google Sheets URL"
-                                value={newTableUrl}
-                                onChange={(e) => setNewTableUrl(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            />
-                            <button
-                                onClick={updateTable}
-                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                disabled={isLoading}
-                            >
-                                {isLoading ? 'Updating...' : 'Update Table'}
-                            </button>
-                        </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg">
-                            <h2 className="text-xl font-semibold mb-4">Your Operators</h2>
-                            {isLoading ? (
-                                <p className="text-center">Loading...</p>
-                            ) : svData && svData.operators && svData.operators.length > 0 ? (
-                                <div className="overflow-x-auto">
-                                    <table className="min-w-full border-collapse bg-white">
-                                        <thead>
-                                            <tr className="bg-gray-200">
-                                                <th className="p-3 border-b text-left">Name</th>
-                                                <th className="p-3 border-b text-left">Calls</th>
-                                                <th className="p-3 border-b text-left">Avg Score</th>
-                                                <th className="p-3 border-b text-left">Link</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {svData.operators.map((op, index) => (
-                                                <tr key={index} className="hover:bg-gray-50">
-                                                    <td className="p-3 border-b">{op.name}</td>
-                                                    <td className="p-3 border-b">{op.call_count}</td>
-                                                    <td className="p-3 border-b">
-                                                        <span className={getScoreColor(op.avg_score)}>
-                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                        </span>
-                                                    </td>
-                                                    <td className="p-3 border-b">
-                                                        {op.link ? (
-                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                        ) : '-'}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            ) : (
-                                <p className="text-center">No operators found.</p>
-                            )}
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                        </div>
-                    </div>
-                );
-            }
-
-            return null;
-        };
-
-        ReactDOM.render(<App />, document.getElementById('root'));
-    </script>
-</body>
-</html><!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OTP Bot Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/babel-standalone@6/babel.min.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
-</head>
-<body className="bg-gray-100">
-    <div id="root"></div>
-    <script type="text/babel">
-        const { useState, useEffect, useCallback } = React;
-
-        const API_BASE_URL = 'https://otp-wif3.onrender.com';
-
-        const App = () => {
-            const [user, setUser] = useState(null);
-            const [key, setKey] = useState('');
-            const [error, setError] = useState('');
-            const [success, setSuccess] = useState('');
-            const [svList, setSvList] = useState([]);
-            const [svData, setSvData] = useState(null);
-            const [newSvName, setNewSvName] = useState('');
-            const [newSvId, setNewSvId] = useState('');
-            const [newTableUrl, setNewTableUrl] = useState('');
-            const [isLoading, setIsLoading] = useState(false);
-            const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
-            const [selectedSvId, setSelectedSvId] = useState('');
-            const [selectedSvData, setSelectedSvData] = useState(null);
-
-            const debouncedFetch = useCallback(_.debounce((fn) => fn(), 300), []);
-
-            const clearMessages = () => {
-                setError('');
-                setSuccess('');
-            };
-
-            const validateUrl = (url) => {
-                const googleSheetsRegex = /^https:\/\/docs\.google\.com\/spreadsheets\/d\/[a-zA-Z0-9_-]+/;
-                return googleSheetsRegex.test(url);
-            };
-
-            const getScoreColor = (score) => {
-                if (!score) return 'text-gray-500';
-                if (score >= 4) return 'text-green-600';
-                if (score >= 3) return 'text-yellow-600';
-                return 'text-red-600';
-            };
-
-            const login = async () => {
-                if (!key.trim()) {
-                    setError('Please enter an API key or Telegram ID');
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await fetch(`${API_BASE_URL}/api/login`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ key: key.trim() })
-                    });
-                    const data = await response.json();
-                    if (data.status === 'success') {
-                        setUser({ role: data.role, id: data.id, name: data.name });
-                        setKey('');
-                    } else {
-                        setError(data.error || 'Invalid key or ID');
-                    }
-                } catch (err) {
-                    setError('Failed to connect to server');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const handleLogout = () => {
-                setShowLogoutConfirm(true);
-            };
-
-            const confirmLogout = () => {
-                setUser(null);
-                setSvList([]);
-                setSvData(null);
-                setKey('');
-                setShowLogoutConfirm(false);
-                setSelectedSvId('');
-                setSelectedSvData(null);
-                clearMessages();
-            };
-
-            const fetchSvList = async () => {
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await fetch(`${API_BASE_URL}/api/admin/sv_list`, {
-                        headers: { 'X-API-Key': key || FLASK_API_KEY }
-                    });
-                    const data = await response.json();
-                    if (data.status === 'success') {
-                        setSvList(data.sv_list);
-                    } else {
-                        setError(data.error);
-                    }
-                } catch (err) {
-                    setError('Failed to fetch supervisor list');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const fetchSvData = async () => {
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await fetch(`${API_BASE_URL}/api/sv/data?id=${user.id}`);
-                    const data = await response.json();
-                    if (data.status === 'success') {
-                        setSvData(data);
-                    } else {
-                        setError(data.error);
-                    }
-                } catch (err) {
-                    setError('Failed to fetch supervisor data');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const fetchSelectedSvData = async (svId) => {
-                if (!svId) {
-                    setSelectedSvData(null);
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await fetch(`${API_BASE_URL}/api/sv/data?id=${svId}`, {
-                        headers: { 'X-API-Key': key || FLASK_API_KEY }
-                    });
-                    const data = await response.json();
-                    if (data.status === 'success') {
-                        setSelectedSvData(data);
-                    } else {
-                        setError(data.error);
-                    }
-                } catch (err) {
-                    setError('Failed to fetch supervisor data');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const addSv = async () => {
-                if (!newSvName.trim() || !newSvId.trim()) {
-                    setError('Please fill in both name and ID');
-                    return;
-                }
-                if (isNaN(newSvId) || newSvId <= 0) {
-                    setError('ID must be a positive number');
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await fetch(`${API_BASE_URL}/api/admin/add_sv`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': key || FLASK_API_KEY
-                        },
-                        body: JSON.stringify({ name: newSvName.trim(), id: newSvId.trim() })
-                    });
-                    const data = await response.json();
-                    if (data.status === 'success') {
-                        setSuccess('Supervisor added successfully');
-                        fetchSvList();
-                        setNewSvName('');
-                        setNewSvId('');
-                    } else {
-                        setError(data.error);
-                    }
-                } catch (err) {
-                    setError('Failed to add supervisor');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const removeSv = async (svId) => {
-                if (!window.confirm(`Are you sure you want to remove supervisor ID ${svId}?`)) return;
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await fetch(`${API_BASE_URL}/api/admin/remove_sv`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': key || FLASK_API_KEY
-                        },
-                        body: JSON.stringify({ id: svId })
-                    });
-                    const data = await response.json();
-                    if (data.status === 'success') {
-                        setSuccess('Supervisor removed successfully');
-                        fetchSvList();
-                        if (selectedSvId === svId) {
-                            setSelectedSvId('');
-                            setSelectedSvData(null);
-                        }
-                    } else {
-                        setError(data.error);
-                    }
-                } catch (err) {
-                    setError('Failed to remove supervisor');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const updateTable = async () => {
-                if (!newTableUrl.trim()) {
-                    setError('Please enter a table URL');
-                    return;
-                }
-                if (!validateUrl(newTableUrl)) {
-                    setError('Please enter a valid Google Sheets URL');
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await fetch(`${API_BASE_URL}/api/sv/update_table`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ id: user.id, table_url: newTableUrl.trim() })
-                    });
-                    const data = await response.json();
-                    if (data.status === 'success') {
-                        setSuccess('Table updated successfully');
-                        fetchSvData();
-                        setNewTableUrl('');
-                    } else {
-                        setError(data.error);
-                    }
-                } catch (err) {
-                    setError('Failed to update table');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            useEffect(() => {
-                if (user && user.role === 'admin') {
-                    debouncedFetch(fetchSvList);
-                } else if (user && user.role === 'sv') {
-                    debouncedFetch(fetchSvData);
-                }
-            }, [user]);
-
-            useEffect(() => {
-                if (user && user.role === 'admin' && selectedSvId) {
-                    debouncedFetch(() => fetchSelectedSvData(selectedSvId));
-                }
-            }, [selectedSvId]);
-
-            if (!user) {
-                return (
-                    <div className="min-h-screen flex items-center justify-center bg-gray-100">
-                        <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                            <h1 className="text-2xl font-bold mb-6 text-center">OTP Bot Login</h1>
-                            <input
-                                type="text"
-                                placeholder="Enter API Key or Telegram ID"
-                                value={key}
-                                onChange={(e) => setKey(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            />
-                            <button
-                                onClick={login}
-                                className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                disabled={isLoading}
-                            >
-                                {isLoading ? 'Logging in...' : 'Login'}
-                            </button>
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                        </div>
-                    </div>
-                );
-            }
-
-            if (showLogoutConfirm) {
-                return (
-                    <div className="min-h-screen flex items-center justify-center bg-gray-100">
-                        <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                            <h2 className="text-xl font-semibold mb-4 text-center">Confirm Logout</h2>
-                            <p className="text-center mb-6">Are you sure you want to log out?</p>
-                            <div className="flex justify-between">
-                                <button
-                                    onClick={confirmLogout}
-                                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
-                                >
-                                    Yes, Log Out
-                                </button>
-                                <button
-                                    onClick={() => setShowLogoutConfirm(false)}
-                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                >
-                                    Cancel
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                );
-            }
-
-            if (user.role === 'admin') {
-                return (
-                    <div className="min-h-screen bg-gray-100 p-6">
-                        <div className="flex justify-between items-center mb-6">
-                            <h1 className="text-3xl font-bold">Admin Dashboard</h1>
-                            <button
-                                onClick={handleLogout}
-                                className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
-                            >
-                                Logout
-                            </button>
-                        </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                            <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
-                            <input
-                                type="text"
-                                placeholder="Supervisor Name"
-                                value={newSvName}
-                                onChange={(e) => setNewSvName(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-green-500"
-                                disabled={isLoading}
-                            />
-                            <input
-                                type="text"
-                                placeholder="Supervisor Telegram ID"
-                                value={newSvId}
-                                onChange={(e) => setNewSvId(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-green-500"
-                                disabled={isLoading}
-                            />
-                            <button
-                                onClick={addSv}
-                                className={`bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                disabled={isLoading}
-                            >
-                                {isLoading ? 'Adding...' : 'Добавить СВ'}
-                            </button>
-                        </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                            <h2 className="text-xl font-semibold mb-4">Supervisors</h2>
-                            {isLoading ? (
-                                <p className="text-center">Loading...</p>
-                            ) : svList.length === 0 ? (
-                                <p className="text-center">No supervisors found.</p>
-                            ) : (
-                                <div className="overflow-x-auto">
-                                    <table className="min-w-full border-collapse bg-white">
-                                        <thead>
-                                            <tr className="bg-gray-200">
-                                                <th className="p-3 border-b text-left">Name</th>
-                                                <th className="p-3 border-b text-left">ID</th>
-                                                <th className="p-3 border-b text-left">Table URL</th>
-                                                <th className="p-3 border-b text-left">Actions</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {svList.map(sv => (
-                                                <tr key={sv.id} className="hover:bg-gray-50">
-                                                    <td className="p-3 border-b">{sv.name}</td>
-                                                    <td className="p-3 border-b">{sv.id}</td>
-                                                    <td className="p-3 border-b">
-                                                        {sv.table ? (
-                                                            <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
-                                                        ) : 'No table'}
-                                                    </td>
-                                                    <td className="p-3 border-b">
-                                                        <button
-                                                            onClick={() => removeSv(sv.id)}
-                                                            className="bg-red-500 text-white px-2 py-1 hover:bg-red-600 rounded text-sm"
-                                                        >
-                                                            Remove
-                                                        </button>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            )}
-                        </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg">
-                            <h2 className="text-xl font-semibold mb-4">View Operator Scores</h2>
-                            <select
-                                value={selectedSvId}
-                                onChange={(e) => setSelectedSvId(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            >
-                                <option value="">Select Supervisor</option>
-                                {svList.map(sv => (
-                                    <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
-                                ))}
-                            </select>
-                            {isLoading ? (
+                            {isAdminDataLoading ? (
                                 <p className="text-center">Loading...</p>
                             ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
                                 <div className="overflow-x-auto">
