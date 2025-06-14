@@ -43,8 +43,8 @@
                 comment: ''
             });
             const [showEvaluationForm, setShowEvaluationForm] = useState(false);
-            const [showOperatorIssues, setShowOperatorIssues] = useState(false);
-            const [operatorIssues, setOperatorIssues] = useState([]);
+            const [showChangeTableForm, setShowChangeTableForm] = useState(false);
+            const [currentSvForTableChange, setCurrentSvForTableChange] = useState(null);
 
             const debouncedFetch = useCallback(_.debounce((fn) => fn(), 300), []);
 
@@ -69,6 +69,17 @@
                 if (count >= expected) return 'text-green-600';
                 if (count >= expected * 0.5) return 'text-yellow-600';
                 return 'text-red-600';
+            };
+
+            const getCurrentWeekOfMonth = () => {
+                const today = new Date();
+                const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+                const diff = today.getDate() + firstDay.getDay() - 1;
+                return Math.ceil(diff / 7);
+            };
+
+            const getExpectedCalls = (weekNumber) => {
+                return weekNumber * 5;
             };
 
             const login = async () => {
@@ -175,27 +186,6 @@
                 }
             };
 
-            const fetchOperatorIssues = async (svId) => {
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await fetch(`${API_BASE_URL}/api/admin/sv_operators?sv_id=${svId}`, {
-                        headers: { 'X-API-Key': user.apiKey }
-                    });
-                    const data = await response.json();
-                    if (data.status === 'success') {
-                        setOperatorIssues(data.operators_with_issues);
-                        setShowOperatorIssues(true);
-                    } else {
-                        setError(data.error);
-                    }
-                } catch (err) {
-                    setError('Failed to fetch operator issues');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
             const addSv = async () => {
                 if (!newSvName.trim() || !newSvId.trim()) {
                     setError('Please fill in both name and ID');
@@ -290,6 +280,42 @@
                     }
                 } catch (err) {
                     setError('Failed to update table');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            const changeSvTable = async (svId, tableUrl) => {
+                if (!tableUrl.trim()) {
+                    setError('Please enter a table URL');
+                    return;
+                }
+                if (!validateUrl(tableUrl)) {
+                    setError('Please enter a valid Google Sheets URL');
+                    return;
+                }
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/admin/change_sv_table`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-API-Key': user.apiKey
+                        },
+                        body: JSON.stringify({ id: svId, table_url: tableUrl.trim() })
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        setSuccess(`Table updated successfully for ${data.sv_name}`);
+                        fetchSvList();
+                        setShowChangeTableForm(false);
+                        setNewTableUrl('');
+                    } else {
+                        setError(data.error);
+                    }
+                } catch (err) {
+                    setError('Failed to update supervisor table');
                 } finally {
                     setIsLoading(false);
                 }
@@ -642,12 +668,12 @@
                                                         </button>
                                                         <button
                                                             onClick={() => {
-                                                                setSelectedSvId(sv.id);
-                                                                fetchOperatorIssues(sv.id);
+                                                                setCurrentSvForTableChange(sv);
+                                                                setShowChangeTableForm(true);
                                                             }}
-                                                            className="bg-yellow-500 text-white px-2 py-1 hover:bg-yellow-600 rounded text-sm"
+                                                            className="bg-green-500 text-white px-2 py-1 hover:bg-green-600 rounded text-sm"
                                                         >
-                                                            View Issues
+                                                            Change Table
                                                         </button>
                                                     </td>
                                                 </tr>
@@ -658,51 +684,35 @@
                             )}
                         </div>
 
-                        {showOperatorIssues && operatorIssues.length > 0 && (
+                        {showChangeTableForm && currentSvForTableChange && (
                             <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                <div className="flex justify-between items-center mb-4">
-                                    <h2 className="text-xl font-semibold">Operators with Issues</h2>
+                                <h2 className="text-xl font-semibold mb-4">Change Table for {currentSvForTableChange.name}</h2>
+                                <input
+                                    type="text"
+                                    placeholder="New Google Sheets URL"
+                                    value={newTableUrl}
+                                    onChange={(e) => setNewTableUrl(e.target.value)}
+                                    className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    disabled={isLoading}
+                                />
+                                <div className="flex justify-between">
                                     <button
-                                        onClick={() => setShowOperatorIssues(false)}
+                                        onClick={() => changeSvTable(currentSvForTableChange.id, newTableUrl)}
+                                        className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                        disabled={isLoading}
+                                    >
+                                        {isLoading ? 'Updating...' : 'Update Table'}
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            setShowChangeTableForm(false);
+                                            setCurrentSvForTableChange(null);
+                                            setNewTableUrl('');
+                                        }}
                                         className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
                                     >
-                                        Close
+                                        Cancel
                                     </button>
-                                </div>
-                                <div className="overflow-x-auto">
-                                    <table className="min-w-full border-collapse bg-white">
-                                        <thead>
-                                            <tr className="bg-gray-200">
-                                                <th className="p-3 border-b text-left">Name</th>
-                                                <th className="p-3 border-b text-left">Calls</th>
-                                                <th className="p-3 border-b text-left">Expected</th>
-                                                <th className="p-3 border-b text-left">Avg Score</th>
-                                                <th className="p-3 border-b text-left">Action</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {operatorIssues.map((op, index) => (
-                                                <tr key={index} className="hover:bg-gray-50">
-                                                    <td className="p-3 border-b">{op.name}</td>
-                                                    <td className={`p-3 border-b ${getCallCountColor(op.call_count, op.expected_calls)}`}>
-                                                        {op.call_count}
-                                                    </td>
-                                                    <td className="p-3 border-b">{op.expected_calls}</td>
-                                                    <td className={`p-3 border-b ${getScoreColor(op.avg_score)}`}>
-                                                        {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                    </td>
-                                                    <td className="p-3 border-b">
-                                                        <button
-                                                            onClick={() => notifySupervisor(selectedSvId, op.name)}
-                                                            className="bg-blue-500 text-white px-2 py-1 hover:bg-blue-600 rounded text-sm"
-                                                        >
-                                                            Notify SV
-                                                        </button>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
                                 </div>
                             </div>
                         )}
@@ -729,29 +739,49 @@
                                             <tr className="bg-gray-200">
                                                 <th className="p-3 border-b text-left">Name</th>
                                                 <th className="p-3 border-b text-left">Calls</th>
+                                                <th className="p-3 border-b text-left">Expected</th>
                                                 <th className="p-3 border-b text-left">Avg Score</th>
                                                 <th className="p-3 border-b text-left">Link</th>
+                                                <th className="p-3 border-b text-left">Action</th>
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {selectedSvData.operators.map((op, index) => (
-                                                <tr key={index} className="hover:bg-gray-50">
-                                                    <td className="p-3 border-b">{op.name}</td>
-                                                    <td className={`p-3 border-b ${getCallCountColor(op.call_count, selectedSvData.expected_calls)}`}>
-                                                        {op.call_count}
-                                                    </td>
-                                                    <td className="p-3 border-b">
-                                                        <span className={getScoreColor(op.avg_score)}>
-                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                        </span>
-                                                    </td>
-                                                    <td className="p-3 border-b">
-                                                        {op.link ? (
-                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                        ) : '-'}
-                                                    </td>
-                                                </tr>
-                                            ))}
+                                            {selectedSvData.operators.map((op, index) => {
+                                                const currentWeek = getCurrentWeekOfMonth();
+                                                const expectedCalls = getExpectedCalls(currentWeek);
+                                                const hasIssue = op.call_count < expectedCalls;
+                                                
+                                                return (
+                                                    <tr key={index} className="hover:bg-gray-50">
+                                                        <td className="p-3 border-b">{op.name}</td>
+                                                        <td className={`p-3 border-b ${getCallCountColor(op.call_count, expectedCalls)}`}>
+                                                            {op.call_count}
+                                                        </td>
+                                                        <td className="p-3 border-b">{expectedCalls}</td>
+                                                        <td className="p-3 border-b">
+                                                            <span className={getScoreColor(op.avg_score)}>
+                                                                {op.avg_score ? op.avg_score.toFixed(2) : '-'}
+                                                            </span>
+                                                        </td>
+                                                        <td className="p-3 border-b">
+                                                            {op.link ? (
+                                                                <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
+                                                            ) : '-'}
+                                                        </td>
+                                                        <td className="p-3 border-b">
+                                                            {hasIssue && (
+                                                                <button
+                                                                    onClick={() => notifySupervisor(selectedSvId, op.name)}
+                                                                    className="bg-yellow-500 text-white px-2 py-1 hover:bg-yellow-600 rounded text-sm"
+                                                                    disabled={isLoading}
+                                                                >
+                                                                    Notify
+                                                                </button>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
                                         </tbody>
                                     </table>
                                 </div>

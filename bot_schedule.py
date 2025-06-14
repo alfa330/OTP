@@ -104,6 +104,50 @@ def get_sv_list():
         logging.error(f"Error fetching SV list: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/admin/change_sv_table', methods=['POST'])
+@require_api_key
+def change_sv_table():
+    try:
+        data = request.get_json()
+        required_fields = ['id', 'table_url']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        sv_id = int(data['id'])
+        table_url = data['table_url']
+        
+        with SVlist_lock:
+            sv = SVlist.get(sv_id)
+            if not sv:
+                return jsonify({"error": "SV not found"}), 404
+            
+            sheet_name, operators, error = extract_fio_and_links(table_url)
+            if error:
+                return jsonify({"error": error}), 400
+            
+            sv.table = table_url
+            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": sv_id,
+                "text": f"Таблица успешно обновлена администратором <b>успешно✅</b>",
+                "parse_mode": "HTML"
+            }
+            response = requests.post(telegram_url, json=payload, timeout=10)
+            if response.status_code != 200:
+                error_detail = response.json().get('description', 'Unknown error')
+                logging.error(f"Telegram API error: {error_detail}")
+                return jsonify({"error": f"Failed to send Telegram message: {error_detail}"}), 500
+        
+        return jsonify({
+            "status": "success",
+            "message": "Table updated",
+            "sv_name": sv.name,
+            "operators": operators
+        })
+    except Exception as e:
+        logging.error(f"Error updating SV table: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/admin/add_sv', methods=['POST'])
 @require_api_key
 def add_sv():
@@ -289,12 +333,12 @@ def get_sv_operators():
 
 @app.route('/api/admin/generate_report', methods=['GET'])
 @require_api_key
-def generate_report():
+def handle_generate_report():
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(generate_weekly_report())
-        return jsonify({"status": "success", "message": "Report generation initiated"})
+        if sync_generate_weekly_report():
+            return jsonify({"status": "success", "message": "Weekly report generated and sent"})
+        else:
+            return jsonify({"error": "Failed to generate report"}), 500
     except Exception as e:
         logging.error(f"Error in generate_report: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
@@ -1173,6 +1217,7 @@ async def generate_weekly_report():
                 text=f"[{now}] ⚠️ Нет данных для отчета за {current_week}-ю неделю",
                 parse_mode='HTML'
             )
+        return True
     except Exception as e:
         logging.error(f"Error generating weekly report: {e}")
         await bot.send_message(
@@ -1180,6 +1225,12 @@ async def generate_weekly_report():
             text=f"[{now}] ❌ Ошибка при генерации еженедельного отчета: {str(e)}",
             parse_mode='HTML'
         )
+        return False
+
+def sync_generate_weekly_report():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    return loop.run_until_complete(generate_weekly_report())
 
 # === Главный запуск =============================================================================================
 if __name__ == '__main__':
