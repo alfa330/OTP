@@ -8,56 +8,106 @@
     <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/babel-standalone@6/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
 </head>
 <body className="bg-gray-100">
     <div id="root"></div>
     <script type="text/babel">
-        const { useState, useEffect } = React;
+        const { useState, useEffect, useCallback } = React;
 
-        // Replace with your Render Flask API URL
-        const API_BASE_URL = 'https://otp-wif3.onrender.com'; // Assumes Flask serves both API and static site
+        const API_BASE_URL = 'https://otp-wif3.onrender.com'; // Replace with your backend URL
 
         const App = () => {
             const [user, setUser] = useState(null);
             const [key, setKey] = useState('');
             const [error, setError] = useState('');
+            const [success, setSuccess] = useState('');
             const [svList, setSvList] = useState([]);
             const [svData, setSvData] = useState(null);
             const [newSvName, setNewSvName] = useState('');
             const [newSvId, setNewSvId] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
+            const [evaluation, setEvaluation] = useState({
+                operator: '',
+                month: '',
+                call_number: '',
+                phone_number: '',
+                score: '',
+                comment: ''
+            });
+            const [isLoading, setIsLoading] = useState(false);
+            const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+
+            // Debounced function for API calls
+            const debouncedFetch = useCallback(_.debounce((fn) => fn(), 300), []);
+
+            const clearMessages = () => {
+                setError('');
+                setSuccess('');
+            };
+
+            const validateUrl = (url) => {
+                const googleSheetsRegex = /^https:\/\/docs\.google\.com\/spreadsheets\/d\/[a-zA-Z0-9_-]+/;
+                return googleSheetsRegex.test(url);
+            };
+
+            const validateEvaluation = () => {
+                const { operator, month, call_number, phone_number, score, comment } = evaluation;
+                if (!operator.trim()) return "Operator name is required";
+                if (!month.trim()) return "Month is required";
+                if (!call_number.trim()) return "Call number is required";
+                if (!phone_number.trim()) return "Phone number is required";
+                if (score === '' || isNaN(score) || score < 0 || score > 100) return "Score must be a number between 0 and 100";
+                if (score < 100 && !comment.trim()) return "Comment is required for scores below 100";
+                return null;
+            };
 
             const login = async () => {
+                if (!key.trim()) {
+                    setError('Please enter an API key or Telegram ID');
+                    return;
+                }
+                setIsLoading(true);
+                clearMessages();
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/login`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ key })
+                        body: JSON.stringify({ key: key.trim() })
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
                         setUser({ role: data.role, id: data.id, name: data.name });
-                        setError('');
+                        setKey('');
                     } else {
                         setError(data.error || 'Invalid key or ID');
                     }
                 } catch (err) {
                     setError('Failed to connect to server');
+                } finally {
+                    setIsLoading(false);
                 }
             };
 
-            const logout = () => {
+            const handleLogout = () => {
+                setShowLogoutConfirm(true);
+            };
+
+            const confirmLogout = () => {
                 setUser(null);
                 setSvList([]);
                 setSvData(null);
                 setKey('');
-                setError('');
+                setShowLogoutConfirm(false);
+                clearMessages();
             };
 
             const fetchSvList = async () => {
+                setIsLoading(true);
+                clearMessages();
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/admin/sv_list`, {
-                        headers: { 'X-API-Key': key }
+                        headers: { 'X-API-Key': key || FLASK_API_KEY }
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
@@ -66,11 +116,15 @@
                         setError(data.error);
                     }
                 } catch (err) {
-                    setError('Failed to fetch SV list');
+                    setError('Failed to fetch supervisor list');
+                } finally {
+                    setIsLoading(false);
                 }
             };
 
             const fetchSvData = async () => {
+                setIsLoading(true);
+                clearMessages();
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/sv/data?id=${user.id}`);
                     const data = await response.json();
@@ -80,81 +134,152 @@
                         setError(data.error);
                     }
                 } catch (err) {
-                    setError('Failed to fetch SV data');
+                    setError('Failed to fetch supervisor data');
+                } finally {
+                    setIsLoading(false);
                 }
             };
 
             const addSv = async () => {
+                if (!newSvName.trim() || !newSvId.trim()) {
+                    setError('Please fill in both name and ID');
+                    return;
+                }
+                if (isNaN(newSvId) || newSvId <= 0) {
+                    setError('ID must be a positive number');
+                    return;
+                }
+                setIsLoading(true);
+                clearMessages();
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/admin/add_sv`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-API-Key': key
+                            'X-API-Key': key || FLASK_API_KEY
                         },
-                        body: JSON.stringify({ name: newSvName, id: newSvId })
+                        body: JSON.stringify({ name: newSvName.trim(), id: newSvId.trim() })
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
+                        setSuccess('Supervisor added successfully');
                         fetchSvList();
                         setNewSvName('');
                         setNewSvId('');
-                        setError('');
                     } else {
                         setError(data.error);
                     }
                 } catch (err) {
-                    setError('Failed to add SV');
+                    setError('Failed to add supervisor');
+                } finally {
+                    setIsLoading(false);
                 }
             };
 
             const removeSv = async (svId) => {
+                if (!window.confirm(`Are you sure you want to remove supervisor ID ${svId}?`)) return;
+                setIsLoading(true);
+                clearMessages();
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/admin/remove_sv`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-API-Key': key
+                            'X-API-Key': key || FLASK_API_KEY
                         },
                         body: JSON.stringify({ id: svId })
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
+                        setSuccess('Supervisor removed successfully');
                         fetchSvList();
-                        setError('');
                     } else {
                         setError(data.error);
                     }
                 } catch (err) {
-                    setError('Failed to remove SV');
+                    setError('Failed to remove supervisor');
+                } finally {
+                    setIsLoading(false);
                 }
             };
 
             const updateTable = async () => {
+                if (!newTableUrl.trim()) {
+                    setError('Please enter a table URL');
+                    return;
+                }
+                if (!validateUrl(newTableUrl)) {
+                    setError('Please enter a valid Google Sheets URL');
+                    return;
+                }
+                setIsLoading(true);
+                clearMessages();
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/sv/update_table`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ id: user.id, table_url: newTableUrl })
+                        body: JSON.stringify({ id: user.id, table_url: newTableUrl.trim() })
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
+                        setSuccess('Table updated successfully');
                         fetchSvData();
                         setNewTableUrl('');
-                        setError('');
                     } else {
                         setError(data.error);
                     }
                 } catch (err) {
                     setError('Failed to update table');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            const submitEvaluation = async () => {
+                const validationError = validateEvaluation();
+                if (validationError) {
+                    setError(validationError);
+                    return;
+                }
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/sv/submit_evaluation`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            evaluator: user.name,
+                            ...evaluation,
+                            score: parseFloat(evaluation.score)
+                        })
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        setSuccess('Evaluation submitted successfully');
+                        setEvaluation({
+                            operator: '',
+                            month: '',
+                            call_number: '',
+                            phone_number: '',
+                            score: '',
+                            comment: ''
+                        });
+                        fetchSvData();
+                    } else {
+                        setError(data.error);
+                    }
+                } catch (err) {
+                    setError('Failed to submit evaluation');
+                } finally {
+                    setIsLoading(false);
                 }
             };
 
             useEffect(() => {
                 if (user && user.role === 'admin') {
-                    fetchSvList();
+                    debouncedFetch(fetchSvList);
                 } else if (user && user.role === 'sv') {
-                    fetchSvData();
+                    debouncedFetch(fetchSvData);
                 }
             }, [user]);
 
@@ -168,15 +293,42 @@
                                 placeholder="Enter API Key or Telegram ID"
                                 value={key}
                                 onChange={(e) => setKey(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded"
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
                             />
                             <button
                                 onClick={login}
-                                className="w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600"
+                                className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                disabled={isLoading}
                             >
-                                Login
+                                {isLoading ? 'Logging in...' : 'Login'}
                             </button>
                             {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                        </div>
+                    </div>
+                );
+            }
+
+            if (showLogoutConfirm) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-gray-100">
+                        <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
+                            <h2 className="text-xl font-semibold mb-4 text-center">Confirm Logout</h2>
+                            <p className="text-center mb-6">Are you sure you want to log out?</p>
+                            <div className="flex justify-between">
+                                <button
+                                    onClick={confirmLogout}
+                                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                                >
+                                    Yes, Log Out
+                                </button>
+                                <button
+                                    onClick={() => setShowLogoutConfirm(false)}
+                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
                         </div>
                     </div>
                 );
@@ -188,7 +340,7 @@
                         <div className="flex justify-between items-center mb-6">
                             <h1 className="text-3xl font-bold">Admin Dashboard</h1>
                             <button
-                                onClick={logout}
+                                onClick={handleLogout}
                                 className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
                             >
                                 Logout
@@ -198,46 +350,72 @@
                             <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
                             <input
                                 type="text"
-                                placeholder="SV Name"
+                                placeholder="Supervisor Name"
                                 value={newSvName}
                                 onChange={(e) => setNewSvName(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded"
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-green-500"
+                                disabled={isLoading}
                             />
                             <input
                                 type="text"
-                                placeholder="SV Telegram ID"
+                                placeholder="Supervisor Telegram ID"
                                 value={newSvId}
                                 onChange={(e) => setNewSvId(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded"
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-green-500"
+                                disabled={isLoading}
                             />
                             <button
                                 onClick={addSv}
-                                className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
+                                className={`bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                disabled={isLoading}
                             >
-                                Add SV
+                                {isLoading ? 'Adding...' : 'Добавить СВ'}
                             </button>
                         </div>
                         <div className="bg-white p-6 rounded-lg shadow-lg">
                             <h2 className="text-xl font-semibold mb-4">Supervisors</h2>
-                            {svList.length === 0 ? (
-                                <p>No supervisors found.</p>
+                            {isLoading ? (
+                                <p className="text-center">Loading...</p>
+                            ) : svList.length === 0 ? (
+                                <p className="text-center">No supervisors found.</p>
                             ) : (
-                                <ul>
-                                    {svList.map(sv => (
-                                        <li key={sv.id} className="flex justify-between items-center mb-2">
-                                            <span>{sv.name} (ID: {sv.id})</span>
-                                            <button
-                                                onClick={() => removeSv(sv.id)}
-                                                className="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600"
-                                            >
-                                                Remove
-                                            </button>
-                                        </li>
-                                    ))}
-                                </ul>
+                                <div className="table-responsive">
+                                    <table className="min-w-full border-collapse">
+                                        <thead>
+                                            <tr>
+                                                <th class="p-2 border-b">Name</th>
+                                            <th className="p-2 border-b">ID</th>
+                                            <th className="p-2 border-b">Table URL</th>
+                                        <th className="p-2 border-b">Actions</th>
+                                        </tr>
+                                        </thead>
+                                        <tbody>
+                                            {svList.map(sv => (
+                                                <tr key={sv.id} className="hover:bg-gray-50">
+                                                    <td className="p-2 border-b">{sv.name}</td>
+                                                    <td className="p-2 border-b">{sv.id}</td>
+                                                    <td className="p-2 border-b">
+                                                        {sv.table ? (
+                                                            <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600">View Table</a>
+                                                        ) : 'No table'}
+                                                    </td>
+                                                    <td className="p-2 border-b">
+                                                        <button
+                                                            onClick={() => removeSv(sv.id)}
+                                                            className="bg-red-500 text-white px-2 py-1 hover:bg-red-600 rounded"
+                                                        >
+                                                            Remove
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
                             )}
+                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                         </div>
-                        {error && <p className="text-red-500 mt-4">{error}</p>}
                     </div>
                 );
             }
@@ -248,43 +426,127 @@
                         <div className="flex justify-between items-center mb-6">
                             <h1 className="text-3xl font-bold">Supervisor Dashboard</h1>
                             <button
-                                onClick={logout}
+                                onClick={handleLogout}
                                 className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
                             >
                                 Logout
                             </button>
                         </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                        <div className="bg-white p-6 rounded-lg shadow-lg mb-8">
                             <h2 className="text-xl font-semibold mb-4">Update Table</h2>
                             <input
                                 type="text"
                                 placeholder="Google Sheets URL"
                                 value={newTableUrl}
                                 onChange={(e) => setNewTableUrl(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded"
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
                             />
                             <button
                                 onClick={updateTable}
-                                className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                disabled={isLoading}
                             >
-                                Update Table
+                                {isLoading ? 'Updating...' : 'Update Table'}
+                            </button>
+                        </div>
+                        <div className="bg-white p-6 rounded-lg shadow-lg mb-8">
+                            <h2 className="text-xl font-semibold mb-4">Submit Call Evaluation</h2>
+                            <input
+                                type="text"
+                                placeholder="Operator Name"
+                                value={evaluation.operator}
+                                onChange={(e) => setEvaluation({ ...evaluation, operator: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <input
+                                type="text"
+                                placeholder="Month (e.g., January 2025)"
+                                value={evaluation.month}
+                                onChange={(e) => setEvaluation({ ...evaluation, month: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <input
+                                type="text"
+                                placeholder="Call Number"
+                                value={evaluation.call_number}
+                                onChange={(e) => setEvaluation({ ...evaluation, call_number: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <input
+                                type="text"
+                                placeholder="Phone Number"
+                                value={evaluation.phone_number}
+                                onChange={(e) => setEvaluation({ ...evaluation, phone_number: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <input
+                                type="number"
+                                placeholder="Score (0-100)"
+                                value={evaluation.score}
+                                onChange={(e) => setEvaluation({ ...evaluation, score: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                min="0"
+                                max="100"
+                                disabled={isLoading}
+                            />
+                            <textarea
+                                placeholder="Comment (required if score < 100)"
+                                value={evaluation.comment}
+                                onChange={(e) => setEvaluation({ ...evaluation, comment: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                rows="4"
+                                disabled={isLoading}
+                            />
+                            <button
+                                onClick={submitEvaluation}
+                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                disabled={isLoading}
+                            >
+                                {isLoading ? 'Submitting...' : 'Submit Evaluation'}
                             </button>
                         </div>
                         <div className="bg-white p-6 rounded-lg shadow-lg">
                             <h2 className="text-xl font-semibold mb-4">Your Operators</h2>
-                            {svData && svData.operators && svData.operators.length > 0 ? (
-                                <ul>
-                                    {svData.operators.map((op, index) => (
-                                        <li key={index} className="mb-2">
-                                            <span>{op.name} (Calls: {op.call_count}, Avg Score: {op.avg_score ? op.avg_score.toFixed(2) : '-'})</span>
-                                        </li>
-                                    ))}
-                                </ul>
+                            {isLoading ? (
+                                <p className="text-center">Loading...</p>
+                            ) : svData && svData.operators && svData.operators.length > 0 ? (
+                                <div className="overflow-x-auto">
+                                    <table className="min-w-full border-collapse">
+                                        <thead>
+                                            <tr>
+                                                <th className="p-2 border-b">Name</th>
+                                                <th className="p-2 border-b">Calls</th>
+                                                <th className="p-2 border-b">Avg Score</th>
+                                                <th className="p-2 border-b">Link</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {svData.operators.map((op, index) => (
+                                                <tr key={index} className="hover:bg-gray-50">
+                                                    <td className="p-2 border-b">{op.name}</td>
+                                                    <td className="p-2 border-b">{op.call_count}</td>
+                                                    <td className="p-2 border-b">{op.avg_score ? op.avg_score.toFixed(2) : '-'}</td>
+                                                    <td className="p-2 border-b">
+                                                        {op.link ? (
+                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
+                                                        ) : '-'}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
                             ) : (
-                                <p>No operators found.</p>
+                                <p className="text-center">No operators found.</p>
                             )}
+                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                         </div>
-                        {error && <p className="text-red-500 mt-4">{error}</p>}
                     </div>
                 );
             }
