@@ -403,12 +403,12 @@
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
-                        setSuccess('Weekly report generated and sent to admin');
+                        setSuccess('Запущена генерация отчета. Это может занять несколько минут.');
                     } else {
-                        setError(data.error || 'Failed to generate report');
+                        setError(data.error || 'Не удалось начать генерацию отчета');
                     }
                 } catch (err) {
-                    setError('Failed to generate report');
+                    setError('Ошибка соединения с сервером');
                 } finally {
                     setIsLoading(false);
                 }
@@ -628,10 +628,10 @@
                                 <h2 className="text-xl font-semibold">Supervisors</h2>
                                 <button
                                     onClick={generateWeeklyReport}
-                                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                     disabled={isLoading}
                                 >
-                                    Generate Weekly Report
+                                    {isLoading ? 'Генерация...' : 'Создать отчет'}
                                 </button>
                             </div>
                             {isAdminDataLoading ? (
