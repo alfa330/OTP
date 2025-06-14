@@ -2,20 +2,17 @@ import logging
 import os
 import threading
 import asyncio
-from hashlib import sha256
-import pandas as pd
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from io import StringIO, BytesIO
+from io import BytesIO
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.dispatcher import FSMContext
-from aiogram.utils.exceptions import TelegramAPIError
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from functools import wraps
 from openpyxl import load_workbook
@@ -25,21 +22,17 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 
 # === Логирование =====================================================================================================
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # === Переменные окружения =========================================================================================
 API_TOKEN = os.getenv('BOT_TOKEN')
 admin = int(os.getenv('ADMIN_ID', '0'))
-SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
-SHEET_NAME = os.getenv('SHEET_NAME')
 FLASK_API_KEY = os.getenv('FLASK_API_KEY')
 
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
 if not FLASK_API_KEY:
     raise Exception("Переменная окружения FLASK_API_KEY обязательна.")
-
-FETCH_URL = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet={SHEET_NAME}"
 
 # === Инициализация бота и диспетчера =============================================================================
 bot = Bot(token=API_TOKEN)
@@ -48,7 +41,9 @@ dp = Dispatcher(bot=bot, storage=storage)
 
 # === В роли ДБ ==================================================================================================
 SVlist = {}
-SVlist_lock = threading.Lock()  # Lock for thread-safe access to SVlist
+SVlist_lock = threading.Lock()
+report_lock = threading.Lock()
+executor_pool = ThreadPoolExecutor(max_workers=4)
 
 class SV:
     def __init__(self, name, id):
@@ -56,7 +51,7 @@ class SV:
         self.id = id
         self.table = ''
         self.calls = {}
-        self.lock = threading.Lock()  # Per-SV lock for thread-safe access to calls
+        self.lock = threading.Lock()
 
 # === Flask-сервер ===============================================================================================
 app = Flask(__name__)
@@ -336,14 +331,21 @@ def get_sv_operators():
 @require_api_key
 def handle_generate_report():
     try:
+        # Проверяем, не запущена ли уже генерация
+        if not report_lock.acquire(blocking=False):
+            return jsonify({"error": "Report generation is already in progress"}), 429
+            
         # Запускаем в отдельном потоке
-        future = executor.submit(run_async_report)
-        if future.result(timeout=300):  # 5 минут таймаут
-            return jsonify({"status": "success", "message": "Report generation started"})
-        return jsonify({"error": "Report generation failed"}), 500
+        executor_pool.submit(sync_generate_weekly_report)
+        return jsonify({"status": "success", "message": "Report generation started"})
     except Exception as e:
         logging.error(f"Error in generate_report: {e}")
         return jsonify({"error": str(e)}), 500
+    finally:
+        try:
+            report_lock.release()
+        except:
+            pass
 
 @app.route('/api/sv/update_table', methods=['POST'])
 def update_sv_table():
@@ -1002,7 +1004,6 @@ def extract_fio_and_links(spreadsheet_url):
             for cell in col:
                 if cell.value is not None:
                     value = str(cell.value).strip()
-                    logging.info(f"Header value: '{value}' (type: {type(cell.value)})")
                     if "ФИО" in value:
                         fio_column = cell.column
                     else:
@@ -1018,7 +1019,6 @@ def extract_fio_and_links(spreadsheet_url):
             return None, None, "Ошибка: Колонка ФИО не найдена на листе."
         if not score_columns:
             os.remove(temp_file)
-            logging.error(f"Score columns not found. Available headers: {[str(cell.value).strip() for col in ws.iter_cols(min_row=1, max_row=1) for cell in col if cell.value is not None]}")
             return None, None, "Ошибка: Столбцы с оценками (1-20) не найдены."
 
         operators = []
@@ -1048,7 +1048,7 @@ def extract_fio_and_links(spreadsheet_url):
         os.remove(temp_file)
         return sheet_name, operators, None
     except Exception as e:
-        if os.path.exists(temp_file):
+        if 'temp_file' in locals() and os.path.exists(temp_file):
             os.remove(temp_file)
         logging.error(f"Ошибка при обработке таблицы: {str(e)}")
         return None, None, f"Ошибка при обработке таблицы: {str(e)}"
@@ -1153,8 +1153,16 @@ async def verify_table(callback: types.CallbackQuery, state: FSMContext):
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
         await sv.crtable.set()
 
-async def generate_weekly_report():
+def sync_generate_weekly_report():
     try:
+        if not report_lock.acquire(blocking=False):
+            logging.warning("Report generation skipped: already running")
+            return False
+            
+        logging.info("Starting weekly report generation")
+        
+        current_week = get_current_week_of_month()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         output = BytesIO()
         workbook = xlsxwriter.Workbook(output, {'in_memory': True})
         header_format = workbook.add_format({
@@ -1164,8 +1172,6 @@ async def generate_weekly_report():
         })
         cell_format_int = workbook.add_format({'border': 1, 'num_format': '0'})
         cell_format_float = workbook.add_format({'border': 1, 'num_format': '0.00'})
-        current_week = get_current_week_of_month()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         with SVlist_lock:
             sv_list_copy = dict(SVlist)
@@ -1177,15 +1183,18 @@ async def generate_weekly_report():
             if error:
                 logging.error(f"Error processing table for SV {sv.name}: {error}")
                 continue
+                
             safe_sheet_name = sv.name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
             worksheet = workbook.add_worksheet(safe_sheet_name)
             headers = ['ФИО', 'Количество звонков', 'Средний балл']
             for col, header in enumerate(headers):
                 worksheet.write(0, col, header, header_format)
+                
             for row, op in enumerate(operators, start=1):
                 name = op.get('name', '')
                 call_count = op.get('call_count', 0)
                 avg_score = op.get('avg_score', None)
+                
                 if call_count in [None, "#DIV/0!"]:
                     call_count = 0
                 else:
@@ -1193,55 +1202,67 @@ async def generate_weekly_report():
                         call_count = int(call_count)
                     except (ValueError, TypeError):
                         call_count = 0
+                
                 try:
-                    score_val = float(avg_score) if avg_score else ''
+                    score_val = float(avg_score) if avg_score else None
                 except (ValueError, TypeError):
                     score_val = ''
+                
                 worksheet.write(row, 0, name, cell_format_int)
                 worksheet.write(row, 1, call_count, cell_format_int)
                 worksheet.write(row, 2, score_val, cell_format_float)
+            
             worksheet.set_column('A:A', 30)
             worksheet.set_column('B:B', 20)
             worksheet.set_column('C:C', 15)
+        
         workbook.close()
         output.seek(0)
+        
         if output.getvalue():
             filename = f"Weekly_Report_Week{current_week}_{datetime.now().strftime('%Y%m%d')}.xlsx"
-            await bot.send_document(
-                chat_id=admin,
-                document=('report.xlsx', output),
-                caption=f"[{now}] 📊 Еженедельный отчет за {current_week}-ю неделю",
-                parse_mode='HTML'
-            )
+            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendDocument"
+            files = {'document': (filename, output.getvalue(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
+            data = {'chat_id': admin, 'caption': f"[{now}] 📊 Еженедельный отчет за {current_week}-ю неделю"}
+            response = requests.post(telegram_url, files=files, data=data)
+            
+            if response.status_code != 200:
+                logging.error(f"Ошибка отправки отчета: {response.text}")
+                return False
+            return True
         else:
-            await bot.send_message(
-                chat_id=admin,
-                text=f"[{now}] ⚠️ Нет данных для отчета за {current_week}-ю неделю",
-                parse_mode='HTML'
-            )
-        return True
+            logging.error("Отчет пустой")
+            return False
     except Exception as e:
-        logging.error(f"Error generating weekly report: {e}")
-        await bot.send_message(
-            chat_id=admin,
-            text=f"[{now}] ❌ Ошибка при генерации еженедельного отчета: {str(e)}",
-            parse_mode='HTML'
-        )
+        logging.error(f"Critical error in report generation: {e}")
         return False
-
-def run_async_report():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(generate_weekly_report())
     finally:
-        loop.close()
+        try:
+            report_lock.release()
+        except:
+            pass
+
+async def generate_weekly_report():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor_pool, sync_generate_weekly_report)
 
 # === Главный запуск =============================================================================================
 if __name__ == '__main__':
-    threading.Thread(target=run_flask, daemon=True).start()
+    # Запускаем Flask в отдельном потоке
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Настраиваем и запускаем планировщик
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(generate_weekly_report, CronTrigger(day_of_week='mon', hour=9, minute=0))
+    scheduler.add_job(
+        generate_weekly_report, 
+        CronTrigger(day_of_week='mon', hour=9, minute=0),
+        misfire_grace_time=3600
+    )
     scheduler.start()
-    print("🔄 Планировщик запущен.")
+    
+    logging.info("🔄 Планировщик запущен")
+    logging.info("🤖 Бот запущен")
+    
+    # Запускаем бота
     executor.start_polling(dp, skip_updates=True)
