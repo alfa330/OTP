@@ -9,6 +9,7 @@
     <script src="https://cdn.jsdelivr.net/npm/babel-standalone@6/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
 </head>
 <body className="bg-gray-100">
     <div id="root"></div>
@@ -32,6 +33,18 @@
             const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
             const [selectedSvId, setSelectedSvId] = useState('');
             const [selectedSvData, setSelectedSvData] = useState(null);
+            const [evaluationData, setEvaluationData] = useState({
+                evaluator: '',
+                operator: '',
+                month: new Date().toLocaleString('default', { month: 'long', year: 'numeric' }),
+                call_number: '',
+                phone_number: '',
+                score: '',
+                comment: ''
+            });
+            const [showEvaluationForm, setShowEvaluationForm] = useState(false);
+            const [showOperatorIssues, setShowOperatorIssues] = useState(false);
+            const [operatorIssues, setOperatorIssues] = useState([]);
 
             const debouncedFetch = useCallback(_.debounce((fn) => fn(), 300), []);
 
@@ -47,8 +60,14 @@
 
             const getScoreColor = (score) => {
                 if (!score) return 'text-gray-500';
-                if (score >= 4) return 'text-green-600';
-                if (score >= 3) return 'text-yellow-600';
+                if (score >= 90) return 'text-green-600';
+                if (score >= 60) return 'text-yellow-600';
+                return 'text-red-600';
+            };
+
+            const getCallCountColor = (count, expected) => {
+                if (count >= expected) return 'text-green-600';
+                if (count >= expected * 0.5) return 'text-yellow-600';
                 return 'text-red-600';
             };
 
@@ -156,6 +175,27 @@
                 }
             };
 
+            const fetchOperatorIssues = async (svId) => {
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/admin/sv_operators?sv_id=${svId}`, {
+                        headers: { 'X-API-Key': user.apiKey }
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        setOperatorIssues(data.operators_with_issues);
+                        setShowOperatorIssues(true);
+                    } else {
+                        setError(data.error);
+                    }
+                } catch (err) {
+                    setError('Failed to fetch operator issues');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
             const addSv = async () => {
                 if (!newSvName.trim() || !newSvId.trim()) {
                     setError('Please fill in both name and ID');
@@ -255,11 +295,106 @@
                 }
             };
 
+            const sendEvaluation = async () => {
+                if (!evaluationData.evaluator || !evaluationData.operator || 
+                    !evaluationData.call_number || !evaluationData.phone_number || 
+                    !evaluationData.score) {
+                    setError('Please fill all required fields');
+                    return;
+                }
+                
+                if (isNaN(evaluationData.score)) {
+                    setError('Score must be a number');
+                    return;
+                }
+                
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/call_evaluation`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-API-Key': user.apiKey
+                        },
+                        body: JSON.stringify(evaluationData)
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        setSuccess('Call evaluation submitted successfully');
+                        setEvaluationData({
+                            evaluator: evaluationData.evaluator,
+                            operator: '',
+                            month: evaluationData.month,
+                            call_number: '',
+                            phone_number: '',
+                            score: '',
+                            comment: ''
+                        });
+                        setShowEvaluationForm(false);
+                    } else {
+                        setError(data.error || 'Failed to submit evaluation');
+                    }
+                } catch (err) {
+                    setError('Failed to submit evaluation');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            const notifySupervisor = async (svId, operatorName) => {
+                if (!window.confirm(`Send notification to supervisor about ${operatorName}?`)) return;
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/admin/notify_sv`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-API-Key': user.apiKey
+                        },
+                        body: JSON.stringify({ sv_id: svId, operator_name: operatorName })
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        setSuccess(`Notification sent to supervisor: ${data.message}`);
+                    } else {
+                        setError(data.error || 'Failed to send notification');
+                    }
+                } catch (err) {
+                    setError('Failed to send notification');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            const generateWeeklyReport = async () => {
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/admin/generate_report`, {
+                        headers: { 'X-API-Key': user.apiKey }
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        setSuccess('Weekly report generated and sent to admin');
+                    } else {
+                        setError(data.error || 'Failed to generate report');
+                    }
+                } catch (err) {
+                    setError('Failed to generate report');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
             useEffect(() => {
-                if (user && user.role === 'admin') {
-                    debouncedFetch(fetchSvList);
-                } else if (user && user.role === 'sv') {
-                    debouncedFetch(fetchSvData);
+                if (user) {
+                    if (user.role === 'admin') {
+                        debouncedFetch(fetchSvList);
+                    } else if (user.role === 'sv') {
+                        debouncedFetch(fetchSvData);
+                    }
                 }
             }, [user]);
 
@@ -325,13 +460,116 @@
                     <div className="min-h-screen bg-gray-100 p-6">
                         <div className="flex justify-between items-center mb-6">
                             <h1 className="text-3xl font-bold">Admin Dashboard</h1>
-                            <button
-                                onClick={handleLogout}
-                                className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
-                            >
-                                Logout
-                            </button>
+                            <div className="flex space-x-4">
+                                <button
+                                    onClick={() => setShowEvaluationForm(!showEvaluationForm)}
+                                    className="bg-purple-500 text-white px-4 py-2 rounded hover:bg-purple-600"
+                                >
+                                    {showEvaluationForm ? 'Hide Evaluation Form' : 'Add Call Evaluation'}
+                                </button>
+                                <button
+                                    onClick={handleLogout}
+                                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                                >
+                                    Logout
+                                </button>
+                            </div>
                         </div>
+
+                        {showEvaluationForm && (
+                            <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                <h2 className="text-xl font-semibold mb-4">Call Evaluation</h2>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">Evaluator</label>
+                                        <input
+                                            type="text"
+                                            placeholder="Evaluator Name"
+                                            value={evaluationData.evaluator}
+                                            onChange={(e) => setEvaluationData({...evaluationData, evaluator: e.target.value})}
+                                            className="w-full p-2 border rounded"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">Operator</label>
+                                        <input
+                                            type="text"
+                                            placeholder="Operator Name"
+                                            value={evaluationData.operator}
+                                            onChange={(e) => setEvaluationData({...evaluationData, operator: e.target.value})}
+                                            className="w-full p-2 border rounded"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">Month</label>
+                                        <input
+                                            type="text"
+                                            value={evaluationData.month}
+                                            onChange={(e) => setEvaluationData({...evaluationData, month: e.target.value})}
+                                            className="w-full p-2 border rounded"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">Call Number</label>
+                                        <input
+                                            type="text"
+                                            placeholder="Call Number"
+                                            value={evaluationData.call_number}
+                                            onChange={(e) => setEvaluationData({...evaluationData, call_number: e.target.value})}
+                                            className="w-full p-2 border rounded"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">Phone Number</label>
+                                        <input
+                                            type="text"
+                                            placeholder="Phone Number"
+                                            value={evaluationData.phone_number}
+                                            onChange={(e) => setEvaluationData({...evaluationData, phone_number: e.target.value})}
+                                            className="w-full p-2 border rounded"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">Score (0-100)</label>
+                                        <input
+                                            type="number"
+                                            placeholder="Score"
+                                            min="0"
+                                            max="100"
+                                            value={evaluationData.score}
+                                            onChange={(e) => setEvaluationData({...evaluationData, score: e.target.value})}
+                                            className="w-full p-2 border rounded"
+                                        />
+                                    </div>
+                                </div>
+                                <div className="mb-4">
+                                    <label className="block text-sm font-medium mb-1">Comment (optional)</label>
+                                    <textarea
+                                        placeholder="Comment"
+                                        value={evaluationData.comment}
+                                        onChange={(e) => setEvaluationData({...evaluationData, comment: e.target.value})}
+                                        className="w-full p-2 border rounded"
+                                        rows="3"
+                                    />
+                                </div>
+                                <div className="flex justify-between">
+                                    <button
+                                        onClick={sendEvaluation}
+                                        className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
+                                        disabled={isLoading}
+                                    >
+                                        {isLoading ? 'Submitting...' : 'Submit Evaluation'}
+                                    </button>
+                                    <button
+                                        onClick={() => setShowEvaluationForm(false)}
+                                        className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
                         <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                             <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
                             <input
@@ -358,8 +596,18 @@
                                 {isLoading ? 'Adding...' : 'Добавить СВ'}
                             </button>
                         </div>
+
                         <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                            <h2 className="text-xl font-semibold mb-4">Supervisors</h2>
+                            <div className="flex justify-between items-center mb-4">
+                                <h2 className="text-xl font-semibold">Supervisors</h2>
+                                <button
+                                    onClick={generateWeeklyReport}
+                                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                                    disabled={isLoading}
+                                >
+                                    Generate Weekly Report
+                                </button>
+                            </div>
                             {isAdminDataLoading ? (
                                 <p className="text-center">Loading...</p>
                             ) : svList.length === 0 ? (
@@ -385,12 +633,21 @@
                                                             <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
                                                         ) : 'No table'}
                                                     </td>
-                                                    <td className="p-3 border-b">
+                                                    <td className="p-3 border-b space-x-2">
                                                         <button
                                                             onClick={() => removeSv(sv.id)}
                                                             className="bg-red-500 text-white px-2 py-1 hover:bg-red-600 rounded text-sm"
                                                         >
                                                             Remove
+                                                        </button>
+                                                        <button
+                                                            onClick={() => {
+                                                                setSelectedSvId(sv.id);
+                                                                fetchOperatorIssues(sv.id);
+                                                            }}
+                                                            className="bg-yellow-500 text-white px-2 py-1 hover:bg-yellow-600 rounded text-sm"
+                                                        >
+                                                            View Issues
                                                         </button>
                                                     </td>
                                                 </tr>
@@ -400,6 +657,56 @@
                                 </div>
                             )}
                         </div>
+
+                        {showOperatorIssues && operatorIssues.length > 0 && (
+                            <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h2 className="text-xl font-semibold">Operators with Issues</h2>
+                                    <button
+                                        onClick={() => setShowOperatorIssues(false)}
+                                        className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                    >
+                                        Close
+                                    </button>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="min-w-full border-collapse bg-white">
+                                        <thead>
+                                            <tr className="bg-gray-200">
+                                                <th className="p-3 border-b text-left">Name</th>
+                                                <th className="p-3 border-b text-left">Calls</th>
+                                                <th className="p-3 border-b text-left">Expected</th>
+                                                <th className="p-3 border-b text-left">Avg Score</th>
+                                                <th className="p-3 border-b text-left">Action</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {operatorIssues.map((op, index) => (
+                                                <tr key={index} className="hover:bg-gray-50">
+                                                    <td className="p-3 border-b">{op.name}</td>
+                                                    <td className={`p-3 border-b ${getCallCountColor(op.call_count, op.expected_calls)}`}>
+                                                        {op.call_count}
+                                                    </td>
+                                                    <td className="p-3 border-b">{op.expected_calls}</td>
+                                                    <td className={`p-3 border-b ${getScoreColor(op.avg_score)}`}>
+                                                        {op.avg_score ? op.avg_score.toFixed(2) : '-'}
+                                                    </td>
+                                                    <td className="p-3 border-b">
+                                                        <button
+                                                            onClick={() => notifySupervisor(selectedSvId, op.name)}
+                                                            className="bg-blue-500 text-white px-2 py-1 hover:bg-blue-600 rounded text-sm"
+                                                        >
+                                                            Notify SV
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        )}
+
                         <div className="bg-white p-6 rounded-lg shadow-lg">
                             <h2 className="text-xl font-semibold mb-4">View Operator Scores</h2>
                             <select
@@ -430,7 +737,9 @@
                                             {selectedSvData.operators.map((op, index) => (
                                                 <tr key={index} className="hover:bg-gray-50">
                                                     <td className="p-3 border-b">{op.name}</td>
-                                                    <td className="p-3 border-b">{op.call_count}</td>
+                                                    <td className={`p-3 border-b ${getCallCountColor(op.call_count, selectedSvData.expected_calls)}`}>
+                                                        {op.call_count}
+                                                    </td>
                                                     <td className="p-3 border-b">
                                                         <span className={getScoreColor(op.avg_score)}>
                                                             {op.avg_score ? op.avg_score.toFixed(2) : '-'}
@@ -505,7 +814,9 @@
                                             {svData.operators.map((op, index) => (
                                                 <tr key={index} className="hover:bg-gray-50">
                                                     <td className="p-3 border-b">{op.name}</td>
-                                                    <td className="p-3 border-b">{op.call_count}</td>
+                                                    <td className={`p-3 border-b ${getCallCountColor(op.call_count, svData.expected_calls)}`}>
+                                                        {op.call_count}
+                                                    </td>
                                                     <td className="p-3 border-b">
                                                         <span className={getScoreColor(op.avg_score)}>
                                                             {op.avg_score ? op.avg_score.toFixed(2) : '-'}

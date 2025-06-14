@@ -190,6 +190,115 @@ def get_sv_data():
         logging.error(f"Error fetching SV data: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/admin/notify_sv', methods=['POST'])
+@require_api_key
+def notify_supervisor():
+    try:
+        data = request.get_json()
+        required_fields = ['sv_id', 'operator_name']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        sv_id = int(data['sv_id'])
+        operator_name = data['operator_name']
+        
+        current_week = get_current_week_of_month()
+        expected_calls = get_expected_calls(current_week)
+        
+        with SVlist_lock:
+            sv = SVlist.get(sv_id)
+            if not sv:
+                return jsonify({"error": "SV not found"}), 404
+
+            notification_text = (
+                f"⚠️ <b>Требуется внимание!</b>\n\n"
+                f"У оператора <b>{operator_name}</b> недостаточно прослушанных звонков.\n"
+                f"Текущая неделя: {current_week}\n"
+                f"Ожидается: {expected_calls} звонков (по 5 в неделю)\n\n"
+                f"Пожалуйста, проверьте и прослушайте недостающие звонки."
+            )
+            
+            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": sv_id,
+                "text": notification_text,
+                "parse_mode": "HTML"
+            }
+            response = requests.post(telegram_url, json=payload, timeout=10)
+            
+            if response.status_code != 200:
+                error_detail = response.json().get('description', 'Unknown error')
+                logging.error(f"Telegram API error: {error_detail}")
+                return jsonify({"error": f"Failed to send Telegram message: {error_detail}"}), 500
+
+        return jsonify({"status": "success", "message": f"Notification sent to {sv.name}"}), 200
+    except Exception as e:
+        logging.error(f"Error in notify_supervisor: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/admin/sv_operators', methods=['GET'])
+@require_api_key
+def get_sv_operators():
+    try:
+        sv_id = request.args.get('sv_id')
+        if not sv_id:
+            return jsonify({"error": "Missing sv_id parameter"}), 400
+        
+        sv_id = int(sv_id)
+        with SVlist_lock:
+            sv = SVlist.get(sv_id)
+            if not sv:
+                return jsonify({"error": "SV not found"}), 404
+            
+            sheet_name, operators, error = extract_fio_and_links(sv.table) if sv.table else (None, [], "No table set")
+            if error:
+                return jsonify({"error": error}), 400
+            
+            current_week = get_current_week_of_month()
+            expected_calls = get_expected_calls(current_week)
+            
+            operators_with_issues = []
+            for op in operators:
+                call_count = op.get('call_count', 0)
+                if call_count in [None, "#DIV/0!"]:
+                    call_count = 0
+                else:
+                    try:
+                        call_count = int(call_count)
+                    except (ValueError, TypeError):
+                        call_count = 0
+                
+                if call_count < expected_calls:
+                    operators_with_issues.append({
+                        'name': op.get('name', ''),
+                        'call_count': call_count,
+                        'expected_calls': expected_calls,
+                        'avg_score': op.get('avg_score', None)
+                    })
+            
+            return jsonify({
+                "status": "success",
+                "operators": operators,
+                "operators_with_issues": operators_with_issues,
+                "current_week": current_week,
+                "expected_calls": expected_calls
+            })
+    except Exception as e:
+        logging.error(f"Error fetching SV operators: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/admin/generate_report', methods=['GET'])
+@require_api_key
+def generate_report():
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(generate_weekly_report())
+        return jsonify({"status": "success", "message": "Report generation initiated"})
+    except Exception as e:
+        logging.error(f"Error in generate_report: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/sv/update_table', methods=['POST'])
 def update_sv_table():
     try:
