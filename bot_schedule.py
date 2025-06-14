@@ -22,6 +22,7 @@ from openpyxl import load_workbook
 import re
 import xlsxwriter
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO)
@@ -335,13 +336,14 @@ def get_sv_operators():
 @require_api_key
 def handle_generate_report():
     try:
-        if sync_generate_weekly_report():
-            return jsonify({"status": "success", "message": "Weekly report generated and sent"})
-        else:
-            return jsonify({"error": "Failed to generate report"}), 500
+        # Запускаем в отдельном потоке
+        future = executor.submit(run_async_report)
+        if future.result(timeout=300):  # 5 минут таймаут
+            return jsonify({"status": "success", "message": "Report generation started"})
+        return jsonify({"error": "Report generation failed"}), 500
     except Exception as e:
         logging.error(f"Error in generate_report: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/sv/update_table', methods=['POST'])
 def update_sv_table():
@@ -1227,10 +1229,13 @@ async def generate_weekly_report():
         )
         return False
 
-def sync_generate_weekly_report():
+def run_async_report():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    return loop.run_until_complete(generate_weekly_report())
+    try:
+        return loop.run_until_complete(generate_weekly_report())
+    finally:
+        loop.close()
 
 # === Главный запуск =============================================================================================
 if __name__ == '__main__':
