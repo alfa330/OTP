@@ -8,58 +8,35 @@
     <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/babel-standalone@6/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
 </head>
-<body className="bg-gray-100">
+<body className="bg-gray-100 font-sans">
     <div id="root"></div>
     <script type="text/babel">
-        const { useState, useEffect, useCallback } = React;
+        const { useState, useEffect } = React;
 
-        const API_BASE_URL = 'https://otp-wif3.onrender.com'; // Replace with your backend URL
+        const API_BASE_URL = 'https://otp-wif3.onrender.com';
 
         const App = () => {
             const [user, setUser] = useState(null);
             const [key, setKey] = useState('');
             const [error, setError] = useState('');
-            const [success, setSuccess] = useState('');
+            const [loading, setLoading] = useState(false);
             const [svList, setSvList] = useState([]);
             const [svData, setSvData] = useState(null);
             const [newSvName, setNewSvName] = useState('');
             const [newSvId, setNewSvId] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
-            const [evaluation, setEvaluation] = useState({
-                operator: '',
-                month: '',
-                call_number: '',
-                phone_number: '',
-                score: '',
-                comment: ''
-            });
-            const [isLoading, setIsLoading] = useState(false);
-            const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
-
-            // Debounced function for API calls
-            const debouncedFetch = useCallback(_.debounce((fn) => fn(), 300), []);
-
-            const clearMessages = () => {
-                setError('');
-                setSuccess('');
-            };
+            const [showConfirm, setShowConfirm] = useState(null);
+            const [selectedSvId, setSelectedSvId] = useState('');
+            const [svRatings, setSvRatings] = useState([]);
 
             const validateUrl = (url) => {
-                const googleSheetsRegex = /^https:\/\/docs\.google\.com\/spreadsheets\/d\/[a-zA-Z0-9_-]+/;
-                return googleSheetsRegex.test(url);
+                return /^https:\/\/docs\.google\.com\/spreadsheets\/d\/[a-zA-Z0-9-_]+/.test(url);
             };
 
-            const validateEvaluation = () => {
-                const { operator, month, call_number, phone_number, score, comment } = evaluation;
-                if (!operator.trim()) return "Operator name is required";
-                if (!month.trim()) return "Month is required";
-                if (!call_number.trim()) return "Call number is required";
-                if (!phone_number.trim()) return "Phone number is required";
-                if (score === '' || isNaN(score) || score < 0 || score > 100) return "Score must be a number between 0 and 100";
-                if (score < 100 && !comment.trim()) return "Comment is required for scores below 100";
-                return null;
+            const handleApiError = (err) => {
+                setError(err.message || 'An unexpected error occurred');
+                setLoading(false);
             };
 
             const login = async () => {
@@ -67,47 +44,46 @@
                     setError('Please enter an API key or Telegram ID');
                     return;
                 }
-                setIsLoading(true);
-                clearMessages();
+                setLoading(true);
+                setError('');
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/login`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ key: key.trim() })
+                        body: JSON.stringify({ key })
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
                         setUser({ role: data.role, id: data.id, name: data.name });
-                        setKey('');
+                        setError('');
                     } else {
                         setError(data.error || 'Invalid key or ID');
                     }
                 } catch (err) {
-                    setError('Failed to connect to server');
+                    handleApiError(err);
                 } finally {
-                    setIsLoading(false);
+                    setLoading(false);
                 }
             };
 
-            const handleLogout = () => {
-                setShowLogoutConfirm(true);
-            };
-
-            const confirmLogout = () => {
+            const logout = () => {
                 setUser(null);
                 setSvList([]);
                 setSvData(null);
                 setKey('');
-                setShowLogoutConfirm(false);
-                clearMessages();
+                setError('');
+                setNewSvName('');
+                setNewSvId('');
+                setNewTableUrl('');
+                setSelectedSvId('');
+                setSvRatings([]);
             };
 
             const fetchSvList = async () => {
-                setIsLoading(true);
-                clearMessages();
+                setLoading(true);
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/admin/sv_list`, {
-                        headers: { 'X-API-Key': key || FLASK_API_KEY }
+                        headers: { 'X-API-Key': key }
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
@@ -116,15 +92,14 @@
                         setError(data.error);
                     }
                 } catch (err) {
-                    setError('Failed to fetch supervisor list');
+                    handleApiError(err);
                 } finally {
-                    setIsLoading(false);
+                    setLoading(false);
                 }
             };
 
             const fetchSvData = async () => {
-                setIsLoading(true);
-                clearMessages();
+                setLoading(true);
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/sv/data?id=${user.id}`);
                     const data = await response.json();
@@ -134,9 +109,28 @@
                         setError(data.error);
                     }
                 } catch (err) {
-                    setError('Failed to fetch supervisor data');
+                    handleApiError(err);
                 } finally {
-                    setIsLoading(false);
+                    setLoading(false);
+                }
+            };
+
+            const fetchSvRatings = async (svId) => {
+                setLoading(true);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/admin/sv_ratings?id=${svId}`, {
+                        headers: { 'X-API-Key': key }
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        setSvRatings(data.ratings || []);
+                    } else {
+                        setError(data.error);
+                    }
+                } catch (err) {
+                    handleApiError(err);
+                } finally {
+                    setLoading(false);
                 }
             };
 
@@ -145,24 +139,19 @@
                     setError('Please fill in both name and ID');
                     return;
                 }
-                if (isNaN(newSvId) || newSvId <= 0) {
-                    setError('ID must be a positive number');
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
+                setLoading(true);
+                setError('');
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/admin/add_sv`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-API-Key': key || FLASK_API_KEY
+                            'X-API-Key': key
                         },
-                        body: JSON.stringify({ name: newSvName.trim(), id: newSvId.trim() })
+                        body: JSON.stringify({ name: newSvName, id: newSvId })
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
-                        setSuccess('Supervisor added successfully');
                         fetchSvList();
                         setNewSvName('');
                         setNewSvId('');
@@ -170,165 +159,130 @@
                         setError(data.error);
                     }
                 } catch (err) {
-                    setError('Failed to add supervisor');
+                    handleApiError(err);
                 } finally {
-                    setIsLoading(false);
+                    setLoading(false);
                 }
             };
 
             const removeSv = async (svId) => {
-                if (!window.confirm(`Are you sure you want to remove supervisor ID ${svId}?`)) return;
-                setIsLoading(true);
-                clearMessages();
+                setLoading(true);
+                setError('');
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/admin/remove_sv`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-API-Key': key || FLASK_API_KEY
+                            'X-API-Key': key
                         },
                         body: JSON.stringify({ id: svId })
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
-                        setSuccess('Supervisor removed successfully');
                         fetchSvList();
+                        if (selectedSvId === svId) {
+                            setSelectedSvId('');
+                            setSvRatings([]);
+                        }
                     } else {
                         setError(data.error);
                     }
                 } catch (err) {
-                    setError('Failed to remove supervisor');
+                    handleApiError(err);
                 } finally {
-                    setIsLoading(false);
+                    setLoading(false);
+                    setShowConfirm(null);
                 }
             };
 
             const updateTable = async () => {
                 if (!newTableUrl.trim()) {
-                    setError('Please enter a table URL');
+                    setError('Please enter a Google Sheets URL');
                     return;
                 }
                 if (!validateUrl(newTableUrl)) {
                     setError('Please enter a valid Google Sheets URL');
                     return;
                 }
-                setIsLoading(true);
-                clearMessages();
+                setLoading(true);
+                setError('');
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/sv/update_table`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ id: user.id, table_url: newTableUrl.trim() })
+                        body: JSON.stringify({ id: user.id, table_url: newTableUrl })
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
-                        setSuccess('Table updated successfully');
                         fetchSvData();
                         setNewTableUrl('');
                     } else {
                         setError(data.error);
                     }
                 } catch (err) {
-                    setError('Failed to update table');
+                    handleApiError(err);
                 } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const submitEvaluation = async () => {
-                const validationError = validateEvaluation();
-                if (validationError) {
-                    setError(validationError);
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await fetch(`${API_BASE_URL}/api/sv/submit_evaluation`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            evaluator: user.name,
-                            ...evaluation,
-                            score: parseFloat(evaluation.score)
-                        })
-                    });
-                    const data = await response.json();
-                    if (data.status === 'success') {
-                        setSuccess('Evaluation submitted successfully');
-                        setEvaluation({
-                            operator: '',
-                            month: '',
-                            call_number: '',
-                            phone_number: '',
-                            score: '',
-                            comment: ''
-                        });
-                        fetchSvData();
-                    } else {
-                        setError(data.error);
-                    }
-                } catch (err) {
-                    setError('Failed to submit evaluation');
-                } finally {
-                    setIsLoading(false);
+                    setLoading(false);
                 }
             };
 
             useEffect(() => {
                 if (user && user.role === 'admin') {
-                    debouncedFetch(fetchSvList);
+                    fetchSvList();
                 } else if (user && user.role === 'sv') {
-                    debouncedFetch(fetchSvData);
+                    fetchSvData();
                 }
             }, [user]);
+
+            useEffect(() => {
+                if (selectedSvId && user.role === 'admin') {
+                    fetchSvRatings(selectedSvId);
+                }
+            }, [selectedSvId]);
+
+            const ConfirmDialog = ({ onConfirm, onCancel, message }) => (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white p-6 rounded-lg shadow-xl">
+                        <p className="mb-4">{message}</p>
+                        <div className="flex justify-end space-x-2">
+                            <button
+                                onClick={onCancel}
+                                className="px-4 py-2 bg-gray-300 rounded hover:bg-gray-400"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={onConfirm}
+                                className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+                            >
+                                Confirm
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
 
             if (!user) {
                 return (
                     <div className="min-h-screen flex items-center justify-center bg-gray-100">
                         <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                            <h1 className="text-2xl font-bold mb-6 text-center">OTP Bot Login</h1>
+                            <h1 className="text-2xl font-bold mb-6 text-center text-gray-800">OTP Bot Login</h1>
                             <input
                                 type="text"
                                 placeholder="Enter API Key or Telegram ID"
                                 value={key}
                                 onChange={(e) => setKey(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
+                                className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={loading}
                             />
                             <button
                                 onClick={login}
-                                className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                disabled={isLoading}
+                                className={`w-full bg-blue-500 text-white p-3 rounded-lg hover:bg-blue-600 transition duration-200 ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                disabled={loading}
                             >
-                                {isLoading ? 'Logging in...' : 'Login'}
+                                {loading ? 'Logging in...' : 'Login'}
                             </button>
                             {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                        </div>
-                    </div>
-                );
-            }
-
-            if (showLogoutConfirm) {
-                return (
-                    <div className="min-h-screen flex items-center justify-center bg-gray-100">
-                        <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                            <h2 className="text-xl font-semibold mb-4 text-center">Confirm Logout</h2>
-                            <p className="text-center mb-6">Are you sure you want to log out?</p>
-                            <div className="flex justify-between">
-                                <button
-                                    onClick={confirmLogout}
-                                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
-                                >
-                                    Yes, Log Out
-                                </button>
-                                <button
-                                    onClick={() => setShowLogoutConfirm(false)}
-                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                >
-                                    Cancel
-                                </button>
-                            </div>
                         </div>
                     </div>
                 );
@@ -338,71 +292,68 @@
                 return (
                     <div className="min-h-screen bg-gray-100 p-6">
                         <div className="flex justify-between items-center mb-6">
-                            <h1 className="text-3xl font-bold">Admin Dashboard</h1>
+                            <h1 className="text-3xl font-bold text-gray-800">Admin Dashboard</h1>
                             <button
-                                onClick={handleLogout}
-                                className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                                onClick={logout}
+                                className="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition duration-200"
                             >
                                 Logout
                             </button>
                         </div>
                         <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                            <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
-                            <input
-                                type="text"
-                                placeholder="Supervisor Name"
-                                value={newSvName}
-                                onChange={(e) => setNewSvName(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-green-500"
-                                disabled={isLoading}
-                            />
-                            <input
-                                type="text"
-                                placeholder="Supervisor Telegram ID"
-                                value={newSvId}
-                                onChange={(e) => setNewSvId(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-green-500"
-                                disabled={isLoading}
-                            />
+                            <h2 className="text-xl font-semibold mb-4 text-gray-700">Add Supervisor</h2>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                                <input
+                                    type="text"
+                                    placeholder="Supervisor Name"
+                                    value={newSvName}
+                                    onChange={(e) => setNewSvName(e.target.value)}
+                                    className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                                    disabled={loading}
+                                />
+                                <input
+                                    type="text"
+                                    placeholder="Supervisor Telegram ID"
+                                    value={newSvId}
+                                    onChange={(e) => setNewSvId(e.target.value)}
+                                    className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                                    disabled={loading}
+                                />
+                            </div>
                             <button
                                 onClick={addSv}
-                                className={`bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                disabled={isLoading}
+                                className={`bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition duration-200 ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                disabled={loading}
                             >
-                                {isLoading ? 'Adding...' : 'Добавить СВ'}
+                                {loading ? 'Adding...' : 'Add Supervisor'}
                             </button>
                         </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg">
-                            <h2 className="text-xl font-semibold mb-4">Supervisors</h2>
-                            {isLoading ? (
-                                <p className="text-center">Loading...</p>
+                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                            <h2 className="text-xl font-semibold mb-4 text-gray-700">Supervisors</h2>
+                            {loading ? (
+                                <p className="text-gray-500">Loading...</p>
                             ) : svList.length === 0 ? (
-                                <p className="text-center">No supervisors found.</p>
+                                <p className="text-gray-500">No supervisors found.</p>
                             ) : (
-                                <div className="table-responsive">
-                                    <table className="min-w-full border-collapse">
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
                                         <thead>
-                                            <tr>
-                                                <th class="p-2 border-b">Name</th>
-                                            <th className="p-2 border-b">ID</th>
-                                            <th className="p-2 border-b">Table URL</th>
-                                        <th className="p-2 border-b">Actions</th>
-                                        </tr>
+                                            <tr className="bg-gray-100">
+                                                <th className="p-3 text-left">Name</th>
+                                                <th className="p-3 text-left">ID</th>
+                                                <th className="p-3 text-right">Actions</th>
+                                            </tr>
                                         </thead>
                                         <tbody>
                                             {svList.map(sv => (
-                                                <tr key={sv.id} className="hover:bg-gray-50">
-                                                    <td className="p-2 border-b">{sv.name}</td>
-                                                    <td className="p-2 border-b">{sv.id}</td>
-                                                    <td className="p-2 border-b">
-                                                        {sv.table ? (
-                                                            <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600">View Table</a>
-                                                        ) : 'No table'}
-                                                    </td>
-                                                    <td className="p-2 border-b">
+                                                <tr key={sv.id} className="border-t">
+                                                    <td className="p-3">{sv.name}</td>
+                                                    <td className="p-3">{sv.id}</td>
+                                                    <td className="p-3 text-right">
                                                         <button
-                                                            onClick={() => removeSv(sv.id)}
-                                                            className="bg-red-500 text-white px-2 py-1 hover:bg-red-600 rounded"
+                                                            onClick={() => setShowConfirm(sv.id)}
+                                                            className="bg-red-500 text-white px-2 py-1 rounded-lg hover:bg-red-600 transition duration-200"
+                                                            disabled={loading}
                                                         >
                                                             Remove
                                                         </button>
@@ -413,9 +364,57 @@
                                     </table>
                                 </div>
                             )}
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                         </div>
+                        <div className="bg-white p-6 rounded-lg shadow-lg">
+                            <h2 className="text-xl font-semibold mb-4 text-gray-700">Supervisor Ratings</h2>
+                            <select
+                                value={selectedSvId}
+                                onChange={(e) => setSelectedSvId(e.target.value)}
+                                className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={loading}
+                            >
+                                <option value="">Select a Supervisor</option>
+                                {svList.map(sv => (
+                                    <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
+                                ))}
+                            </select>
+                            {loading ? (
+                                <p className="text-gray-500">Loading...</p>
+                            ) : selectedSvId && svRatings.length > 0 ? (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead>
+                                            <tr className="bg-gray-100">
+                                                <th className="p-3 text-left">Date</th>
+                                                <th className="p-3 text-left">Score</th>
+                                                <th className="p-3 text-left">Comment</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {svRatings.map((rating, index) => (
+                                                <tr key={index} className="border-t">
+                                                    <td className="p-3">{rating.date}</td>
+                                                    <td className="p-3">{rating.score}</td>
+                                                    <td className="p-3">{rating.comment || '-'}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            ) : selectedSvId ? (
+                                <p className="text-gray-500">No ratings found for this supervisor.</p>
+                            ) : (
+                                <p className="text-gray-500">Please select a supervisor to view ratings.</p>
+                            )}
+                        </div>
+                        {error && <p className="text-red-500 mt-4">{error}</p>}
+                        {showConfirm && (
+                            <ConfirmDialog
+                                message="Are you sure you want to remove this supervisor?"
+                                onConfirm={() => removeSv(showConfirm)}
+                                onCancel={() => setShowConfirm(null)}
+                            />
+                        )}
                     </div>
                 );
             }
@@ -424,129 +423,91 @@
                 return (
                     <div className="min-h-screen bg-gray-100 p-6">
                         <div className="flex justify-between items-center mb-6">
-                            <h1 className="text-3xl font-bold">Supervisor Dashboard</h1>
+                            <h1 className="text-3xl font-bold text-gray-800">Supervisor Dashboard</h1>
                             <button
-                                onClick={handleLogout}
-                                className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                                onClick={logout}
+                                className="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition duration-200"
                             >
                                 Logout
                             </button>
                         </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg mb-8">
-                            <h2 className="text-xl font-semibold mb-4">Update Table</h2>
+                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                            <h2 className="text-xl font-semibold mb-4 text-gray-700">Update Table</h2>
                             <input
                                 type="text"
                                 placeholder="Google Sheets URL"
                                 value={newTableUrl}
                                 onChange={(e) => setNewTableUrl(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
+                                className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={loading}
                             />
                             <button
                                 onClick={updateTable}
-                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                disabled={isLoading}
+                                className={`bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition duration-200 ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                disabled={loading}
                             >
-                                {isLoading ? 'Updating...' : 'Update Table'}
+                                {loading ? 'Updating...' : 'Update Table'}
                             </button>
                         </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg mb-8">
-                            <h2 className="text-xl font-semibold mb-4">Submit Call Evaluation</h2>
-                            <input
-                                type="text"
-                                placeholder="Operator Name"
-                                value={evaluation.operator}
-                                onChange={(e) => setEvaluation({ ...evaluation, operator: e.target.value })}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            />
-                            <input
-                                type="text"
-                                placeholder="Month (e.g., January 2025)"
-                                value={evaluation.month}
-                                onChange={(e) => setEvaluation({ ...evaluation, month: e.target.value })}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            />
-                            <input
-                                type="text"
-                                placeholder="Call Number"
-                                value={evaluation.call_number}
-                                onChange={(e) => setEvaluation({ ...evaluation, call_number: e.target.value })}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            />
-                            <input
-                                type="text"
-                                placeholder="Phone Number"
-                                value={evaluation.phone_number}
-                                onChange={(e) => setEvaluation({ ...evaluation, phone_number: e.target.value })}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            />
-                            <input
-                                type="number"
-                                placeholder="Score (0-100)"
-                                value={evaluation.score}
-                                onChange={(e) => setEvaluation({ ...evaluation, score: e.target.value })}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                min="0"
-                                max="100"
-                                disabled={isLoading}
-                            />
-                            <textarea
-                                placeholder="Comment (required if score < 100)"
-                                value={evaluation.comment}
-                                onChange={(e) => setEvaluation({ ...evaluation, comment: e.target.value })}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                rows="4"
-                                disabled={isLoading}
-                            />
-                            <button
-                                onClick={submitEvaluation}
-                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                disabled={isLoading}
-                            >
-                                {isLoading ? 'Submitting...' : 'Submit Evaluation'}
-                            </button>
-                        </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg">
-                            <h2 className="text-xl font-semibold mb-4">Your Operators</h2>
-                            {isLoading ? (
-                                <p className="text-center">Loading...</p>
+                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                            <h2 className="text-xl font-semibold mb-4 text-gray-700">Your Operators</h2>
+                            {loading ? (
+                                <p className="text-gray-500">Loading...</p>
                             ) : svData && svData.operators && svData.operators.length > 0 ? (
                                 <div className="overflow-x-auto">
-                                    <table className="min-w-full border-collapse">
+                                    <table className="w-full">
                                         <thead>
-                                            <tr>
-                                                <th className="p-2 border-b">Name</th>
-                                                <th className="p-2 border-b">Calls</th>
-                                                <th className="p-2 border-b">Avg Score</th>
-                                                <th className="p-2 border-b">Link</th>
+                                            <tr className="bg-gray-100">
+                                                <th className="p-3 text-left">Name</th>
+                                                <th className="p-3 text-left">Calls</th>
+                                                <th className="p-3 text-left">Avg Score</th>
                                             </tr>
                                         </thead>
                                         <tbody>
                                             {svData.operators.map((op, index) => (
-                                                <tr key={index} className="hover:bg-gray-50">
-                                                    <td className="p-2 border-b">{op.name}</td>
-                                                    <td className="p-2 border-b">{op.call_count}</td>
-                                                    <td className="p-2 border-b">{op.avg_score ? op.avg_score.toFixed(2) : '-'}</td>
-                                                    <td className="p-2 border-b">
-                                                        {op.link ? (
-                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                        ) : '-'}
-                                                    </td>
+                                                <tr key={index} className="border-t">
+                                                    <td className="p-3">{op.name}</td>
+                                                    <td className="p-3">{op.call_count}</td>
+                                                    <td className="p-3">{op.avg_score ? op.avg_score.toFixed(2) : '-'}</td>
                                                 </tr>
                                             ))}
                                         </tbody>
                                     </table>
                                 </div>
                             ) : (
-                                <p className="text-center">No operators found.</p>
+                                <p className="text-gray-500">No operators found.</p>
                             )}
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                         </div>
+                        <div className="bg-white p-6 rounded-lg shadow-lg">
+                            <h2 className="text-xl font-semibold mb-4 text-gray-700">Your Ratings</h2>
+                            {loading ? (
+                                <p className="text-gray-500">Loading...</p>
+                            ) : svData && svData.ratings && svData.ratings.length > 0 ? (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead>
+                                            <tr className="bg-gray-100">
+                                                <th className="p-3 text-left">Date</th>
+                                                <th className="p-3 text-left">Score</th>
+                                                <th className="p-3 text-left">Comment</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {svData.ratings.map((rating, index) => (
+                                                <tr key={index} className="border-t">
+                                                    <td className="p-3">{rating.date}</td>
+                                                    <td className="p-3">{rating.score}</td>
+                                                    <td className="p-3">{rating.comment || '-'}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            ) : (
+                                <p className="text-gray-500">No ratings found.</p>
+                            )}
+                        </div>
+                        {error && <p className="text-red-500 mt-4">{error}</p>}
                     </div>
                 );
             }
