@@ -990,7 +990,7 @@ async def tableName(message: types.Message, state: FSMContext):
 
         async with state.proxy() as data:
             data['table_url'] = message.text
-            if is_admin_changing:
+            if is_admin_changing or user[3]=='sv' :
                 data.setdefault('sv_id', user_id)
 
         message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
