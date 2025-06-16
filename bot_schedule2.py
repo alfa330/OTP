@@ -48,7 +48,7 @@ executor_pool = ThreadPoolExecutor(max_workers=4)
 
 # === Flask-сервер ================================================================================================
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "https://alfa330.github.io"}})
+CORS(app, resources={r"/api/*": {"origins": ["https://alfa330.github.io", "http://localhost:3000"]}})
 
 def require_api_key(f):
     @wraps(f)
@@ -57,12 +57,24 @@ def require_api_key(f):
         if api_key and api_key == FLASK_API_KEY:
             return f(*args, **kwargs)
         else:
-            return jsonify({"error": "Invalid or missing API key"}), 401
+            logging.warning(f"Invalid or missing API key: {api_key}")
+            return jsonify({"error": "Invalid or missing API key", "provided_key": api_key}), 401
     return decorated
 
 @app.route('/')
 def index():
     return "Bot is alive!", 200
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    try:
+        # Test database connectivity
+        with db._get_cursor() as cursor:
+            cursor.execute("SELECT 1")
+        return jsonify({"status": "healthy", "database": "connected"}), 200
+    except Exception as e:
+        logging.error(f"Health check failed: {e}")
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -81,7 +93,8 @@ def login():
                     "role": user[3],
                     "id": user[0],
                     "name": user[2],
-                    "telegram_id": user[1]
+                    "telegram_id": user[1],
+                    "apiKey": FLASK_API_KEY  # Return API key for frontend
                 })
         
         if 'login' in data and 'password' in data:
@@ -95,7 +108,8 @@ def login():
                     "role": user[3],
                     "id": user[0],
                     "name": user[2],
-                    "telegram_id": user[1]
+                    "telegram_id": user[1],
+                    "apiKey": FLASK_API_KEY  # Return API key for frontend
                 })
         
         return jsonify({"error": "Invalid credentials"}), 401
@@ -107,12 +121,16 @@ def login():
 @require_api_key
 def get_sv_list():
     try:
+        # Verify database connectivity
+        with db._get_cursor() as cursor:
+            cursor.execute("SELECT 1")
         supervisors = db.get_supervisors()
+        logging.info(f"Fetched {len(supervisors)} supervisors")
         sv_data = [{"id": sv[0], "name": sv[1], "table": sv[2]} for sv in supervisors]
         return jsonify({"status": "success", "sv_list": sv_data})
     except Exception as e:
-        logging.error(f"Error fetching SV list: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        logging.error(f"Error fetching SV list: {e}", exc_info=True)
+        return jsonify({"error": f"Failed to fetch supervisors: {str(e)}"}), 500
 
 @app.route('/api/call_evaluations', methods=['GET'])
 def get_call_evaluations():
