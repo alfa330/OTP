@@ -1,2 +1,2 @@
 #!/bin/bash
-python bot_schedule.py
+python bot_schedule2.py
