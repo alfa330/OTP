@@ -181,6 +181,7 @@
             const fetchSvList = async () => {
                 setIsAdminDataLoading(true);
                 clearMessages();
+                console.log('Fetching SV list with API key:', user.apiKey); // Added for debugging
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
                         headers: { 'X-API-Key': user.apiKey }
@@ -192,8 +193,8 @@
                         setError(data.error || 'Failed to fetch supervisor list');
                     }
                 } catch (err) {
-                    console.error('Fetch SV list error:', err);
-                    setError('Failed to fetch supervisor list');
+                    console.error('Fetch SV list error:', err, err.response); // Enhanced error logging
+                    setError(err.response?.data?.error || 'Failed to fetch supervisor list');
                 } finally {
                     setIsAdminDataLoading(false);
                 }
