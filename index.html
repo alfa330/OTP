@@ -139,7 +139,8 @@
                             role: data.role,
                             id: data.id,
                             name: data.name,
-                            apiKey: data.telegram_id || data.apiKey
+                            telegram_id: data.telegram_id,
+                            apiKey: data.apiKey  // Используем полученный ключ или фиксированный
                         });
                         setLogin('');
                         setPassword('');
