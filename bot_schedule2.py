@@ -910,6 +910,133 @@ async def change_sv_table(message: types.Message):
         await sv.change_table.set()
     await message.delete()
 
+@dp.callback_query_handler(lambda c: c.data.startswith('change_table_'), state=sv.change_table)
+async def select_sv_for_table_change(callback: types.CallbackQuery, state: FSMContext):
+    sv_id = int(callback.data.split('_')[2])
+    async with state.proxy() as data:
+        data['sv_id'] = sv_id
+    user = db.get_user(id=sv_id)
+    if user:
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text=f'<b>Отправьте новую таблицу ОКК для {user[2]}🖊</b>',
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+        await sv.crtable.set()
+    else:
+        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
+        await state.finish()
+
+@dp.message_handler(regexp='Добавить таблицу📑')
+async def crtablee(message: types.Message):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user and user[3] == 'sv':
+        await bot.send_message(
+            text='<b>Отправьте вашу таблицу ОКК🖊</b>',
+            chat_id=message.from_user.id,
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        await sv.crtable.set()
+    await message.delete()
+
+@dp.message_handler(state=sv.crtable)
+async def tableName(message: types.Message, state: FSMContext):
+    try:
+        user_id = message.from_user.id
+        user = db.get_user(telegram_id=user_id)
+        is_admin_changing = await state.get_state() == sv.crtable.state and user and user[3] == 'admin'
+        
+        if not is_admin_changing and (not user or user[3] != 'sv'):
+            await bot.send_message(
+                chat_id=user_id,
+                text="Ошибка: Вы не зарегистрированы как супервайзер! Пожалуйста, добавьтесь через администратора.",
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            await state.finish()
+            return
+
+        sheet_name, operators, error = extract_fio_and_links(message.text)
+        
+        if error:
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"{error}\n\n<b>Пожалуйста, отправьте корректную ссылку на таблицу.</b>",
+                parse_mode="HTML",
+                reply_markup=get_cancel_keyboard()
+            )
+            return
+
+        async with state.proxy() as data:
+            data['table_url'] = message.text
+            if is_admin_changing:
+                data.setdefault('sv_id', user_id)
+
+        message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
+        for op in operators:
+            if op['link']:
+                message_text += f"👤 {op['name']} → <a href='{op['link']}'>Ссылка</a>\n"
+            else:
+                message_text += f"👤 {op['name']} → Ссылка отсутствует\n"
+        message_text += "\n<b>Это все ваши операторы?</b>"
+
+        await bot.send_message(
+            chat_id=user_id,
+            text=message_text,
+            parse_mode="HTML",
+            reply_markup=get_verify_keyboard(),
+            disable_web_page_preview=True
+        )
+        await sv.verify_table.set()
+        await message.delete()
+    except Exception as e:
+        logging.error(f"Ошибка в tableName: {e}")
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="Произошла ошибка при обработке таблицы. Попробуйте снова или свяжитесь с администратором.",
+            parse_mode="HTML",
+            reply_markup=get_cancel_keyboard()
+        )
+
+@dp.callback_query_handler(state=sv.verify_table)
+async def verify_table(callback: types.CallbackQuery, state: FSMContext):
+    async with state.proxy() as data:
+        table_url = data.get('table_url')
+        sv_id = data.get('sv_id', callback.from_user.id)
+    
+    user = db.get_user(id=sv_id)
+    if not user:
+        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
+        await state.finish()
+        return
+    
+    if callback.data == "verify_yes":
+        db.update_user_table(sv_id, table_url)
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add(KeyboardButton('Добавить таблицу📑'))
+        reply_markup = kb if sv_id == callback.from_user.id else get_editor_keyboard()
+        target_id = callback.from_user.id if sv_id == callback.from_user.id else admin
+        await bot.send_message(
+            chat_id=target_id,
+            text=f'<b>Таблица успешно подтверждена и сохранена для {user[2]}✅</b>',
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+        await state.finish()
+    elif callback.data == "verify_no":
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text=f'<b>Отправьте корректную таблицу ОКК для {user[2]}🖊</b>',
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+        await sv.crtable.set()
+
 @dp.message_handler(regexp='Оценки📊')
 async def view_evaluations(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)

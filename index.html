@@ -4,23 +4,51 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OTP Bot Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/babel-standalone@6/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.6/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
 </head>
-<body className="bg-gray-100">
+<body class="bg-gray-100">
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback } = React;
 
         const API_BASE_URL = 'https://otp-wif3.onrender.com';
 
+        // Error Boundary Component
+        class ErrorBoundary extends React.Component {
+            state = { hasError: false, error: null };
+
+            static getDerivedStateFromError(error) {
+                return { hasError: true, error };
+            }
+
+            componentDidCatch(error, errorInfo) {
+                console.error('ErrorBoundary caught:', error, errorInfo);
+            }
+
+            render() {
+                if (this.state.hasError) {
+                    return (
+                        <div className="min-h-screen flex items-center justify-center bg-gray-100">
+                            <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
+                                <h1 className="text-2xl font-bold mb-4 text-center text-red-500">Application Error</h1>
+                                <p className="text-center">An error occurred: {this.state.error?.message || 'Unknown error'}</p>
+                                <p className="text-center">Please check the console for details or try refreshing the page.</p>
+                            </div>
+                        </div>
+                    );
+                }
+                return this.props.children;
+            }
+        }
+
         const App = () => {
             const [user, setUser] = useState(null);
-            const [login1, setLogin] = useState('');
+            const [login, setLogin] = useState('');
             const [password, setPassword] = useState('');
             const [error, setError] = useState('');
             const [success, setSuccess] = useState('');
@@ -48,7 +76,14 @@
             const [showChangeTableForm, setShowChangeTableForm] = useState(false);
             const [currentSvForTableChange, setCurrentSvForTableChange] = useState(null);
 
-            const debouncedFetch = useCallback(_.debounce((fn) => fn(), 300), []);
+            const debouncedFetch = useCallback(_.debounce((fn) => {
+                try {
+                    fn();
+                } catch (err) {
+                    console.error('Debounced fetch error:', err);
+                    setError('An error occurred while fetching data');
+                }
+            }, 300), []);
 
             const clearMessages = () => {
                 setError('');
@@ -84,7 +119,7 @@
                 return weekNumber * 5;
             };
 
-            const login = async () => {
+            const handleLogin = async () => {
                 if (!login.trim() || !password.trim()) {
                     setError('Please enter both login and password');
                     return;
@@ -92,28 +127,37 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/login`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ login: login.trim(), password: password.trim() })
+                    const response = await axios.post(`${API_BASE_URL}/api/login`, {
+                        login: login.trim(),
+                        password: password.trim()
+                    }, {
+                        headers: { 'Content-Type': 'application/json' }
                     });
-                    const data = await response.json();
+                    const data = response.data;
                     if (data.status === 'success') {
-                        setUser({ 
-                            role: data.role, 
-                            id: data.id, 
-                            name: data.name, 
-                            apiKey: data.telegram_id // Using telegram_id as API key for consistency
+                        setUser({
+                            role: data.role,
+                            id: data.id,
+                            name: data.name,
+                            apiKey: data.telegram_id || data.apiKey
                         });
                         setLogin('');
                         setPassword('');
+                        setSuccess('Logged in successfully');
                     } else {
                         setError(data.error || 'Invalid login or password');
                     }
                 } catch (err) {
-                    setError('Failed to connect to server');
+                    console.error('Login error:', err);
+                    setError(err.response?.data?.error || 'Failed to connect to server. Please check your network or try again later.');
                 } finally {
                     setIsLoading(false);
+                }
+            };
+
+            const handleKeyPress = (e) => {
+                if (e.key === 'Enter' && !isLoading) {
+                    handleLogin();
                 }
             };
 
@@ -138,16 +182,17 @@
                 setIsAdminDataLoading(true);
                 clearMessages();
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/admin/sv_list`, {
+                    const response = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
                         headers: { 'X-API-Key': user.apiKey }
                     });
-                    const data = await response.json();
+                    const data = response.data;
                     if (data.status === 'success') {
-                        setSvList(data.sv_list);
+                        setSvList(data.sv_list || []);
                     } else {
-                        setError(data.error);
+                        setError(data.error || 'Failed to fetch supervisor list');
                     }
                 } catch (err) {
+                    console.error('Fetch SV list error:', err);
                     setError('Failed to fetch supervisor list');
                 } finally {
                     setIsAdminDataLoading(false);
@@ -158,14 +203,15 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/sv/data?id=${user.id}`);
-                    const data = await response.json();
+                    const response = await axios.get(`${API_BASE_URL}/api/sv/data?id=${user.id}`);
+                    const data = response.data;
                     if (data.status === 'success') {
                         setSvData(data);
                     } else {
-                        setError(data.error);
+                        setError(data.error || 'Failed to fetch supervisor data');
                     }
                 } catch (err) {
+                    console.error('Fetch SV data error:', err);
                     setError('Failed to fetch supervisor data');
                 } finally {
                     setIsLoading(false);
@@ -176,14 +222,15 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}`);
-                    const data = await response.json();
+                    const response = await axios.get(`${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}`);
+                    const data = response.data;
                     if (data.status === 'success') {
                         setOperatorData(data);
                     } else {
-                        setError(data.error);
+                        setError(data.error || 'Failed to fetch operator data');
                     }
                 } catch (err) {
+                    console.error('Fetch operator data error:', err);
                     setError('Failed to fetch operator data');
                 } finally {
                     setIsLoading(false);
@@ -198,16 +245,17 @@
                 setIsAdminDataLoading(true);
                 clearMessages();
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/sv/data?id=${svId}`, {
+                    const response = await axios.get(`${API_BASE_URL}/api/sv/data?id=${svId}`, {
                         headers: { 'X-API-Key': user.apiKey }
                     });
-                    const data = await response.json();
+                    const data = response.data;
                     if (data.status === 'success') {
                         setSelectedSvData(data);
                     } else {
-                        setError(data.error);
+                        setError(data.error || 'Failed to fetch supervisor data');
                     }
                 } catch (err) {
+                    console.error('Fetch selected SV data error:', err);
                     setError('Failed to fetch supervisor data');
                 } finally {
                     setIsAdminDataLoading(false);
@@ -226,24 +274,26 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/admin/add_sv`, {
-                        method: 'POST',
+                    const response = await axios.post(`${API_BASE_URL}/api/admin/add_sv`, {
+                        name: newSvName.trim(),
+                        telegram_id: newSvId.trim()
+                    }, {
                         headers: {
                             'Content-Type': 'application/json',
                             'X-API-Key': user.apiKey
-                        },
-                        body: JSON.stringify({ name: newSvName.trim(), telegram_id: newSvId.trim() })
+                        }
                     });
-                    const data = await response.json();
+                    const data = response.data;
                     if (data.status === 'success') {
                         setSuccess('Supervisor added successfully');
                         fetchSvList();
                         setNewSvName('');
                         setNewSvId('');
                     } else {
-                        setError(data.error);
+                        setError(data.error || 'Failed to add supervisor');
                     }
                 } catch (err) {
+                    console.error('Add SV error:', err);
                     setError('Failed to add supervisor');
                 } finally {
                     setIsLoading(false);
@@ -255,15 +305,13 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/admin/remove_sv`, {
-                        method: 'POST',
+                    const response = await axios.post(`${API_BASE_URL}/api/admin/remove_sv`, { id: svId }, {
                         headers: {
                             'Content-Type': 'application/json',
                             'X-API-Key': user.apiKey
-                        },
-                        body: JSON.stringify({ id: svId })
+                        }
                     });
-                    const data = await response.json();
+                    const data = response.data;
                     if (data.status === 'success') {
                         setSuccess('Supervisor removed successfully');
                         fetchSvList();
@@ -272,9 +320,10 @@
                             setSelectedSvData(null);
                         }
                     } else {
-                        setError(data.error);
+                        setError(data.error || 'Failed to remove supervisor');
                     }
                 } catch (err) {
+                    console.error('Remove SV error:', err);
                     setError('Failed to remove supervisor');
                 } finally {
                     setIsLoading(false);
@@ -293,20 +342,22 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/sv/update_table`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ id: user.id, table_url: newTableUrl.trim() })
+                    const response = await axios.post(`${API_BASE_URL}/api/sv/update_table`, {
+                        id: user.id,
+                        table_url: newTableUrl.trim()
+                    }, {
+                        headers: { 'Content-Type': 'application/json' }
                     });
-                    const data = await response.json();
+                    const data = response.data;
                     if (data.status === 'success') {
                         setSuccess('Table updated successfully');
                         fetchSvData();
                         setNewTableUrl('');
                     } else {
-                        setError(data.error);
+                        setError(data.error || 'Failed to update table');
                     }
                 } catch (err) {
+                    console.error('Update table error:', err);
                     setError('Failed to update table');
                 } finally {
                     setIsLoading(false);
@@ -325,24 +376,26 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/admin/change_sv_table`, {
-                        method: 'POST',
+                    const response = await axios.post(`${API_BASE_URL}/api/admin/change_sv_table`, {
+                        id: svId,
+                        table_url: tableUrl.trim()
+                    }, {
                         headers: {
                             'Content-Type': 'application/json',
                             'X-API-Key': user.apiKey
-                        },
-                        body: JSON.stringify({ id: svId, table_url: tableUrl.trim() })
+                        }
                     });
-                    const data = await response.json();
+                    const data = response.data;
                     if (data.status === 'success') {
                         setSuccess(`Table updated successfully for ${data.sv_name}`);
                         fetchSvList();
                         setShowChangeTableForm(false);
                         setNewTableUrl('');
                     } else {
-                        setError(data.error);
+                        setError(data.error || 'Failed to update supervisor table');
                     }
                 } catch (err) {
+                    console.error('Change SV table error:', err);
                     setError('Failed to update supervisor table');
                 } finally {
                     setIsLoading(false);
@@ -350,34 +403,30 @@
             };
 
             const sendEvaluation = async () => {
-                if (!evaluationData.evaluator || !evaluationData.operator || 
-                    !evaluationData.call_number || !evaluationData.phone_number || 
+                if (!evaluationData.evaluator || !evaluationData.operator ||
+                    !evaluationData.call_number || !evaluationData.phone_number ||
                     !evaluationData.score) {
                     setError('Please fill all required fields');
                     return;
                 }
-                
                 if (isNaN(evaluationData.score)) {
                     setError('Score must be a number');
                     return;
                 }
-                
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/call_evaluation`, {
-                        method: 'POST',
+                    const response = await axios.post(`${API_BASE_URL}/api/call_evaluation`, {
+                        ...evaluationData,
+                        evaluator_id: user.id,
+                        operator_id: evaluationData.operator_id || user.id
+                    }, {
                         headers: {
                             'Content-Type': 'application/json',
                             'X-API-Key': user.apiKey
-                        },
-                        body: JSON.stringify({
-                            ...evaluationData,
-                            evaluator_id: user.id,
-                            operator_id: evaluationData.operator_id || user.id // For operators, operator_id is their own ID
-                        })
+                        }
                     });
-                    const data = await response.json();
+                    const data = response.data;
                     if (data.status === 'success') {
                         setSuccess('Call evaluation submitted successfully');
                         setEvaluationData({
@@ -397,6 +446,7 @@
                         setError(data.error || 'Failed to submit evaluation');
                     }
                 } catch (err) {
+                    console.error('Send evaluation error:', err);
                     setError('Failed to submit evaluation');
                 } finally {
                     setIsLoading(false);
@@ -408,21 +458,23 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/admin/notify_sv`, {
-                        method: 'POST',
+                    const response = await axios.post(`${API_BASE_URL}/api/admin/notify_sv`, {
+                        sv_id: svId,
+                        operator_name: operatorName
+                    }, {
                         headers: {
                             'Content-Type': 'application/json',
                             'X-API-Key': user.apiKey
-                        },
-                        body: JSON.stringify({ sv_id: svId, operator_name: operatorName })
+                        }
                     });
-                    const data = await response.json();
+                    const data = response.data;
                     if (data.status === 'success') {
                         setSuccess(`Notification sent to supervisor: ${data.message}`);
                     } else {
                         setError(data.error || 'Failed to send notification');
                     }
                 } catch (err) {
+                    console.error('Notify supervisor error:', err);
                     setError('Failed to send notification');
                 } finally {
                     setIsLoading(false);
@@ -433,16 +485,17 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await fetch(`${API_BASE_URL}/api/admin/generate_report`, {
+                    const response = await axios.get(`${API_BASE_URL}/api/admin/generate_report`, {
                         headers: { 'X-API-Key': user.apiKey }
                     });
-                    const data = await response.json();
+                    const data = response.data;
                     if (data.status === 'success') {
                         setSuccess('Report generation started. This may take a few minutes.');
                     } else {
                         setError(data.error || 'Failed to start report generation');
                     }
                 } catch (err) {
+                    console.error('Generate report error:', err);
                     setError('Failed to connect to server');
                 } finally {
                     setIsLoading(false);
@@ -477,6 +530,7 @@
                                 placeholder="Enter Login"
                                 value={login}
                                 onChange={(e) => setLogin(e.target.value)}
+                                onKeyPress={handleKeyPress}
                                 className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 disabled={isLoading}
                             />
@@ -485,17 +539,19 @@
                                 placeholder="Enter Password"
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
+                                onKeyPress={handleKeyPress}
                                 className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 disabled={isLoading}
                             />
                             <button
-                                onClick={login}
+                                onClick={handleLogin}
                                 className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                 disabled={isLoading}
                             >
                                 {isLoading ? 'Logging in...' : 'Login'}
                             </button>
                             {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                         </div>
                     </div>
                 );
@@ -614,19 +670,20 @@
                                     </div>
                                 </div>
                                 <div className="mb-4">
-                                    <label className="block text-sm font-medium mb-1">Comment (optional)</label>
+                                    <label className="block text-sm font-semibold mb-1">Comment (optional)</label>
                                     <textarea
-                                        placeholder="Comment"
+                                        placeholder="Enter comment"
                                         value={evaluationData.comment}
                                         onChange={(e) => setEvaluationData({...evaluationData, comment: e.target.value})}
                                         className="w-full p-2 border rounded"
+                                        class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         rows="3"
                                     />
                                 </div>
                                 <div className="flex justify-between">
                                     <button
                                         onClick={sendEvaluation}
-                                        className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
+                                        className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
                                         disabled={isLoading}
                                     >
                                         {isLoading ? 'Submitting...' : 'Submit Evaluation'}
@@ -648,20 +705,20 @@
                                 placeholder="Supervisor Name"
                                 value={newSvName}
                                 onChange={(e) => setNewSvName(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-green-500"
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 disabled={isLoading}
                             />
                             <input
-                                type="text"
-                                placeholder="Supervisor Telegram ID"
+                                type="Supervisor ID"
+                                placeholder="Enter Supervisor ID"
                                 value={newSvId}
                                 onChange={(e) => setNewSvId(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-green-500"
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 disabled={isLoading}
                             />
                             <button
                                 onClick={addSv}
-                                className={`bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                 disabled={isLoading}
                             >
                                 {isLoading ? 'Adding...' : 'Add Supervisor'}
@@ -673,7 +730,7 @@
                                 <h2 className="text-xl font-semibold">Supervisors</h2>
                                 <button
                                     onClick={generateWeeklyReport}
-                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                     disabled={isLoading}
                                 >
                                     {isLoading ? 'Generating...' : 'Generate Report'}
@@ -685,7 +742,7 @@
                                 <p className="text-center">No supervisors found.</p>
                             ) : (
                                 <div className="overflow-x-auto">
-                                    <table className="min-w-full border-collapse bg-white">
+                                    <table className="min-w-full bg-white border-collapse">
                                         <thead>
                                             <tr className="bg-gray-200">
                                                 <th className="p-3 border-b text-left">Name</th>
@@ -707,7 +764,7 @@
                                                     <td className="p-3 border-b space-x-2">
                                                         <button
                                                             onClick={() => removeSv(sv.id)}
-                                                            className="bg-red-500 text-white px-2 py-1 hover:bg-red-600 rounded text-sm"
+                                                            className="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 text-sm"
                                                         >
                                                             Remove
                                                         </button>
@@ -716,8 +773,8 @@
                                                                 setCurrentSvForTableChange(sv);
                                                                 setShowChangeTableForm(true);
                                                             }}
-                                                            className="bg-green-500 text-white px-2 py-1 hover:bg-green-600 rounded text-sm"
-                                                        >
+                                                            className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                >
                                                             Change Table
                                                         </button>
                                                     </td>
@@ -743,7 +800,7 @@
                                 <div className="flex justify-between">
                                     <button
                                         onClick={() => changeSvTable(currentSvForTableChange.id, newTableUrl)}
-                                        className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                        className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                         disabled={isLoading}
                                     >
                                         {isLoading ? 'Updating...' : 'Update Table'}
@@ -779,15 +836,15 @@
                                 <p className="text-center">Loading...</p>
                             ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
                                 <div className="overflow-x-auto">
-                                    <table className="min-w-full border-collapse bg-white">
+                                    <table className="min-w-full bg-white border-collapse">
                                         <thead>
-                                            <tr className="bg-gray-200">
+                                            <tr className="bg-gray-100">
                                                 <th className="p-3 border-b text-left">Name</th>
                                                 <th className="p-3 border-b text-left">Calls</th>
                                                 <th className="p-3 border-b text-left">Expected</th>
                                                 <th className="p-3 border-b text-left">Avg Score</th>
                                                 <th className="p-3 border-b text-left">Link</th>
-                                                <th className="p-3 border-b text-left">Action</th>
+                                                <th className="p-3 border-b text-left">Actions</th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -795,7 +852,6 @@
                                                 const currentWeek = getCurrentWeekOfMonth();
                                                 const expectedCalls = getExpectedCalls(currentWeek);
                                                 const hasIssue = op.call_count < expectedCalls;
-                                                
                                                 return (
                                                     <tr key={index} className="hover:bg-gray-50">
                                                         <td className="p-3 border-b">{op.name}</td>
@@ -817,7 +873,7 @@
                                                             {hasIssue && (
                                                                 <button
                                                                     onClick={() => notifySupervisor(selectedSvId, op.name)}
-                                                                    className="bg-yellow-500 text-white px-2 py-1 hover:bg-yellow-600 rounded text-sm"
+                                                                    className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
                                                                     disabled={isLoading}
                                                                 >
                                                                     Notify
@@ -847,24 +903,24 @@
                             <h1 className="text-3xl font-bold">Supervisor Dashboard</h1>
                             <button
                                 onClick={handleLogout}
-                                className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700"
                             >
                                 Logout
                             </button>
                         </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg mb-8">
+                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                             <h2 className="text-xl font-semibold mb-4">Update Table</h2>
                             <input
                                 type="text"
-                                placeholder="Google Sheets URL"
+                                placeholder="Enter Google Sheets URL"
                                 value={newTableUrl}
                                 onChange={(e) => setNewTableUrl(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full p-2 mb-4 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 disabled={isLoading}
                             />
                             <button
                                 onClick={updateTable}
-                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                className={`w-full bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                 disabled={isLoading}
                             >
                                 {isLoading ? 'Updating...' : 'Update Table'}
@@ -876,9 +932,9 @@
                                 <p className="text-center">Loading...</p>
                             ) : svData && svData.operators && svData.operators.length > 0 ? (
                                 <div className="overflow-x-auto">
-                                    <table className="min-w-full border-collapse bg-white">
+                                    <table className="min-w-full bg-white border-collapse">
                                         <thead>
-                                            <tr className="bg-gray-200">
+                                            <tr className="bg-gray-100">
                                                 <th className="p-3 border-b text-left">Name</th>
                                                 <th className="p-3 border-b text-left">Calls</th>
                                                 <th className="p-3 border-b text-left">Avg Score</th>
@@ -924,7 +980,7 @@
                             <h1 className="text-3xl font-bold">Operator Dashboard</h1>
                             <button
                                 onClick={handleLogout}
-                                className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700"
                             >
                                 Logout
                             </button>
@@ -935,9 +991,9 @@
                                 <p className="text-center">Loading...</p>
                             ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
                                 <div className="overflow-x-auto">
-                                    <table className="min-w-full border-collapse bg-white">
+                                    <table className="min-w-full bg-white border-collapse">
                                         <thead>
-                                            <tr className="bg-gray-200">
+                                            <tr className="bg-gray-100">
                                                 <th className="p-3 border-b text-left">Call Number</th>
                                                 <th className="p-3 border-b text-left">Phone Number</th>
                                                 <th className="p-3 border-b text-left">Score</th>
@@ -973,7 +1029,24 @@
             return null;
         };
 
-        ReactDOM.render(<App />, document.getElementById('root'));
+        try {
+            const root = ReactDOM.createRoot(document.getElementById('root'));
+            root.render(
+                <ErrorBoundary>
+                    <App />
+                </ErrorBoundary>
+            );
+        } catch (err) {
+            console.error('Root rendering error:', err);
+            document.getElementById('root').innerHTML = `
+                <div class="min-h-screen flex items-center justify-center bg-gray-100">
+                    <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
+                        <h1 class="text-2xl font-bold mb-4 text-center text-red-500">Application Failed to Load</h1>
+                        <p class="text-center">An error occurred while loading the application. Please check the console for details.</p>
+                    </div>
+                </div>
+            `;
+        }
     </script>
 </body>
 </html>
