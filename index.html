@@ -20,11 +20,13 @@
 
         const App = () => {
             const [user, setUser] = useState(null);
-            const [key, setKey] = useState('');
+            const [login1, setLogin] = useState('');
+            const [password, setPassword] = useState('');
             const [error, setError] = useState('');
             const [success, setSuccess] = useState('');
             const [svList, setSvList] = useState([]);
             const [svData, setSvData] = useState(null);
+            const [operatorData, setOperatorData] = useState(null);
             const [newSvName, setNewSvName] = useState('');
             const [newSvId, setNewSvId] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
@@ -83,8 +85,8 @@
             };
 
             const login = async () => {
-                if (!key.trim()) {
-                    setError('Please enter an API key or Telegram ID');
+                if (!login.trim() || !password.trim()) {
+                    setError('Please enter both login and password');
                     return;
                 }
                 setIsLoading(true);
@@ -93,14 +95,20 @@
                     const response = await fetch(`${API_BASE_URL}/api/login`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ key: key.trim() })
+                        body: JSON.stringify({ login: login.trim(), password: password.trim() })
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
-                        setUser({ role: data.role, id: data.id, name: data.name, apiKey: key.trim() });
-                        setKey('');
+                        setUser({ 
+                            role: data.role, 
+                            id: data.id, 
+                            name: data.name, 
+                            apiKey: data.telegram_id // Using telegram_id as API key for consistency
+                        });
+                        setLogin('');
+                        setPassword('');
                     } else {
-                        setError(data.error || 'Invalid key or ID');
+                        setError(data.error || 'Invalid login or password');
                     }
                 } catch (err) {
                     setError('Failed to connect to server');
@@ -117,7 +125,9 @@
                 setUser(null);
                 setSvList([]);
                 setSvData(null);
-                setKey('');
+                setOperatorData(null);
+                setLogin('');
+                setPassword('');
                 setShowLogoutConfirm(false);
                 setSelectedSvId('');
                 setSelectedSvData(null);
@@ -157,6 +167,24 @@
                     }
                 } catch (err) {
                     setError('Failed to fetch supervisor data');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            const fetchOperatorData = async () => {
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}`);
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        setOperatorData(data);
+                    } else {
+                        setError(data.error);
+                    }
+                } catch (err) {
+                    setError('Failed to fetch operator data');
                 } finally {
                     setIsLoading(false);
                 }
@@ -204,7 +232,7 @@
                             'Content-Type': 'application/json',
                             'X-API-Key': user.apiKey
                         },
-                        body: JSON.stringify({ name: newSvName.trim(), id: newSvId.trim() })
+                        body: JSON.stringify({ name: newSvName.trim(), telegram_id: newSvId.trim() })
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
@@ -343,7 +371,11 @@
                             'Content-Type': 'application/json',
                             'X-API-Key': user.apiKey
                         },
-                        body: JSON.stringify(evaluationData)
+                        body: JSON.stringify({
+                            ...evaluationData,
+                            evaluator_id: user.id,
+                            operator_id: evaluationData.operator_id || user.id // For operators, operator_id is their own ID
+                        })
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
@@ -358,6 +390,9 @@
                             comment: ''
                         });
                         setShowEvaluationForm(false);
+                        if (user.role === 'operator') {
+                            fetchOperatorData();
+                        }
                     } else {
                         setError(data.error || 'Failed to submit evaluation');
                     }
@@ -403,12 +438,12 @@
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
-                        setSuccess('Запущена генерация отчета. Это может занять несколько минут.');
+                        setSuccess('Report generation started. This may take a few minutes.');
                     } else {
-                        setError(data.error || 'Не удалось начать генерацию отчета');
+                        setError(data.error || 'Failed to start report generation');
                     }
                 } catch (err) {
-                    setError('Ошибка соединения с сервером');
+                    setError('Failed to connect to server');
                 } finally {
                     setIsLoading(false);
                 }
@@ -420,6 +455,8 @@
                         debouncedFetch(fetchSvList);
                     } else if (user.role === 'sv') {
                         debouncedFetch(fetchSvData);
+                    } else if (user.role === 'operator') {
+                        debouncedFetch(fetchOperatorData);
                     }
                 }
             }, [user]);
@@ -437,9 +474,17 @@
                             <h1 className="text-2xl font-bold mb-6 text-center">OTP Bot Login</h1>
                             <input
                                 type="text"
-                                placeholder="Enter API Key or Telegram ID"
-                                value={key}
-                                onChange={(e) => setKey(e.target.value)}
+                                placeholder="Enter Login"
+                                value={login}
+                                onChange={(e) => setLogin(e.target.value)}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <input
+                                type="password"
+                                placeholder="Enter Password"
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
                                 className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 disabled={isLoading}
                             />
@@ -619,7 +664,7 @@
                                 className={`bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                 disabled={isLoading}
                             >
-                                {isLoading ? 'Adding...' : 'Добавить СВ'}
+                                {isLoading ? 'Adding...' : 'Add Supervisor'}
                             </button>
                         </div>
 
@@ -631,7 +676,7 @@
                                     className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                     disabled={isLoading}
                                 >
-                                    {isLoading ? 'Генерация...' : 'Создать отчет'}
+                                    {isLoading ? 'Generating...' : 'Generate Report'}
                                 </button>
                             </div>
                             {isAdminDataLoading ? (
@@ -864,6 +909,59 @@
                                 </div>
                             ) : (
                                 <p className="text-center">No operators found.</p>
+                            )}
+                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                        </div>
+                    </div>
+                );
+            }
+
+            if (user.role === 'operator') {
+                return (
+                    <div className="min-h-screen bg-gray-100 p-6">
+                        <div className="flex justify-between items-center mb-6">
+                            <h1 className="text-3xl font-bold">Operator Dashboard</h1>
+                            <button
+                                onClick={handleLogout}
+                                className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                            >
+                                Logout
+                            </button>
+                        </div>
+                        <div className="bg-white p-6 rounded-lg shadow-lg">
+                            <h2 className="text-xl font-semibold mb-4">Your Call Evaluations</h2>
+                            {isLoading ? (
+                                <p className="text-center">Loading...</p>
+                            ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
+                                <div className="overflow-x-auto">
+                                    <table className="min-w-full border-collapse bg-white">
+                                        <thead>
+                                            <tr className="bg-gray-200">
+                                                <th className="p-3 border-b text-left">Call Number</th>
+                                                <th className="p-3 border-b text-left">Phone Number</th>
+                                                <th className="p-3 border-b text-left">Score</th>
+                                                <th className="p-3 border-b text-left">Comment</th>
+                                                <th className="p-3 border-b text-left">Month</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {operatorData.evaluations.map((eval1, index) => (
+                                                <tr key={index} className="hover:bg-gray-50">
+                                                    <td className="p-3 border-b">{eval1.call_number}</td>
+                                                    <td className="p-3 border-b">{eval1.phone_number}</td>
+                                                    <td className={`p-3 border-b ${getScoreColor(eval1.score)}`}>
+                                                        {eval1.score}
+                                                    </td>
+                                                    <td className="p-3 border-b">{eval1.comment || '-'}</td>
+                                                    <td className="p-3 border-b">{eval1.month}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            ) : (
+                                <p className="text-center">No evaluations found.</p>
                             )}
                             {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
                             {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
