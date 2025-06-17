@@ -1352,7 +1352,7 @@ def extract_fio_and_links(spreadsheet_url):
             for col_idx in score_columns:
                 score_cell = row[col_idx - 1]
                 try:
-                    score = float(score_cell.value) if score_cell.value else None
+                    score = float(score_cell.value) if score_cell.value.isdigit() else None
                     if score is not None:
                         scores.append(score)
                 except (ValueError, TypeError):
