@@ -1068,14 +1068,20 @@ async def view_evaluations(message: types.Message):
                 reply_markup=get_admin_keyboard()
             )
             return
-
+        
+        await bot.send_message(
+                    text='<b>Выберите чьи оценки просмотреть или сгенерируйте отчет</b>',
+                    chat_id=admin,
+                    parse_mode='HTML',
+                    reply_markup=get_evaluations_keyboard()
+                )
         ikb = InlineKeyboardMarkup(row_width=1)
         for sv_id, sv_name, _ in supervisors:
             ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"eval_{sv_id}"))
         
         await bot.send_message(
             chat_id=message.from_user.id,
-            text="<b>Выберите супервайзера для просмотра оценок:</b>",
+            text="<b>Лист СВ:</b>",
             parse_mode='HTML',
             reply_markup=ikb
         )
@@ -1389,22 +1395,50 @@ def sync_generate_weekly_report():
         cell_format_int = workbook.add_format({'border': 1, 'num_format': '0'})
         cell_format_float = workbook.add_format({'border': 1, 'num_format': '0.00'})
         
-        # Получаем сводку по звонкам
-        calls_summary = db.get_calls_summary()
+        # Get supervisors from the database
+        svs = db.get_supervisors()
         
-        worksheet = workbook.add_worksheet("Сводный отчет")
-        headers = ['Оператор', 'Количество звонков', 'Средний балл']
-        for col, header in enumerate(headers):
-            worksheet.write(0, col, header, header_format)
+        for sv_id, sv_name, table_url in svs:
+            if not table_url:
+                logging.warning(f"No table URL for supervisor {sv_name}")
+                continue
+                
+            sheet_name, operators, error = extract_fio_and_links(table_url)
+            if error:
+                logging.error(f"Error processing table for SV {sv_name}: {error}")
+                continue
+                
+            safe_sheet_name = sv_name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
+            worksheet = workbook.add_worksheet(safe_sheet_name)
+            headers = ['ФИО', 'Количество звонков', 'Средний балл']
+            for col, header in enumerate(headers):
+                worksheet.write(0, col, header, header_format)
+                
+            for row, op in enumerate(operators, start=1):
+                name = op.get('name', '')
+                call_count = op.get('call_count', 0)
+                avg_score = op.get('avg_score', None)
+                
+                if call_count in [None, "#DIV/0!"]:
+                    call_count = 0
+                else:
+                    try:
+                        call_count = int(call_count)
+                    except (ValueError, TypeError):
+                        call_count = 0
+                
+                try:
+                    score_val = float(avg_score) if avg_score else None
+                except (ValueError, TypeError):
+                    score_val = ''
+                
+                worksheet.write(row, 0, name, cell_format_int)
+                worksheet.write(row, 1, call_count, cell_format_int)
+                worksheet.write(row, 2, score_val, cell_format_float)
             
-        for row, (operator_id, operator_name, call_count, avg_score) in enumerate(calls_summary, start=1):
-            worksheet.write(row, 0, operator_name, cell_format_int)
-            worksheet.write(row, 1, call_count, cell_format_int)
-            worksheet.write(row, 2, avg_score or 0, cell_format_float)
-        
-        worksheet.set_column('A:A', 30)
-        worksheet.set_column('B:B', 20)
-        worksheet.set_column('C:C', 15)
+            worksheet.set_column('A:A', 30)
+            worksheet.set_column('B:B', 20)
+            worksheet.set_column('C:C', 15)
         
         workbook.close()
         output.seek(0)
@@ -1413,19 +1447,28 @@ def sync_generate_weekly_report():
             filename = f"Weekly_Report_Week{current_week}_{datetime.now().strftime('%Y%m%d')}.xlsx"
             telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendDocument"
             
-            # Отправляем отчет всем админам
-            admins = [user for user in db._get_cursor().execute("SELECT * FROM users WHERE role = 'admin'")]
-            for admin in admins:
+            # Fetch admins from the database
+            try:
+                admins = []
+                with db._get_cursor() as cursor:
+                    cursor.execute("SELECT telegram_id FROM users WHERE role = 'admin'")
+                    admins = [row[0] for row in cursor.fetchall()]
+            except Exception as e:
+                logging.error(f"Error fetching admins: {e}")
+                return False
+            
+            # Send report to all admins
+            for admin_id in admins:
                 files = {'document': (filename, output.getvalue(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
-                data = {'chat_id': admin[1], 'caption': f"[{now}] 📊 Еженедельный отчет за {current_week}-ю неделю"}
+                data = {'chat_id': admin_id, 'caption': f"[{now}] 📊 Еженедельный отчет за {current_week}-ю неделю"}
                 response = requests.post(telegram_url, files=files, data=data)
                 
                 if response.status_code != 200:
-                    logging.error(f"Ошибка отправки отчета: {response.text}")
+                    logging.error(f"Error sending report to admin {admin_id}: {response.text}")
             
             return True
         else:
-            logging.error("Отчет пустой")
+            logging.error("Report is empty")
             return False
     except Exception as e:
         logging.error(f"Critical error in report generation: {e}")
