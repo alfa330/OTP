@@ -1025,7 +1025,7 @@ async def verify_table(callback: types.CallbackQuery, state: FSMContext):
         table_url = data.get('table_url')
         sv_id = data.get('sv_id', callback.from_user.id)
     
-    user = db.get_user(id=sv_id)
+    user = db.get_user(telegram_id=sv_id)
     if not user:
         await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
         await state.finish()
