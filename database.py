@@ -73,7 +73,9 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_id ON calls(operator_id);
             """)
 
-    def create_user(self, telegram_id, name, role, supervisor_id=None, login=str(telegram_id), password="123321123"):
+    def create_user(self, telegram_id, name, role, supervisor_id=None, login=None, password="123321123"):
+        if login is None:
+            login = str(telegram_id)
         password_hash = pbkdf2_sha256.hash(password) if password else None
         with self._get_cursor() as cursor:
             cursor.execute("""
