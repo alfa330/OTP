@@ -734,9 +734,7 @@ async def newSVid(message: types.Message, state: FSMContext):
         db.create_user(
             telegram_id=sv_id,
             name=sv_name,
-            role='sv',
-            login=str(sv_id),
-            password=str(123321123)
+            role='sv'
         )
         
         kb_sv = ReplyKeyboardMarkup(resize_keyboard=True)
