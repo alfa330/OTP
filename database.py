@@ -39,24 +39,25 @@ class Database:
             finally:
                 cursor.close()
 
-    def _init_db(self):
-        with self._get_cursor() as cursor:
-            # Users table with hire_date and operator direction
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    id SERIAL PRIMARY KEY,
-                    telegram_id BIGINT UNIQUE,
-                    name VARCHAR(255) NOT NULL,
-                    role VARCHAR(20) NOT NULL CHECK(role IN ('admin', 'sv', 'operator')),
-                    direction VARCHAR(20) CHECK(direction IN ('chat', 'moderator', 'line', NULL)),
-                    hire_date DATE,
-                    login VARCHAR(50) UNIQUE,
-                    password_hash VARCHAR(255),
-                    supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    hours_table_url TEXT,
-                    scores_table_url TEXT
-                );
-            """)
+            def _init_db(self):
+                with self._get_cursor() as cursor:
+                    # Users table with hire_date and operator direction
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS users (
+                            id SERIAL PRIMARY KEY,
+                            telegram_id BIGINT UNIQUE,
+                            name VARCHAR(255) NOT NULL,
+                            role VARCHAR(20) NOT NULL CHECK(role IN ('admin', 'sv', 'operator')),
+                            direction VARCHAR(20) CHECK(direction IN ('chat', 'moderator', 'line', NULL)),
+                            hire_date DATE,
+                            login VARCHAR(50) UNIQUE,
+                            password_hash VARCHAR(255),
+                            supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                            hours_table_url TEXT,
+                            scores_table_url TEXT,
+                            CONSTRAINT unique_name_role UNIQUE (name, role)
+                        );
+                    """)
             # Calls table with automatic month in 'YYYY-MM' format
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS calls (
@@ -100,10 +101,12 @@ class Database:
             cursor.execute("""
                 INSERT INTO users (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (name, role) DO UPDATE
-                SET supervisor_id = EXCLUDED.supervisor_id,
+                ON CONFLICT (telegram_id) DO UPDATE
+                SET name = EXCLUDED.name,
+                    role = EXCLUDED.role,
                     direction = EXCLUDED.direction,
-                    telegram_id = EXCLUDED.telegram_id,
+                    hire_date = EXCLUDED.hire_date,
+                    supervisor_id = EXCLUDED.supervisor_id,
                     login = EXCLUDED.login,
                     password_hash = EXCLUDED.password_hash
                 RETURNING id
