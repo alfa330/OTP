@@ -83,20 +83,6 @@ def login():
         if not data or ('key' not in data and ('login' not in data or 'password' not in data)):
             return jsonify({"error": "Missing credentials"}), 400
         
-        if 'key' in data:
-            # Аутентификация по Telegram ID
-            key = data['key']
-            user = db.get_user(telegram_id=key)
-            if user:
-                return jsonify({
-                    "status": "success", 
-                    "role": user[3],
-                    "id": user[0],
-                    "name": user[2],
-                    "telegram_id": user[1],
-                    "apiKey": FLASK_API_KEY  # Return API key for frontend
-                })
-        
         if 'login' in data and 'password' in data:
             # Аутентификация по логину/паролю
             login = data['login']
@@ -444,28 +430,41 @@ def update_sv_table():
 def receive_call_evaluation():
     try:
         data = request.get_json()
-        required_fields = ['evaluator_id', 'operator_id', 'month', 'call_number', 'phone_number', 'score', 'comment']
+        required_fields = ['evaluator', 'operator', 'call_number', 'phone_number', 'score', 'comment']
         if not data or not all(field in data for field in required_fields):
             return jsonify({"error": "Missing or invalid required fields"}), 400
 
+        # Set month to current YYYY-MM if not provided
+        month = data.get('month', datetime.now().strftime('%Y-%m'))
+
+        # Find evaluator and operator by name
+        evaluator = db.get_user(name=data['evaluator'])
+        operator = db.get_user(name=data['operator'])
+
+        if not evaluator or not operator:
+            return jsonify({"error": "Evaluator or operator not found"}), 404
+
+        # Check for existing call evaluation with same call_number and month
+        existing_calls = db.get_call_evaluations(operator_id=operator[0], month=month)
+        is_correction = any(call['call_number'] == data['call_number'] for call in existing_calls)
+
+        # Add call evaluation (history is preserved as new entry)
         db.add_call_evaluation(
-            evaluator_id=data['evaluator_id'],
-            operator_id=data['operator_id'],
-            month=data['month'],
+            evaluator_id=evaluator[0],
+            operator_id=operator[0],
+            month=month,
             call_number=data['call_number'],
             phone_number=data['phone_number'],
             score=data['score'],
             comment=data['comment']
         )
 
-        evaluator = db.get_user(id=data['evaluator_id'])
-        operator = db.get_user(id=data['operator_id'])
-        
+        # Construct Telegram message
         message = (
-            f"📞 <b>Оценка звонка</b>\n" 
+            f"📞 <b>Оценка звонка{' (корректировка)' if is_correction else ''}</b>\n"
             f"👤 Оценивающий: <b>{evaluator[2]}</b>\n"
             f"📋 Оператор: <b>{operator[2]}</b>\n"
-            f"📄 За месяц: <b>{data['month']}</b>\n"
+            f"📄 За месяц: <b>{month}</b>\n"
             f"📞 Звонок: <b>№{data['call_number']}</b>\n"
             f"📱 Номер телефона: <b>{data['phone_number']}</b>\n"
             f"💯 Оценка: <b>{data['score']}</b>\n"
@@ -473,7 +472,7 @@ def receive_call_evaluation():
         if data['score'] < 100 and data['comment']:
             message += f"\n💬 Комментарий: \n{data['comment']}\n"
 
-        # Отправка уведомления админу
+        # Send notification to admin
         admin = db.get_user(role='admin')
         if admin:
             telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
@@ -551,6 +550,7 @@ class sv(StatesGroup):
     delete = State()
     delete_operator = State()  # Новое состояние
     verify_table = State()
+    select_direction= State()
     view_evaluations = State()
     change_table = State()
 
