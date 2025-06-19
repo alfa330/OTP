@@ -39,58 +39,58 @@ class Database:
             finally:
                 cursor.close()
 
-            def _init_db(self):
-                with self._get_cursor() as cursor:
-                    # Users table with hire_date and operator direction
-                    cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS users (
-                            id SERIAL PRIMARY KEY,
-                            telegram_id BIGINT UNIQUE,
-                            name VARCHAR(255) NOT NULL,
-                            role VARCHAR(20) NOT NULL CHECK(role IN ('admin', 'sv', 'operator')),
-                            direction VARCHAR(20) CHECK(direction IN ('chat', 'moderator', 'line', NULL)),
-                            hire_date DATE,
-                            login VARCHAR(50) UNIQUE,
-                            password_hash VARCHAR(255),
-                            supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                            hours_table_url TEXT,
-                            scores_table_url TEXT,
-                            CONSTRAINT unique_name_role UNIQUE (name, role)
-                        );
-                    """)
-            # Calls table with automatic month in 'YYYY-MM' format
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS calls (
-                    id SERIAL PRIMARY KEY,
-                    evaluator_id INTEGER NOT NULL REFERENCES users(id),
-                    operator_id INTEGER NOT NULL REFERENCES users(id),
-                    month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
-                    call_number INTEGER NOT NULL,
-                    phone_number VARCHAR(20) NOT NULL,
-                    score FLOAT NOT NULL,
-                    comment TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-            # Work hours table for regular and training hours
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS work_hours (
-                    id SERIAL PRIMARY KEY,
-                    operator_id INTEGER NOT NULL REFERENCES users(id),
-                    month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
-                    regular_hours FLOAT NOT NULL DEFAULT 0,
-                    training_hours FLOAT NOT NULL DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(operator_id, month)
-                );
-            """)
-            # Indexes for performance
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
-                CREATE INDEX IF NOT EXISTS idx_calls_operator_id ON calls(operator_id);
-                CREATE INDEX IF NOT EXISTS idx_work_hours_operator_id ON work_hours(operator_id);
-                CREATE INDEX IF NOT EXISTS idx_work_hours_month ON work_hours(month);
-            """)
+    def _init_db(self):
+            with self._get_cursor() as cursor:
+                # Users table with hire_date and operator direction
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id SERIAL PRIMARY KEY,
+                        telegram_id BIGINT UNIQUE,
+                        name VARCHAR(255) NOT NULL,
+                        role VARCHAR(20) NOT NULL CHECK(role IN ('admin', 'sv', 'operator')),
+                        direction VARCHAR(20) CHECK(direction IN ('chat', 'moderator', 'line', NULL)),
+                        hire_date DATE,
+                        login VARCHAR(50) UNIQUE,
+                        password_hash VARCHAR(255),
+                        supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                        hours_table_url TEXT,
+                        scores_table_url TEXT,
+                        CONSTRAINT unique_name_role UNIQUE (name, role)
+                    );
+                """)
+                # Calls table with automatic month in 'YYYY-MM' format
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS calls (
+                        id SERIAL PRIMARY KEY,
+                        evaluator_id INTEGER NOT NULL REFERENCES users(id),
+                        operator_id INTEGER NOT NULL REFERENCES users(id),
+                        month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
+                        call_number INTEGER NOT NULL,
+                        phone_number VARCHAR(20) NOT NULL,
+                        score FLOAT NOT NULL,
+                        comment TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                # Work hours table for regular and training hours
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS work_hours (
+                        id SERIAL PRIMARY KEY,
+                        operator_id INTEGER NOT NULL REFERENCES users(id),
+                        month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
+                        regular_hours FLOAT NOT NULL DEFAULT 0,
+                        training_hours FLOAT NOT NULL DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(operator_id, month)
+                    );
+                """)
+                # Indexes for performance
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
+                    CREATE INDEX IF NOT EXISTS idx_calls_operator_id ON calls(operator_id);
+                    CREATE INDEX IF NOT EXISTS idx_work_hours_operator_id ON work_hours(operator_id);
+                    CREATE INDEX IF NOT EXISTS idx_work_hours_month ON work_hours(month);
+                """)
 
     def create_user(self, telegram_id, name, role, direction=None, hire_date=None, supervisor_id=None, login=None, password=None):
         # Set default login and password if None
