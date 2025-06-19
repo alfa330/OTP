@@ -1008,7 +1008,6 @@ async def tableName(message: types.Message, state: FSMContext):
             reply_markup=get_verify_keyboard(),
             disable_web_page_preview=True
         )
-        await sv.verify_table.set()
         await message.delete()
     except Exception as e:
         logging.error(f"Ошибка в tableName: {e}")
