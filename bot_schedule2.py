@@ -588,6 +588,15 @@ def get_verify_keyboard():
     )
     return ikb
 
+def get_direction_keyboard():
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(
+        types.InlineKeyboardButton("Чат 📱", callback_data="dir_chat"),
+        types.InlineKeyboardButton("Модератор 🛡️", callback_data="dir_moderator"),
+        types.InlineKeyboardButton("Линия 📞", callback_data="dir_line")
+    )
+    return keyboard
+
 def get_editor_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Добавить СВ➕'))
@@ -972,7 +981,7 @@ async def tableName(message: types.Message, state: FSMContext):
                 chat_id=user_id,
                 text="Ошибка: Вы не зарегистрированы как супервайзер! Пожалуйста, добавьтесь через администратора.",
                 parse_mode="HTML",
-                reply_markup=ReplyKeyboardRemove()
+                reply_markup=types.ReplyKeyboardRemove()
             )
             await state.finish()
             return
@@ -990,7 +999,9 @@ async def tableName(message: types.Message, state: FSMContext):
 
         async with state.proxy() as data:
             data['table_url'] = message.text
-            if is_admin_changing or user[3]=='sv' :
+            data['operators'] = operators
+            data['sheet_name'] = sheet_name
+            if is_admin_changing or user[3] == 'sv':
                 data.setdefault('sv_id', user_id)
 
         message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
@@ -1008,6 +1019,7 @@ async def tableName(message: types.Message, state: FSMContext):
             reply_markup=get_verify_keyboard(),
             disable_web_page_preview=True
         )
+        await sv.verify_table.set()
         await message.delete()
     except Exception as e:
         logging.error(f"Ошибка в tableName: {e}")
@@ -1022,7 +1034,9 @@ async def tableName(message: types.Message, state: FSMContext):
 async def verify_table(callback: types.CallbackQuery, state: FSMContext):
     async with state.proxy() as data:
         table_url = data.get('table_url')
-        sv_id = data.get('sv_id', callback.from_user.id)
+        sv_id = data.get('sv_id')
+        operators = data.get('operators')
+        sheet_name = data.get('sheet_name')
     
     user = db.get_user(telegram_id=sv_id)
     if not user:
@@ -1031,19 +1045,15 @@ async def verify_table(callback: types.CallbackQuery, state: FSMContext):
         return
     
     if callback.data == "verify_yes":
-        db.update_user_table(sv_id, table_url)
-        kb = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add(KeyboardButton('Добавить таблицу📑'))
-        reply_markup = kb if sv_id == callback.from_user.id else get_editor_keyboard()
-        target_id = callback.from_user.id if sv_id == callback.from_user.id else admin
+        async with state.proxy() as data:
+            data['operators'] = operators
         await bot.send_message(
-            chat_id=target_id,
-            text=f'<b>Таблица успешно подтверждена и сохранена для {user[2]}✅</b>',
-            parse_mode='HTML',
-            reply_markup=reply_markup
+            chat_id=callback.from_user.id,
+            text="Выберите направление для операторов:",
+            reply_markup=get_direction_keyboard()
         )
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-        await state.finish()
+        await sv.select_direction.set()
     elif callback.data == "verify_no":
         await bot.send_message(
             chat_id=callback.from_user.id,
@@ -1053,6 +1063,53 @@ async def verify_table(callback: types.CallbackQuery, state: FSMContext):
         )
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
         await sv.crtable.set()
+
+@dp.callback_query_handler(state=sv.select_direction)
+async def select_direction(callback: types.CallbackQuery, state: FSMContext):
+    async with state.proxy() as data:
+        table_url = data.get('table_url')
+        sv_id = data.get('sv_id')
+        operators = data.get('operators')
+    
+    direction_map = {
+        "dir_chat": "chat",
+        "dir_moderator": "moderator",
+        "dir_line": "line"
+    }
+    direction = direction_map.get(callback.data)
+    
+    if not direction:
+        await bot.answer_callback_query(callback.id, text="Ошибка: Неверное направление")
+        return
+    
+    user = db.get_user(telegram_id=sv_id)
+    if not user:
+        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
+        await state.finish()
+        return
+    
+    db.update_user_table(user[0], scores_table_url=table_url)
+    
+    for op in operators:
+        db.create_user(
+            telegram_id=None,
+            name=op['name'],
+            role='operator',
+            direction=direction,
+            supervisor_id=user[0]
+        )
+    
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(types.KeyboardButton('Добавить таблицу📑'))
+    await bot.send_message(
+        chat_id=callback.from_user.id,
+        text=f'<b>Таблица оценок сохранена, операторы добавлены/обновлены с направлением "{direction}"✅</b>',
+        parse_mode='HTML',
+        reply_markup=kb
+    )
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+    await state.finish()
+
 
 @dp.message_handler(regexp='Оценки📊')
 async def view_evaluations(message: types.Message):
