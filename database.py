@@ -254,7 +254,7 @@ class Database:
                     "operator_name": row[1],
                     "direction": row[2],
                     "regular_hours": float(row[3]) if row[3] is not None else 0,
-                    "training_hours": float(row[4]) if row[4] is not None else None 0
+                    "training_hours": float(row[4]) if row[4] is not None else 0
                 } for row in cursor.fetchall()
             ]
 
