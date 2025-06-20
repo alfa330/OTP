@@ -259,7 +259,6 @@ def get_sv_data():
         table_url = user[9]
         operators = []
         error = None
-        logging.info(table_url)
         if table_url:
             sheet_name, operators, error = extract_fio_and_links(table_url)
             if error:
