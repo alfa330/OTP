@@ -661,9 +661,10 @@ async def start_command(message: types.Message):
             )
     else:
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add(KeyboardButton('Выбрать СВ👤'))
         await bot.send_message(
             chat_id=message.from_user.id,
-            text=f"<b>Бобро пожаловать!</b>\nТвой <b>ID</b> что бы присоединиться к команде:\n\n<pre>{message.from_user.id}</pre>",
+            text=f"<b>Бобро пожаловать!</b>\nТвой <b>ID</b> что бы присоединиться к команде:\n\n<pre>{message.from_user.id}</pre>\n\nЕсли ты оператор, нажми <b>Выбрать СВ👤</b>, чтобы присоединиться к своей группе. 👥",
             parse_mode='HTML',
             reply_markup=kb
         )
