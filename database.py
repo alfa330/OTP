@@ -259,13 +259,13 @@ class Database:
             ]
 
     def get_supervisors(self):
-            with self._get_cursor() as :
-                cursor.execute("""
+        with self._get_cursor() as :
+            cursor.execute("""
                     SELECT id, name, scores_table_url, hours_table_url 
                     FROM users 
                     WHERE role = 'sv'
                 """)
-                return cursor.fetchall()
+            return cursor.fetchall()
 
     def get_user_by_login(self, login):
         with self._get_cursor() as cursor:
