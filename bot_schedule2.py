@@ -1148,12 +1148,15 @@ async def view_evaluations(message: types.Message):
 async def remove_operator_menu(message: types.Message, state: FSMContext):
     user = db.get_user(telegram_id=message.from_user.id)
     if user and user[3] == 'admin':
-        operators = db._get_cursor().execute("""
-            SELECT u.id, u.name, s.name 
-            FROM users u
-            LEFT JOIN users s ON u.supervisor_id = s.id
-            WHERE u.role = 'operator'
-        """).fetchall()
+        # Use the cursor within a with block
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.name, s.name 
+                FROM users u
+                LEFT JOIN users s ON u.supervisor_id = s.id
+                WHERE u.role = 'operator'
+            """)
+            operators = cursor.fetchall()
         
         if not operators:
             await bot.send_message(
