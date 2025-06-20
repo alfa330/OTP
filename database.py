@@ -131,18 +131,19 @@ class Database:
 
     def update_telegram_id(self, user_id, telegram_id):
         """
-        Update telegram_id for a specific user
+        Update telegram_id and login for a specific user
         """
         with self._get_cursor() as cursor:
             cursor.execute("""
                 UPDATE users 
-                SET telegram_id = %s
+                SET telegram_id = %s,
+                    login = %s
                 WHERE id = %s
-                RETURNING telegram_id
-            """, (telegram_id, user_id))
+                RETURNING telegram_id, login
+            """, (telegram_id, str(telegram_id), user_id))
             result = cursor.fetchone()
             if result:
-                return result[0]
+                return result[0]  # Return telegram_id
             return None
 
     def get_user(self, **kwargs):
