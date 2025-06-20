@@ -246,7 +246,7 @@ class Database:
     def get_supervisors(self):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name, table_url FROM users WHERE role = 'sv'
+                SELECT id, name, scores_table_url, hours_table_url FROM users WHERE role = 'sv'
             """)
             return cursor.fetchall()
 
@@ -296,7 +296,7 @@ class Database:
         # For admin access to all operator data
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name, direction, hire_date, supervisor_id, table_url
+                SELECT id, name, direction, hire_date, supervisor_id, scores_table_url, hours_table_url
                 FROM users 
                 WHERE role = 'operator'
             """)
