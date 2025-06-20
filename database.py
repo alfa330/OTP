@@ -4,6 +4,7 @@ import psycopg2
 from contextlib import contextmanager
 from passlib.hash import pbkdf2_sha256
 from datetime import datetime
+import uuid
 
 logging.basicConfig(level=logging.INFO)
 
@@ -40,63 +41,78 @@ class Database:
                 cursor.close()
 
     def _init_db(self):
-            with self._get_cursor() as cursor:
-                # Users table with hire_date and operator direction
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS users (
-                        id SERIAL PRIMARY KEY,
-                        telegram_id BIGINT UNIQUE,
-                        name VARCHAR(255) NOT NULL,
-                        role VARCHAR(20) NOT NULL CHECK(role IN ('admin', 'sv', 'operator')),
-                        direction VARCHAR(20) CHECK(direction IN ('chat', 'moderator', 'line', NULL)),
-                        hire_date DATE,
-                        login VARCHAR(50) UNIQUE,
-                        password_hash VARCHAR(255),
-                        supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                        hours_table_url TEXT,
-                        scores_table_url TEXT,
-                        CONSTRAINT unique_name_role UNIQUE (name, role)
-                    );
-                """)
-                # Calls table with automatic month in 'YYYY-MM' format
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS calls (
-                        id SERIAL PRIMARY KEY,
-                        evaluator_id INTEGER NOT NULL REFERENCES users(id),
-                        operator_id INTEGER NOT NULL REFERENCES users(id),
-                        month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
-                        call_number INTEGER NOT NULL,
-                        phone_number VARCHAR(20) NOT NULL,
-                        score FLOAT NOT NULL,
-                        comment TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """)
-                # Work hours table for regular and training hours
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS work_hours (
-                        id SERIAL PRIMARY KEY,
-                        operator_id INTEGER NOT NULL REFERENCES users(id),
-                        month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
-                        regular_hours FLOAT NOT NULL DEFAULT 0,
-                        training_hours FLOAT NOT NULL DEFAULT 0,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE(operator_id, month)
-                    );
-                """)
-                # Indexes for performance
-                cursor.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
-                    CREATE INDEX IF NOT EXISTS idx_calls_operator_id ON calls(operator_id);
-                    CREATE INDEX IF NOT EXISTS idx_work_hours_operator_id ON work_hours(operator_id);
-                    CREATE INDEX IF NOT EXISTS idx_work_hours_month ON work_hours(month);
-                """)
+        with self._get_cursor() as cursor:
+            # Users table with hire_date and operator direction
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    telegram_id BIGINT UNIQUE,
+                    name VARCHAR(255) NOT NULL,
+                    role VARCHAR(20) NOT NULL CHECK(role IN ('admin', 'sv', 'operator')),
+                    direction VARCHAR(20) CHECK(direction IN ('chat', 'moderator', 'line', NULL)),
+                    hire_date DATE,
+                    login VARCHAR(50) UNIQUE,
+                    password_hash VARCHAR(255),
+                    supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    hours_table_url TEXT,
+                    scores_table_url TEXT,
+                    CONSTRAINT unique_name_role UNIQUE (name, role)
+                );
+            """)
+            # Calls table with automatic month in 'YYYY-MM' format
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS calls (
+                    id SERIAL PRIMARY KEY,
+                    evaluator_id INTEGER NOT NULL REFERENCES users(id),
+                    operator_id INTEGER NOT NULL REFERENCES users(id),
+                    month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
+                    call_number INTEGER NOT NULL,
+                    phone_number VARCHAR(20) NOT NULL,
+                    score FLOAT NOT NULL,
+                    comment TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            # Work hours table for regular and training hours
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS work_hours (
+                    id SERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id),
+                    month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
+                    regular_hours FLOAT NOT NULL DEFAULT 0,
+                    training_hours FLOAT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(operator_id, month)
+                );
+            """)
+            # Indexes for performance
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
+                CREATE INDEX IF NOT EXISTS idx_calls_operator_id ON calls(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_work_hours_operator_id ON work_hours(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_work_hours_month ON work_hours(month);
+            """)
 
     def create_user(self, telegram_id, name, role, direction=None, hire_date=None, supervisor_id=None, login=None, password=None):
-        # Set default login and password if None
-        login = login or str(telegram_id)
+        # Generate a random login if None is provided
+        if login is None:
+            # Generate a unique login using a prefix and UUID
+            base_login = f"user_{str(uuid.uuid4())[:8]}"  # Use first 8 chars of UUID
+            with self._get_cursor() as cursor:
+                # Check if login exists and keep generating until unique
+                while True:
+                    cursor.execute("SELECT id FROM users WHERE login = %s", (base_login,))
+                    if not cursor.fetchone():
+                        login = base_login
+                        break
+                    base_login = f"user_{str(uuid.uuid4())[:8]}"
+        else:
+            login = login or str(telegram_id)
+
+        # Set default password if None
         password = password or "123321123"
         password_hash = pbkdf2_sha256.hash(password)
+
         with self._get_cursor() as cursor:
             cursor.execute("""
                 INSERT INTO users (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash)
@@ -213,25 +229,24 @@ class Database:
                 } for row in cursor.fetchall()
             ]
 
-    def get_hours_summary(self, month=None):
-        # Optional month filter for hours table
+    def get_hours_summary(self, operator_id=None):
         query = """
             SELECT 
                 u.id AS operator_id,
                 u.name AS operator_name,
                 u.direction,
                 wh.regular_hours,
-                wh.training_hours
+                wh.training_hours,
             FROM users u
-            LEFT JOIN work_hours wh ON u.id = wh.operator_id
+            LEFT JOIN work_hours ON u.id = wh.operator_id
             WHERE u.role = 'operator'
-        """
+            """
         params = []
         if month:
             query += " AND wh.month = %s"
             params.append(month)
         
-        with self._get_cursor() as cursor:
+        with self._get() as cursor:
             cursor.execute(query, params)
             return [
                 {
@@ -239,16 +254,18 @@ class Database:
                     "operator_name": row[1],
                     "direction": row[2],
                     "regular_hours": float(row[3]) if row[3] is not None else 0,
-                    "training_hours": float(row[4]) if row[4] is not None else 0
+                    "training_hours": float(row[4]) if row[4] is not None else None 0
                 } for row in cursor.fetchall()
             ]
 
     def get_supervisors(self):
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT id, name, scores_table_url, hours_table_url FROM users WHERE role = 'sv'
-            """)
-            return cursor.fetchall()
+            with self._get_cursor() as :
+                cursor.execute("""
+                    SELECT id, name, scores_table_url, hours_table_url 
+                    FROM users 
+                    WHERE role = 'sv'
+                """)
+                return cursor.fetchall()
 
     def get_user_by_login(self, login):
         with self._get_cursor() as cursor:
