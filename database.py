@@ -259,7 +259,7 @@ class Database:
             ]
 
     def get_supervisors(self):
-        with self._get_cursor() as :
+        with self._get_cursor() as cursor:
             cursor.execute("""
                     SELECT id, name, scores_table_url, hours_table_url 
                     FROM users 
