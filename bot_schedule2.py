@@ -407,7 +407,7 @@ def update_sv_table():
         if error:
             return jsonify({"error": error}), 400
         
-        db.update_user_table(user_id, table_url)
+        db.update_user_table(user_id = user_id, scores_table_url = table_url)
         
         telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
         payload = {
