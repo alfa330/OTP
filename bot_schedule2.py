@@ -256,7 +256,7 @@ def get_sv_data():
         if not user or user[3] not in ['sv', 'operator']:
             return jsonify({"error": "User not found"}), 404
         
-        table_url = user[8]
+        table_url = user[9]
         operators = []
         error = None
         logging.info(table_url)
