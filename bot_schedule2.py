@@ -553,6 +553,9 @@ class sv(StatesGroup):
     view_evaluations = State()
     change_table = State()
 
+class ChangeCredentials(StatesGroup):
+    waiting_for_value = State()
+
 class Auth(StatesGroup):
     login = State()
     password = State()
@@ -583,6 +586,12 @@ def get_evaluations_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Отчет за месяц📅'))
     kb.add(KeyboardButton('Назад 🔙'))
+    return kb
+
+def get_sv_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton('Добавить таблицу📑'))
+    kb.add(KeyboardButton('Управление операторами🔑'))
     return kb
 
 def get_verify_keyboard():
@@ -651,14 +660,11 @@ async def start_command(message: types.Message):
                 reply_markup=get_admin_keyboard()
             )
         elif user[3] == 'sv':
-            kb = ReplyKeyboardMarkup(resize_keyboard=True)
-            kb.add(KeyboardButton('Добавить таблицу📑'))
             await bot.send_message(
                 chat_id=message.from_user.id,
                 text=f"<b>Бобро пожаловать, {user[2]}!</b>",
                 parse_mode='HTML',
-                reply_markup=kb
-            )
+                reply_markup=get_sv_keyboard()
         elif user[3] == 'operator':
             await bot.send_message(
                 chat_id=message.from_user.id,
@@ -1084,6 +1090,126 @@ async def select_sv_for_table_change(callback: types.CallbackQuery, state: FSMCo
     else:
         await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
         await state.finish()
+
+@dp.message_handler(regexp='Управление операторами🔑')
+async def manage_operators_credentials(message: types.Message):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user and user[3] == 'sv':
+        operators = db.get_operators_by_supervisor(user[0])
+        if not operators:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="<b>У вас нет операторов</b>",
+                parse_mode='HTML',
+                reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton('Назад 🔙'))
+            return
+
+        ikb = InlineKeyboardMarkup(row_width=1)
+        for op_id, op_name, _, _, _, _ in operators:
+            ikb.insert(InlineKeyboardButton(text=op_name, callback_data=f"cred_{op_id}"))
+        
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="<b>Выберите оператора для управления доступом:</b>",
+            parse_mode='HTML',
+            reply_markup=ikb
+        )
+    await message.delete()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('cred_'))
+async def operator_credentials_menu(callback: types.CallbackQuery):
+    operator_id = int(callback.data.split('_')[1])
+    user = db.get_user(telegram_id=callback.from_user.id)
+    
+    if user and user[3] == 'sv':
+        operator = db.get_operator_credentials(operator_id, user[0])
+        if not operator:
+            await bot.answer_callback_query(callback.id, text="Оператор не найден")
+            return
+
+        ikb = InlineKeyboardMarkup(row_width=2)
+        ikb.add(
+            InlineKeyboardButton("Изменить логин", callback_data=f"chlogin_{operator_id}"),
+            InlineKeyboardButton("Изменить пароль", callback_data=f"chpass_{operator_id}")
+        )
+        ikb.add(InlineKeyboardButton("Назад", callback_data="cred_back"))
+
+        await bot.edit_message_text(
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text=f"<b>Управление доступом оператора</b>\n\nЛогин: <code>{operator[1]}</code>",
+            parse_mode='HTML',
+            reply_markup=ikb
+        )
+
+@dp.callback_query_handler(lambda c: c.data.startswith('chlogin_'))
+async def change_login_start(callback: types.CallbackQuery, state: FSMContext):
+    operator_id = int(callback.data.split('_')[1])
+    await state.update_data(operator_id=operator_id, action="login")
+    await bot.edit_message_text(
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="Введите новый логин для оператора:",
+        reply_markup=None
+    )
+    await ChangeCredentials.waiting_for_value.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('chpass_'))
+async def change_password_start(callback: types.CallbackQuery, state: FSMContext):
+    operator_id = int(callback.data.split('_')[1])
+    await state.update_data(operator_id=operator_id, action="password")
+    await bot.edit_message_text(
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="Введите новый пароль для оператора:",
+        reply_markup=None
+    )
+    await ChangeCredentials.waiting_for_value.set()
+
+@dp.message_handler(state=ChangeCredentials.waiting_for_value)
+async def process_credential_change(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    operator_id = user_data['operator_id']
+    action = user_data['action']
+    value = message.text.strip()
+    user = db.get_user(telegram_id=message.from_user.id)
+
+    try:
+        if action == "login":
+            success = db.update_operator_login(operator_id, user[0], value)
+            msg = f"Логин оператора изменён на: <code>{value}</code>"
+        else:
+            success = db.update_operator_password(operator_id, user[0], value)
+            msg = "Пароль оператора успешно изменён"
+        
+        if success:
+            operator = db.get_user(id=operator_id)
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text=f"✅ {msg}\n\nОператор: {operator[2]}",
+                parse_mode='HTML'
+            )
+        else:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="❌ Не удалось изменить данные оператора",
+                parse_mode='HTML'
+            )
+    except Exception as e:
+        logging.error(f"Error changing operator {action}: {e}")
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text=f"❌ Ошибка при изменении: {str(e)}",
+            parse_mode='HTML'
+        )
+    
+    await state.finish()
+    await message.delete()
+
+@dp.callback_query_handler(lambda c: c.data == "cred_back", state="*")
+async def credentials_back(callback: types.CallbackQuery, state: FSMContext):
+    await state.finish()
+    await manage_operators_credentials(callback.message)
 
 @dp.message_handler(regexp='Добавить таблицу📑')
 async def crtablee(message: types.Message):
