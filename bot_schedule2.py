@@ -677,7 +677,7 @@ async def start_command(message: types.Message):
 
 # === Админка ===================================================================================================
 @dp.message_handler(regexp='Вход👤')
-async def start_auth(message: Message):
+async def start_auth(message: types.Message):
     await message.delete()
     await message.answer(
         "<b>Введите ваш логин:</b>",
@@ -689,7 +689,7 @@ async def start_auth(message: Message):
     await dp.storage.set_data(chat=message.chat.id, data={'attempts': 0})
 
 @dp.message_handler(state=Auth.login)
-async def process_login(message: Message, state: FSMContext):
+async def process_login(message: types.Message, state: FSMContext):
     login = message.text.strip()
     try:
         user = db.get_user_by_login(login)
@@ -728,7 +728,7 @@ async def process_login(message: Message, state: FSMContext):
         await state.finish()
         
 @dp.message_handler(state=Auth.password)
-async def process_password(message: Message, state: FSMContext):
+async def process_password(message: types.Message, state: FSMContext):
     password = message.text.strip()
     user_data = await state.get_data()
     user = user_data.get('user')
