@@ -138,7 +138,7 @@ class Database:
                 UPDATE users 
                 SET telegram_id = %s
                 WHERE id = %s
-                RETURNING telegram_id, login
+                RETURNING telegram_id
             """, (telegram_id, user_id))
             result = cursor.fetchone()
             if result:
