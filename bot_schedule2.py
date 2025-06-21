@@ -665,6 +665,7 @@ async def start_command(message: types.Message):
                 text=f"<b>Бобро пожаловать, {user[2]}!</b>",
                 parse_mode='HTML',
                 reply_markup=get_sv_keyboard()
+            )
         elif user[3] == 'operator':
             await bot.send_message(
                 chat_id=message.from_user.id,
