@@ -553,6 +553,12 @@ class sv(StatesGroup):
     view_evaluations = State()
     change_table = State()
 
+class Auth(StatesGroup):
+    login = State()
+    password = State()
+
+MAX_LOGIN_ATTEMPTS = 3
+
 def get_current_week_of_month():
     today = datetime.now()
     week_number = (today.day - 1) // 7 + 1
@@ -661,15 +667,138 @@ async def start_command(message: types.Message):
             )
     else:
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add(KeyboardButton('Выбрать СВ👤'))
+        kb.add(KeyboardButton('Вход👤'))
         await bot.send_message(
             chat_id=message.from_user.id,
-            text=f"<b>Бобро пожаловать!</b>\nТвой <b>ID</b> что бы присоединиться к команде:\n\n<pre>{message.from_user.id}</pre>\n\nЕсли ты оператор, нажми <b>Выбрать СВ👤</b>, чтобы присоединиться к своей группе. 👥",
+            text=f"<b>Бобро пожаловать!</b>\nТвой <b>ID</b> что бы присоединиться к команде:\n\n<pre>{message.from_user.id}</pre>\n\nЕсли ты оператор, нажми <b>Вход👤</b>, чтобы присоединиться к своей группе. 👥",
             parse_mode='HTML',
             reply_markup=kb
         )
 
 # === Админка ===================================================================================================
+@dp.message_handler(regexp='Вход👤')
+async def start_auth(message: Message):
+    await message.delete()
+    await message.answer(
+        "<b>Введите ваш логин:</b>",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    await Auth.login.set()
+    # Инициализация счетчика попыток
+    await dp.storage.set_data(chat=message.chat.id, data={'attempts': 0})
+
+@dp.message_handler(state=Auth.login)
+async def process_login(message: Message, state: FSMContext):
+    login = message.text.strip()
+    try:
+        user = db.get_user_by_login(login)
+        if not user:
+            await message.delete()
+            await message.answer(
+                "<b>Неверный логин. Попробуйте снова🔁</b>",
+                parse_mode='HTML'
+            )
+            return
+
+        # Сохраняем данные пользователя в состоянии
+        await state.update_data(user={
+            'id': user[0],
+            'telegram_id': user[1],
+            'name': user[2],
+            'role': user[3],
+            'direction': user[4],
+            'hire_date': user[5],
+            'supervisor_id': user[6],
+            'login': user[7]
+        })
+        await message.delete()
+        await message.answer(
+            "<b>Введите ваш пароль:</b>",
+            parse_mode='HTML'
+        )
+        await Auth.password.set()
+    except Exception as e:
+        logger.error(f"Ошибка при обработке логина {login}: {str(e)}")
+        await message.delete()
+        await message.answer(
+            "<b>Произошла ошибка. Попробуйте снова или свяжитесь с поддержкой.</b>",
+            parse_mode='HTML'
+        )
+        await state.finish()
+        
+@dp.message_handler(state=Auth.password)
+async def process_password(message: Message, state: FSMContext):
+    password = message.text.strip()
+    user_data = await state.get_data()
+    user = user_data.get('user')
+    attempts = (await dp.storage.get_data(chat=message.chat.id)).get('attempts', 0)
+
+    try:
+        if attempts >= MAX_LOGIN_ATTEMPTS:
+            await message.delete()
+            await message.answer(
+                "<b>Слишком много попыток. Авторизация заблокирована. Свяжитесь с поддержкой.</b>",
+                parse_mode='HTML'
+            )
+            await state.finish()
+            await dp.storage.reset_data(chat=message.chat.id)
+            logger.warning(f"Превышено количество попыток авторизации для chat_id {message.chat.id}")
+            return
+
+        if not user or not db.verify_password(user['id'], password):
+            attempts += 1
+            await dp.storage.set_data(chat=message.chat.id, data={'attempts': attempts})
+            await message.delete()
+            await message.answer(
+                f"<b>Неверный пароль. Осталось попыток: {MAX_LOGIN_ATTEMPTS - attempts}. Попробуйте снова.</b>",
+                parse_mode='HTML'
+            )
+            logger.warning(f"Неверный пароль для логина {user.get('login')} (попытка {attempts})")
+            return
+
+        # Успешная авторизация
+        db.update_telegram_id(user['id'], message.from_user.id)
+        await message.delete()
+
+        # Формируем приветственное сообщение в зависимости от роли
+        role = user['role']
+        name = user['name']
+        if role == 'admin':
+            await message.answer(
+                "<b>Добро пожаловать!</b>\nЭто бот для управления прослушками.",
+                parse_mode='HTML',
+                reply_markup=get_admin_keyboard()
+            )
+        elif role == 'sv':
+            kb = ReplyKeyboardMarkup(resize_keyboard=True)
+            kb.add(KeyboardButton('Добавить таблицу📑'))
+            await message.answer(
+                f"<b>Добро пожаловать, {name}!</b>",
+                parse_mode='HTML',
+                reply_markup=kb
+            )
+        elif role == 'operator':
+            await message.answer(
+                f"<b>Добро пожаловать, оператор {name}!</b>",
+                parse_mode='HTML'
+            )
+
+        logger.info(f"Успешная авторизация: login={user['login']}, role={role}, chat_id={message.chat.id}")
+        await state.finish()
+        await dp.storage.reset_data(chat=message.chat.id)
+
+    except Exception as e:
+        logger.error(f"Ошибка при обработке пароля для login {user.get('login')}: {str(e)}")
+        await message.delete()
+        await message.answer(
+            "<b>Произошла ошибка. Попробуйте снова или свяжитесь с СВ.</b>",
+            parse_mode='HTML'
+        )
+        await state.finish()
+    
+    
+
 @dp.message_handler(regexp='Редактор СВ📝')
 async def editor_sv(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)
