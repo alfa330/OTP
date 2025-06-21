@@ -222,7 +222,38 @@ class Database:
             if result:
                 return result[0]
             return None
-
+            
+    def get_operator_credentials(self, operator_id, supervisor_id):
+        """Получить логин и хеш пароля оператора с проверкой принадлежности супервайзеру"""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.login 
+                FROM users u
+                WHERE u.id = %s AND u.role = 'operator' AND u.supervisor_id = %s
+            """, (operator_id, supervisor_id))
+            return cursor.fetchone()
+    
+    def update_operator_login(self, operator_id, supervisor_id, new_login):
+        """Обновить логин оператора с проверкой принадлежности"""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE users SET login = %s
+                WHERE id = %s AND role = 'operator' AND supervisor_id = %s
+                RETURNING id
+            """, (new_login, operator_id, supervisor_id))
+            return cursor.fetchone() is not None
+    
+    def update_operator_password(self, operator_id, supervisor_id, new_password):
+        """Обновить пароль оператора с проверкой принадлежности"""
+        password_hash = pbkdf2_sha256.hash(new_password)
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE users SET password_hash = %s
+                WHERE id = %s AND role = 'operator' AND supervisor_id = %s
+                RETURNING id
+            """, (password_hash, operator_id, supervisor_id))
+            return cursor.fetchone() is not None
+            
     def get_user(self, **kwargs):
         conditions = []
         params = []
