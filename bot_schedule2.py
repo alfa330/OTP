@@ -1117,6 +1117,7 @@ async def manage_operators_credentials(message: types.Message):
                 text="<b>У вас нет операторов</b>",
                 parse_mode='HTML',
                 reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton('Назад 🔙'))
+            )
             return
 
         ikb = InlineKeyboardMarkup(row_width=1)
