@@ -859,51 +859,65 @@ async def newSv(message: types.Message):
 async def newSVname(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['svname'] = message.text
+    
+    # Генерируем случайные логин и пароль
+    login = f"sv_{str(uuid.uuid4())[:8]}"
+    password = str(uuid.uuid4())[:8]
+    
+    async with state.proxy() as data:
+        data['login'] = login
+        data['password'] = password
+    
     await message.answer(
-        text=f'Класс, ФИО - <b>{message.text}</b>\n\n<b>Добавление СВ, этап</b>: 2 из 2📍\n\nНапишите <b>ID</b> нового СВ🆔',
+        text=f'<b>Данные для нового СВ:</b>\n\n'
+             f'ФИО: <b>{message.text}</b>\n'
+             f'Логин: <code>{login}</code>\n'
+             f'Пароль: <code>{password}</code>\n\n'
+             f'Передайте эти данные супервайзеру. Он сможет войти в систему и добавить '
+             f'остальную информацию самостоятельно.\n\n'
+             f'<b>Хотите сохранить этого супервайзера?</b>',
         parse_mode='HTML',
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_verify_keyboard()
     )
     await new_sv.next()
     await message.delete()
 
-@dp.message_handler(state=new_sv.svid)
-async def newSVid(message: types.Message, state: FSMContext):
-    try:
-        sv_id = int(message.text)
+@dp.callback_query_handler(state=new_sv.svid)
+async def newSVid(callback: types.CallbackQuery, state: FSMContext):
+    if callback.data == "verify_yes":
         async with state.proxy() as data:
-            data['svid'] = sv_id
             sv_name = data['svname']
+            login = data['login']
+            password = data['password']
         
-        # Создаем супервайзера
-        db.create_user(
-            telegram_id=sv_id,
+        # Создаем супервайзера без telegram_id (он добавит его при первом входе)
+        sv_id = db.create_user(
+            telegram_id=None,  # Будет установлен при первом входе
             name=sv_name,
-            role='sv'
+            role='sv',
+            login=login,
+            password=password
         )
         
-        kb_sv = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb_sv.add(KeyboardButton('Добавить таблицу📑'))
         await bot.send_message(
-            chat_id=sv_id,
-            text=f"Принятие в команду прошло успешно <b>успешно✅</b>\n\nОсталось отправить таблицу вашей группы. Нажмите <b>Добавить таблицу📑</b> что бы сделать это.",
-            parse_mode='HTML',
-            reply_markup=kb_sv
-        )
-        
-        await message.answer(
-            text=f'Класс, ID - <b>{message.text}</b>\n\nДобавление СВ прошло <b>успешно✅</b>. Новому супервайзеру осталось лишь отправить таблицу этого месяца👌🏼',
+            chat_id=callback.from_user.id,
+            text=f'<b>Супервайзер {sv_name} успешно добавлен!</b>\n\n'
+                 f'Логин: <code>{login}</code>\n'
+                 f'Пароль: <code>{password}</code>\n\n'
+                 f'Передайте эти данные супервайзеру для входа в систему.',
             parse_mode='HTML',
             reply_markup=get_editor_keyboard()
         )
-        await state.finish()
-    except:
-        await message.answer(
-            text='Ой, похоже вы отправили не тот <b>ID</b>❌\n\n<b>Пожалуйста повторите попытку!</b>',
+    else:
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text='Добавление супервайзера отменено.',
             parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
+            reply_markup=get_editor_keyboard()
         )
-    await message.delete()
+    
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+    await state.finish()
 
 @dp.message_handler(regexp='Добавить оператора👷‍♂️')
 async def newOperator(message: types.Message):
