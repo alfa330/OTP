@@ -1079,7 +1079,7 @@ async def change_sv_table(message: types.Message):
             return
 
         ikb = InlineKeyboardMarkup(row_width=1)
-        for sv_id, sv_name, _ in supervisors:
+        for sv_id, sv_name, _, _ in supervisors:
             ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"change_table_{sv_id}"))
         
         await bot.send_message(
@@ -1407,7 +1407,7 @@ async def view_evaluations(message: types.Message):
                     reply_markup=get_evaluations_keyboard()
                 )
         ikb = InlineKeyboardMarkup(row_width=1)
-        for sv_id, sv_name, _ in supervisors:
+        for sv_id, sv_name, _, _ in supervisors:
             ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"eval_{sv_id}"))
         
         await bot.send_message(
@@ -1732,7 +1732,7 @@ def sync_generate_weekly_report():
         # Get supervisors from the database
         svs = db.get_supervisors()
         
-        for sv_id, sv_name, table_url in svs:
+        for sv_id, sv_name, table_url, _ in svs:
             if not table_url:
                 logging.warning(f"No table URL for supervisor {sv_name}")
                 continue
