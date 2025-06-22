@@ -436,7 +436,7 @@ def receive_call_evaluation():
             return jsonify({"error": "Missing or invalid required fields"}), 400
 
         # Set month to current YYYY-MM if not provided
-        month = data.get('month', datetime.now().strftime('%Y-%m'))
+        month = datetime.now().strftime('%Y-%m')
 
         # Find evaluator and operator by name
         evaluator = db.get_user(name=data['evaluator'])
