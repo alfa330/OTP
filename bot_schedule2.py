@@ -1029,7 +1029,7 @@ async def delSv(message: types.Message):
             return
 
         ikb = InlineKeyboardMarkup(row_width=1)
-        for sv_id, sv_name, _ in supervisors:
+        for sv_id, sv_name, _, _ in supervisors:
             ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"delsv_{sv_id}"))
         
         await bot.send_message(
