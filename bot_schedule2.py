@@ -787,22 +787,21 @@ async def process_password(message: types.Message, state: FSMContext):
         name = user['name']
         if role == 'admin':
             await message.answer(
-                "<b>Добро пожаловать!</b>\nЭто бот для управления прослушками.",
+                "<b>Бобро пожаловать!</b>\nЭто бот для управления прослушками.",
                 parse_mode='HTML',
                 reply_markup=get_admin_keyboard()
             )
         elif role == 'sv':
-            kb = ReplyKeyboardMarkup(resize_keyboard=True)
-            kb.add(KeyboardButton('Добавить таблицу📑'))
             await message.answer(
-                f"<b>Добро пожаловать, {name}!</b>",
+                f"<b>Бобро пожаловать, {name}!</b>",
                 parse_mode='HTML',
-                reply_markup=kb
+                reply_markup=get_sv_keyboard()
             )
         elif role == 'operator':
             await message.answer(
-                f"<b>Добро пожаловать, оператор {name}!</b>",
-                parse_mode='HTML'
+                f"<b>Бобро пожаловать, оператор {name}!</b>",
+                parse_mode='HTML',
+                reply_markup=get_operator_keyboard()
             )
 
         logging.info(f"Успешная авторизация: login={user['login']}, role={role}, chat_id={message.chat.id}")
