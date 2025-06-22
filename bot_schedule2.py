@@ -592,7 +592,7 @@ def get_admin_keyboard():
 def get_data_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Оценки📊'))
-    kb.add(KeyboardButton('Часы⏱️'))
+    kb.insert(KeyboardButton('Часы⏱️'))
     kb.add(KeyboardButton('Назад 🔙'))
     return kb
 
