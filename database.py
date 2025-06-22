@@ -15,6 +15,12 @@ import io
 
 logging.basicConfig(level=logging.INFO)
 
+import re
+import requests
+import openpyxl
+import os
+from datetime import datetime
+
 def process_timesheet(file_url):
     """
     Process the last sheet of a Google Sheets timesheet to extract operator details.
@@ -22,6 +28,7 @@ def process_timesheet(file_url):
         file_url (str): Google Sheets URL (e.g., https://docs.google.com/spreadsheets/d/.../edit?gid=...).
     Returns:
         list: List of dicts with ФИО, Кол-во часов, Кол-во часов тренинга, Штрафы, Год-Месяц.
+        or dict: {"error": "error message"} if something went wrong
     """
     # Set current year-month
     current_month = datetime.now().strftime('%Y-%m')
@@ -37,59 +44,88 @@ def process_timesheet(file_url):
     local_file = 'temp_timesheet.xlsx'
     try:
         response = requests.get(export_url)
-        if response.status_code != 200:
-            return {"error": f"Failed to download file: HTTP {response.status_code}"}
+        response.raise_for_status()
         with open(local_file, 'wb') as f:
             f.write(response.content)
-    except Exception as e:
+    except requests.RequestException as e:
         return {"error": f"Failed to download file: {str(e)}"}
 
     try:
         # Load the Excel file and get the last sheet
         workbook = openpyxl.load_workbook(local_file, data_only=True)
         sheet_names = workbook.sheetnames
+        if not sheet_names:
+            os.remove(local_file)
+            return {"error": "No sheets found in the workbook."}
+        
         last_sheet = workbook[sheet_names[-1]]
 
         # Extract data
         data = []
-        headers = []
         fio_col, hours_col, training_col, fines_col = None, None, None, None
 
         # Read rows
         for row_idx, row in enumerate(last_sheet.iter_rows(values_only=True), 1):
             if row_idx == 1:  # Header row
-                headers = [str(cell).strip().replace('"', '').replace('\n', '').replace(' ', ' ') if cell else '' for cell in row]
+                headers = [
+                    str(cell).strip().replace('"', '').replace('\n', '').replace(' ', ' ') 
+                    if cell is not None else '' 
+                    for cell in row
+                ]
+                
+                # Find column indexes using exact word matching
                 for idx, header in enumerate(headers):
                     header_lower = header.lower()
-                    if 'фио' in header_lower:
+                    if re.search(r'\bфио\b', header_lower):
                         fio_col = idx
-                    elif 'итого' in header_lower or 'итоговые' in header_lower:
+                    elif re.search(r'\b(итого|итоговые|часы)\b', header_lower):
                         hours_col = idx
-                    elif 'часы тренинга' in header_lower or 'тренинг' in header_lower:
+                    elif re.search(r'\b(часы тренинга|тренинг)\b', header_lower):
                         training_col = idx
-                    elif 'общая сумма' in header_lower or 'сумма штрафа' in header_lower:
+                    elif re.search(r'\b(общая сумма|сумма штрафа|штрафы)\b', header_lower):
                         fines_col = idx
-                if not (fio_col is not None and hours_col is not None):
+                
+                if fio_col is None or hours_col is None:
                     os.remove(local_file)
                     return {"error": f"Required columns (ФИО, Итого) not found in sheet '{last_sheet.title}'."}
             else:
-                # Data row
-                if row[fio_col] and row[hours_col] is not None:
+                # Skip empty rows or rows without ФИО
+                if not row[fio_col] or str(row[fio_col]).strip() == '':
+                    continue
+                
+                try:
+                    # Convert values to float with rounding to 2 decimal places
+                    def round_value(val):
+                        if val is None:
+                            return 0.0
+                        try:
+                            return round(float(val), 2) if float(val) != 0 else 0.0
+                        except (ValueError, TypeError):
+                            return 0.0
+                    
+                    hours = round_value(row[hours_col])
+                    training_hours = round_value(row[training_col]) if training_col is not None else 0.0
+                    fines = round_value(row[fines_col]) if fines_col is not None else 0.0
+                    
                     entry = {
                         'ФИО': str(row[fio_col]).strip(),
-                        'Кол-во часов': float(row[hours_col]) if row[hours_col] else 0.0,
-                        'Кол-во часов тренинга': float(row[training_col]) if training_col is not None and row[training_col] else 0.0,
-                        'Штрафы': float(row[fines_col]) if fines_col is not None and row[fines_col] else 0.0,
+                        'Кол-во часов': hours,
+                        'Кол-во часов тренинга': training_hours,
+                        'Штрафы': fines,
                         'Год-Месяц': current_month
                     }
                     data.append(entry)
+                except Exception as e:
+                    # Skip row if conversion fails
+                    continue
 
         # Clean up
         os.remove(local_file)
         return data
 
     except Exception as e:
-        os.remove(local_file) if os.path.exists(local_file) else None
+        if os.path.exists(local_file):
+            os.remove(local_file)
         return {"error": f"Error processing file: {str(e)}"}
 
 class Database:
