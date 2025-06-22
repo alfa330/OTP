@@ -585,8 +585,15 @@ def get_admin_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Редактор СВ📝'))
     kb.insert(KeyboardButton('Операторы👷'))
-    kb.add(KeyboardButton('Оценки📊'))
+    kb.add(KeyboardButton('Данные📈'))
     kb.add(KeyboardButton('Доступ🔑'))
+    return kb
+
+def get_data_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton('Оценки📊'))
+    kb.add(KeyboardButton('Часы⏱️'))
+    kb.add(KeyboardButton('Назад 🔙'))
     return kb
 
 def get_evaluations_keyboard():
@@ -597,7 +604,8 @@ def get_evaluations_keyboard():
 
 def get_sv_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton('Добавить таблицу📑'))
+    kb.add(KeyboardButton('Добавить таблицу оценок📑'))
+    kb.add(KeyboardButton('Добавить таблицу часов📊'))
     kb.add(KeyboardButton('Управление операторами🔑'))
     kb.add(KeyboardButton('Доступ🔑'))
     return kb
@@ -1128,6 +1136,79 @@ async def select_sv_for_table_change(callback: types.CallbackQuery, state: FSMCo
         await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
         await state.finish()
 
+@dp.message_handler(regexp='Данные📈')
+async def view_data_menu(message: types.Message):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user and user[3] == 'admin':
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text='<b>Меню данных</b>',
+            parse_mode='HTML',
+            reply_markup=get_data_keyboard()
+        )
+    await message.delete()
+
+@dp.message_handler(regexp='Часы⏱️')
+async def view_hours_data(message: types.Message):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user and user[3] == 'admin':
+        supervisors = db.get_supervisors()
+        if not supervisors:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="<b>Нет доступных супервайзеров</b>",
+                parse_mode='HTML',
+                reply_markup=get_admin_keyboard()
+            )
+            return
+        
+        ikb = InlineKeyboardMarkup(row_width=1)
+        for sv_id, sv_name, _, _ in supervisors:
+            ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"hours_{sv_id}"))
+        
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="<b>Выберите супервайзера для просмотра часов операторов:</b>",
+            parse_mode='HTML',
+            reply_markup=ikb
+        )
+    await message.delete()
+
+# Обработчик для отображения часов операторов
+@dp.callback_query_handler(lambda c: c.data.startswith('hours_'))
+async def show_operator_hours(callback: types.CallbackQuery):
+    sv_id = int(callback.data.split('_')[1])
+    user = db.get_user(id=sv_id)
+    
+    if not user or user[3] != 'sv':
+        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
+        return
+
+    operators = db.get_operators_by_supervisor(sv_id)
+    current_month = datetime.now().strftime('%Y-%m')
+    
+    message_text = f"<b>Часы операторов {user[2]} за {current_month}:</b>\n\n"
+    
+    for op_id, op_name, _, _, _, _ in operators:
+        hours_data = db.get_hours_summary(op_id, current_month)
+        if hours_data:
+            hours = hours_data[0]
+            message_text += (
+                f"👤 <b>{op_name}</b>\n"
+                f"   ⏱️ Часы работы: {hours['regular_hours']}\n"
+                f"   📚 Часы тренинга: {hours['training_hours']}\n"
+                f"   💸 Штрафы: {hours['fines']}\n\n"
+            )
+        else:
+            message_text += f"👤 <b>{op_name}</b> - данные отсутствуют\n\n"
+    
+    await bot.send_message(
+        chat_id=callback.from_user.id,
+        text=message_text,
+        parse_mode='HTML'
+    )
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+
 
 @dp.message_handler(regexp='Оценки📊')
 async def view_evaluations(message: types.Message):
@@ -1202,6 +1283,31 @@ async def remove_operator_menu(message: types.Message, state: FSMContext):
         await state.set_state("delete_operator")
     await message.delete()
 
+@dp.callback_query_handler(lambda c: c.data.startswith('delop_'), state="delete_operator")
+async def remove_operator_callback(callback: types.CallbackQuery, state: FSMContext):
+    op_id = int(callback.data.split('_')[1])
+    user = db.get_user(id=op_id)
+    
+    if user and user[3] == 'operator':
+        with db._get_cursor() as cursor:
+            cursor.execute("DELETE FROM users WHERE id = %s", (op_id,))
+        
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text=f"Оператор <b>{user[2]}</b> удалён!",
+            parse_mode='HTML',
+            reply_markup=get_operators_keyboard()
+        )
+    else:
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text="Оператор не найден!",
+            parse_mode='HTML'
+        )
+    
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+    await state.finish()
+
 
 @dp.message_handler(regexp='Отчет за месяц📅', state=sv.view_evaluations)
 async def handle_monthly_report(message: types.Message, state: FSMContext):
@@ -1242,30 +1348,6 @@ async def back_from_evaluations(message: types.Message, state: FSMContext):
     await state.finish()
     await back_to_admin(message)
 
-@dp.callback_query_handler(lambda c: c.data.startswith('delop_'), state="delete_operator")
-async def remove_operator_callback(callback: types.CallbackQuery, state: FSMContext):
-    op_id = int(callback.data.split('_')[1])
-    user = db.get_user(id=op_id)
-    
-    if user and user[3] == 'operator':
-        with db._get_cursor() as cursor:
-            cursor.execute("DELETE FROM users WHERE id = %s", (op_id,))
-        
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text=f"Оператор <b>{user[2]}</b> удалён!",
-            parse_mode='HTML',
-            reply_markup=get_operators_keyboard()
-        )
-    else:
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text="Оператор не найден!",
-            parse_mode='HTML'
-        )
-    
-    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-    await state.finish()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('eval_'), state=sv.view_evaluations)
 async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
@@ -1652,6 +1734,40 @@ async def select_direction(callback: types.CallbackQuery, state: FSMContext):
     await state.finish()
 
 
+@dp.message_handler(regexp='Добавить таблицу часов📊')
+async def add_hours_table(message: types.Message, state: FSMContext):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user and user[3] == 'sv':
+        await bot.send_message(
+            text='<b>Отправьте ссылку на таблицу с часами работы операторов:</b>',
+            chat_id=message.from_user.id,
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state("waiting_for_hours_table")
+
+# Обработчик для сохранения таблицы часов
+@dp.message_handler(state="waiting_for_hours_table")
+async def save_hours_table(message: types.Message, state: FSMContext):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user and user[3] == 'sv':
+        try:
+            db.update_user_table(user[0], hours_table_url=message.text)
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="<b>Таблица часов успешно сохранена!</b>",
+                parse_mode='HTML',
+                reply_markup=get_sv_keyboard()
+            )
+        except Exception as e:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text=f"<b>Ошибка при сохранении таблицы: {str(e)}</b>",
+                parse_mode='HTML'
+            )
+        await state.finish()
+
+
 @dp.message_handler(regexp='Доступ🔑')
 async def change_credentials_menu(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)
@@ -1998,6 +2114,11 @@ if __name__ == '__main__':
     scheduler.add_job(
         generate_weekly_report, 
         CronTrigger(day_of_week='mon', hour=9, minute=0),
+        misfire_grace_time=3600
+    )
+    scheduler.add_job(
+        db.process_and_upload_timesheet,
+        CronTrigger(minute='*/2'),
         misfire_grace_time=3600
     )
     scheduler.start()
