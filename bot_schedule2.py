@@ -586,6 +586,7 @@ def get_admin_keyboard():
     kb.add(KeyboardButton('Редактор СВ📝'))
     kb.insert(KeyboardButton('Операторы👷'))
     kb.add(KeyboardButton('Оценки📊'))
+    kb.add(KeyboardButton('Доступ🔑'))
     return kb
 
 def get_evaluations_keyboard():

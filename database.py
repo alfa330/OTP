@@ -151,7 +151,7 @@ class Database:
                     operator_id INTEGER NOT NULL REFERENCES users(id),
                     month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
                     call_number VARCHAR(255) NOT NULL,
-                    phone_number VARCHAR(20) NOT NULL,
+                    phone_number VARCHAR(70) NOT NULL,
                     score FLOAT NOT NULL,
                     comment TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
