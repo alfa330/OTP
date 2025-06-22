@@ -1110,10 +1110,18 @@ async def change_sv_table(message: types.Message):
         
         await bot.send_message(
             chat_id=message.from_user.id,
-            text="<b>Выберите супервайзера для изменения таблицы:</b>",
+            text="<b>Выберите супервайзера для изменения таблицы</b>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="<b>Лист СВ:</b>",
             parse_mode='HTML',
             reply_markup=ikb
         )
+
         await sv.change_table.set()
     await message.delete()
 
@@ -1276,10 +1284,18 @@ async def remove_operator_menu(message: types.Message, state: FSMContext):
         
         await bot.send_message(
             chat_id=message.from_user.id,
-            text="<b>Выберите оператора для удаления:</b>",
+            text="<b>Выберите оператора для удаления</b>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="<b>Лист операторов:</b>",
             parse_mode='HTML',
             reply_markup=ikb
         )
+
         await state.set_state("delete_operator")
     await message.delete()
 
@@ -1579,7 +1595,7 @@ async def credentials_back(callback: types.CallbackQuery, state: FSMContext):
     await manage_operators_credentials(callback.message)
 
 
-@dp.message_handler(regexp='Добавить таблицу📑')
+@dp.message_handler(regexp='Добавить таблицу оценок📑')
 async def crtablee(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)
     if user and user[3] == 'sv':
@@ -1722,13 +1738,11 @@ async def select_direction(callback: types.CallbackQuery, state: FSMContext):
             supervisor_id=user[0]
         )
     
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(types.KeyboardButton('Добавить таблицу📑'))
     await bot.send_message(
         chat_id=callback.from_user.id,
         text=f'<b>Таблица оценок сохранена, операторы добавлены/обновлены с направлением "{direction}"✅</b>',
         parse_mode='HTML',
-        reply_markup=kb
+        reply_markup=get_sv_keyboard()
     )
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await state.finish()
