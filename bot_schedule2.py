@@ -679,7 +679,7 @@ async def start_command(message: types.Message):
         kb.add(KeyboardButton('Вход👤'))
         await bot.send_message(
             chat_id=message.from_user.id,
-            text=f"<b>Бобро пожаловать!\n\nНажмите <b>Вход👤</b>, чтобы подключиться к <b>OTP dashboard</b>. 👥",
+            text=f"<b>Бобро пожаловать!</b>\n\nНажмите <b>Вход👤</b>, чтобы подключиться к <b>OTP dashboard</b>. 👥",
             parse_mode='HTML',
             reply_markup=kb
         )
