@@ -460,27 +460,6 @@ class Database:
                     "fines": float(row[5]) if row[5] is not None else 0
                 } for row in cursor.fetchall()
             ]
-
-    def get_hours_summary(self, operator_id=None, month=None):
-        query = """
-            SELECT 
-                u.id AS operator_id,
-                u.name AS operator_name,
-                u.direction,
-                wh.regular_hours,
-                wh.training_hours,
-                wh.fines
-            FROM users u
-            LEFT JOIN work_hours wh ON u.id = wh.operator_id
-            WHERE u.role = 'operator'
-        """
-        params = []
-        if operator_id:
-            query += " AND u.id = %s"
-            params.append(operator_id)
-        if month:
-            query += " AND wh.month = %s"
-            params.append(month)
         
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
