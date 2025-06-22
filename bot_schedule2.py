@@ -22,7 +22,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from database import db
 import uuid
-
+from passlib.hash import pbkdf2_sha256
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -557,6 +557,10 @@ class sv(StatesGroup):
 
 class ChangeCredentials(StatesGroup):
     waiting_for_value = State()
+    waiting_for_new_login = State()
+    waiting_for_new_password = State()
+    waiting_for_current_password = State()
+    
 
 class Auth(StatesGroup):
     login = State()
@@ -594,6 +598,7 @@ def get_sv_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Добавить таблицу📑'))
     kb.add(KeyboardButton('Управление операторами🔑'))
+    kb.add(KeyboardButton('Доступ🔑'))
     return kb
 
 def get_verify_keyboard():
@@ -621,11 +626,16 @@ def get_editor_keyboard():
     kb.add(KeyboardButton('Назад 🔙'))
     return kb
 
-def get_operator_keyboard():
+def get_operators_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Добавить оператора👷‍♂️'))
     kb.insert(KeyboardButton('Убрать оператора❌'))
     kb.add(KeyboardButton('Назад 🔙'))
+    return kb
+
+def get_operator_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton('Доступ🔑'))
     return kb
 
 @dp.message_handler(regexp='Отмена ❌', state='*')
@@ -684,7 +694,6 @@ async def start_command(message: types.Message):
             reply_markup=kb
         )
 
-# === Админка ===================================================================================================
 @dp.message_handler(regexp='Вход👤')
 async def start_auth(message: types.Message):
     await message.delete()
@@ -807,8 +816,8 @@ async def process_password(message: types.Message, state: FSMContext):
             parse_mode='HTML'
         )
         await state.finish()
-    
-    
+
+# === Админка ===================================================================================================
 
 @dp.message_handler(regexp='Редактор СВ📝')
 async def editor_sv(message: types.Message):
@@ -830,7 +839,7 @@ async def operators_menu(message: types.Message):
             chat_id=message.from_user.id,
             text='<b>Управление операторами</b>',
             parse_mode='HTML',
-            reply_markup=get_operator_keyboard()
+            reply_markup=get_operators_keyboard()
         )
     await message.delete()
 
@@ -845,6 +854,7 @@ async def back_to_admin(message: types.Message):
             reply_markup=get_admin_keyboard()
         )
     await message.delete()
+
 
 @dp.message_handler(regexp='Добавить СВ➕')
 async def newSv(message: types.Message):
@@ -922,6 +932,7 @@ async def newSVid(callback: types.CallbackQuery, state: FSMContext):
     
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await state.finish()
+
 
 @dp.message_handler(regexp='Добавить оператора👷‍♂️')
 async def newOperator(message: types.Message):
@@ -1008,7 +1019,7 @@ async def newOperatorSV(callback: types.CallbackQuery, state: FSMContext):
             chat_id=callback.from_user.id,
             text=f'Оператор <b>{op_name}</b> успешно добавлен✅',
             parse_mode='HTML',
-            reply_markup=get_operator_keyboard()
+            reply_markup=get_operators_keyboard()
         )
     await state.finish()
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
@@ -1070,6 +1081,7 @@ async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await state.finish()
 
+
 @dp.message_handler(regexp='Изменить таблицу СВ🔄')
 async def change_sv_table(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)
@@ -1115,6 +1127,253 @@ async def select_sv_for_table_change(callback: types.CallbackQuery, state: FSMCo
     else:
         await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
         await state.finish()
+
+
+@dp.message_handler(regexp='Оценки📊')
+async def view_evaluations(message: types.Message):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user and user[3] == 'admin':
+        supervisors = db.get_supervisors()
+        if not supervisors:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="<b>Нет доступных супервайзеров</b>",
+                parse_mode='HTML',
+                reply_markup=get_admin_keyboard()
+            )
+            return
+        
+        await bot.send_message(
+                    text='<b>Выберите чьи оценки просмотреть или сгенерируйте отчет</b>',
+                    chat_id=admin,
+                    parse_mode='HTML',
+                    reply_markup=get_evaluations_keyboard()
+                )
+        ikb = InlineKeyboardMarkup(row_width=1)
+        for sv_id, sv_name, _, _ in supervisors:
+            ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"eval_{sv_id}"))
+        
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="<b>Лист СВ:</b>",
+            parse_mode='HTML',
+            reply_markup=ikb
+        )
+        await sv.view_evaluations.set()
+    await message.delete()
+
+@dp.message_handler(regexp='Убрать оператора❌')
+async def remove_operator_menu(message: types.Message, state: FSMContext):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user and user[3] == 'admin':
+        # Use the cursor within a with block
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.name, s.name 
+                FROM users u
+                LEFT JOIN users s ON u.supervisor_id = s.id
+                WHERE u.role = 'operator'
+            """)
+            operators = cursor.fetchall()
+        
+        if not operators:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="<b>Нет доступных операторов</b>",
+                parse_mode='HTML',
+                reply_markup=get_operators_keyboard()
+            )
+            return
+
+        ikb = InlineKeyboardMarkup(row_width=1)
+        for op_id, op_name, sv_name in operators:
+            supervisor = f" ({sv_name})" if sv_name else ""
+            ikb.insert(InlineKeyboardButton(
+                text=f"{op_name}{supervisor}",
+                callback_data=f"delop_{op_id}"
+            ))
+        
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="<b>Выберите оператора для удаления:</b>",
+            parse_mode='HTML',
+            reply_markup=ikb
+        )
+        await state.set_state("delete_operator")
+    await message.delete()
+
+
+@dp.message_handler(regexp='Отчет за месяц📅', state=sv.view_evaluations)
+async def handle_monthly_report(message: types.Message, state: FSMContext):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user and user[3] == 'admin':
+        try:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="📊 Генерирую отчет за месяц...",
+                parse_mode='HTML'
+            )
+            await generate_weekly_report()
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="✅ Отчет успешно сгенерирован и отправлен!",
+                parse_mode='HTML',
+                reply_markup=get_admin_keyboard()
+            )
+        except Exception as e:
+            logging.error(f"Ошибка генерации отчета: {e}")
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text=f"❌ Ошибка генерации отчета: {str(e)}",
+                parse_mode='HTML',
+                reply_markup=get_admin_keyboard()
+            )
+    else:
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="⚠️ Команда доступна только администратору",
+            parse_mode='HTML'
+        )
+    await state.finish()
+    await message.delete()
+
+@dp.message_handler(regexp='Назад 🔙', state=sv.view_evaluations)
+async def back_from_evaluations(message: types.Message, state: FSMContext):
+    await state.finish()
+    await back_to_admin(message)
+
+@dp.callback_query_handler(lambda c: c.data.startswith('delop_'), state="delete_operator")
+async def remove_operator_callback(callback: types.CallbackQuery, state: FSMContext):
+    op_id = int(callback.data.split('_')[1])
+    user = db.get_user(id=op_id)
+    
+    if user and user[3] == 'operator':
+        with db._get_cursor() as cursor:
+            cursor.execute("DELETE FROM users WHERE id = %s", (op_id,))
+        
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text=f"Оператор <b>{user[2]}</b> удалён!",
+            parse_mode='HTML',
+            reply_markup=get_operators_keyboard()
+        )
+    else:
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text="Оператор не найден!",
+            parse_mode='HTML'
+        )
+    
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+    await state.finish()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('eval_'), state=sv.view_evaluations)
+async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
+    sv_id = int(callback.data.split('_')[1])
+    user = db.get_user(id=sv_id)
+    
+    if not user or user[3] != 'sv':
+        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
+        return
+
+    # Получаем операторов этого СВ
+    operators = db.get_operators_by_supervisor(sv_id)
+    current_week = get_current_week_of_month()
+    expected_calls = get_expected_calls(current_week)
+    
+    message_text = (
+        f"<b>Оценки {user[2]} (неделя {current_week}):</b>\n"
+        f"<i>Ожидается: {expected_calls} звонков (по 5 в неделю)</i>\n\n"
+    )
+    
+    operators_with_issues = []
+    
+    for op_id, op_name, table_url in operators:
+        # Для каждого оператора получаем статистику звонков
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT COUNT(*), AVG(score) 
+                FROM calls 
+                WHERE operator_id = %s
+            """, (op_id,))
+            result = cursor.fetchone()
+        
+        call_count = result[0] or 0
+        avg_score = result[1] or 0
+        
+        # Форматируем данные для отображения
+        if call_count < expected_calls:
+            operators_with_issues.append({
+                'name': op_name,
+                'call_count': call_count,
+                'expected': expected_calls
+            })
+            
+        # Добавляем в общее сообщение
+        message_text += f"👤 {op_name}\n"
+        message_text += f"   📞 Звонков: {call_count}/{expected_calls}\n"
+        message_text += f"   ⭐ Средний балл: {avg_score:.2f}\n\n"
+    
+    # Клавиатура для уведомлений
+    ikb = InlineKeyboardMarkup(row_width=1)
+    for op in operators_with_issues:
+        ikb.add(InlineKeyboardButton(
+            text=f"Уведомить о {op['name']}",
+            callback_data=f"notify_{sv_id}_{op['name']}"
+        ))
+    
+    await bot.send_message(
+        chat_id=callback.from_user.id,
+        text=message_text,
+        parse_mode='HTML',
+        reply_markup=ikb
+    )
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+    await state.finish()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('notify_'))
+async def notify_supervisor_handler(callback: types.CallbackQuery):
+    try:
+        _, sv_id, op_name = callback.data.split('_', 2)
+        sv_id = int(sv_id)
+        
+        user = db.get_user(id=sv_id)
+        if not user or user[3] != 'sv':
+            await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
+            return
+
+        current_week = get_current_week_of_month()
+        expected_calls = get_expected_calls(current_week)
+        
+        notification_text = (
+            f"⚠️ <b>Требуется внимание!</b>\n\n"
+            f"У оператора <b>{op_name}</b> недостаточно прослушанных звонков.\n"
+            f"Текущая неделя: {current_week}\n"
+            f"Ожидается: {expected_calls} звонков\n\n"
+            f"Пожалуйста, проверьте и прослушайте недостающие звонки."
+        )
+        
+        await bot.send_message(
+            chat_id=user[1],
+            text=notification_text,
+            parse_mode='HTML'
+        )
+        
+        await bot.answer_callback_query(
+            callback.id,
+            text=f"Уведомление отправлено СВ {user[2]}",
+            show_alert=False
+        )
+    except Exception as e:
+        logging.error(f"Ошибка уведомления: {e}")
+        await bot.answer_callback_query(
+            callback.id,
+            text="Ошибка отправки уведомления",
+            show_alert=True
+        )
+
+
+# === Супервайзерам =============================================================================================
 
 @dp.message_handler(regexp='Управление операторами🔑')
 async def manage_operators_credentials(message: types.Message):
@@ -1236,6 +1495,7 @@ async def process_credential_change(message: types.Message, state: FSMContext):
 async def credentials_back(callback: types.CallbackQuery, state: FSMContext):
     await state.finish()
     await manage_operators_credentials(callback.message)
+
 
 @dp.message_handler(regexp='Добавить таблицу📑')
 async def crtablee(message: types.Message):
@@ -1392,250 +1652,143 @@ async def select_direction(callback: types.CallbackQuery, state: FSMContext):
     await state.finish()
 
 
-@dp.message_handler(regexp='Оценки📊')
-async def view_evaluations(message: types.Message):
+@dp.message_handler(regexp='Доступ🔑')
+async def change_credentials_menu(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)
-    if user and user[3] == 'admin':
-        supervisors = db.get_supervisors()
-        if not supervisors:
-            await bot.send_message(
-                chat_id=message.from_user.id,
-                text="<b>Нет доступных супервайзеров</b>",
-                parse_mode='HTML',
-                reply_markup=get_admin_keyboard()
-            )
-            return
-        
-        await bot.send_message(
-                    text='<b>Выберите чьи оценки просмотреть или сгенерируйте отчет</b>',
-                    chat_id=admin,
-                    parse_mode='HTML',
-                    reply_markup=get_evaluations_keyboard()
-                )
-        ikb = InlineKeyboardMarkup(row_width=1)
-        for sv_id, sv_name, _, _ in supervisors:
-            ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"eval_{sv_id}"))
+    if user:
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add(KeyboardButton('Изменить логин'))
+        kb.add(KeyboardButton('Изменить пароль'))
+        kb.add(KeyboardButton('Назад 🔙'))
         
         await bot.send_message(
             chat_id=message.from_user.id,
-            text="<b>Лист СВ:</b>",
+            text="<b>Выберите что хотите изменить:</b>",
             parse_mode='HTML',
-            reply_markup=ikb
+            reply_markup=kb
         )
-        await sv.view_evaluations.set()
     await message.delete()
 
-@dp.message_handler(regexp='Убрать оператора❌')
-async def remove_operator_menu(message: types.Message, state: FSMContext):
-    user = db.get_user(telegram_id=message.from_user.id)
-    if user and user[3] == 'admin':
-        # Use the cursor within a with block
-        with db._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT u.id, u.name, s.name 
-                FROM users u
-                LEFT JOIN users s ON u.supervisor_id = s.id
-                WHERE u.role = 'operator'
-            """)
-            operators = cursor.fetchall()
-        
-        if not operators:
-            await bot.send_message(
-                chat_id=message.from_user.id,
-                text="<b>Нет доступных операторов</b>",
-                parse_mode='HTML',
-                reply_markup=get_operator_keyboard()
-            )
-            return
+@dp.message_handler(regexp='Изменить логин')
+async def change_login_start(message: types.Message):
+    await bot.send_message(
+        chat_id=message.from_user.id,
+        text="<b>Введите новый логин:</b>",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    await ChangeCredentials.waiting_for_new_login.set()
+    await message.delete()
 
-        ikb = InlineKeyboardMarkup(row_width=1)
-        for op_id, op_name, sv_name in operators:
-            supervisor = f" ({sv_name})" if sv_name else ""
-            ikb.insert(InlineKeyboardButton(
-                text=f"{op_name}{supervisor}",
-                callback_data=f"delop_{op_id}"
-            ))
-        
+@dp.message_handler(state=ChangeCredentials.waiting_for_new_login)
+async def process_new_login(message: types.Message, state: FSMContext):
+    new_login = message.text.strip()
+    if len(new_login) < 4:
         await bot.send_message(
             chat_id=message.from_user.id,
-            text="<b>Выберите оператора для удаления:</b>",
-            parse_mode='HTML',
-            reply_markup=ikb
+            text="Логин должен быть не менее 4 символов. Попробуйте еще раз:",
+            reply_markup=get_cancel_keyboard()
         )
-        await state.set_state("delete_operator")
-    await message.delete()
-
-
-@dp.message_handler(regexp='Отчет за месяц📅', state=sv.view_evaluations)
-async def handle_monthly_report(message: types.Message, state: FSMContext):
+        return
+    
     user = db.get_user(telegram_id=message.from_user.id)
-    if user and user[3] == 'admin':
+    if user:
         try:
+            # Проверяем, не занят ли логин
+            existing_user = db.get_user_by_login(new_login)
+            if existing_user and existing_user[0] != user[0]:
+                await bot.send_message(
+                    chat_id=message.from_user.id,
+                    text="Этот логин уже занят. Попробуйте другой:",
+                    reply_markup=get_cancel_keyboard()
+                )
+                return
+            
+            # Обновляем логин
+            with db._get_cursor() as cursor:
+                cursor.execute("UPDATE users SET login = %s WHERE id = %s", (new_login, user[0]))
+            
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text="📊 Генерирую отчет за месяц...",
+                text=f"✅ Логин успешно изменен на: <code>{new_login}</code>",
                 parse_mode='HTML'
             )
-            await generate_weekly_report()
-            await bot.send_message(
-                chat_id=message.from_user.id,
-                text="✅ Отчет успешно сгенерирован и отправлен!",
-                parse_mode='HTML',
-                reply_markup=get_admin_keyboard()
-            )
         except Exception as e:
-            logging.error(f"Ошибка генерации отчета: {e}")
+            logging.error(f"Error changing login: {e}")
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text=f"❌ Ошибка генерации отчета: {str(e)}",
-                parse_mode='HTML',
-                reply_markup=get_admin_keyboard()
+                text="❌ Произошла ошибка при изменении логина. Попробуйте позже."
             )
-    else:
-        await bot.send_message(
-            chat_id=message.from_user.id,
-            text="⚠️ Команда доступна только администратору",
-            parse_mode='HTML'
-        )
+    
     await state.finish()
     await message.delete()
 
-@dp.message_handler(regexp='Назад 🔙', state=sv.view_evaluations)
-async def back_from_evaluations(message: types.Message, state: FSMContext):
-    await state.finish()
-    await back_to_admin(message)
+@dp.message_handler(regexp='Изменить пароль')
+async def change_password_start(message: types.Message):
+    await bot.send_message(
+        chat_id=message.from_user.id,
+        text="<b>Введите текущий пароль для подтверждения:</b>",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    await ChangeCredentials.waiting_for_current_password.set()
+    await message.delete()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('delop_'), state="delete_operator")
-async def remove_operator_callback(callback: types.CallbackQuery, state: FSMContext):
-    op_id = int(callback.data.split('_')[1])
-    user = db.get_user(id=op_id)
+@dp.message_handler(state=ChangeCredentials.waiting_for_current_password)
+async def verify_current_password(message: types.Message, state: FSMContext):
+    current_password = message.text.strip()
+    user = db.get_user(telegram_id=message.from_user.id)
     
-    if user and user[3] == 'operator':
-        with db._get_cursor() as cursor:
-            cursor.execute("DELETE FROM users WHERE id = %s", (op_id,))
-        
+    if user and db.verify_password(user[0], current_password):
+        await state.update_data(user_id=user[0])
         await bot.send_message(
-            chat_id=callback.from_user.id,
-            text=f"Оператор <b>{user[2]}</b> удалён!",
+            chat_id=message.from_user.id,
+            text="<b>Введите новый пароль:</b>",
             parse_mode='HTML',
-            reply_markup=get_operator_keyboard()
+            reply_markup=get_cancel_keyboard()
         )
+        await ChangeCredentials.waiting_for_new_password.set()
     else:
         await bot.send_message(
-            chat_id=callback.from_user.id,
-            text="Оператор не найден!",
-            parse_mode='HTML'
+            chat_id=message.from_user.id,
+            text="❌ Неверный текущий пароль. Попробуйте еще раз:",
+            reply_markup=get_cancel_keyboard()
         )
-    
-    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-    await state.finish()
+    await message.delete()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('eval_'), state=sv.view_evaluations)
-async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
-    sv_id = int(callback.data.split('_')[1])
-    user = db.get_user(id=sv_id)
-    
-    if not user or user[3] != 'sv':
-        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
-        return
-
-    # Получаем операторов этого СВ
-    operators = db.get_operators_by_supervisor(sv_id)
-    current_week = get_current_week_of_month()
-    expected_calls = get_expected_calls(current_week)
-    
-    message_text = (
-        f"<b>Оценки {user[2]} (неделя {current_week}):</b>\n"
-        f"<i>Ожидается: {expected_calls} звонков (по 5 в неделю)</i>\n\n"
-    )
-    
-    operators_with_issues = []
-    
-    for op_id, op_name, table_url in operators:
-        # Для каждого оператора получаем статистику звонков
-        with db._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT COUNT(*), AVG(score) 
-                FROM calls 
-                WHERE operator_id = %s
-            """, (op_id,))
-            result = cursor.fetchone()
-        
-        call_count = result[0] or 0
-        avg_score = result[1] or 0
-        
-        # Форматируем данные для отображения
-        if call_count < expected_calls:
-            operators_with_issues.append({
-                'name': op_name,
-                'call_count': call_count,
-                'expected': expected_calls
-            })
-            
-        # Добавляем в общее сообщение
-        message_text += f"👤 {op_name}\n"
-        message_text += f"   📞 Звонков: {call_count}/{expected_calls}\n"
-        message_text += f"   ⭐ Средний балл: {avg_score:.2f}\n\n"
-    
-    # Клавиатура для уведомлений
-    ikb = InlineKeyboardMarkup(row_width=1)
-    for op in operators_with_issues:
-        ikb.add(InlineKeyboardButton(
-            text=f"Уведомить о {op['name']}",
-            callback_data=f"notify_{sv_id}_{op['name']}"
-        ))
-    
-    await bot.send_message(
-        chat_id=callback.from_user.id,
-        text=message_text,
-        parse_mode='HTML',
-        reply_markup=ikb
-    )
-    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-    await state.finish()
-
-@dp.callback_query_handler(lambda c: c.data.startswith('notify_'))
-async def notify_supervisor_handler(callback: types.CallbackQuery):
-    try:
-        _, sv_id, op_name = callback.data.split('_', 2)
-        sv_id = int(sv_id)
-        
-        user = db.get_user(id=sv_id)
-        if not user or user[3] != 'sv':
-            await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
-            return
-
-        current_week = get_current_week_of_month()
-        expected_calls = get_expected_calls(current_week)
-        
-        notification_text = (
-            f"⚠️ <b>Требуется внимание!</b>\n\n"
-            f"У оператора <b>{op_name}</b> недостаточно прослушанных звонков.\n"
-            f"Текущая неделя: {current_week}\n"
-            f"Ожидается: {expected_calls} звонков\n\n"
-            f"Пожалуйста, проверьте и прослушайте недостающие звонки."
-        )
-        
+@dp.message_handler(state=ChangeCredentials.waiting_for_new_password)
+async def process_new_password(message: types.Message, state: FSMContext):
+    new_password = message.text.strip()
+    if len(new_password) < 6:
         await bot.send_message(
-            chat_id=user[1],
-            text=notification_text,
-            parse_mode='HTML'
+            chat_id=message.from_user.id,
+            text="Пароль должен быть не менее 6 символов. Попробуйте еще раз:",
+            reply_markup=get_cancel_keyboard()
         )
-        
-        await bot.answer_callback_query(
-            callback.id,
-            text=f"Уведомление отправлено СВ {user[2]}",
-            show_alert=False
-        )
-    except Exception as e:
-        logging.error(f"Ошибка уведомления: {e}")
-        await bot.answer_callback_query(
-            callback.id,
-            text="Ошибка отправки уведомления",
-            show_alert=True
-        )
-
-
+        return
+    
+    user_data = await state.get_data()
+    user_id = user_data.get('user_id')
+    
+    if user_id:
+        try:
+            password_hash = pbkdf2_sha256.hash(new_password)
+            with db._get_cursor() as cursor:
+                cursor.execute("UPDATE users SET password_hash = %s WHERE id = %s", (password_hash, user_id))
+            
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="✅ Пароль успешно изменен!"
+            )
+        except Exception as e:
+            logging.error(f"Error changing password: {e}")
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="❌ Произошла ошибка при изменении пароля. Попробуйте позже."
+            )
+    
+    await state.finish()
+    await message.delete()
 
 # Остальной код остается аналогичным предыдущей версии, но с использованием базы данных
 # ... (код для удаления СВ, изменения таблиц, просмотра оценок и т.д.) ...
