@@ -21,6 +21,8 @@ import xlsxwriter
 import json
 from concurrent.futures import ThreadPoolExecutor
 from database import db
+import uuid
+
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -553,6 +555,15 @@ class sv(StatesGroup):
     view_evaluations = State()
     change_table = State()
 
+class ChangeCredentials(StatesGroup):
+    waiting_for_value = State()
+
+class Auth(StatesGroup):
+    login = State()
+    password = State()
+
+MAX_LOGIN_ATTEMPTS = 3
+
 def get_current_week_of_month():
     today = datetime.now()
     week_number = (today.day - 1) // 7 + 1
@@ -577,6 +588,12 @@ def get_evaluations_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Отчет за месяц📅'))
     kb.add(KeyboardButton('Назад 🔙'))
+    return kb
+
+def get_sv_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton('Добавить таблицу📑'))
+    kb.add(KeyboardButton('Управление операторами🔑'))
     return kb
 
 def get_verify_keyboard():
@@ -645,13 +662,11 @@ async def start_command(message: types.Message):
                 reply_markup=get_admin_keyboard()
             )
         elif user[3] == 'sv':
-            kb = ReplyKeyboardMarkup(resize_keyboard=True)
-            kb.add(KeyboardButton('Добавить таблицу📑'))
             await bot.send_message(
                 chat_id=message.from_user.id,
                 text=f"<b>Бобро пожаловать, {user[2]}!</b>",
                 parse_mode='HTML',
-                reply_markup=kb
+                reply_markup=get_sv_keyboard()
             )
         elif user[3] == 'operator':
             await bot.send_message(
@@ -661,15 +676,138 @@ async def start_command(message: types.Message):
             )
     else:
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add(KeyboardButton('Выбрать СВ👤'))
+        kb.add(KeyboardButton('Вход👤'))
         await bot.send_message(
             chat_id=message.from_user.id,
-            text=f"<b>Бобро пожаловать!</b>\nТвой <b>ID</b> что бы присоединиться к команде:\n\n<pre>{message.from_user.id}</pre>\n\nЕсли ты оператор, нажми <b>Выбрать СВ👤</b>, чтобы присоединиться к своей группе. 👥",
+            text=f"<b>Бобро пожаловать!</b>\nТвой <b>ID</b> что бы присоединиться к команде:\n\n<pre>{message.from_user.id}</pre>\n\nЕсли ты оператор, нажми <b>Вход👤</b>, чтобы присоединиться к своей группе. 👥",
             parse_mode='HTML',
             reply_markup=kb
         )
 
 # === Админка ===================================================================================================
+@dp.message_handler(regexp='Вход👤')
+async def start_auth(message: types.Message):
+    await message.delete()
+    await message.answer(
+        "<b>Введите ваш логин:</b>",
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
+    await Auth.login.set()
+    # Инициализация счетчика попыток
+    await dp.storage.set_data(chat=message.chat.id, data={'attempts': 0})
+
+@dp.message_handler(state=Auth.login)
+async def process_login(message: types.Message, state: FSMContext):
+    login = message.text.strip()
+    try:
+        user = db.get_user_by_login(login)
+        if not user:
+            await message.delete()
+            await message.answer(
+                "<b>Неверный логин. Попробуйте снова🔁</b>",
+                parse_mode='HTML'
+            )
+            return
+
+        # Сохраняем данные пользователя в состоянии
+        await state.update_data(user={
+            'id': user[0],
+            'telegram_id': user[1],
+            'name': user[2],
+            'role': user[3],
+            'direction': user[4],
+            'hire_date': user[5],
+            'supervisor_id': user[6],
+            'login': user[7]
+        })
+        await message.delete()
+        await message.answer(
+            "<b>Введите ваш пароль:</b>",
+            parse_mode='HTML'
+        )
+        await Auth.password.set()
+    except Exception as e:
+        logging.error(f"Ошибка при обработке логина {login}: {str(e)}")
+        await message.delete()
+        await message.answer(
+            "<b>Произошла ошибка. Попробуйте снова или свяжитесь с поддержкой.</b>",
+            parse_mode='HTML'
+        )
+        await state.finish()
+        
+@dp.message_handler(state=Auth.password)
+async def process_password(message: types.Message, state: FSMContext):
+    password = message.text.strip()
+    user_data = await state.get_data()
+    user = user_data.get('user')
+    attempts = (await dp.storage.get_data(chat=message.chat.id)).get('attempts', 0)
+
+    try:
+        if attempts >= MAX_LOGIN_ATTEMPTS:
+            await message.delete()
+            await message.answer(
+                "<b>Слишком много попыток. Авторизация заблокирована. Свяжитесь с поддержкой.</b>",
+                parse_mode='HTML'
+            )
+            await state.finish()
+            await dp.storage.reset_data(chat=message.chat.id)
+            logging.warning(f"Превышено количество попыток авторизации для chat_id {message.chat.id}")
+            return
+
+        if not user or not db.verify_password(user['id'], password):
+            attempts += 1
+            await dp.storage.set_data(chat=message.chat.id, data={'attempts': attempts})
+            await message.delete()
+            await message.answer(
+                f"<b>Неверный пароль. Осталось попыток: {MAX_LOGIN_ATTEMPTS - attempts}. Попробуйте снова.</b>",
+                parse_mode='HTML'
+            )
+            logging.warning(f"Неверный пароль для логина {user.get('login')} (попытка {attempts})")
+            return
+
+        # Успешная авторизация
+        db.update_telegram_id(user['id'], message.from_user.id)
+        await message.delete()
+
+        # Формируем приветственное сообщение в зависимости от роли
+        role = user['role']
+        name = user['name']
+        if role == 'admin':
+            await message.answer(
+                "<b>Добро пожаловать!</b>\nЭто бот для управления прослушками.",
+                parse_mode='HTML',
+                reply_markup=get_admin_keyboard()
+            )
+        elif role == 'sv':
+            kb = ReplyKeyboardMarkup(resize_keyboard=True)
+            kb.add(KeyboardButton('Добавить таблицу📑'))
+            await message.answer(
+                f"<b>Добро пожаловать, {name}!</b>",
+                parse_mode='HTML',
+                reply_markup=kb
+            )
+        elif role == 'operator':
+            await message.answer(
+                f"<b>Добро пожаловать, оператор {name}!</b>",
+                parse_mode='HTML'
+            )
+
+        logging.info(f"Успешная авторизация: login={user['login']}, role={role}, chat_id={message.chat.id}")
+        await state.finish()
+        await dp.storage.reset_data(chat=message.chat.id)
+
+    except Exception as e:
+        logging.error(f"Ошибка при обработке пароля для login {user.get('login')}: {str(e)}")
+        await message.delete()
+        await message.answer(
+            "<b>Произошла ошибка. Попробуйте снова или свяжитесь с СВ.</b>",
+            parse_mode='HTML'
+        )
+        await state.finish()
+    
+    
+
 @dp.message_handler(regexp='Редактор СВ📝')
 async def editor_sv(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)
@@ -723,51 +861,65 @@ async def newSv(message: types.Message):
 async def newSVname(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
         data['svname'] = message.text
+    
+    # Генерируем случайные логин и пароль
+    login = f"sv_{str(uuid.uuid4())[:8]}"
+    password = str(uuid.uuid4())[:8]
+    
+    async with state.proxy() as data:
+        data['login'] = login
+        data['password'] = password
+    
     await message.answer(
-        text=f'Класс, ФИО - <b>{message.text}</b>\n\n<b>Добавление СВ, этап</b>: 2 из 2📍\n\nНапишите <b>ID</b> нового СВ🆔',
+        text=f'<b>Данные для нового СВ:</b>\n\n'
+             f'ФИО: <b>{message.text}</b>\n'
+             f'Логин: <code>{login}</code>\n'
+             f'Пароль: <code>{password}</code>\n\n'
+             f'Передайте эти данные супервайзеру. Он сможет войти в систему и добавить '
+             f'остальную информацию самостоятельно.\n\n'
+             f'<b>Хотите сохранить этого супервайзера?</b>',
         parse_mode='HTML',
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_verify_keyboard()
     )
     await new_sv.next()
     await message.delete()
 
-@dp.message_handler(state=new_sv.svid)
-async def newSVid(message: types.Message, state: FSMContext):
-    try:
-        sv_id = int(message.text)
+@dp.callback_query_handler(state=new_sv.svid)
+async def newSVid(callback: types.CallbackQuery, state: FSMContext):
+    if callback.data == "verify_yes":
         async with state.proxy() as data:
-            data['svid'] = sv_id
             sv_name = data['svname']
+            login = data['login']
+            password = data['password']
         
-        # Создаем супервайзера
-        db.create_user(
-            telegram_id=sv_id,
+        # Создаем супервайзера без telegram_id (он добавит его при первом входе)
+        sv_id = db.create_user(
+            telegram_id=None,  # Будет установлен при первом входе
             name=sv_name,
-            role='sv'
+            role='sv',
+            login=login,
+            password=password
         )
         
-        kb_sv = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb_sv.add(KeyboardButton('Добавить таблицу📑'))
         await bot.send_message(
-            chat_id=sv_id,
-            text=f"Принятие в команду прошло успешно <b>успешно✅</b>\n\nОсталось отправить таблицу вашей группы. Нажмите <b>Добавить таблицу📑</b> что бы сделать это.",
-            parse_mode='HTML',
-            reply_markup=kb_sv
-        )
-        
-        await message.answer(
-            text=f'Класс, ID - <b>{message.text}</b>\n\nДобавление СВ прошло <b>успешно✅</b>. Новому супервайзеру осталось лишь отправить таблицу этого месяца👌🏼',
+            chat_id=callback.from_user.id,
+            text=f'<b>Супервайзер {sv_name} успешно добавлен!</b>\n\n'
+                 f'Логин: <code>{login}</code>\n'
+                 f'Пароль: <code>{password}</code>\n\n'
+                 f'Передайте эти данные супервайзеру для входа в систему.',
             parse_mode='HTML',
             reply_markup=get_editor_keyboard()
         )
-        await state.finish()
-    except:
-        await message.answer(
-            text='Ой, похоже вы отправили не тот <b>ID</b>❌\n\n<b>Пожалуйста повторите попытку!</b>',
+    else:
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text='Добавление супервайзера отменено.',
             parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
+            reply_markup=get_editor_keyboard()
         )
-    await message.delete()
+    
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+    await state.finish()
 
 @dp.message_handler(regexp='Добавить оператора👷‍♂️')
 async def newOperator(message: types.Message):
@@ -955,6 +1107,127 @@ async def select_sv_for_table_change(callback: types.CallbackQuery, state: FSMCo
     else:
         await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
         await state.finish()
+
+@dp.message_handler(regexp='Управление операторами🔑')
+async def manage_operators_credentials(message: types.Message):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user and user[3] == 'sv':
+        operators = db.get_operators_by_supervisor(user[0])
+        if not operators:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="<b>У вас нет операторов</b>",
+                parse_mode='HTML',
+                reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton('Назад 🔙'))
+            )
+            return
+
+        ikb = InlineKeyboardMarkup(row_width=1)
+        for op_id, op_name, _, _, _, _ in operators:
+            ikb.insert(InlineKeyboardButton(text=op_name, callback_data=f"cred_{op_id}"))
+        
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="<b>Выберите оператора для управления доступом:</b>",
+            parse_mode='HTML',
+            reply_markup=ikb
+        )
+    await message.delete()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('cred_'))
+async def operator_credentials_menu(callback: types.CallbackQuery):
+    operator_id = int(callback.data.split('_')[1])
+    user = db.get_user(telegram_id=callback.from_user.id)
+    
+    if user and user[3] == 'sv':
+        operator = db.get_operator_credentials(operator_id, user[0])
+        if not operator:
+            await bot.answer_callback_query(callback.id, text="Оператор не найден")
+            return
+
+        ikb = InlineKeyboardMarkup(row_width=2)
+        ikb.add(
+            InlineKeyboardButton("Изменить логин", callback_data=f"chlogin_{operator_id}"),
+            InlineKeyboardButton("Изменить пароль", callback_data=f"chpass_{operator_id}")
+        )
+        ikb.add(InlineKeyboardButton("Назад", callback_data="cred_back"))
+
+        await bot.edit_message_text(
+            chat_id=callback.from_user.id,
+            message_id=callback.message.message_id,
+            text=f"<b>Управление доступом оператора</b>\n\nЛогин: <code>{operator[1]}</code>",
+            parse_mode='HTML',
+            reply_markup=ikb
+        )
+
+@dp.callback_query_handler(lambda c: c.data.startswith('chlogin_'))
+async def change_login_start(callback: types.CallbackQuery, state: FSMContext):
+    operator_id = int(callback.data.split('_')[1])
+    await state.update_data(operator_id=operator_id, action="login")
+    await bot.edit_message_text(
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="Введите новый логин для оператора:",
+        reply_markup=None
+    )
+    await ChangeCredentials.waiting_for_value.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('chpass_'))
+async def change_password_start(callback: types.CallbackQuery, state: FSMContext):
+    operator_id = int(callback.data.split('_')[1])
+    await state.update_data(operator_id=operator_id, action="password")
+    await bot.edit_message_text(
+        chat_id=callback.from_user.id,
+        message_id=callback.message.message_id,
+        text="Введите новый пароль для оператора:",
+        reply_markup=None
+    )
+    await ChangeCredentials.waiting_for_value.set()
+
+@dp.message_handler(state=ChangeCredentials.waiting_for_value)
+async def process_credential_change(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    operator_id = user_data['operator_id']
+    action = user_data['action']
+    value = message.text.strip()
+    user = db.get_user(telegram_id=message.from_user.id)
+
+    try:
+        if action == "login":
+            success = db.update_operator_login(operator_id, user[0], value)
+            msg = f"Логин оператора изменён на: <code>{value}</code>"
+        else:
+            success = db.update_operator_password(operator_id, user[0], value)
+            msg = "Пароль оператора успешно изменён"
+        
+        if success:
+            operator = db.get_user(id=operator_id)
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text=f"✅ {msg}\n\nОператор: {operator[2]}",
+                parse_mode='HTML'
+            )
+        else:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="❌ Не удалось изменить данные оператора",
+                parse_mode='HTML'
+            )
+    except Exception as e:
+        logging.error(f"Error changing operator {action}: {e}")
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text=f"❌ Ошибка при изменении: {str(e)}",
+            parse_mode='HTML'
+        )
+    
+    await state.finish()
+    await message.delete()
+
+@dp.callback_query_handler(lambda c: c.data == "cred_back", state="*")
+async def credentials_back(callback: types.CallbackQuery, state: FSMContext):
+    await state.finish()
+    await manage_operators_credentials(callback.message)
 
 @dp.message_handler(regexp='Добавить таблицу📑')
 async def crtablee(message: types.Message):

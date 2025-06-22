@@ -5,8 +5,92 @@ from contextlib import contextmanager
 from passlib.hash import pbkdf2_sha256
 from datetime import datetime
 import uuid
+import requests
+import openpyxl
+import re
+import json
+import csv
+import io
+
 
 logging.basicConfig(level=logging.INFO)
+
+def process_timesheet(file_url):
+    """
+    Process the last sheet of a Google Sheets timesheet to extract operator details.
+    Args:
+        file_url (str): Google Sheets URL (e.g., https://docs.google.com/spreadsheets/d/.../edit?gid=...).
+    Returns:
+        list: List of dicts with ФИО, Кол-во часов, Кол-во часов тренинга, Штрафы, Год-Месяц.
+    """
+    # Set current year-month
+    current_month = datetime.now().strftime('%Y-%m')
+
+    # Convert Google Sheets URL to Excel export URL
+    sheet_id_match = re.search(r'spreadsheets/d/([a-zA-Z0-9_-]+)', file_url)
+    if not sheet_id_match:
+        return {"error": "Invalid Google Sheets URL format."}
+    sheet_id = sheet_id_match.group(1)
+    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+
+    # Download the file
+    local_file = 'temp_timesheet.xlsx'
+    try:
+        response = requests.get(export_url)
+        if response.status_code != 200:
+            return {"error": f"Failed to download file: HTTP {response.status_code}"}
+        with open(local_file, 'wb') as f:
+            f.write(response.content)
+    except Exception as e:
+        return {"error": f"Failed to download file: {str(e)}"}
+
+    try:
+        # Load the Excel file and get the last sheet
+        workbook = openpyxl.load_workbook(local_file, data_only=True)
+        sheet_names = workbook.sheetnames
+        last_sheet = workbook[sheet_names[-1]]
+
+        # Extract data
+        data = []
+        headers = []
+        fio_col, hours_col, training_col, fines_col = None, None, None, None
+
+        # Read rows
+        for row_idx, row in enumerate(last_sheet.iter_rows(values_only=True), 1):
+            if row_idx == 1:  # Header row
+                headers = [str(cell).strip().replace('"', '').replace('\n', '').replace(' ', ' ') if cell else '' for cell in row]
+                for idx, header in enumerate(headers):
+                    header_lower = header.lower()
+                    if 'фио' in header_lower:
+                        fio_col = idx
+                    elif 'итого' in header_lower or 'итоговые' in header_lower:
+                        hours_col = idx
+                    elif 'часы тренинга' in header_lower or 'тренинг' in header_lower:
+                        training_col = idx
+                    elif 'общая сумма' in header_lower or 'сумма штрафа' in header_lower:
+                        fines_col = idx
+                if not (fio_col is not None and hours_col is not None):
+                    os.remove(local_file)
+                    return {"error": f"Required columns (ФИО, Итого) not found in sheet '{last_sheet.title}'."}
+            else:
+                # Data row
+                if row[fio_col] and row[hours_col] is not None:
+                    entry = {
+                        'ФИО': str(row[fio_col]).strip(),
+                        'Кол-во часов': float(row[hours_col]) if row[hours_col] else 0.0,
+                        'Кол-во часов тренинга': float(row[training_col]) if training_col is not None and row[training_col] else 0.0,
+                        'Штрафы': float(row[fines_col]) if fines_col is not None and row[fines_col] else 0.0,
+                        'Год-Месяц': current_month
+                    }
+                    data.append(entry)
+
+        # Clean up
+        os.remove(local_file)
+        return data
+
+    except Exception as e:
+        os.remove(local_file) if os.path.exists(local_file) else None
+        return {"error": f"Error processing file: {str(e)}"}
 
 class Database:
     def __init__(self):
@@ -42,7 +126,7 @@ class Database:
 
     def _init_db(self):
         with self._get_cursor() as cursor:
-            # Users table with hire_date and operator direction
+            # Users table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
@@ -51,7 +135,7 @@ class Database:
                     role VARCHAR(20) NOT NULL CHECK(role IN ('admin', 'sv', 'operator')),
                     direction VARCHAR(20) CHECK(direction IN ('chat', 'moderator', 'line', NULL)),
                     hire_date DATE,
-                    login VARCHAR(50) UNIQUE,
+                    login VARCHAR(255) UNIQUE,
                     password_hash VARCHAR(255),
                     supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     hours_table_url TEXT,
@@ -59,33 +143,34 @@ class Database:
                     CONSTRAINT unique_name_role UNIQUE (name, role)
                 );
             """)
-            # Calls table with automatic month in 'YYYY-MM' format
+            # Calls table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS calls (
                     id SERIAL PRIMARY KEY,
                     evaluator_id INTEGER NOT NULL REFERENCES users(id),
                     operator_id INTEGER NOT NULL REFERENCES users(id),
                     month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
-                    call_number INTEGER NOT NULL,
+                    call_number VARCHAR(255) NOT NULL,
                     phone_number VARCHAR(20) NOT NULL,
                     score FLOAT NOT NULL,
                     comment TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            # Work hours table for regular and training hours
+            # Work hours table with fines column
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS work_hours (
-                    id SERIAL PRIMARY KEY,
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     operator_id INTEGER NOT NULL REFERENCES users(id),
                     month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
                     regular_hours FLOAT NOT NULL DEFAULT 0,
                     training_hours FLOAT NOT NULL DEFAULT 0,
+                    fines FLOAT NOT NULL DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(operator_id, month)
                 );
             """)
-            # Indexes for performance
+            # Indexes
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_id ON calls(operator_id);
@@ -94,12 +179,9 @@ class Database:
             """)
 
     def create_user(self, telegram_id, name, role, direction=None, hire_date=None, supervisor_id=None, login=None, password=None):
-        # Generate a random login if None is provided
         if login is None:
-            # Generate a unique login using a prefix and UUID
-            base_login = f"user_{str(uuid.uuid4())[:8]}"  # Use first 8 chars of UUID
+            base_login = f"user_{str(uuid.uuid4())[:8]}"
             with self._get_cursor() as cursor:
-                # Check if login exists and keep generating until unique
                 while True:
                     cursor.execute("SELECT id FROM users WHERE login = %s", (base_login,))
                     if not cursor.fetchone():
@@ -109,8 +191,7 @@ class Database:
         else:
             login = login or str(telegram_id)
 
-        # Set default password if None
-        password = password or "123321123"
+        password = password or "123456"
         password_hash = pbkdf2_sha256.hash(password)
 
         with self._get_cursor() as cursor:
@@ -130,22 +211,49 @@ class Database:
             return cursor.fetchone()[0]
 
     def update_telegram_id(self, user_id, telegram_id):
-        """
-        Update telegram_id and login for a specific user
-        """
         with self._get_cursor() as cursor:
             cursor.execute("""
                 UPDATE users 
-                SET telegram_id = %s,
-                    login = %s
+                SET telegram_id = %s
                 WHERE id = %s
-                RETURNING telegram_id, login
-            """, (telegram_id, str(telegram_id), user_id))
+                RETURNING telegram_id
+            """, (telegram_id, user_id))
             result = cursor.fetchone()
             if result:
-                return result[0]  # Return telegram_id
+                return result[0]
             return None
-
+            
+    def get_operator_credentials(self, operator_id, supervisor_id):
+        """Получить логин и хеш пароля оператора с проверкой принадлежности супервайзеру"""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.login 
+                FROM users u
+                WHERE u.id = %s AND u.role = 'operator' AND u.supervisor_id = %s
+            """, (operator_id, supervisor_id))
+            return cursor.fetchone()
+    
+    def update_operator_login(self, operator_id, supervisor_id, new_login):
+        """Обновить логин оператора с проверкой принадлежности"""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE users SET login = %s
+                WHERE id = %s AND role = 'operator' AND supervisor_id = %s
+                RETURNING id
+            """, (new_login, operator_id, supervisor_id))
+            return cursor.fetchone() is not None
+    
+    def update_operator_password(self, operator_id, supervisor_id, new_password):
+        """Обновить пароль оператора с проверкой принадлежности"""
+        password_hash = pbkdf2_sha256.hash(new_password)
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE users SET password_hash = %s
+                WHERE id = %s AND role = 'operator' AND supervisor_id = %s
+                RETURNING id
+            """, (password_hash, operator_id, supervisor_id))
+            return cursor.fetchone() is not None
+            
     def get_user(self, **kwargs):
         conditions = []
         params = []
@@ -168,8 +276,7 @@ class Database:
                 WHERE id = %s
             """, (hours_table_url, scores_table_url, user_id))
 
-    def add_call_evaluation(self, evaluator_id, operator_id, call_number, phone_number, score, comment, month=None):
-        # Use provided month or default to current YYYY-MM
+    def add_call_evaluation(self, evaluator_id, operator_id, call_number, phone_number, score, comment=None, month=None):
         month = month or datetime.now().strftime('%Y-%m')
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -177,18 +284,135 @@ class Database:
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (evaluator_id, operator_id, month, call_number, phone_number, score, comment))
 
-    def add_work_hours(self, operator_id, regular_hours, training_hours, month=None):
-        # Use provided month or default to current YYYY-MM
+    def add_work_hours(self, operator_id, regular_hours, training_hours, fines=0.0, month=None):
         month = month or datetime.now().strftime('%Y-%m')
         with self._get_cursor() as cursor:
             cursor.execute("""
-                INSERT INTO work_hours (operator_id, month, regular_hours, training_hours)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO work_hours (operator_id, month, regular_hours, training_hours, fines)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (operator_id, month)
                 DO UPDATE SET 
                     regular_hours = EXCLUDED.regular_hours,
-                    training_hours = EXCLUDED.training_hours
-            """, (operator_id, month, regular_hours, training_hours))
+                    training_hours = EXCLUDED.training_hours,
+                    fines = EXCLUDED.fines
+            """, (operator_id, month, regular_hours, training_hours, fines))
+
+    def process_and_upload_timesheet(self):
+        """
+        Process timesheets from all supervisors' hours_table_url and upload data to work_hours table.
+        Returns:
+            dict: Aggregated status of all operations with processed and skipped records per supervisor.
+        """
+        # Get all supervisors with their hours_table_url
+        supervisors = self.get_supervisors()
+        if not supervisors:
+            return {
+                "status": "error",
+                "message": "No supervisors found in database",
+                "total_processed": 0,
+                "total_skipped": 0,
+                "details": []
+            }
+    
+        total_processed = 0
+        total_skipped = 0
+        results = []
+    
+        for supervisor in supervisors:
+            supervisor_id, supervisor_name, _, hours_table_url = supervisor
+            
+            if not hours_table_url:
+                logging.warning(f"Supervisor {supervisor_name} (ID: {supervisor_id}) has no hours_table_url")
+                results.append({
+                    "supervisor_id": supervisor_id,
+                    "supervisor_name": supervisor_name,
+                    "status": "skipped",
+                    "message": "No hours_table_url configured",
+                    "processed": 0,
+                    "skipped": 0,
+                    "skipped_operators": []
+                })
+                continue
+    
+            # Process the timesheet for this supervisor
+            timesheet_data = process_timesheet(hours_table_url)
+            
+            if isinstance(timesheet_data, dict) and "error" in timesheet_data:
+                error_msg = timesheet_data["error"]
+                logging.error(f"Error processing timesheet for {supervisor_name}: {error_msg}")
+                results.append({
+                    "supervisor_id": supervisor_id,
+                    "supervisor_name": supervisor_name,
+                    "status": "error",
+                    "message": error_msg,
+                    "processed": 0,
+                    "skipped": 0,
+                    "skipped_operators": []
+                })
+                continue
+    
+            processed = 0
+            skipped = 0
+            skipped_operators = []
+    
+            with self._get_cursor() as cursor:
+                for entry in timesheet_data:
+                    fio = entry['ФИО']
+                    regular_hours = entry['Кол-во часов']
+                    training_hours = entry['Кол-во часов тренинга']
+                    fines = entry['Штрафы']
+                    month = entry['Год-Месяц']
+    
+                    # Find operator by name who is under this supervisor
+                    cursor.execute("""
+                        SELECT id FROM users 
+                        WHERE name = %s 
+                        AND role = 'operator' 
+                        AND supervisor_id = %s
+                    """, (fio, supervisor_id))
+                    operator = cursor.fetchone()
+    
+                    if operator:
+                        operator_id = operator[0]
+                        cursor.execute("""
+                            INSERT INTO work_hours (
+                                operator_id, 
+                                month, 
+                                regular_hours, 
+                                training_hours, 
+                                fines
+                            )
+                            VALUES (%s, %s, %s, %s, %s)
+                            ON CONFLICT (operator_id, month)
+                            DO UPDATE SET 
+                                regular_hours = EXCLUDED.regular_hours,
+                                training_hours = EXCLUDED.training_hours,
+                                fines = EXCLUDED.fines
+                        """, (operator_id, month, regular_hours, training_hours, fines))
+                        processed += 1
+                    else:
+                        logging.warning(f"Operator {fio} not found under supervisor {supervisor_name}")
+                        skipped += 1
+                        skipped_operators.append(fio)
+    
+            total_processed += processed
+            total_skipped += skipped
+    
+            results.append({
+                "supervisor_id": supervisor_id,
+                "supervisor_name": supervisor_name,
+                "status": "success",
+                "processed": processed,
+                "skipped": skipped,
+                "skipped_operators": skipped_operators
+            })
+    
+        return {
+            "status": "completed",
+            "total_processed": total_processed,
+            "total_skipped": total_skipped,
+            "details": results
+        }
 
     def get_operators_by_supervisor(self, supervisor_id):
         with self._get_cursor() as cursor:
@@ -199,38 +423,7 @@ class Database:
             """, (supervisor_id,))
             return cursor.fetchall()
 
-    def get_calls_summary(self, month=None):
-        # Optional month filter for quality table
-        query = """
-            SELECT 
-                u.id AS operator_id,
-                u.name AS operator_name,
-                u.direction,
-                COUNT(c.id) AS call_count,
-                AVG(c.score) AS avg_score
-            FROM users u
-            LEFT JOIN calls c ON u.id = c.operator_id
-            WHERE u.role = 'operator'
-        """
-        params = []
-        if month:
-            query += " AND c.month = %s"
-            params.append(month)
-        query += " GROUP BY u.id, u.name, u.direction"
-        
-        with self._get_cursor() as cursor:
-            cursor.execute(query, params)
-            return [
-                {
-                    "operator_id": row[0],
-                    "operator_name": row[1],
-                    "direction": row[2],
-                    "call_count": row[3],
-                    "avg_score": float(row[4]) if row[4] is not None else None
-                } for row in cursor.fetchall()
-            ]
-
-    def get_hours_summary(self, operator_id=None):
+    def get_hours_summary(self, operator_id=None, month=None):
         query = """
             SELECT 
                 u.id AS operator_id,
@@ -238,16 +431,24 @@ class Database:
                 u.direction,
                 wh.regular_hours,
                 wh.training_hours,
+                wh.fines
             FROM users u
-            LEFT JOIN work_hours ON u.id = wh.operator_id
+            LEFT JOIN work_hours wh ON u.id = wh.operator_id
             WHERE u.role = 'operator'
-            """
+        """
         params = []
+        if operator_id:
+            query += " AND u.id = %s"
+            params.append(operator_id)
         if month:
             query += " AND wh.month = %s"
             params.append(month)
         
-        with self._get() as cursor:
+        # Добавить группировку, если operator_id не указан
+        if not operator_id:
+            query += " GROUP BY u.id, u.name, u.direction, wh.regular_hours, wh.training_hours, wh.fines"
+        
+        with self._get_cursor() as cursor:
             cursor.execute(query, params)
             return [
                 {
@@ -255,17 +456,52 @@ class Database:
                     "operator_name": row[1],
                     "direction": row[2],
                     "regular_hours": float(row[3]) if row[3] is not None else 0,
-                    "training_hours": float(row[4]) if row[4] is not None else 0
+                    "training_hours": float(row[4]) if row[4] is not None else 0,
+                    "fines": float(row[5]) if row[5] is not None else 0
+                } for row in cursor.fetchall()
+            ]
+
+    def get_hours_summary(self, operator_id=None, month=None):
+        query = """
+            SELECT 
+                u.id AS operator_id,
+                u.name AS operator_name,
+                u.direction,
+                wh.regular_hours,
+                wh.training_hours,
+                wh.fines
+            FROM users u
+            LEFT JOIN work_hours wh ON u.id = wh.operator_id
+            WHERE u.role = 'operator'
+        """
+        params = []
+        if operator_id:
+            query += " AND u.id = %s"
+            params.append(operator_id)
+        if month:
+            query += " AND wh.month = %s"
+            params.append(month)
+        
+        with self._get_cursor() as cursor:
+            cursor.execute(query, params)
+            return [
+                {
+                    "operator_id": row[0],
+                    "operator_name": row[1],
+                    "direction": row[2],
+                    "regular_hours": float(row[3]) if row[3] is not None else 0,
+                    "training_hours": float(row[4]) if row[4] is not None else 0,
+                    "fines": float(row[5]) if row[5] is not None else 0
                 } for row in cursor.fetchall()
             ]
 
     def get_supervisors(self):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                    SELECT id, name, scores_table_url, hours_table_url 
-                    FROM users 
-                    WHERE role = 'sv'
-                """)
+                SELECT id, name, scores_table_url, hours_table_url 
+                FROM users 
+                WHERE role = 'sv'
+            """)
             return cursor.fetchall()
 
     def get_user_by_login(self, login):
@@ -311,7 +547,6 @@ class Database:
             ]
 
     def get_all_operators(self):
-        # For admin access to all operator data
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT id, name, direction, hire_date, supervisor_id, scores_table_url, hours_table_url
