@@ -1031,10 +1031,16 @@ async def delSv(message: types.Message):
         ikb = InlineKeyboardMarkup(row_width=1)
         for sv_id, sv_name, _, _ in supervisors:
             ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"delsv_{sv_id}"))
-        
         await bot.send_message(
             chat_id=message.from_user.id,
-            text="<b>Выберите супервайзера для удаления:</b>",
+            text="<b>Выберите супервайзера для удаления</b>",
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="<b>Лист СВ:</b>",
             parse_mode='HTML',
             reply_markup=ikb
         )
