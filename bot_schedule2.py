@@ -679,7 +679,7 @@ async def start_command(message: types.Message):
         kb.add(KeyboardButton('Вход👤'))
         await bot.send_message(
             chat_id=message.from_user.id,
-            text=f"<b>Бобро пожаловать!</b>\nТвой <b>ID</b> что бы присоединиться к команде:\n\n<pre>{message.from_user.id}</pre>\n\nЕсли ты оператор, нажми <b>Вход👤</b>, чтобы присоединиться к своей группе. 👥",
+            text=f"<b>Бобро пожаловать!\n\nНажмите <b>Вход👤</b>, чтобы подключиться к <b>OTP dashboard</b>. 👥",
             parse_mode='HTML',
             reply_markup=kb
         )
@@ -711,15 +711,17 @@ async def process_login(message: types.Message, state: FSMContext):
             return
 
         # Сохраняем данные пользователя в состоянии
-        await state.update_data(user={
-            'id': user[0],
-            'telegram_id': user[1],
-            'name': user[2],
-            'role': user[3],
-            'direction': user[4],
-            'hire_date': user[5],
-            'supervisor_id': user[6],
-            'login': user[7]
+        await state.update_data({
+            'user': {
+                'id': user[0],
+                'telegram_id': user[1],
+                'name': user[2],
+                'role': user[3],
+                'direction': user[4],
+                'hire_date': user[5],
+                'supervisor_id': user[6],
+                'login': user[7]
+            }
         })
         await message.delete()
         await message.answer(
