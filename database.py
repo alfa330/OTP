@@ -81,9 +81,9 @@ def process_timesheet(file_url):
                 if row[fio_col] and row[hours_col] is not None:
                     entry = {
                         'ФИО': str(row[fio_col]).strip(),
-                        'Кол-во часов': float(row[hours_col]) if row[hours_col] else 0.0,
-                        'Кол-во часов тренинга': float(row[training_col]) if training_col is not None and row[training_col] else 0.0,
-                        'Штрафы': float(row[fines_col]) if fines_col is not None and row[fines_col] else 0.0,
+                        'Кол-во часов': round(float(row[hours_col]) if row[hours_col] else 0.0, 2),
+                        'Кол-во часов тренинга': round(float(row[training_col]) if training_col is not None and row[training_col] else 0.0, 2),
+                        'Штрафы': round(float(row[fines_col]) if fines_col is not None and row[fines_col] else 0.0, 2),
                         'Год-Месяц': current_month
                     }
                     data.append(entry)
