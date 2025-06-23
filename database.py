@@ -175,6 +175,10 @@ def process_call_evaluations(scores_table_url, operator_name, month=None):
     Returns:
         list: List of dicts with evaluator, operator, month, call_number, phone_number, score, comment.
     """
+    if not scores_table_url:
+        return {"error": "No scores table URL provided"}
+    if not operator_name:
+        return {"error": "No operator name provided"}
     # Set default month if not provided
     month = month or datetime.now().strftime('%Y-%m')
 
