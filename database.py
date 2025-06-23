@@ -462,7 +462,10 @@ class Database:
                     phone_number VARCHAR(70) NOT NULL,
                     score FLOAT NOT NULL,
                     comment TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_correction BOOLEAN DEFAULT FALSE,
+                    previous_version_id INTEGER REFERENCES calls(id),
+                    UNIQUE(evaluator_id, operator_id, month, call_number, phone_number, score, comment)
                 );
             """)
             # Work hours table with fines column
@@ -484,6 +487,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_id ON calls(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_work_hours_operator_id ON work_hours(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_work_hours_month ON work_hours(month);
+                CREATE INDEX IF NOT EXISTS idx_calls_operator_month_call ON calls(operator_id, month, call_number);
             """)
 
     def create_user(self, telegram_id, name, role, direction=None, hire_date=None, supervisor_id=None, login=None, password=None):
@@ -587,10 +591,62 @@ class Database:
     def add_call_evaluation(self, evaluator_id, operator_id, call_number, phone_number, score, comment=None, month=None):
         month = month or datetime.now().strftime('%Y-%m')
         with self._get_cursor() as cursor:
+            # Проверяем, существует ли уже такая же запись (полный дубль)
             cursor.execute("""
-                INSERT INTO calls (evaluator_id, operator_id, month, call_number, phone_number, score, comment)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                SELECT id FROM calls 
+                WHERE evaluator_id = %s 
+                AND operator_id = %s 
+                AND month = %s 
+                AND call_number = %s 
+                AND phone_number = %s 
+                AND score = %s 
+                AND comment IS NOT DISTINCT FROM %s
             """, (evaluator_id, operator_id, month, call_number, phone_number, score, comment))
+            
+            if cursor.fetchone():
+                # Полный дубль - игнорируем
+                return False
+            
+            # Проверяем, есть ли уже оценка для этого звонка в этом месяце
+            cursor.execute("""
+                SELECT id FROM calls 
+                WHERE operator_id = %s 
+                AND month = %s 
+                AND call_number = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (operator_id, month, call_number))
+            
+            existing_call = cursor.fetchone()
+            is_correction = existing_call is not None
+            
+            # Добавляем запись
+            cursor.execute("""
+                INSERT INTO calls (
+                    evaluator_id, 
+                    operator_id, 
+                    month, 
+                    call_number, 
+                    phone_number, 
+                    score, 
+                    comment,
+                    is_correction,
+                    previous_version_id
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                evaluator_id, 
+                operator_id, 
+                month, 
+                call_number, 
+                phone_number, 
+                score, 
+                comment,
+                is_correction,
+                existing_call[0] if is_correction else None
+            ))
+            
+            return True
 
     def add_work_hours(self, operator_id, regular_hours, training_hours, fines=0.0, month=None):
         month = month or datetime.now().strftime('%Y-%m')
@@ -841,7 +897,14 @@ class Database:
 
     def get_call_evaluations(self, operator_id, month=None):
         query = """
-            SELECT call_number, month, phone_number, score, comment
+            SELECT 
+                call_number, 
+                month, 
+                phone_number, 
+                score, 
+                comment,
+                is_correction,
+                TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI')
             FROM calls
             WHERE operator_id = %s
         """
@@ -859,7 +922,9 @@ class Database:
                     "month": row[1],
                     "phone_number": row[2],
                     "score": float(row[3]),
-                    "comment": row[4]
+                    "comment": row[4],
+                    "is_correction": row[5],
+                    "evaluation_date": row[6]
                 } for row in cursor.fetchall()
             ]
 
