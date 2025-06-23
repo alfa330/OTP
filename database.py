@@ -345,51 +345,43 @@ def save_evaluations_to_db(evaluations):
     }
 
 def process_and_save_evaluations():
-    """Process all supervisors' score tables and save to DB"""
-    supervisors = db.get_supervisors()
-    if not supervisors:
-        logging.warning("No supervisors found for evaluation processing")
+    """Process all operators' score tables and save to DB"""
+    operators = db.get_all_operators()  # Получаем всех операторов
+    if not operators:
+        logging.warning("No operators found for evaluation processing")
         return
     
     total_processed = 0
     total_errors = 0
     
-    for supervisor in supervisors:
-        supervisor_id, supervisor_name, scores_table_url, _ = supervisor
+    for operator in operators:
+        operator_id, operator_name, _, _, _, scores_table_url, _  = operator
         
         if not scores_table_url:
-            logging.warning(f"No scores table URL for supervisor {supervisor_name}")
+            logging.warning(f"No scores table URL for operator {operator_name}")
             continue
             
-        # Get operators for this supervisor
-        operators = db.get_operators_by_supervisor(supervisor_id)
-        if not operators:
-            logging.warning(f"No operators found for supervisor {supervisor_name}")
-            continue
+        try:
+            # Process evaluations for this operator
+            evaluations = process_call_evaluations(
+                scores_table_url,
+                operator_name
+            )
             
-        for operator in operators:
-            operator_id, operator_name, _, _, _, scores_table_url = operator
-            try:
-                # Process evaluations for this operator
-                evaluations = process_call_evaluations(
-                    scores_table_url,
-                    operator_name
-                )
-                
-                if isinstance(evaluations, dict) and 'error' in evaluations:
-                    logging.error(f"Error processing evaluations for {operator_name}: {evaluations['error']}")
-                    total_errors += 1
-                    continue
-                    
-                # Save to database
-                result = save_evaluations_to_db(evaluations)
-                if result:
-                    total_processed += result.get('success_count', 0)
-                    total_errors += result.get('error_count', 0)
-                    
-            except Exception as e:
-                logging.error(f"Error processing operator {operator_name}: {str(e)}")
+            if isinstance(evaluations, dict) and 'error' in evaluations:
+                logging.error(f"Error processing evaluations for {operator_name}: {evaluations['error']}")
                 total_errors += 1
+                continue
+                
+            # Save to database
+            result = save_evaluations_to_db(evaluations)
+            if result:
+                total_processed += result.get('success_count', 0)
+                total_errors += result.get('error_count', 0)
+                
+        except Exception as e:
+            logging.error(f"Error processing operator {operator_name}: {str(e)}")
+            total_errors += 1
     
     logging.info(f"Evaluation processing completed. Processed: {total_processed}, Errors: {total_errors}")
     return {
