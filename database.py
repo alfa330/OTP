@@ -398,12 +398,6 @@ def process_and_save_evaluations():
         'errors': total_errors
     }
 
-async def async_process_evaluations():
-    """Async wrapper for evaluation processing"""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(executor_pool, process_and_save_evaluations)
-
-
 class Database:
     def __init__(self):
         self.conn_params = {
