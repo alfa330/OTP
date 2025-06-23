@@ -20,7 +20,7 @@ import re
 import xlsxwriter
 import json
 from concurrent.futures import ThreadPoolExecutor
-from database import db
+from database import db, async_process_evaluations
 import uuid
 from passlib.hash import pbkdf2_sha256
 
@@ -2197,6 +2197,11 @@ if __name__ == '__main__':
         db.process_and_upload_timesheet,
         CronTrigger(minute='*/2'),
         misfire_grace_time=3600
+    )
+    scheduler.add_job(
+        async_process_evaluations,
+        CronTrigger(minute='*/5'),
+        misfire_grace_time=300
     )
     scheduler.start()
     
