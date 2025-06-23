@@ -13,8 +13,7 @@ import csv
 import io
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-
-executor_pool = ThreadPoolExecutor(max_workers=4)
+import gc
 
 logging.basicConfig(level=logging.INFO)
 
@@ -344,9 +343,8 @@ def save_evaluations_to_db(evaluations):
         'error_count': error_count
     }
 
-def process_and_save_evaluations():
-    """Process all operators' score tables and save to DB"""
-    operators = db.get_all_operators()  # Получаем всех операторов
+def process_and_save_evaluations(batch_size=5):
+    operators = db.get_all_operators()
     if not operators:
         logging.warning("No operators found for evaluation processing")
         return
@@ -354,34 +352,35 @@ def process_and_save_evaluations():
     total_processed = 0
     total_errors = 0
     
-    for operator in operators:
-        operator_id, operator_name, _, _, _, scores_table_url, _  = operator
-        
-        if not scores_table_url:
-            logging.warning(f"No scores table URL for operator {operator_name}")
-            continue
+    # Обрабатываем операторов по батчам
+    for i in range(0, len(operators), batch_size):
+        batch = operators[i:i + batch_size]
+        for operator in batch:
+            operator_id, operator_name, _, _, _, scores_table_url, _ = operator
             
-        try:
-            # Process evaluations for this operator
-            evaluations = process_call_evaluations(
-                scores_table_url,
-                operator_name
-            )
-            
-            if isinstance(evaluations, dict) and 'error' in evaluations:
-                logging.error(f"Error processing evaluations for {operator_name}: {evaluations['error']}")
-                total_errors += 1
+            if not scores_table_url:
+                logging.warning(f"No scores table URL for operator {operator_name}")
                 continue
                 
-            # Save to database
-            result = save_evaluations_to_db(evaluations)
-            if result:
-                total_processed += result.get('success_count', 0)
-                total_errors += result.get('error_count', 0)
+            try:
+                evaluations = process_call_evaluations(scores_table_url, operator_name)
                 
-        except Exception as e:
-            logging.error(f"Error processing operator {operator_name}: {str(e)}")
-            total_errors += 1
+                if isinstance(evaluations, dict) and 'error' in evaluations:
+                    logging.error(f"Error processing evaluations for {operator_name}: {evaluations['error']}")
+                    total_errors += 1
+                    continue
+                    
+                result = save_evaluations_to_db(evaluations)
+                if result:
+                    total_processed += result.get('success_count', 0)
+                    total_errors += result.get('error_count', 0)
+                    
+            except Exception as e:
+                logging.error(f"Error processing operator {operator_name}: {str(e)}")
+                total_errors += 1
+        
+        # Освобождаем память после обработки батча
+        gc.collect()  # Принудительный вызов сборщика мусора
     
     logging.info(f"Evaluation processing completed. Processed: {total_processed}, Errors: {total_errors}")
     return {
