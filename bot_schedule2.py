@@ -2206,11 +2206,6 @@ if __name__ == '__main__':
         CronTrigger(minute='*/2'),
         misfire_grace_time=3600
     )
-    scheduler.add_job(
-        lambda: process_and_save_evaluations(batch_size=5),
-        CronTrigger(minute='*/5'),
-        misfire_grace_time=300
-    )
     scheduler.start()
     
     logging.info("🔄 Планировщик запущен")
