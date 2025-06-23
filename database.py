@@ -494,7 +494,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_month_call ON calls(operator_id, month, call_number);
             """)
 
-    def create_user(self, telegram_id, name, role, direction=None, hire_date=None, supervisor_id=None, login=None, password=None):
+    def create_user(self, telegram_id, name, role, direction=None, hire_date=None, supervisor_id=None, login=None, password=None, scores_table_url=None):
         if login is None:
             base_login = f"user_{str(uuid.uuid4())[:8]}"
             with self._get_cursor() as cursor:
@@ -512,8 +512,8 @@ class Database:
 
         with self._get_cursor() as cursor:
             cursor.execute("""
-                INSERT INTO users (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO users (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash, scores_table_url)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (telegram_id) DO UPDATE
                 SET name = EXCLUDED.name,
                     role = EXCLUDED.role,
@@ -521,9 +521,10 @@ class Database:
                     hire_date = EXCLUDED.hire_date,
                     supervisor_id = EXCLUDED.supervisor_id,
                     login = EXCLUDED.login,
-                    password_hash = EXCLUDED.password_hash
+                    password_hash = EXCLUDED.password_hash,
+                    scores_table_url = EXCLUDED.scores_table_url
                 RETURNING id
-            """, (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash))
+            """, (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash, scores_table_url))
             return cursor.fetchone()[0]
 
     def update_telegram_id(self, user_id, telegram_id):
