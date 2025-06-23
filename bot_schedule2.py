@@ -1739,7 +1739,8 @@ async def select_direction(callback: types.CallbackQuery, state: FSMContext):
             name=op['name'],
             role='operator',
             direction=direction,
-            supervisor_id=user[0]
+            supervisor_id=user[0],
+            scores_table_url=op['link'] if op['link'] else None
         )
     
     await bot.send_message(
