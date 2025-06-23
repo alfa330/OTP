@@ -50,43 +50,109 @@ def process_timesheet(file_url):
         sheet_names = workbook.sheetnames
         last_sheet = workbook[sheet_names[-1]]
 
+        # Set limits (55 rows, 50 columns)
+        MAX_ROWS = 55
+        MAX_COLS = 50
+
         # Extract data
         data = []
-        headers = []
-        fio_col, hours_col, training_col, fines_col = None, None, None, None
+        fio_col, hours_col, training_col = None, None, None
 
-        # Read rows
-        for row_idx, row in enumerate(last_sheet.iter_rows(values_only=True), 1):
-            if row_idx == 1:  # Header row
-                headers = [str(cell).strip().replace('"', '').replace('\n', '').replace(' ', ' ') if cell else '' for cell in row]
-                for idx, header in enumerate(headers):
-                    header_lower = header.lower()
-                    if 'фио' in header_lower:
-                        if not fio_col:
-                            fio_col = idx
-                    elif 'итого' in header_lower or 'итоговые' in header_lower:
-                        if not hours_col:
-                            hours_col = idx
-                    elif 'часы тренинга' in header_lower or 'тренинг' in header_lower:
-                        if not training_col:
-                            training_col = idx
-                    elif 'общая сумма' in header_lower or 'сумма штрафа' in header_lower:
-                        if not fines_col:
-                            fines_col = idx
-                if not (fio_col is not None and hours_col is not None):
-                    os.remove(local_file)
-                    return {"error": f"Required columns (ФИО, Итого) not found in sheet '{last_sheet.title}'."}
-            else:
-                # Data row
-                if row[fio_col] and row[hours_col] is not None:
-                    entry = {
-                        'ФИО': str(row[fio_col]).strip(),
-                        'Кол-во часов': round(float(row[hours_col]) if row[hours_col] else 0.0, 2),
-                        'Кол-во часов тренинга': round(float(row[training_col]) if training_col is not None and row[training_col] else 0.0, 2),
-                        'Штрафы': round(float(row[fines_col]) if fines_col is not None and row[fines_col] else 0.0, 2),
-                        'Год-Месяц': current_month
-                    }
-                    data.append(entry)
+        # First pass - find headers in the main table (only check first row)
+        for row_idx, row in enumerate(last_sheet.iter_rows(max_row=1, max_col=MAX_COLS, values_only=True), 1):
+            headers = [str(cell).strip().replace('"', '').replace('\n', '').replace(' ', ' ') if cell else '' for cell in row]
+            for idx, header in enumerate(headers):
+                if idx >= MAX_COLS:
+                    break
+                header_lower = header.lower()
+                if 'фио' in header_lower:
+                    if fio_col is None:
+                        fio_col = idx
+                elif 'итого' in header_lower or 'итоговые' in header_lower:
+                    if hours_col is None:  # Only set if not already found
+                        hours_col = idx
+                elif 'часы тренинга' in header_lower or 'тренинг' in header_lower:
+                    if training_col is None:  # Only set if not already found
+                        training_col = idx
+            
+            if fio_col is None or hours_col is None:
+                os.remove(local_file)
+                return {"error": f"Required columns (ФИО, Итого) not found in sheet '{last_sheet.title}'."}
+
+        # Find the end of main data (first empty cell in ФИО column after header)
+        main_data_end_row = None
+        for row_idx, row in enumerate(last_sheet.iter_rows(min_row=2, max_row=MAX_ROWS, max_col=MAX_COLS, values_only=True), 2):
+            if not row[fio_col]:  # Empty ФИО cell
+                main_data_end_row = row_idx
+                break
+
+        # Second pass - find fines section (look for "ФИО" again after main data)
+        fines_start_row = None
+        fines_fio_col = None
+        fines_amount_col = None
+        
+        for row_idx, row in enumerate(last_sheet.iter_rows(min_row=main_data_end_row+1 if main_data_end_row else 2, 
+                                                         max_row=MAX_ROWS, 
+                                                         max_col=MAX_COLS, 
+                                                         values_only=True), 
+                                 main_data_end_row+1 if main_data_end_row else 2):
+            if not fines_start_row:
+                for idx, cell in enumerate(row):
+                    if idx >= MAX_COLS:
+                        break
+                    if cell and 'фио' in str(cell).lower():
+                        fines_fio_col = idx
+                    elif cell and ('штраф' in str(cell).lower() or 'сумма' in str(cell).lower()):
+                        fines_amount_col = idx
+                
+                if fines_fio_col is not None:
+                    fines_start_row = row_idx
+                    break
+
+        # Create a mapping of operator names to fines
+        fines_map = {}
+        if fines_start_row and fines_fio_col is not None and fines_amount_col is not None:
+            for row in last_sheet.iter_rows(min_row=fines_start_row+1, 
+                                          max_row=MAX_ROWS, 
+                                          max_col=MAX_COLS, 
+                                          values_only=True):
+                if fines_fio_col >= len(row) or fines_amount_col >= len(row):
+                    continue
+                    
+                name = str(row[fines_fio_col]).strip() if row[fines_fio_col] else None
+                fine = row[fines_amount_col] if fines_amount_col < len(row) else None
+                
+                if name and name != 'None' and fine is not None:
+                    try:
+                        fines_map[name] = float(fine)
+                    except (ValueError, TypeError):
+                        fines_map[name] = 0.0
+
+        # Process main data rows (2 to main_data_end_row-1)
+        for row_idx, row in enumerate(last_sheet.iter_rows(min_row=2, 
+                                                         max_row=main_data_end_row-1 if main_data_end_row else MAX_ROWS, 
+                                                         max_col=MAX_COLS, 
+                                                         values_only=True), 2):
+            if fio_col >= len(row) or hours_col >= len(row):
+                continue
+                
+            if row[fio_col] and row[hours_col] is not None:
+                operator_name = str(row[fio_col]).strip()
+                training_hours = 0.0
+                if training_col is not None and training_col < len(row) and row[training_col] is not None:
+                    try:
+                        training_hours = float(row[training_col])
+                    except (ValueError, TypeError):
+                        training_hours = 0.0
+                
+                entry = {
+                    'ФИО': operator_name,
+                    'Кол-во часов': round(float(row[hours_col]) if row[hours_col] else 0.0, 2),
+                    'Кол-во часов тренинга': round(training_hours, 2),
+                    'Штрафы': round(fines_map.get(operator_name, 0.0), 2),
+                    'Год-Месяц': current_month
+                }
+                data.append(entry)
 
         # Clean up
         os.remove(local_file)
