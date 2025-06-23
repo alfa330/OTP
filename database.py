@@ -484,6 +484,36 @@ class Database:
             "details": results
         }
 
+    def get_operator_stats(self, operator_id):
+        """Получить статистику оператора (часы, оценки)"""
+        with self._get_cursor() as cursor:
+            # Получаем текущий месяц
+            current_month = datetime.now().strftime('%Y-%m')
+            
+            # Получаем данные о часах
+            cursor.execute("""
+                SELECT regular_hours, training_hours, fines 
+                FROM work_hours 
+                WHERE operator_id = %s AND month = %s
+            """, (operator_id, current_month))
+            hours_data = cursor.fetchone()
+            
+            # Получаем данные об оценках
+            cursor.execute("""
+                SELECT COUNT(*), AVG(score) 
+                FROM calls 
+                WHERE operator_id = %s AND month = %s
+            """, (operator_id, current_month))
+            evaluations_data = cursor.fetchone()
+            
+            return {
+                'regular_hours': hours_data[0] if hours_data else 0,
+                'training_hours': hours_data[1] if hours_data else 0,
+                'fines': hours_data[2] if hours_data else 0,
+                'call_count': evaluations_data[0] or 0,
+                'avg_score': float(evaluations_data[1]) if evaluations_data[1] else 0
+            }
+
     def get_operators_by_supervisor(self, supervisor_id):
         with self._get_cursor() as cursor:
             cursor.execute("""
