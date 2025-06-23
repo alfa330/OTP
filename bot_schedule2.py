@@ -1934,13 +1934,18 @@ async def show_operator_stats(message: types.Message):
         stats = db.get_operator_stats(user[0])
         current_month = datetime.now().strftime('%B %Y')
         
+        # Получаем оценки только последних версий звонков
+        evaluations = db.get_call_evaluations(user[0])
+        call_count = len(evaluations)
+        avg_score = sum(eval['score'] for eval in evaluations) / call_count if call_count > 0 else 0
+        
         message_text = (
             f"<b>Ваша статистика за {current_month}:</b>\n\n"
             f"⏱ <b>Часы работы:</b> {stats['regular_hours']}\n"
             f"📚 <b>Часы тренинга:</b> {stats['training_hours']}\n"
             f"💸 <b>Штрафы:</b> {stats['fines']}\n\n"
-            f"📞 <b>Прослушано звонков:</b> {stats['call_count']}\n"
-            f"⭐ <b>Средний балл:</b> {stats['avg_score']:.2f}"
+            f"📞 <b>Прослушано звонков:</b> {call_count}\n"
+            f"⭐ <b>Средний балл:</b> {avg_score:.2f}"
         )
         
         await bot.send_message(
@@ -1965,12 +1970,14 @@ async def show_operator_evaluations(message: types.Message):
             return
         
         message_text = "<b>Ваши последние оценки:</b>\n\n"
-        for eval in evaluations[:5]:  # Показываем последние 5 оценок
+        for eval in evaluations[:5]:  # Показываем последние 5 оценок (уже только последние версии)
+            correction_mark = " (корректировка)" if eval['is_correction'] else ""
             message_text += (
-                f"📞 <b>Звонок {eval['call_number']}</b>\n"
+                f"📞 <b>Звонок {eval['call_number']}{correction_mark}</b>\n"
                 f"   📅 {eval['month']}\n"
                 f"   📱 {eval['phone_number']}\n"
                 f"   ⭐ Оценка: <b>{eval['score']}</b>\n"
+                f"   🕒 Дата оценки: {eval['evaluation_date']}\n"
             )
             if eval['comment']:
                 message_text += f"   💬 Комментарий: {eval['comment']}\n"

@@ -897,22 +897,31 @@ class Database:
 
     def get_call_evaluations(self, operator_id, month=None):
         query = """
+            WITH latest_calls AS (
+                SELECT 
+                    call_number, 
+                    MAX(created_at) as latest_date
+                FROM calls
+                WHERE operator_id = %s
+                GROUP BY call_number
+            )
             SELECT 
-                call_number, 
-                month, 
-                phone_number, 
-                score, 
-                comment,
-                is_correction,
-                TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI')
-            FROM calls
-            WHERE operator_id = %s
+                c.call_number, 
+                c.month, 
+                c.phone_number, 
+                c.score, 
+                c.comment,
+                c.is_correction,
+                TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI')
+            FROM calls c
+            JOIN latest_calls lc ON c.call_number = lc.call_number AND c.created_at = lc.latest_date
+            WHERE c.operator_id = %s
         """
-        params = [operator_id]
+        params = [operator_id, operator_id]
         if month:
-            query += " AND month = %s"
+            query += " AND c.month = %s"
             params.append(month)
-        query += " ORDER BY created_at DESC, call_number"
+        query += " ORDER BY c.call_number"
         
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
