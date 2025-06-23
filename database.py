@@ -11,7 +11,10 @@ import re
 import json
 import csv
 import io
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
+executor_pool = ThreadPoolExecutor(max_workers=4)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -161,6 +164,241 @@ def process_timesheet(file_url):
     except Exception as e:
         os.remove(local_file) if os.path.exists(local_file) else None
         return {"error": f"Error processing file: {str(e)}"}
+
+def process_call_evaluations(scores_table_url, operator_name, month=None):
+    """
+    Process the last sheet of a Google Sheets call evaluation table to extract call data.
+    Args:
+        scores_table_url (str): Google Sheets URL (e.g., https://docs.google.com/spreadsheets/d/...).
+        operator_name (str): Name of the operator (from spreadsheet name).
+        month (str, optional): Month in 'YYYY-MM' format. Defaults to current month.
+    Returns:
+        list: List of dicts with evaluator, operator, month, call_number, phone_number, score, comment.
+    """
+    # Set default month if not provided
+    month = month or datetime.now().strftime('%Y-%m')
+
+    # Convert Google Sheets URL to Excel export URL
+    sheet_id_match = re.search(r'spreadsheets/d/([a-zA-Z0-9_-]+)', scores_table_url)
+    if not sheet_id_match:
+        return {"error": "Invalid Google Sheets URL format."}
+    sheet_id = sheet_id_match.group(1)
+    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+
+    # Download the file
+    local_file = 'temp_scoresheet.xlsx'
+    try:
+        response = requests.get(export_url)
+        if response.status_code != 200:
+            return {"error": f"Failed to download file: HTTP {response.status_code}"}
+        with open(local_file, 'wb') as f:
+            f.write(response.content)
+    except Exception as e:
+        return {"error": f"Failed to download file: {str(e)}"}
+
+    try:
+        # Load the Excel file
+        workbook = openpyxl.load_workbook(local_file, data_only=True)
+        # Select the last sheet
+        sheet_names = workbook.sheetnames
+        if not sheet_names:
+            os.remove(local_file)
+            return {"error": "No sheets found in the workbook."}
+        sheet = workbook[sheet_names[-1]]
+
+        # Set limits based on typical sheet size
+        MAX_ROWS = 40
+        MAX_COLS = 100
+
+        # Fetch column A data (rows 3 to 40)
+        column_a = [sheet.cell(row=r+1, column=1).value for r in range(2, 41)]  # Rows 3 to 40
+        column_a = [str(cell).strip() if cell is not None else '' for cell in column_a]
+        # Find score_row (row labeled "Оценивающий" or fallback to row 20)
+        score_row = None
+        for i, value in enumerate(column_a, start=3):
+            if value and 'Оценивающий' in value:
+                score_row = i-1
+                break
+        if score_row is None:
+            score_row = 20  # Fallback based on file structure
+        phone_row = score_row + 1
+        # Get evaluator name from the last non-empty cell in column A
+        evaluator = None
+        for r in range(MAX_ROWS, 0, -1):
+            cell_value = sheet.cell(row=r, column=1).value
+            if cell_value and str(cell_value).strip():
+                evaluator = str(cell_value).strip()
+                break
+        if not evaluator:
+            os.remove(local_file)
+            return {"error": "Evaluator name not found in column A"}
+
+        # Initialize results
+        results = []
+
+        # Process each call block (starting from column F=6, each block is 2 columns: status, comment)
+        call_index = 1
+        base_coli = 6  # Column F
+        for base_col in range(base_coli,MAX_COLS,4):
+            # Fetch score (score_row, base_col+1), phone (phone_row, base_col+1)
+            score = sheet.cell(row=score_row, column=base_col+2).value
+            phone_number = sheet.cell(row=phone_row, column=base_col+2).value
+
+            # Exit if no valid data
+            if not (score is not None and phone_number):
+                break
+
+            try:
+                score = float(score)
+            except (ValueError, TypeError):
+                call_index += 1
+                continue
+
+            # Fetch comment data (rows 3 to score_row-2, status_col=base_col, comment_col=base_col+1)
+            status_col = base_col+1
+            comment_col = base_col + 3
+            comment = ''
+            for r in range(3, score_row - 1):  # Rows 3 to score_row-2
+                status = sheet.cell(row=r+1, column=status_col).value
+                comment_value = sheet.cell(row=r+1, column=comment_col).value
+                criterion = column_a[r-2] if r-2 < len(column_a) else ''
+                
+            
+                # Skip if status is 'Корректно', 'N/A', or empty
+                if status in ['Корректно', 'N/A'] or not status:
+                    continue
+
+                # Include comment if present
+                if comment_value and str(comment_value).strip():
+                    comment += f"\n<b>{criterion}</b>: <i>{str(comment_value).strip()}</i>"
+
+            # Include evaluation even if score < 100, as long as comments exist for errors
+            if score < 100 and not comment.strip():
+                base_col += 2
+                call_index += 1
+                continue
+
+            # Add valid evaluation to results
+            results.append({
+                'evaluator': evaluator,
+                'operator': operator_name,
+                'month': month,
+                'call_number': call_index,
+                'phone_number': phone_number,
+                'score': score,
+                'comment': comment.strip()
+            })
+            call_index += 1
+
+        # Clean up
+        os.remove(local_file)
+        return results
+
+    except Exception as e:
+        os.remove(local_file) if os.path.exists(local_file) else None
+        return {"error": f"Error processing file: {str(e)}"}
+
+def save_evaluations_to_db(evaluations):
+    """Save processed call evaluations to database"""
+    if isinstance(evaluations, dict) and 'error' in evaluations:
+        logging.error(f"Error in evaluations: {evaluations['error']}")
+        return False
+    
+    success_count = 0
+    error_count = 0
+    
+    for evaluation in evaluations:
+        try:
+            # Find evaluator and operator in database
+            evaluator = db.get_user(name=evaluation['evaluator'])
+            operator = db.get_user(name=evaluation['operator'])
+            
+            if not evaluator or not operator:
+                logging.warning(f"User not found: evaluator={evaluation['evaluator']}, operator={evaluation['operator']}")
+                error_count += 1
+                continue
+                
+            # Add call evaluation to database
+            db.add_call_evaluation(
+                evaluator_id=evaluator[0],
+                operator_id=operator[0],
+                call_number=evaluation['call_number'],
+                phone_number=evaluation['phone_number'],
+                score=evaluation['score'],
+                comment=evaluation['comment'],
+                month=evaluation['month']
+            )
+            success_count += 1
+            
+        except Exception as e:
+            logging.error(f"Error saving evaluation: {str(e)}")
+            error_count += 1
+    
+    return {
+        'status': 'completed',
+        'success_count': success_count,
+        'error_count': error_count
+    }
+
+def process_and_save_evaluations():
+    """Process all supervisors' score tables and save to DB"""
+    supervisors = db.get_supervisors()
+    if not supervisors:
+        logging.warning("No supervisors found for evaluation processing")
+        return
+    
+    total_processed = 0
+    total_errors = 0
+    
+    for supervisor in supervisors:
+        supervisor_id, supervisor_name, scores_table_url, _ = supervisor
+        
+        if not scores_table_url:
+            logging.warning(f"No scores table URL for supervisor {supervisor_name}")
+            continue
+            
+        # Get operators for this supervisor
+        operators = db.get_operators_by_supervisor(supervisor_id)
+        if not operators:
+            logging.warning(f"No operators found for supervisor {supervisor_name}")
+            continue
+            
+        for operator in operators:
+            operator_id, operator_name, _, _, _, scores_table_url = operator
+            try:
+                # Process evaluations for this operator
+                evaluations = process_call_evaluations(
+                    scores_table_url,
+                    operator_name
+                )
+                
+                if isinstance(evaluations, dict) and 'error' in evaluations:
+                    logging.error(f"Error processing evaluations for {operator_name}: {evaluations['error']}")
+                    total_errors += 1
+                    continue
+                    
+                # Save to database
+                result = save_evaluations_to_db(evaluations)
+                if result:
+                    total_processed += result.get('success_count', 0)
+                    total_errors += result.get('error_count', 0)
+                    
+            except Exception as e:
+                logging.error(f"Error processing operator {operator_name}: {str(e)}")
+                total_errors += 1
+    
+    logging.info(f"Evaluation processing completed. Processed: {total_processed}, Errors: {total_errors}")
+    return {
+        'status': 'completed',
+        'processed': total_processed,
+        'errors': total_errors
+    }
+
+async def async_process_evaluations():
+    """Async wrapper for evaluation processing"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor_pool, process_and_save_evaluations)
+
 
 class Database:
     def __init__(self):
