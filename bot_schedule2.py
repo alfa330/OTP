@@ -1390,7 +1390,7 @@ async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
     
     operators_with_issues = []
     
-    for op_id, op_name, table_url in operators:
+    for op_id, op_name, _, _, _, _ in operators:
         # Для каждого оператора получаем статистику звонков
         with db._get_cursor() as cursor:
             cursor.execute("""
@@ -1421,7 +1421,7 @@ async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
     for op in operators_with_issues:
         ikb.add(InlineKeyboardButton(
             text=f"Уведомить о {op['name']}",
-            callback_data=f"notify_{sv_id}_{op['name']}"
+            callback_data=f"notify_{sv_id}_{op['name'].split(" ")[1]}"
         ))
     
     await bot.send_message(
