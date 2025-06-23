@@ -644,6 +644,8 @@ def get_operators_keyboard():
 
 def get_operator_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton('Моя статистика📊'))
+    kb.add(KeyboardButton('Мои оценки📝'))
     kb.add(KeyboardButton('Доступ🔑'))
     return kb
 
@@ -805,9 +807,11 @@ async def process_password(message: types.Message, state: FSMContext):
                 parse_mode='HTML',
                 reply_markup=get_sv_keyboard()
             )
-        elif role == 'operator':
+        elif user[3] == 'operator':
             await message.answer(
-                f"<b>Бобро пожаловать, оператор {name}!</b>",
+                chat_id=message.from_user.id,
+                text=f"<b>Добро пожаловать, оператор {user[2]}!</b>\n\n"
+                    "Используйте кнопки ниже для просмотра вашей статистики.",
                 parse_mode='HTML',
                 reply_markup=get_operator_keyboard()
             )
@@ -1918,6 +1922,65 @@ async def process_new_password(message: types.Message, state: FSMContext):
             )
     
     await state.finish()
+    await message.delete()
+
+
+# === Операторам =============================================================================================
+
+@dp.message_handler(regexp='Моя статистика📊')
+async def show_operator_stats(message: types.Message):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user and user[3] == 'operator':
+        stats = db.get_operator_stats(user[0])
+        current_month = datetime.now().strftime('%B %Y')
+        
+        message_text = (
+            f"<b>Ваша статистика за {current_month}:</b>\n\n"
+            f"⏱ <b>Часы работы:</b> {stats['regular_hours']}\n"
+            f"📚 <b>Часы тренинга:</b> {stats['training_hours']}\n"
+            f"💸 <b>Штрафы:</b> {stats['fines']}\n\n"
+            f"📞 <b>Прослушано звонков:</b> {stats['call_count']}\n"
+            f"⭐ <b>Средний балл:</b> {stats['avg_score']:.2f}"
+        )
+        
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text=message_text,
+            parse_mode='HTML'
+        )
+    await message.delete()
+
+@dp.message_handler(regexp='Мои оценки📝')
+async def show_operator_evaluations(message: types.Message):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user and user[3] == 'operator':
+        evaluations = db.get_call_evaluations(user[0])
+        
+        if not evaluations:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text="<b>У вас пока нет оценок за текущий месяц.</b>",
+                parse_mode='HTML'
+            )
+            return
+        
+        message_text = "<b>Ваши последние оценки:</b>\n\n"
+        for eval in evaluations[:5]:  # Показываем последние 5 оценок
+            message_text += (
+                f"📞 <b>Звонок {eval['call_number']}</b>\n"
+                f"   📅 {eval['month']}\n"
+                f"   📱 {eval['phone_number']}\n"
+                f"   ⭐ Оценка: <b>{eval['score']}</b>\n"
+            )
+            if eval['comment']:
+                message_text += f"   💬 Комментарий: {eval['comment']}\n"
+            message_text += "\n"
+        
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text=message_text,
+            parse_mode='HTML'
+        )
     await message.delete()
 
 # Остальной код остается аналогичным предыдущей версии, но с использованием базы данных
