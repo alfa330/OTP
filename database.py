@@ -679,11 +679,11 @@ class Database:
                 "total_skipped": 0,
                 "details": []
             }
-    
+
         total_processed = 0
         total_skipped = 0
         results = []
-    
+
         for supervisor in supervisors:
             supervisor_id, supervisor_name, _, hours_table_url = supervisor
             
@@ -699,7 +699,7 @@ class Database:
                     "skipped_operators": []
                 })
                 continue
-    
+
             # Process the timesheet for this supervisor
             timesheet_data = process_timesheet(hours_table_url)
             
@@ -716,11 +716,11 @@ class Database:
                     "skipped_operators": []
                 })
                 continue
-    
+
             processed = 0
             skipped = 0
             skipped_operators = []
-    
+
             with self._get_cursor() as cursor:
                 for entry in timesheet_data:
                     fio = entry['ФИО']
@@ -728,7 +728,8 @@ class Database:
                     training_hours = entry['Кол-во часов тренинга']
                     fines = entry['Штрафы']
                     month = entry['Год-Месяц']
-    
+                    norm_hours = entry.get('Норма часов', 0.0)  # Use get() with default value
+
                     # Find operator by name who is under this supervisor
                     cursor.execute("""
                         SELECT id FROM users 
@@ -737,7 +738,7 @@ class Database:
                         AND supervisor_id = %s
                     """, (fio, supervisor_id))
                     operator = cursor.fetchone()
-    
+
                     if operator:
                         operator_id = operator[0]
                         cursor.execute("""
@@ -746,24 +747,26 @@ class Database:
                                 month, 
                                 regular_hours, 
                                 training_hours, 
-                                fines
+                                fines,
+                                norm_hours
                             )
-                            VALUES (%s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s)
                             ON CONFLICT (operator_id, month)
                             DO UPDATE SET 
                                 regular_hours = EXCLUDED.regular_hours,
                                 training_hours = EXCLUDED.training_hours,
-                                fines = EXCLUDED.fines
-                        """, (operator_id, month, regular_hours, training_hours, fines))
+                                fines = EXCLUDED.fines,
+                                norm_hours = EXCLUDED.norm_hours
+                        """, (operator_id, month, regular_hours, training_hours, fines, norm_hours))
                         processed += 1
                     else:
                         logging.warning(f"Operator {fio} not found under supervisor {supervisor_name}")
                         skipped += 1
                         skipped_operators.append(fio)
-    
+
             total_processed += processed
             total_skipped += skipped
-    
+
             results.append({
                 "supervisor_id": supervisor_id,
                 "supervisor_name": supervisor_name,
@@ -772,7 +775,7 @@ class Database:
                 "skipped": skipped,
                 "skipped_operators": skipped_operators
             })
-    
+
         return {
             "status": "completed",
             "total_processed": total_processed,
