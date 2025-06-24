@@ -3,7 +3,7 @@ import logging
 import psycopg2
 from contextlib import contextmanager
 from passlib.hash import pbkdf2_sha256
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 import requests
 import openpyxl
@@ -17,7 +17,7 @@ import gc
 
 logging.basicConfig(level=logging.INFO)
 
-def process_timesheet(file_url):
+def process_timesheet(file_url, supervisor_id):
     """
     Process the last sheet of a Google Sheets timesheet to extract operator details.
     Args:
@@ -34,7 +34,6 @@ def process_timesheet(file_url):
         return {"error": "Invalid Google Sheets URL format."}
     sheet_id = sheet_id_match.group(1)
     export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
-
     # Download the file
     local_file = 'temp_timesheet.xlsx'
     try:
@@ -51,6 +50,18 @@ def process_timesheet(file_url):
         workbook = openpyxl.load_workbook(local_file, data_only=True)
         sheet_names = workbook.sheetnames
         last_sheet = workbook[sheet_names[-1]]
+        current_sheet_name = last_sheet.title
+        
+        prev_month = datetime.now().replace(day=1) - timedelta(days=1)
+        prev_month_str = prev_month.strftime('%Y-%m')
+        
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT sheet_name FROM processed_sheets 
+                WHERE supervisor_id = %s AND processed_month = %s AND sheet_name = %s
+            """, (supervisor_id, prev_month_str, current_sheet_name))
+            if cursor.fetchone():
+                return {"error": f"Sheet '{current_sheet_name}' was already processed last month"}
 
         # Set limits (55 rows, 50 columns)
         MAX_ROWS = 55
@@ -165,6 +176,16 @@ def process_timesheet(file_url):
                     'Норма часов': norm_hours
                 }
                 data.append(entry)
+       
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO processed_sheets (supervisor_id, sheet_name, processed_month)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (supervisor_id, processed_month) 
+                DO UPDATE SET 
+                    sheet_name = EXCLUDED.sheet_name,
+                    processed_at = CURRENT_TIMESTAMP
+            """, (supervisor_id, current_sheet_name, current_month))
 
         # Clean up
         os.remove(local_file)
@@ -481,6 +502,16 @@ class Database:
                     UNIQUE(operator_id, month)
                 );
             """)
+            # Processed sheets table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS processed_sheets (
+                    supervisor_id INTEGER NOT NULL REFERENCES users(id),
+                    sheet_name TEXT NOT NULL,
+                    processed_month VARCHAR(7) NOT NULL,
+                    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (supervisor_id, processed_month)
+                );
+            """)
             # Indexes
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
@@ -701,7 +732,7 @@ class Database:
                 continue
 
             # Process the timesheet for this supervisor
-            timesheet_data = process_timesheet(hours_table_url)
+            timesheet_data = process_timesheet(hours_table_url,supervisor_id)
             
             if isinstance(timesheet_data, dict) and "error" in timesheet_data:
                 error_msg = timesheet_data["error"]
