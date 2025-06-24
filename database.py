@@ -162,7 +162,7 @@ def process_timesheet(file_url):
                     'Кол-во часов тренинга': round(training_hours, 2),
                     'Штрафы': round(fines_map.get(operator_name, 0.0), 2),
                     'Год-Месяц': current_month,
-                    'Норма часов': round(norm_hours, 2)
+                    'Норма часов': norm_hours
                 }
                 data.append(entry)
 
