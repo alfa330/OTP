@@ -1229,11 +1229,17 @@ async def show_operator_hours(callback: types.CallbackQuery):
         hours_data = db.get_hours_summary(op_id, current_month)
         if hours_data:
             hours = hours_data[0]
+            regular_hours = hours.get('regular_hours', 0) or 0
+            norm_hours = hours.get('norm_hours', 0) or 0
+            percent_complete = 0
+            if norm_hours > 0:
+                percent_complete = round(regular_hours / norm_hours * 100, 1)
             message_text += (
                 f"👤 <b>{op_name}</b>\n"
-                f"   ⏱️ Часы работы: {hours['regular_hours']}\n"
-                f"   📚 Часы тренинга: {hours['training_hours']}\n"
-                f"   💸 Штрафы: {hours['fines']}\n\n"
+                f"   ⏱️ Часы работы: {regular_hours} из {norm_hours}\n"
+                f"   📈 Процент выполнения: {percent_complete}%\n"
+                f"   📚 Часы тренинга: {hours.get('training_hours', 0)}\n"
+                f"   💸 Штрафы: {hours.get('fines', 0)}\n\n"
             )
         else:
             message_text += f"👤 <b>{op_name}</b> - данные отсутствуют\n\n"
