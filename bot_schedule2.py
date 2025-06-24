@@ -20,7 +20,7 @@ import re
 import xlsxwriter
 import json
 from concurrent.futures import ThreadPoolExecutor
-from database import db, process_and_save_evaluations
+from database import db
 import uuid
 from passlib.hash import pbkdf2_sha256
 
