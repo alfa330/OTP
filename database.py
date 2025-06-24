@@ -58,7 +58,7 @@ def process_timesheet(file_url):
 
         # Extract data
         data = []
-        fio_col, hours_col, training_col = None, None, None
+        fio_col, hours_col, training_col, norm_col  = None, None, None, None
 
         # First pass - find headers in the main table (only check first row)
         for row_idx, row in enumerate(last_sheet.iter_rows(max_row=1, max_col=MAX_COLS, values_only=True), 1):
@@ -76,6 +76,9 @@ def process_timesheet(file_url):
                 elif 'часы тренинга' in header_lower or 'тренинг' in header_lower:
                     if training_col is None:  # Only set if not already found
                         training_col = idx
+                elif 'норма' in header_lower or 'норма часов' in header_lower:
+                    if norm_col is None:  # Only set if not already found
+                        norm_col = idx
             
             if fio_col is None or hours_col is None:
                 os.remove(local_file)
@@ -141,18 +144,25 @@ def process_timesheet(file_url):
             if row[fio_col] and row[hours_col] is not None:
                 operator_name = str(row[fio_col]).strip()
                 training_hours = 0.0
+                norm_hours = 0.0
                 if training_col is not None and training_col < len(row) and row[training_col] is not None:
                     try:
                         training_hours = float(row[training_col])
                     except (ValueError, TypeError):
                         training_hours = 0.0
-                
+                if norm_col is not None and norm_col < len(row) and row[norm_col] is not None:
+                    try:
+                        norm_hours = float(row[norm_col])
+                    except (ValueError, TypeError):
+                        norm_hours = 0.0
+
                 entry = {
                     'ФИО': operator_name,
                     'Кол-во часов': round(float(row[hours_col]) if row[hours_col] else 0.0, 2),
                     'Кол-во часов тренинга': round(training_hours, 2),
                     'Штрафы': round(fines_map.get(operator_name, 0.0), 2),
-                    'Год-Месяц': current_month
+                    'Год-Месяц': current_month,
+                    'Норма часов': round(norm_hours, 2)
                 }
                 data.append(entry)
 
@@ -466,6 +476,7 @@ class Database:
                     regular_hours FLOAT NOT NULL DEFAULT 0,
                     training_hours FLOAT NOT NULL DEFAULT 0,
                     fines FLOAT NOT NULL DEFAULT 0,
+                    norm_hours FLOAT NOT NULL DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(operator_id, month)
                 );
@@ -638,18 +649,19 @@ class Database:
             
             return True
 
-    def add_work_hours(self, operator_id, regular_hours, training_hours, fines=0.0, month=None):
+    def add_work_hours(self, operator_id, regular_hours, training_hours, fines=0.0, norm_hours=0.0, month=None):
         month = month or datetime.now().strftime('%Y-%m')
         with self._get_cursor() as cursor:
             cursor.execute("""
-                INSERT INTO work_hours (operator_id, month, regular_hours, training_hours, fines)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO work_hours (operator_id, month, regular_hours, training_hours, fines, norm_hours)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (operator_id, month)
                 DO UPDATE SET 
                     regular_hours = EXCLUDED.regular_hours,
                     training_hours = EXCLUDED.training_hours,
-                    fines = EXCLUDED.fines
-            """, (operator_id, month, regular_hours, training_hours, fines))
+                    fines = EXCLUDED.fines,
+                    norm_hours = EXCLUDED.norm_hours
+            """, (operator_id, month, regular_hours, training_hours, fines, norm_hours))
 
     def process_and_upload_timesheet(self):
         """
@@ -776,7 +788,7 @@ class Database:
             
             # Получаем данные о часах
             cursor.execute("""
-                SELECT regular_hours, training_hours, fines 
+                SELECT regular_hours, training_hours, fines, norm_hours 
                 FROM work_hours 
                 WHERE operator_id = %s AND month = %s
             """, (operator_id, current_month))
@@ -790,10 +802,17 @@ class Database:
             """, (operator_id, current_month))
             evaluations_data = cursor.fetchone()
             
+            # Рассчитываем процент выполнения нормы
+            norm_hours = hours_data[3] if hours_data and hours_data[3] else 0
+            regular_hours = hours_data[0] if hours_data and hours_data[0] else 0
+            percent_complete = (regular_hours / norm_hours * 100) if norm_hours > 0 else 0
+            
             return {
                 'regular_hours': hours_data[0] if hours_data else 0,
                 'training_hours': hours_data[1] if hours_data else 0,
                 'fines': hours_data[2] if hours_data else 0,
+                'norm_hours': norm_hours,
+                'percent_complete': round(percent_complete, 2),
                 'call_count': evaluations_data[0] or 0,
                 'avg_score': float(evaluations_data[1]) if evaluations_data[1] else 0
             }
