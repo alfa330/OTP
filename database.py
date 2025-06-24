@@ -194,232 +194,6 @@ def process_timesheet(file_url, supervisor_id):
     except Exception as e:
         os.remove(local_file) if os.path.exists(local_file) else None
         return {"error": f"Error processing file: {str(e)}"}
-
-def process_call_evaluations(scores_table_url, operator_name, month=None):
-    """
-    Process the last sheet of a Google Sheets call evaluation table to extract call data.
-    Args:
-        scores_table_url (str): Google Sheets URL (e.g., https://docs.google.com/spreadsheets/d/...).
-        operator_name (str): Name of the operator (from spreadsheet name).
-        month (str, optional): Month in 'YYYY-MM' format. Defaults to current month.
-    Returns:
-        list: List of dicts with evaluator, operator, month, call_number, phone_number, score, comment.
-    """
-    if not scores_table_url:
-        return {"error": "No scores table URL provided"}
-    if not operator_name:
-        return {"error": "No operator name provided"}
-    # Set default month if not provided
-    month = month or datetime.now().strftime('%Y-%m')
-
-    # Convert Google Sheets URL to Excel export URL
-    sheet_id_match = re.search(r'spreadsheets/d/([a-zA-Z0-9_-]+)', scores_table_url)
-    if not sheet_id_match:
-        return {"error": "Invalid Google Sheets URL format."}
-    sheet_id = sheet_id_match.group(1)
-    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
-
-    # Download the file
-    local_file = 'temp_scoresheet.xlsx'
-    try:
-        response = requests.get(export_url)
-        if response.status_code != 200:
-            return {"error": f"Failed to download file: HTTP {response.status_code}"}
-        with open(local_file, 'wb') as f:
-            f.write(response.content)
-    except Exception as e:
-        return {"error": f"Failed to download file: {str(e)}"}
-
-    try:
-        # Load the Excel file
-        workbook = openpyxl.load_workbook(local_file, data_only=True)
-        # Select the last sheet
-        sheet_names = workbook.sheetnames
-        if not sheet_names:
-            os.remove(local_file)
-            return {"error": "No sheets found in the workbook."}
-        sheet = workbook[sheet_names[-1]]
-
-        # Set limits based on typical sheet size
-        MAX_ROWS = 40
-        MAX_COLS = 100
-
-        # Fetch column A data (rows 3 to 40)
-        column_a = [sheet.cell(row=r+1, column=1).value for r in range(2, 41)]  # Rows 3 to 40
-        column_a = [str(cell).strip() if cell is not None else '' for cell in column_a]
-        # Find score_row (row labeled "Оценивающий" or fallback to row 20)
-        score_row = None
-        for i, value in enumerate(column_a, start=3):
-            if value and 'Оценивающий' in value:
-                score_row = i-1
-                break
-        if score_row is None:
-            score_row = 20  # Fallback based on file structure
-        phone_row = score_row + 1
-        # Get evaluator name from the last non-empty cell in column A
-        evaluator = None
-        for r in range(MAX_ROWS, 0, -1):
-            cell_value = sheet.cell(row=r, column=1).value
-            if cell_value and str(cell_value).strip():
-                evaluator = str(cell_value).strip()
-                break
-        if not evaluator:
-            os.remove(local_file)
-            return {"error": "Evaluator name not found in column A"}
-
-        # Initialize results
-        results = []
-
-        # Process each call block (starting from column F=6, each block is 2 columns: status, comment)
-        call_index = 1
-        base_coli = 6  # Column F
-        for base_col in range(base_coli,MAX_COLS,4):
-            # Fetch score (score_row, base_col+1), phone (phone_row, base_col+1)
-            score = sheet.cell(row=score_row, column=base_col+2).value
-            phone_number = sheet.cell(row=phone_row, column=base_col+2).value
-
-            # Exit if no valid data
-            if not (score is not None and phone_number):
-                break
-
-            try:
-                score = float(score)
-            except (ValueError, TypeError):
-                call_index += 1
-                continue
-
-            # Fetch comment data (rows 3 to score_row-2, status_col=base_col, comment_col=base_col+1)
-            status_col = base_col+1
-            comment_col = base_col + 3
-            comment = ''
-            for r in range(3, score_row - 1):  # Rows 3 to score_row-2
-                status = sheet.cell(row=r+1, column=status_col).value
-                comment_value = sheet.cell(row=r+1, column=comment_col).value
-                criterion = column_a[r-2] if r-2 < len(column_a) else ''
-                
-            
-                # Skip if status is 'Корректно', 'N/A', or empty
-                if status in ['Корректно', 'N/A'] or not status:
-                    continue
-
-                # Include comment if present
-                if comment_value and str(comment_value).strip():
-                    comment += f"\n<b>{criterion}</b>: <i>{str(comment_value).strip()}</i>"
-
-            # Include evaluation even if score < 100, as long as comments exist for errors
-            if score < 100 and not comment.strip():
-                base_col += 2
-                call_index += 1
-                continue
-
-            # Add valid evaluation to results
-            results.append({
-                'evaluator': evaluator,
-                'operator': operator_name,
-                'month': month,
-                'call_number': call_index,
-                'phone_number': phone_number,
-                'score': score,
-                'comment': comment.strip()
-            })
-            call_index += 1
-
-        # Clean up
-        os.remove(local_file)
-        return results
-
-    except Exception as e:
-        os.remove(local_file) if os.path.exists(local_file) else None
-        return {"error": f"Error processing file: {str(e)}"}
-
-def save_evaluations_to_db(evaluations):
-    """Save processed call evaluations to database"""
-    if isinstance(evaluations, dict) and 'error' in evaluations:
-        logging.error(f"Error in evaluations: {evaluations['error']}")
-        return False
-    
-    success_count = 0
-    error_count = 0
-    
-    for evaluation in evaluations:
-        try:
-            # Find evaluator and operator in database
-            evaluator = db.get_user(name=evaluation['evaluator'])
-            operator = db.get_user(name=evaluation['operator'])
-            
-            if not evaluator or not operator:
-                logging.warning(f"User not found: evaluator={evaluation['evaluator']}, operator={evaluation['operator']}")
-                error_count += 1
-                continue
-                
-            # Add call evaluation to database
-            db.add_call_evaluation(
-                evaluator_id=evaluator[0],
-                operator_id=operator[0],
-                call_number=evaluation['call_number'],
-                phone_number=evaluation['phone_number'],
-                score=evaluation['score'],
-                comment=evaluation['comment'],
-                month=evaluation['month']
-            )
-            success_count += 1
-            
-        except Exception as e:
-            logging.error(f"Error saving evaluation: {str(e)}")
-            error_count += 1
-    
-    return {
-        'status': 'completed',
-        'success_count': success_count,
-        'error_count': error_count
-    }
-
-def process_and_save_evaluations(batch_size=5):
-    operators = db.get_all_operators()
-    if not operators:
-        logging.warning("No operators found for evaluation processing")
-        return
-    
-    total_processed = 0
-    total_errors = 0
-    
-    # Обрабатываем операторов по батчам
-    for i in range(0, len(operators), batch_size):
-        batch = operators[i:i + batch_size]
-        for operator in batch:
-            operator_id, operator_name, _, _, _, scores_table_url, _ = operator
-            
-            if not scores_table_url:
-                logging.warning(f"No scores table URL for operator {operator_name}")
-                continue
-                
-            try:
-                evaluations = process_call_evaluations(scores_table_url, operator_name)
-                
-                if isinstance(evaluations, dict) and 'error' in evaluations:
-                    logging.error(f"Error processing evaluations for {operator_name}: {evaluations['error']}")
-                    total_errors += 1
-                    continue
-                    
-                result = save_evaluations_to_db(evaluations)
-                if result:
-                    total_processed += result.get('success_count', 0)
-                    total_errors += result.get('error_count', 0)
-                    
-            except Exception as e:
-                logging.error(f"Error processing operator {operator_name}: {str(e)}")
-                total_errors += 1
-        
-        # Освобождаем память после обработки батча
-        gc.collect()  # Принудительный вызов сборщика мусора
-    
-    logging.info(f"Evaluation processing completed. Processed: {total_processed}, Errors: {total_errors}")
-    return {
-        'status': 'completed',
-        'processed': total_processed,
-        'errors': total_errors
-    }
-
 class Database:
     def __init__(self):
         self.conn_params = {
@@ -471,6 +245,16 @@ class Database:
                     CONSTRAINT unique_name_role UNIQUE (name, role)
                 );
             """)
+            # Sessions table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    token VARCHAR(36) NOT NULL UNIQUE,
+                    expires_at TIMESTAMP NOT NULL
+                );
+            """)
+
             # Calls table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS calls (
@@ -520,6 +304,29 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_hours_month ON work_hours(month);
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_month_call ON calls(operator_id, month, call_number);
             """)
+
+    def create_session(self, user_id):
+        session_token = str(uuid.uuid4())
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO sessions (user_id, token, expires_at)
+                VALUES (%s, %s, %s)
+                RETURNING token
+            """, (user_id, session_token, datetime.now() + timedelta(hours=24)))
+            return cursor.fetchone()[0]
+
+    def verify_session_token(self, token):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT user_id FROM sessions
+                WHERE token = %s AND expires_at > CURRENT_TIMESTAMP
+            """, (token,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+
+    def invalidate_session(self, token):
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM sessions WHERE token = %s", (token,))
 
     def create_user(self, telegram_id, name, role, direction=None, hire_date=None, supervisor_id=None, login=None, password=None, scores_table_url=None):
         if login is None:

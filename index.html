@@ -3,1051 +3,723 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OTP Bot Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.6/babel.min.js"></script>
+    <title>OTP Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios@1.6.8/dist/axios.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.22.9/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
-</head>
-<body class="bg-gray-100">
-    <div id="root"></div>
-    <script type="text/babel">
-        const { useState, useEffect, useCallback } = React;
-
-        const API_BASE_URL = 'https://otp-wif3.onrender.com';
-
-        // Error Boundary Component
-        class ErrorBoundary extends React.Component {
-            state = { hasError: false, error: null };
-
-            static getDerivedStateFromError(error) {
-                return { hasError: true, error };
-            }
-
-            componentDidCatch(error, errorInfo) {
-                console.error('ErrorBoundary caught:', error, errorInfo);
-            }
-
-            render() {
-                if (this.state.hasError) {
-                    return (
-                        <div className="min-h-screen flex items-center justify-center bg-gray-100">
-                            <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                                <h1 className="text-2xl font-bold mb-4 text-center text-red-500">Application Error</h1>
-                                <p className="text-center">An error occurred: {this.state.error?.message || 'Unknown error'}</p>
-                                <p className="text-center">Please check the console for details or try refreshing the page.</p>
-                            </div>
-                        </div>
-                    );
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#1D4ED8',
+                        secondary: '#9333EA',
+                    }
                 }
-                return this.props.children;
             }
         }
+    </script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div id="root"></div>
 
-        const App = () => {
-            const [user, setUser] = useState(null);
+    <script type="text/babel" data-presets="react">
+        const { useState, useEffect } = React;
+
+        // API Base URL
+        const API_BASE_URL = 'https://otp-wif3.onrender.com/api';
+
+        // Helper function to get auth headers
+        const getAuthHeaders = (apiKey) => {
+            const token = localStorage.getItem('session_token') || '';
+            return {
+                'Authorization': `Bearer ${token}`,
+                'X-API-Key': apiKey || ''
+            };
+        };
+
+        // Login Component
+        const Login = ({ setUser }) => {
             const [login, setLogin] = useState('');
             const [password, setPassword] = useState('');
             const [error, setError] = useState('');
-            const [success, setSuccess] = useState('');
-            const [svList, setSvList] = useState([]);
-            const [svData, setSvData] = useState(null);
-            const [operatorData, setOperatorData] = useState(null);
-            const [newSvName, setNewSvName] = useState('');
-            const [newSvId, setNewSvId] = useState('');
-            const [newTableUrl, setNewTableUrl] = useState('');
-            const [isLoading, setIsLoading] = useState(false);
-            const [isAdminDataLoading, setIsAdminDataLoading] = useState(false);
-            const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
-            const [selectedSvId, setSelectedSvId] = useState('');
-            const [selectedSvData, setSelectedSvData] = useState(null);
-            const [evaluationData, setEvaluationData] = useState({
+            const [loading, setLoading] = useState(false);
+            const [apiKey, setApiKey] = useState('');
+
+            useEffect(() => {
+                const fetchApiKey = async () => {
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/config`);
+                        setApiKey(response.data.api_key);
+                    } catch (err) {
+                        setError('Failed to load configuration. Please check the backend server.');
+                        console.error('API Key fetch error:', err);
+                    }
+                };
+                fetchApiKey();
+            }, []);
+
+            const handleLogin = async (e) => {
+                e.preventDefault();
+                if (!apiKey) {
+                    setError('API key not loaded. Please try again.');
+                    return;
+                }
+                setLoading(true);
+                try {
+                    const response = await axios.post(`${API_BASE_URL}/auth/login`, { login, password }, {
+                        headers: getAuthHeaders(apiKey)
+                    });
+                    const { user } = response.data;
+                    localStorage.setItem('session_token', user.session_token);
+                    setUser(user);
+                    setError('');
+                } catch (err) {
+                    setError(err.response?.data?.error || 'Login failed. Please check your credentials.');
+                    console.error('Login error:', err);
+                }
+                setLoading(false);
+            };
+
+            return (
+                <div className="flex items-center justify-center min-h-screen">
+                    <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
+                        <h1 className="text-2xl font-bold text-center mb-6">OTP Dashboard Login</h1>
+                        {error && <p className="text-red-500 text-center mb-4">{error}</p>}
+                        <form onSubmit={handleLogin} className="space-y-4">
+                            <input
+                                type="text"
+                                placeholder="Login"
+                                value={login}
+                                onChange={(e) => setLogin(e.target.value)}
+                                className="w-full p-2 border rounded focus:outline-none focus:ring-2 focus:ring-primary"
+                                required
+                            />
+                            <input
+                                type="password"
+                                placeholder="Password"
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                className="w-full p-2 border rounded focus:outline-none focus:ring-2 focus:ring-primary"
+                                required
+                            />
+                            <button
+                                type="submit"
+                                className="w-full bg-primary text-white p-2 rounded hover:bg-blue-700 disabled:bg-blue-300"
+                                disabled={loading || !apiKey}
+                            >
+                                {loading ? 'Logging in...' : 'Login'}
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        // Dashboard Component
+        const Dashboard = ({ user, setUser, apiKey }) => {
+            const [activeTab, setActiveTab] = useState('overview');
+
+            const handleLogout = async () => {
+                try {
+                    await axios.post(`${API_BASE_URL}/auth/logout`, {}, { headers: getAuthHeaders(apiKey) });
+                    localStorage.removeItem('session_token');
+                    setUser(null);
+                } catch (err) {
+                    console.error('Logout error:', err);
+                }
+            };
+
+            return (
+                <div className="container mx-auto p-4">
+                    <div className="flex justify-between items-center mb-6">
+                        <h1 className="text-3xl font-bold">OTP Dashboard - {user.name} ({user.role})</h1>
+                        <button
+                            onClick={handleLogout}
+                            className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                        >
+                            Logout
+                        </button>
+                    </div>
+                    <nav className="flex space-x-4 mb-4">
+                        <button
+                            onClick={() => setActiveTab('overview')}
+                            className={`px-4 py-2 rounded ${activeTab === 'overview' ? 'bg-primary text-white' : 'bg-gray-200'}`}
+                        >
+                            Overview
+                        </button>
+                        {user.role === 'admin' && (
+                            <>
+                                <button
+                                    onClick={() => setActiveTab('supervisors')}
+                                    className={`px-4 py-2 rounded ${activeTab === 'supervisors' ? 'bg-primary text-white' : 'bg-gray-200'}`}
+                                >
+                                    Supervisors
+                                </button>
+                                <button
+                                    onClick={() => setActiveTab('operators')}
+                                    className={`px-4 py-2 rounded ${activeTab === 'operators' ? 'bg-primary text-white' : 'bg-gray-200'}`}
+                                >
+                                    Operators
+                                </button>
+                            </>
+                        )}
+                        {(user.role === 'admin' || user.role === 'sv') && (
+                            <button
+                                onClick={() => setActiveTab('evaluations')}
+                                className={`px-4 py-2 rounded ${activeTab === 'evaluations' ? 'bg-primary text-white' : 'bg-gray-200'}`}
+                            >
+                                Evaluations
+                            </button>
+                        )}
+                        {user.role === 'operator' && (
+                            <button
+                                onClick={() => setActiveTab('myStats')}
+                                className={`px-4 py-2 rounded ${activeTab === 'myStats' ? 'bg-primary text-white' : 'bg-gray-200'}`}
+                            >
+                                My Stats
+                            </button>
+                        )}
+                    </nav>
+                    {activeTab === 'overview' && <Overview user={user} apiKey={apiKey} />}
+                    {activeTab === 'supervisors' && user.role === 'admin' && <Supervisors apiKey={apiKey} />}
+                    {activeTab === 'operators' && user.role === 'admin' && <Operators apiKey={apiKey} />}
+                    {activeTab === 'evaluations' && (user.role === 'admin' || user.role === 'sv') && <Evaluations user={user} apiKey={apiKey} />}
+                    {activeTab === 'myStats' && user.role === 'operator' && <OperatorStats user={user} apiKey={apiKey} />}
+                </div>
+            );
+        };
+
+        // Overview Component
+        const Overview = ({ user, apiKey }) => {
+            const [hours, setHours] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+
+            useEffect(() => {
+                const fetchHours = async () => {
+                    setLoading(true);
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/users/${user.id}/hours`, {
+                            headers: getAuthHeaders(apiKey)
+                        });
+                        setHours(response.data.hours);
+                        setError('');
+                    } catch (err) {
+                        setError('Error fetching hours. Please try again.');
+                        console.error('Fetch hours error:', err);
+                    }
+                    setLoading(false);
+                };
+                if (apiKey) fetchHours();
+            }, [user.id, apiKey]);
+
+            return (
+                <div className="bg-white p-6 rounded-lg shadow">
+                    <h2 className="text-xl font-semibold mb-4">Overview</h2>
+                    {error && <p className="text-red-500 mb-4">{error}</p>}
+                    {loading ? (
+                        <p>Loading...</p>
+                    ) : hours ? (
+                        <div>
+                            <p><strong>Regular Hours:</strong> {hours.regular_hours}</p>
+                            <p><strong>Training Hours:</strong> {hours.training_hours}</p>
+                            <p><strong>Fines:</strong> {hours.fines}</p>
+                            <p><strong>Norm Hours:</strong> {hours.norm_hours}</p>
+                            <p><strong>Percent Complete:</strong> {hours.percent_complete}%</p>
+                        </div>
+                    ) : (
+                        <p>No hours data available.</p>
+                    )}
+                </div>
+            );
+        };
+
+        // Supervisors Component
+        const Supervisors = ({ apiKey }) => {
+            const [supervisors, setSupervisors] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [formData, setFormData] = useState({ name: '', telegram_id: '' });
+            const [error, setError] = useState('');
+
+            const fetchSupervisors = async () => {
+                setLoading(true);
+                try {
+                    const response = await axios.get(`${API_BASE_URL}/users/supervisors`, {
+                        headers: getAuthHeaders(apiKey)
+                    });
+                    setSupervisors(response.data.supervisors);
+                    setError('');
+                } catch (err) {
+                    setError('Failed to fetch supervisors');
+                    console.error('Fetch supervisors error:', err);
+                }
+                setLoading(false);
+            };
+
+            useEffect(() => {
+                if (apiKey) fetchSupervisors();
+            }, [apiKey]);
+
+            const handleAddSupervisor = async (e) => {
+                e.preventDefault();
+                try {
+                    await axios.post(
+                        `${API_BASE_URL}/admin/supervisors`,
+                        formData,
+                        { headers: getAuthHeaders(apiKey) }
+                    );
+                    setFormData({ name: '', telegram_id: '' });
+                    setError('');
+                    fetchSupervisors();
+                } catch (err) {
+                    setError(err.response?.data?.error || 'Failed to add supervisor');
+                    console.error('Add supervisor error:', err);
+                }
+            };
+
+            const handleDeleteSupervisor = async (id) => {
+                try {
+                    await axios.delete(`${API_BASE_URL}/admin/supervisors/${id}`, {
+                        headers: getAuthHeaders(apiKey)
+                    });
+                    fetchSupervisors();
+                } catch (err) {
+                    setError('Failed to delete supervisor');
+                    console.error('Delete supervisor error:', err);
+                }
+            };
+
+            return (
+                <div className="bg-white p-6 rounded-lg shadow">
+                    <h2 className="text-xl font-semibold mb-4">Supervisors</h2>
+                    {error && <p className="text-red-500 mb-4">{error}</p>}
+                    <form onSubmit={handleAddSupervisor} className="mb-4 space-y-4">
+                        <input
+                            type="text"
+                            placeholder="Name"
+                            value={formData.name}
+                            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                            className="w-full p-2 border rounded"
+                            required
+                        />
+                        <input
+                            type="text"
+                            placeholder="Telegram ID"
+                            value={formData.telegram_id}
+                            onChange={(e) => setFormData({ ...formData, telegram_id: e.target.value })}
+                            className="w-full p-2 border rounded"
+                            required
+                        />
+                        <button
+                            type="submit"
+                            className="bg-primary text-white px-4 py-2 rounded hover:bg-blue-700 disabled:bg-blue-300"
+                            disabled={!apiKey}
+                        >
+                            Add Supervisor
+                        </button>
+                    </form>
+                    {loading ? (
+                        <p>Loading...</p>
+                    ) : (
+                        <table className="w-full border-collapse">
+                            <thead>
+                                <tr className="bg-gray-200">
+                                    <th className="border p-2">Name</th>
+                                    <th className="border p-2">Table URL</th>
+                                    <th className="border p-2">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {supervisors.map((sv) => (
+                                    <tr key={sv.id} className="border">
+                                        <td className="p-2">{sv.name}</td>
+                                        <td className="p-2">{sv.table || 'N/A'}</td>
+                                        <td className="p-2">
+                                            <button
+                                                onClick={() => handleDeleteSupervisor(sv.id)}
+                                                className="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 disabled:bg-red-300"
+                                                disabled={!apiKey}
+                                            >
+                                                Delete
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+            );
+        };
+
+        // Operators Component
+        const Operators = ({ apiKey }) => {
+            const [operators, setOperators] = useState([]);
+            const [supervisors, setSupervisors] = useState([]);
+            const [formData, setFormData] = useState({ name: '', telegram_id: '', supervisor_id: '' });
+            const [error, setError] = useState('');
+            const [loading, setLoading] = useState(false);
+
+            const fetchData = async () => {
+                setLoading(true);
+                try {
+                    const [opsResponse, svsResponse] = await Promise.all([
+                        axios.get(`${API_BASE_URL}/admin/operators`, {
+                            headers: getAuthHeaders(apiKey)
+                        }),
+                        axios.get(`${API_BASE_URL}/users/supervisors`, { headers: getAuthHeaders(apiKey) })
+                    ]);
+                    setOperators(opsResponse.data.operators);
+                    setSupervisors(svsResponse.data.supervisors);
+                    setError('');
+                } catch (err) {
+                    setError('Failed to fetch data');
+                    console.error('Fetch operators/supervisors error:', err);
+                }
+                setLoading(false);
+            };
+
+            useEffect(() => {
+                if (apiKey) fetchData();
+            }, [apiKey]);
+
+            const handleAddOperator = async (e) => {
+                e.preventDefault();
+                try {
+                    await axios.post(
+                        `${API_BASE_URL}/admin/operators`,
+                        formData,
+                        { headers: getAuthHeaders(apiKey) }
+                    );
+                    setFormData({ name: '', telegram_id: '', supervisor_id: '' });
+                    setError('');
+                    fetchData();
+                } catch (err) {
+                    setError(err.response?.data?.error || 'Failed to add operator');
+                    console.error('Add operator error:', err);
+                }
+            };
+
+            return (
+                <div className="bg-white p-6 rounded-lg shadow">
+                    <h2 className="text-xl font-semibold mb-4">Operators</h2>
+                    {error && <p className="text-red-500 mb-4">{error}</p>}
+                    <form onSubmit={handleAddOperator} className="mb-4 space-y-4">
+                        <input
+                            type="text"
+                            placeholder="Name"
+                            value={formData.name}
+                            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                            className="w-full p-2 border rounded"
+                            required
+                        />
+                        <input
+                            type="text"
+                            placeholder="Telegram ID"
+                            value={formData.telegram_id}
+                            onChange={(e) => setFormData({ ...formData, telegram_id: e.target.value })}
+                            className="w-full p-2 border rounded"
+                            required
+                        />
+                        <select
+                            value={formData.supervisor_id}
+                            onChange={(e) => setFormData({ ...formData, supervisor_id: e.target.value })}
+                            className="w-full p-2 border rounded"
+                            required
+                        >
+                            <option value="">Select Supervisor</option>
+                            {supervisors.map((sv) => (
+                                <option key={sv.id} value={sv.id}>{sv.name}</option>
+                            ))}
+                        </select>
+                        <button
+                            type="submit"
+                            className="bg-primary text-white px-4 py-2 rounded hover:bg-blue-700 disabled:bg-blue-300"
+                            disabled={!apiKey}
+                        >
+                            Add Operator
+                        </button>
+                    </form>
+                    {loading ? (
+                        <p>Loading...</p>
+                    ) : (
+                        <table className="w-full border-collapse">
+                            <thead>
+                                <tr className="bg-gray-200">
+                                    <th className="border p-2">Name</th>
+                                    <th className="border p-2">Supervisor</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {operators.map((op) => (
+                                    <tr key={op.id} className="border">
+                                        <td className="p-2">{op.name}</td>
+                                        <td className="p-2">{op.supervisor_name || 'N/A'}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+            );
+        };
+
+        // Evaluations Component
+        const Evaluations = ({ user, apiKey }) => {
+            const [evaluations, setEvaluations] = useState([]);
+            const [formData, setFormData] = useState({
                 evaluator: '',
                 operator: '',
-                month: new Date().toLocaleString('default', { month: 'long', year: 'numeric' }),
                 call_number: '',
                 phone_number: '',
                 score: '',
                 comment: ''
             });
-            const [showEvaluationForm, setShowEvaluationForm] = useState(false);
-            const [showChangeTableForm, setShowChangeTableForm] = useState(false);
-            const [currentSvForTableChange, setCurrentSvForTableChange] = useState(null);
+            const [error, setError] = useState('');
+            const [loading, setLoading] = useState(false);
 
-            const debouncedFetch = useCallback(_.debounce((fn) => {
+            const fetchEvaluations = async () => {
+                setLoading(true);
                 try {
-                    fn();
-                } catch (err) {
-                    console.error('Debounced fetch error:', err);
-                    setError('An error occurred while fetching data');
-                }
-            }, 300), []);
-
-            const clearMessages = () => {
-                setError('');
-                setSuccess('');
-            };
-
-            const validateUrl = (url) => {
-                const googleSheetsRegex = /^https:\/\/docs\.google\.com\/spreadsheets\/d\/[a-zA-Z0-9_-]+/;
-                return googleSheetsRegex.test(url);
-            };
-
-            const getScoreColor = (score) => {
-                if (!score) return 'text-gray-500';
-                if (score >= 90) return 'text-green-600';
-                if (score >= 60) return 'text-yellow-600';
-                return 'text-red-600';
-            };
-
-            const getCallCountColor = (count, expected) => {
-                if (count >= expected) return 'text-green-600';
-                if (count >= expected * 0.5) return 'text-yellow-600';
-                return 'text-red-600';
-            };
-
-            const getCurrentWeekOfMonth = () => {
-                const today = new Date();
-                const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
-                const diff = today.getDate() + firstDay.getDay() - 1;
-                return Math.ceil(diff / 7);
-            };
-
-            const getExpectedCalls = (weekNumber) => {
-                return weekNumber * 5;
-            };
-
-            const handleLogin = async () => {
-                if (!login.trim() || !password.trim()) {
-                    setError('Please enter both login and password');
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.post(`${API_BASE_URL}/api/login`, {
-                        login: login.trim(),
-                        password: password.trim()
-                    }, {
-                        headers: { 'Content-Type': 'application/json' }
+                    const response = await axios.get(`${API_BASE_URL}/evaluations`, {
+                        headers: getAuthHeaders(apiKey),
+                        params: { operator_id: user.role === 'operator' ? user.id : undefined }
                     });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setUser({
-                            role: data.role,
-                            id: data.id,
-                            name: data.name,
-                            telegram_id: data.telegram_id,
-                            apiKey: data.apiKey  // Используем полученный ключ или фиксированный
-                        });
-                        setLogin('');
-                        setPassword('');
-                        setSuccess('Logged in successfully');
-                    } else {
-                        setError(data.error || 'Invalid login or password');
-                    }
+                    setEvaluations(response.data.evaluations);
+                    setError('');
                 } catch (err) {
-                    console.error('Login error:', err);
-                    setError(err.response?.data?.error || 'Failed to connect to server. Please check your network or try again later.');
-                } finally {
-                    setIsLoading(false);
+                    setError('Failed to fetch evaluations');
+                    console.error('Fetch evaluations error:', err);
                 }
-            };
-
-            const handleKeyPress = (e) => {
-                if (e.key === 'Enter' && !isLoading) {
-                    handleLogin();
-                }
-            };
-
-            const handleLogout = () => {
-                setShowLogoutConfirm(true);
-            };
-
-            const confirmLogout = () => {
-                setUser(null);
-                setSvList([]);
-                setSvData(null);
-                setOperatorData(null);
-                setLogin('');
-                setPassword('');
-                setShowLogoutConfirm(false);
-                setSelectedSvId('');
-                setSelectedSvData(null);
-                clearMessages();
-            };
-
-            const fetchSvList = async () => {
-                setIsAdminDataLoading(true);
-                clearMessages();
-                console.log('Fetching SV list with API key:', user.apiKey); // Added for debugging
-                try {
-                    const response = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
-                        headers: { 'X-API-Key': user.apiKey }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setSvList(data.sv_list || []);
-                    } else {
-                        setError(data.error || 'Failed to fetch supervisor list');
-                    }
-                } catch (err) {
-                    console.error('Fetch SV list error:', err, err.response); // Enhanced error logging
-                    setError(err.response?.data?.error || 'Failed to fetch supervisor list');
-                } finally {
-                    setIsAdminDataLoading(false);
-                }
-            };
-
-            const fetchSvData = async () => {
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.get(`${API_BASE_URL}/api/sv/data?id=${user.id}`);
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setSvData(data);
-                    } else {
-                        setError(data.error || 'Failed to fetch supervisor data');
-                    }
-                } catch (err) {
-                    console.error('Fetch SV data error:', err);
-                    setError('Failed to fetch supervisor data');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const fetchOperatorData = async () => {
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.get(`${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}`);
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setOperatorData(data);
-                    } else {
-                        setError(data.error || 'Failed to fetch operator data');
-                    }
-                } catch (err) {
-                    console.error('Fetch operator data error:', err);
-                    setError('Failed to fetch operator data');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const fetchSelectedSvData = async (svId) => {
-                if (!svId) {
-                    setSelectedSvData(null);
-                    return;
-                }
-                setIsAdminDataLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.get(`${API_BASE_URL}/api/sv/data?id=${svId}`, {
-                        headers: { 'X-API-Key': user.apiKey }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setSelectedSvData(data);
-                    } else {
-                        setError(data.error || 'Failed to fetch supervisor data');
-                    }
-                } catch (err) {
-                    console.error('Fetch selected SV data error:', err);
-                    setError('Failed to fetch supervisor data');
-                } finally {
-                    setIsAdminDataLoading(false);
-                }
-            };
-
-            const addSv = async () => {
-                if (!newSvName.trim() || !newSvId.trim()) {
-                    setError('Please fill in both name and ID');
-                    return;
-                }
-                if (isNaN(newSvId) || newSvId <= 0) {
-                    setError('ID must be a positive number');
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.post(`${API_BASE_URL}/api/admin/add_sv`, {
-                        name: newSvName.trim(),
-                        telegram_id: newSvId.trim()
-                    }, {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey
-                        }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setSuccess('Supervisor added successfully');
-                        fetchSvList();
-                        setNewSvName('');
-                        setNewSvId('');
-                    } else {
-                        setError(data.error || 'Failed to add supervisor');
-                    }
-                } catch (err) {
-                    console.error('Add SV error:', err);
-                    setError('Failed to add supervisor');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const removeSv = async (svId) => {
-                if (!window.confirm(`Are you sure you want to remove supervisor ID ${svId}?`)) return;
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.post(`${API_BASE_URL}/api/admin/remove_sv`, { id: svId }, {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey
-                        }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setSuccess('Supervisor removed successfully');
-                        fetchSvList();
-                        if (selectedSvId === svId) {
-                            setSelectedSvId('');
-                            setSelectedSvData(null);
-                        }
-                    } else {
-                        setError(data.error || 'Failed to remove supervisor');
-                    }
-                } catch (err) {
-                    console.error('Remove SV error:', err);
-                    setError('Failed to remove supervisor');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const updateTable = async () => {
-                if (!newTableUrl.trim()) {
-                    setError('Please enter a table URL');
-                    return;
-                }
-                if (!validateUrl(newTableUrl)) {
-                    setError('Please enter a valid Google Sheets URL');
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.post(`${API_BASE_URL}/api/sv/update_table`, {
-                        id: user.id,
-                        table_url: newTableUrl.trim()
-                    }, {
-                        headers: { 'Content-Type': 'application/json' }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setSuccess('Table updated successfully');
-                        fetchSvData();
-                        setNewTableUrl('');
-                    } else {
-                        setError(data.error || 'Failed to update table');
-                    }
-                } catch (err) {
-                    console.error('Update table error:', err);
-                    setError('Failed to update table');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const changeSvTable = async (svId, tableUrl) => {
-                if (!tableUrl.trim()) {
-                    setError('Please enter a table URL');
-                    return;
-                }
-                if (!validateUrl(tableUrl)) {
-                    setError('Please enter a valid Google Sheets URL');
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.post(`${API_BASE_URL}/api/admin/change_sv_table`, {
-                        id: svId,
-                        table_url: tableUrl.trim()
-                    }, {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey
-                        }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setSuccess(`Table updated successfully for ${data.sv_name}`);
-                        fetchSvList();
-                        setShowChangeTableForm(false);
-                        setNewTableUrl('');
-                    } else {
-                        setError(data.error || 'Failed to update supervisor table');
-                    }
-                } catch (err) {
-                    console.error('Change SV table error:', err);
-                    setError('Failed to update supervisor table');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const sendEvaluation = async () => {
-                if (!evaluationData.evaluator || !evaluationData.operator ||
-                    !evaluationData.call_number || !evaluationData.phone_number ||
-                    !evaluationData.score) {
-                    setError('Please fill all required fields');
-                    return;
-                }
-                if (isNaN(evaluationData.score)) {
-                    setError('Score must be a number');
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.post(`${API_BASE_URL}/api/call_evaluation`, {
-                        ...evaluationData,
-                        evaluator_id: user.id,
-                        operator_id: evaluationData.operator_id || user.id
-                    }, {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey
-                        }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setSuccess('Call evaluation submitted successfully');
-                        setEvaluationData({
-                            evaluator: evaluationData.evaluator,
-                            operator: '',
-                            month: evaluationData.month,
-                            call_number: '',
-                            phone_number: '',
-                            score: '',
-                            comment: ''
-                        });
-                        setShowEvaluationForm(false);
-                        if (user.role === 'operator') {
-                            fetchOperatorData();
-                        }
-                    } else {
-                        setError(data.error || 'Failed to submit evaluation');
-                    }
-                } catch (err) {
-                    console.error('Send evaluation error:', err);
-                    setError('Failed to submit evaluation');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const notifySupervisor = async (svId, operatorName) => {
-                if (!window.confirm(`Send notification to supervisor about ${operatorName}?`)) return;
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.post(`${API_BASE_URL}/api/admin/notify_sv`, {
-                        sv_id: svId,
-                        operator_name: operatorName
-                    }, {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey
-                        }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setSuccess(`Notification sent to supervisor: ${data.message}`);
-                    } else {
-                        setError(data.error || 'Failed to send notification');
-                    }
-                } catch (err) {
-                    console.error('Notify supervisor error:', err);
-                    setError('Failed to send notification');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const generateWeeklyReport = async () => {
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.get(`${API_BASE_URL}/api/admin/generate_report`, {
-                        headers: { 'X-API-Key': user.apiKey }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setSuccess('Report generation started. This may take a few minutes.');
-                    } else {
-                        setError(data.error || 'Failed to start report generation');
-                    }
-                } catch (err) {
-                    console.error('Generate report error:', err);
-                    setError('Failed to connect to server');
-                } finally {
-                    setIsLoading(false);
-                }
+                setLoading(false);
             };
 
             useEffect(() => {
-                if (user) {
-                    if (user.role === 'admin') {
-                        debouncedFetch(fetchSvList);
-                    } else if (user.role === 'sv') {
-                        debouncedFetch(fetchSvData);
-                    } else if (user.role === 'operator') {
-                        debouncedFetch(fetchOperatorData);
-                    }
-                }
-            }, [user]);
+                if (apiKey) fetchEvaluations();
+            }, [user.id, user.role, apiKey]);
 
-            useEffect(() => {
-                if (user && user.role === 'admin' && selectedSvId) {
-                    debouncedFetch(() => fetchSelectedSvData(selectedSvId));
+            const handleSubmitEvaluation = async (e) => {
+                e.preventDefault();
+                try {
+                    await axios.post(
+                        `${API_BASE_URL}/evaluations`,
+                        formData,
+                        { headers: getAuthHeaders(apiKey) }
+                    );
+                    setFormData({
+                        evaluator: '',
+                        operator: '',
+                        call_number: '',
+                        phone_number: '',
+                        score: '',
+                        comment: ''
+                    });
+                    setError('');
+                    fetchEvaluations();
+                } catch (err) {
+                    setError(err.response?.data?.error || 'Failed to submit evaluation');
+                    console.error('Submit evaluation error:', err);
                 }
-            }, [selectedSvId]);
+            };
 
-            if (!user) {
-                return (
-                    <div className="min-h-screen flex items-center justify-center bg-gray-100">
-                        <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                            <h1 className="text-2xl font-bold mb-6 text-center">OTP Bot Login</h1>
+            return (
+                <div className="bg-white p-6 rounded-lg shadow">
+                    <h2 className="text-xl font-semibold mb-4">Call Evaluations</h2>
+                    {(user.role === 'admin' || user.role === 'sv') && (
+                        <form onSubmit={handleSubmitEvaluation} className="mb-4 space-y-4">
                             <input
                                 type="text"
-                                placeholder="Enter Login"
-                                value={login}
-                                onChange={(e) => setLogin(e.target.value)}
-                                onKeyPress={handleKeyPress}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
+                                placeholder="Evaluator Name"
+                                value={formData.evaluator}
+                                onChange={(e) => setFormData({ ...formData, evaluator: e.target.value })}
+                                className="w-full p-2 border rounded"
+                                required
                             />
-                            <input
-                                type="password"
-                                placeholder="Enter Password"
-                                value={password}
-                                onChange={(e) => setPassword(e.target.value)}
-                                onKeyPress={handleKeyPress}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            />
-                            <button
-                                onClick={handleLogin}
-                                className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                disabled={isLoading}
-                            >
-                                {isLoading ? 'Logging in...' : 'Login'}
-                            </button>
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                        </div>
-                    </div>
-                );
-            }
-
-            if (showLogoutConfirm) {
-                return (
-                    <div className="min-h-screen flex items-center justify-center bg-gray-100">
-                        <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                            <h2 className="text-xl font-semibold mb-4 text-center">Confirm Logout</h2>
-                            <p className="text-center mb-6">Are you sure you want to log out?</p>
-                            <div className="flex justify-between">
-                                <button
-                                    onClick={confirmLogout}
-                                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
-                                >
-                                    Yes, Log Out
-                                </button>
-                                <button
-                                    onClick={() => setShowLogoutConfirm(false)}
-                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                >
-                                    Cancel
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                );
-            }
-
-            if (user.role === 'admin') {
-                return (
-                    <div className="min-h-screen bg-gray-100 p-6">
-                        <div className="flex justify-between items-center mb-6">
-                            <h1 className="text-3xl font-bold">Admin Dashboard</h1>
-                            <div className="flex space-x-4">
-                                <button
-                                    onClick={() => setShowEvaluationForm(!showEvaluationForm)}
-                                    className="bg-purple-500 text-white px-4 py-2 rounded hover:bg-purple-600"
-                                >
-                                    {showEvaluationForm ? 'Hide Evaluation Form' : 'Add Call Evaluation'}
-                                </button>
-                                <button
-                                    onClick={handleLogout}
-                                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
-                                >
-                                    Logout
-                                </button>
-                            </div>
-                        </div>
-
-                        {showEvaluationForm && (
-                            <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                <h2 className="text-xl font-semibold mb-4">Call Evaluation</h2>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                                    <div>
-                                        <label className="block text-sm font-medium mb-1">Evaluator</label>
-                                        <input
-                                            type="text"
-                                            placeholder="Evaluator Name"
-                                            value={evaluationData.evaluator}
-                                            onChange={(e) => setEvaluationData({...evaluationData, evaluator: e.target.value})}
-                                            className="w-full p-2 border rounded"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium mb-1">Operator</label>
-                                        <input
-                                            type="text"
-                                            placeholder="Operator Name"
-                                            value={evaluationData.operator}
-                                            onChange={(e) => setEvaluationData({...evaluationData, operator: e.target.value})}
-                                            className="w-full p-2 border rounded"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium mb-1">Month</label>
-                                        <input
-                                            type="text"
-                                            value={evaluationData.month}
-                                            onChange={(e) => setEvaluationData({...evaluationData, month: e.target.value})}
-                                            className="w-full p-2 border rounded"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium mb-1">Call Number</label>
-                                        <input
-                                            type="text"
-                                            placeholder="Call Number"
-                                            value={evaluationData.call_number}
-                                            onChange={(e) => setEvaluationData({...evaluationData, call_number: e.target.value})}
-                                            className="w-full p-2 border rounded"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium mb-1">Phone Number</label>
-                                        <input
-                                            type="text"
-                                            placeholder="Phone Number"
-                                            value={evaluationData.phone_number}
-                                            onChange={(e) => setEvaluationData({...evaluationData, phone_number: e.target.value})}
-                                            className="w-full p-2 border rounded"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium mb-1">Score (0-100)</label>
-                                        <input
-                                            type="number"
-                                            placeholder="Score"
-                                            min="0"
-                                            max="100"
-                                            value={evaluationData.score}
-                                            onChange={(e) => setEvaluationData({...evaluationData, score: e.target.value})}
-                                            className="w-full p-2 border rounded"
-                                        />
-                                    </div>
-                                </div>
-                                <div className="mb-4">
-                                    <label className="block text-sm font-semibold mb-1">Comment (optional)</label>
-                                    <textarea
-                                        placeholder="Enter comment"
-                                        value={evaluationData.comment}
-                                        onChange={(e) => setEvaluationData({...evaluationData, comment: e.target.value})}
-                                        className="w-full p-2 border rounded"
-                                        class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        rows="3"
-                                    />
-                                </div>
-                                <div className="flex justify-between">
-                                    <button
-                                        onClick={sendEvaluation}
-                                        className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-                                        disabled={isLoading}
-                                    >
-                                        {isLoading ? 'Submitting...' : 'Submit Evaluation'}
-                                    </button>
-                                    <button
-                                        onClick={() => setShowEvaluationForm(false)}
-                                        className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                    >
-                                        Cancel
-                                    </button>
-                                </div>
-                            </div>
-                        )}
-
-                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                            <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
                             <input
                                 type="text"
-                                placeholder="Supervisor Name"
-                                value={newSvName}
-                                onChange={(e) => setNewSvName(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
+                                placeholder="Operator Name"
+                                value={formData.operator}
+                                onChange={(e) => setFormData({ ...formData, operator: e.target.value })}
+                                className="w-full p-2 border rounded"
+                                required
                             />
                             <input
-                                type="Supervisor ID"
-                                placeholder="Enter Supervisor ID"
-                                value={newSvId}
-                                onChange={(e) => setNewSvId(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
+                                type="number"
+                                placeholder="Call Number"
+                                value={formData.call_number}
+                                onChange={(e) => setFormData({ ...formData, call_number: e.target.value })}
+                                className="w-full p-2 border rounded"
+                                required
                             />
+                            <input
+                                type="text"
+                                placeholder="Phone Number"
+                                value={formData.phone_number}
+                                onChange={(e) => setFormData({ ...formData, phone_number: e.target.value })}
+                                className="w-full p-2 border rounded"
+                                required
+                            />
+                            <input
+                                type="number"
+                                placeholder="Score"
+                                value={formData.score}
+                                onChange={(e) => setFormData({ ...formData, score: e.target.value })}
+                                className="w-full p-2 border rounded"
+                                required
+                            />
+                            <textarea
+                                placeholder="Comment"
+                                value={formData.comment}
+                                onChange={(e) => setFormData({ ...formData, comment: e.target.value })}
+                                className="w-full p-2 border rounded"
+                            ></textarea>
                             <button
-                                onClick={addSv}
-                                className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                disabled={isLoading}
+                                type="submit"
+                                className="bg-primary text-white px-4 py-2 rounded hover:bg-blue-700 disabled:bg-blue-300"
+                                disabled={!apiKey}
                             >
-                                {isLoading ? 'Adding...' : 'Add Supervisor'}
+                                Submit Evaluation
                             </button>
-                        </div>
-
-                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                            <div className="flex justify-between items-center mb-4">
-                                <h2 className="text-xl font-semibold">Supervisors</h2>
-                                <button
-                                    onClick={generateWeeklyReport}
-                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                    disabled={isLoading}
-                                >
-                                    {isLoading ? 'Generating...' : 'Generate Report'}
-                                </button>
-                            </div>
-                            {isAdminDataLoading ? (
-                                <p className="text-center">Loading...</p>
-                            ) : svList.length === 0 ? (
-                                <p className="text-center">No supervisors found.</p>
-                            ) : (
-                                <div className="overflow-x-auto">
-                                    <table className="min-w-full bg-white border-collapse">
-                                        <thead>
-                                            <tr className="bg-gray-200">
-                                                <th className="p-3 border-b text-left">Name</th>
-                                                <th className="p-3 border-b text-left">ID</th>
-                                                <th className="p-3 border-b text-left">Table URL</th>
-                                                <th className="p-3 border-b text-left">Actions</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {svList.map(sv => (
-                                                <tr key={sv.id} className="hover:bg-gray-50">
-                                                    <td className="p-3 border-b">{sv.name}</td>
-                                                    <td className="p-3 border-b">{sv.id}</td>
-                                                    <td className="p-3 border-b">
-                                                        {sv.table ? (
-                                                            <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
-                                                        ) : 'No table'}
-                                                    </td>
-                                                    <td className="p-3 border-b space-x-2">
-                                                        <button
-                                                            onClick={() => removeSv(sv.id)}
-                                                            className="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 text-sm"
-                                                        >
-                                                            Remove
-                                                        </button>
-                                                        <button
-                                                            onClick={() => {
-                                                                setCurrentSvForTableChange(sv);
-                                                                setShowChangeTableForm(true);
-                                                            }}
-                                                            className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
-                                                                >
-                                                            Change Table
-                                                        </button>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            )}
-                        </div>
-
-                        {showChangeTableForm && currentSvForTableChange && (
-                            <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                <h2 className="text-xl font-semibold mb-4">Change Table for {currentSvForTableChange.name}</h2>
-                                <input
-                                    type="text"
-                                    placeholder="New Google Sheets URL"
-                                    value={newTableUrl}
-                                    onChange={(e) => setNewTableUrl(e.target.value)}
-                                    className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    disabled={isLoading}
-                                />
-                                <div className="flex justify-between">
-                                    <button
-                                        onClick={() => changeSvTable(currentSvForTableChange.id, newTableUrl)}
-                                        className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                        disabled={isLoading}
-                                    >
-                                        {isLoading ? 'Updating...' : 'Update Table'}
-                                    </button>
-                                    <button
-                                        onClick={() => {
-                                            setShowChangeTableForm(false);
-                                            setCurrentSvForTableChange(null);
-                                            setNewTableUrl('');
-                                        }}
-                                        className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                    >
-                                        Cancel
-                                    </button>
-                                </div>
-                            </div>
-                        )}
-
-                        <div className="bg-white p-6 rounded-lg shadow-lg">
-                            <h2 className="text-xl font-semibold mb-4">View Operator Scores</h2>
-                            <select
-                                value={selectedSvId}
-                                onChange={(e) => setSelectedSvId(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading || isAdminDataLoading}
-                            >
-                                <option value="">Select Supervisor</option>
-                                {svList.map(sv => (
-                                    <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
+                        </form>
+                    )}
+                    {error && <p className="text-red-500 mb-4">{error}</p>}
+                    {loading ? (
+                        <p>Loading...</p>
+                    ) : (
+                        <table className="w-full border-collapse">
+                            <thead>
+                                <tr className="bg-gray-200">
+                                    <th className="border p-2">Call Number</th>
+                                    <th className="border p-2">Month</th>
+                                    <th className="border p-2">Phone Number</th>
+                                    <th className="border p-2">Score</th>
+                                    <th className="border p-2">Comment</th>
+                                    <th className="border p-2">Date</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {evaluations.map((eval) => (
+                                    <tr key={eval.call_number} className="border">
+                                        <td className="p-2">{eval.call_number} {eval.is_correction ? '(Correction)' : ''}</td>
+                                        <td className="p-2">{eval.month}</td>
+                                        <td className="p-2">{eval.phone_number}</td>
+                                        <td className="p-2">{eval.score}</td>
+                                        <td className="p-2">{eval.comment || 'N/A'}</td>
+                                        <td className="p-2">{eval.evaluation_date}</td>
+                                    </tr>
                                 ))}
-                            </select>
-                            {isAdminDataLoading ? (
-                                <p className="text-center">Loading...</p>
-                            ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
-                                <div className="overflow-x-auto">
-                                    <table className="min-w-full bg-white border-collapse">
-                                        <thead>
-                                            <tr className="bg-gray-100">
-                                                <th className="p-3 border-b text-left">Name</th>
-                                                <th className="p-3 border-b text-left">Calls</th>
-                                                <th className="p-3 border-b text-left">Expected</th>
-                                                <th className="p-3 border-b text-left">Avg Score</th>
-                                                <th className="p-3 border-b text-left">Link</th>
-                                                <th className="p-3 border-b text-left">Actions</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {selectedSvData.operators.map((op, index) => {
-                                                const currentWeek = getCurrentWeekOfMonth();
-                                                const expectedCalls = getExpectedCalls(currentWeek);
-                                                const hasIssue = op.call_count < expectedCalls;
-                                                return (
-                                                    <tr key={index} className="hover:bg-gray-50">
-                                                        <td className="p-3 border-b">{op.name}</td>
-                                                        <td className={`p-3 border-b ${getCallCountColor(op.call_count, expectedCalls)}`}>
-                                                            {op.call_count}
-                                                        </td>
-                                                        <td className="p-3 border-b">{expectedCalls}</td>
-                                                        <td className="p-3 border-b">
-                                                            <span className={getScoreColor(op.avg_score)}>
-                                                                {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                            </span>
-                                                        </td>
-                                                        <td className="p-3 border-b">
-                                                            {op.link ? (
-                                                                <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                            ) : '-'}
-                                                        </td>
-                                                        <td className="p-3 border-b">
-                                                            {hasIssue && (
-                                                                <button
-                                                                    onClick={() => notifySupervisor(selectedSvId, op.name)}
-                                                                    className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
-                                                                    disabled={isLoading}
-                                                                >
-                                                                    Notify
-                                                                </button>
-                                                            )}
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            })}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            ) : selectedSvId ? (
-                                <p className="text-center">No operators found for this supervisor.</p>
-                            ) : null}
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                        </div>
-                    </div>
-                );
-            }
-
-            if (user.role === 'sv') {
-                return (
-                    <div className="min-h-screen bg-gray-100 p-6">
-                        <div className="flex justify-between items-center mb-6">
-                            <h1 className="text-3xl font-bold">Supervisor Dashboard</h1>
-                            <button
-                                onClick={handleLogout}
-                                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700"
-                            >
-                                Logout
-                            </button>
-                        </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                            <h2 className="text-xl font-semibold mb-4">Update Table</h2>
-                            <input
-                                type="text"
-                                placeholder="Enter Google Sheets URL"
-                                value={newTableUrl}
-                                onChange={(e) => setNewTableUrl(e.target.value)}
-                                className="w-full p-2 mb-4 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            />
-                            <button
-                                onClick={updateTable}
-                                className={`w-full bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                disabled={isLoading}
-                            >
-                                {isLoading ? 'Updating...' : 'Update Table'}
-                            </button>
-                        </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg">
-                            <h2 className="text-xl font-semibold mb-4">Your Operators</h2>
-                            {isLoading ? (
-                                <p className="text-center">Loading...</p>
-                            ) : svData && svData.operators && svData.operators.length > 0 ? (
-                                <div className="overflow-x-auto">
-                                    <table className="min-w-full bg-white border-collapse">
-                                        <thead>
-                                            <tr className="bg-gray-100">
-                                                <th className="p-3 border-b text-left">Name</th>
-                                                <th className="p-3 border-b text-left">Calls</th>
-                                                <th className="p-3 border-b text-left">Avg Score</th>
-                                                <th className="p-3 border-b text-left">Link</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {svData.operators.map((op, index) => (
-                                                <tr key={index} className="hover:bg-gray-50">
-                                                    <td className="p-3 border-b">{op.name}</td>
-                                                    <td className={`p-3 border-b ${getCallCountColor(op.call_count, svData.expected_calls)}`}>
-                                                        {op.call_count}
-                                                    </td>
-                                                    <td className="p-3 border-b">
-                                                        <span className={getScoreColor(op.avg_score)}>
-                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                        </span>
-                                                    </td>
-                                                    <td className="p-3 border-b">
-                                                        {op.link ? (
-                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                        ) : '-'}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            ) : (
-                                <p className="text-center">No operators found.</p>
-                            )}
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                        </div>
-                    </div>
-                );
-            }
-
-            if (user.role === 'operator') {
-                return (
-                    <div className="min-h-screen bg-gray-100 p-6">
-                        <div className="flex justify-between items-center mb-6">
-                            <h1 className="text-3xl font-bold">Operator Dashboard</h1>
-                            <button
-                                onClick={handleLogout}
-                                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700"
-                            >
-                                Logout
-                            </button>
-                        </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg">
-                            <h2 className="text-xl font-semibold mb-4">Your Call Evaluations</h2>
-                            {isLoading ? (
-                                <p className="text-center">Loading...</p>
-                            ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
-                                <div className="overflow-x-auto">
-                                    <table className="min-w-full bg-white border-collapse">
-                                        <thead>
-                                            <tr className="bg-gray-100">
-                                                <th className="p-3 border-b text-left">Call Number</th>
-                                                <th className="p-3 border-b text-left">Phone Number</th>
-                                                <th className="p-3 border-b text-left">Score</th>
-                                                <th className="p-3 border-b text-left">Comment</th>
-                                                <th className="p-3 border-b text-left">Month</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {operatorData.evaluations.map((eval1, index) => (
-                                                <tr key={index} className="hover:bg-gray-50">
-                                                    <td className="p-3 border-b">{eval1.call_number}</td>
-                                                    <td className="p-3 border-b">{eval1.phone_number}</td>
-                                                    <td className={`p-3 border-b ${getScoreColor(eval1.score)}`}>
-                                                        {eval1.score}
-                                                    </td>
-                                                    <td className="p-3 border-b">{eval1.comment || '-'}</td>
-                                                    <td className="p-3 border-b">{eval1.month}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            ) : (
-                                <p className="text-center">No evaluations found.</p>
-                            )}
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                        </div>
-                    </div>
-                );
-            }
-
-            return null;
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+            );
         };
 
+        // Operator Stats Component
+        const OperatorStats = ({ user, apiKey }) => {
+            const [stats, setStats] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+
+            const fetchStats = async () => {
+                setLoading(true);
+                try {
+                    const response = await axios.get(`${API_BASE_URL}/users/${user.id}/hours`, {
+                        headers: getAuthHeaders(apiKey)
+                    });
+                    setStats(response.data.hours);
+                    setError('');
+                } catch (err) {
+                    setError('Error fetching stats. Please try again.');
+                    console.error('Fetch stats error:', err);
+                }
+                setLoading(false);
+            };
+
+            useEffect(() => {
+                if (apiKey) fetchStats();
+            }, [user.id, apiKey]);
+
+            return (
+                <div className="bg-white p-6 rounded-lg shadow">
+                    <h2 className="text-xl font-semibold mb-4">My Statistics</h2>
+                    {error && <p className="text-red-500 mb-4">{error}</p>}
+                    {loading ? (
+                        <p>Loading...</p>
+                    ) : stats ? (
+                        <div>
+                            <p><strong>Regular Hours:</strong> {stats.regular_hours}</p>
+                            <p><strong>Training Hours:</strong> {stats.training_hours}</p>
+                            <p><strong>Fines:</strong> {stats.fines}</p>
+                            <p><strong>Norm Hours:</strong> {stats.norm_hours}</p>
+                            <p><strong>Percent Complete:</strong> {stats.percent_complete}%</p>
+                            <p><strong>Call Count:</strong> {stats.call_count}</p>
+                            <p><strong>Average Score:</strong> {stats.avg_score}</p>
+                        </div>
+                    ) : (
+                        <p>No statistics available.</p>
+                    )}
+                </div>
+            );
+        };
+
+        // Main App Component
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [apiKey, setApiKey] = useState('');
+            const [error, setError] = useState('');
+
+            useEffect(() => {
+                const fetchApiKey = async () => {
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/config`);
+                        setApiKey(response.data.api_key);
+                        setError('');
+                    } catch (err) {
+                        setError('Failed to load API key. Please check the backend server.');
+                        console.error('Fetch API key error:', err);
+                    }
+                };
+                fetchApiKey();
+
+                const token = localStorage.getItem('session_token');
+                if (token && apiKey) {
+                    axios.get(`${API_BASE_URL}/users/${token}`, { headers: getAuthHeaders(apiKey) })
+                        .then(response => setUser(response.data.user))
+                        .catch(err => {
+                            console.error('Fetch user error:', err);
+                            localStorage.removeItem('session_token');
+                        });
+                }
+            }, [apiKey]);
+
+            if (error) {
+                return (
+                    <div className="flex items-center justify-center min-h-screen">
+                        <div className="bg-white p-8 rounded-lg shadow-lg">
+                            <p className="text-red-500 text-center">{error}</p>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div>
+                    {user ? <Dashboard user={user} setUser={setUser} apiKey={apiKey} /> : <Login setUser={setUser} />}
+                </div>
+            );
+        };
+
+        // Render the app
         try {
             const root = ReactDOM.createRoot(document.getElementById('root'));
-            root.render(
-                <ErrorBoundary>
-                    <App />
-                </ErrorBoundary>
-            );
+            root.render(<App />);
         } catch (err) {
-            console.error('Root rendering error:', err);
-            document.getElementById('root').innerHTML = `
-                <div class="min-h-screen flex items-center justify-center bg-gray-100">
-                    <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                        <h1 class="text-2xl font-bold mb-4 text-center text-red-500">Application Failed to Load</h1>
-                        <p class="text-center">An error occurred while loading the application. Please check the console for details.</p>
-                    </div>
-                </div>
-            `;
+            console.error('Render error:', err);
+            document.getElementById('root').innerHTML = '<div class="text-red-500 text-center p-4">Failed to render application. Please check the console for details.</div>';
         }
     </script>
 </body>
