@@ -194,6 +194,8 @@ def process_timesheet(file_url, supervisor_id):
     except Exception as e:
         os.remove(local_file) if os.path.exists(local_file) else None
         return {"error": f"Error processing file: {str(e)}"}
+
+
 class Database:
     def __init__(self):
         self.conn_params = {
@@ -245,16 +247,6 @@ class Database:
                     CONSTRAINT unique_name_role UNIQUE (name, role)
                 );
             """)
-            # Sessions table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER NOT NULL REFERENCES users(id),
-                    token VARCHAR(36) NOT NULL UNIQUE,
-                    expires_at TIMESTAMP NOT NULL
-                );
-            """)
-
             # Calls table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS calls (
@@ -304,29 +296,6 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_hours_month ON work_hours(month);
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_month_call ON calls(operator_id, month, call_number);
             """)
-
-    def create_session(self, user_id):
-        session_token = str(uuid.uuid4())
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                INSERT INTO sessions (user_id, token, expires_at)
-                VALUES (%s, %s, %s)
-                RETURNING token
-            """, (user_id, session_token, datetime.now() + timedelta(hours=24)))
-            return cursor.fetchone()[0]
-
-    def verify_session_token(self, token):
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT user_id FROM sessions
-                WHERE token = %s AND expires_at > CURRENT_TIMESTAMP
-            """, (token,))
-            result = cursor.fetchone()
-            return result[0] if result else None
-
-    def invalidate_session(self, token):
-        with self._get_cursor() as cursor:
-            cursor.execute("DELETE FROM sessions WHERE token = %s", (token,))
 
     def create_user(self, telegram_id, name, role, direction=None, hire_date=None, supervisor_id=None, login=None, password=None, scores_table_url=None):
         if login is None:

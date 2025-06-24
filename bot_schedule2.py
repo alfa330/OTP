@@ -20,7 +20,7 @@ import re
 import xlsxwriter
 import json
 from concurrent.futures import ThreadPoolExecutor
-from database import db
+from database import db, process_and_save_evaluations
 import uuid
 from passlib.hash import pbkdf2_sha256
 
@@ -50,7 +50,7 @@ executor_pool = ThreadPoolExecutor(max_workers=4)
 
 # === Flask-сервер ================================================================================================
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["https://alfa330.github.io/OTP/", "http://localhost:3000", "*"]}})
+CORS(app, resources={r"/api/*": {"origins": ["https://alfa330.github.io", "http://localhost:3000"]}})
 
 def require_api_key(f):
     @wraps(f)
@@ -58,32 +58,19 @@ def require_api_key(f):
         api_key = request.headers.get('X-API-Key')
         if api_key and api_key == FLASK_API_KEY:
             return f(*args, **kwargs)
-        logging.warning(f"Invalid or missing API key: {api_key}")
-        return jsonify({"error": "Invalid or missing API key", "provided_key": api_key}), 401
+        else:
+            logging.warning(f"Invalid or missing API key: {api_key}")
+            return jsonify({"error": "Invalid or missing API key", "provided_key": api_key}), 401
     return decorated
 
-def require_auth(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth_token = request.headers.get('Authorization')
-        if not auth_token or not auth_token.startswith('Bearer '):
-            return jsonify({"error": "Missing or invalid Authorization header"}), 401
-        
-        token = auth_token.split(' ')[1]
-        try:
-            user_id = db.verify_session_token(token)
-            if not user_id:
-                return jsonify({"error": "Invalid session token"}), 401
-            request.user_id = user_id
-            return f(*args, **kwargs)
-        except Exception as e:
-            logging.error(f"Authentication error: {e}")
-            return jsonify({"error": "Authentication failed"}), 401
-    return decorated
+@app.route('/')
+def index():
+    return "Bot is alive!", 200
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     try:
+        # Test database connectivity
         with db._get_cursor() as cursor:
             cursor.execute("SELECT 1")
         return jsonify({"status": "healthy", "database": "connected"}), 200
@@ -91,96 +78,79 @@ def health_check():
         logging.error(f"Health check failed: {e}")
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
-@app.route('/api/auth/login', methods=['POST'])
+@app.route('/api/login', methods=['POST'])
 def login():
     try:
         data = request.get_json()
-        if not data or 'login' not in data or 'password' not in data:
-            return jsonify({"error": "Missing login or password"}), 400
-
-        login = data['login']
-        password = data['password']
-        user = db.get_user_by_login(login)
-        if user and db.verify_password(user[0], password):
-            session_token = db.create_session(user[0])
-            return jsonify({
-                "status": "success",
-                "user": {
+        if not data or ('key' not in data and ('login' not in data or 'password' not in data)):
+            return jsonify({"error": "Missing credentials"}), 400
+        
+        if 'login' in data and 'password' in data:
+            # Аутентификация по логину/паролю
+            login = data['login']
+            password = data['password']
+            user = db.get_user_by_login(login)
+            if user and db.verify_password(user[0], password):
+                return jsonify({
+                    "status": "success", 
+                    "role": user[3],
                     "id": user[0],
                     "name": user[2],
-                    "role": user[3],
                     "telegram_id": user[1],
-                    "session_token": session_token
-                }
-            }), 200
+                    "apiKey": FLASK_API_KEY  # Return API key for frontend
+                })
+        
         return jsonify({"error": "Invalid credentials"}), 401
     except Exception as e:
         logging.error(f"Login error: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/auth/logout', methods=['POST'])
-@require_auth
-def logout():
-    try:
-        auth_token = request.headers.get('Authorization').split(' ')[1]
-        db.invalidate_session(auth_token)
-        return jsonify({"status": "success", "message": "Logged out successfully"}), 200
-    except Exception as e:
-        logging.error(f"Logout error: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/api/config', methods=['GET'])
-def get_config():
-    return jsonify({'api_key': os.getenv('FLASK_API_KEY')})
-
-@app.route('/api/users/supervisors', methods=['GET'])
-@require_auth
+@app.route('/api/admin/sv_list', methods=['GET'])
 @require_api_key
-def get_supervisors():
+def get_sv_list():
     try:
-        user = db.get_user(id=request.user_id)
-        if user[3] != 'admin':
-            return jsonify({"error": "Unauthorized: Admin access required"}), 403
+        # Verify database connectivity
+        with db._get_cursor() as cursor:
+            cursor.execute("SELECT 1")
         supervisors = db.get_supervisors()
+        logging.info(f"Fetched {len(supervisors)} supervisors")
         sv_data = [{"id": sv[0], "name": sv[1], "table": sv[2]} for sv in supervisors]
-        return jsonify({"status": "success", "supervisors": sv_data}), 200
+        return jsonify({"status": "success", "sv_list": sv_data})
     except Exception as e:
-        logging.error(f"Error fetching supervisors: {e}")
+        logging.error(f"Error fetching SV list: {e}", exc_info=True)
         return jsonify({"error": f"Failed to fetch supervisors: {str(e)}"}), 500
 
-@app.route('/api/evaluations', methods=['GET'])
-@require_auth
-def get_evaluations():
+@app.route('/api/call_evaluations', methods=['GET'])
+def get_call_evaluations():
     try:
-        user = db.get_user(id=request.user_id)
-        operator_id = request.args.get('operator_id', type=int)
-        if user[3] == 'admin' or (user[3] == 'operator' and user[0] == operator_id):
-            evaluations = db.get_call_evaluations(operator_id)
-            return jsonify({"status": "success", "evaluations": evaluations}), 200
-        return jsonify({"error": "Unauthorized access"}), 403
+        operator_id = request.args.get('operator_id')
+        if not operator_id:
+            return jsonify({"error": "Missing operator_id parameter"}), 400
+        operator_id = int(operator_id)
+        evaluations = db.get_call_evaluations(operator_id)
+        return jsonify({"status": "success", "evaluations": evaluations})
     except Exception as e:
         logging.error(f"Error fetching evaluations: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/admin/supervisors/<int:sv_id>/table', methods=['PUT'])
-@require_auth
+@app.route('/api/admin/change_sv_table', methods=['POST'])
 @require_api_key
-def update_supervisor_table(sv_id):
+def change_sv_table():
     try:
-        user = db.get_user(id=request.user_id)
-        if user[3] != 'admin':
-            return jsonify({"error": "Unauthorized: Admin access required"}), 403
-
         data = request.get_json()
-        if not data or 'table_url' not in data:
-            return jsonify({"error": "Missing table_url field"}), 400
+        required_fields = ['id', 'table_url']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields"}), 400
 
+        sv_id = int(data['id'])
         table_url = data['table_url']
+        
         sheet_name, operators, error = extract_fio_and_links(table_url)
         if error:
             return jsonify({"error": error}), 400
-
-        db.update_user_table(sv_id, scores_table_url=table_url)
+        
+        db.update_user_table(sv_id, table_url)
+        
         telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
         payload = {
             "chat_id": db.get_user(id=sv_id)[1],
@@ -189,84 +159,74 @@ def update_supervisor_table(sv_id):
         }
         response = requests.post(telegram_url, json=payload, timeout=10)
         if response.status_code != 200:
-            logging.error(f"Telegram API error: {response.json().get('description', 'Unknown error')}")
+            error_detail = response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error: {error_detail}")
         
         return jsonify({
             "status": "success",
-            "message": "Supervisor table updated",
+            "message": "Table updated",
             "operators": operators
-        }), 200
+        })
     except Exception as e:
-        logging.error(f"Error updating supervisor table: {e}")
+        logging.error(f"Error updating SV table: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/admin/supervisors', methods=['POST'])
-@require_auth
+@app.route('/api/admin/add_sv', methods=['POST'])
 @require_api_key
-def add_supervisor():
+def add_sv():
     try:
-        user = db.get_user(id=request.user_id)
-        if user[3] != 'admin':
-            return jsonify({"error": "Unauthorized: Admin access required"}), 403
-
         data = request.get_json()
         required_fields = ['name', 'telegram_id']
         if not data or not all(field in data for field in required_fields):
-            return jsonify({"error": "Missing required fields: name, telegram_id"}), 400
+            return jsonify({"error": "Missing required fields"}), 400
 
         name = data['name']
         telegram_id = int(data['telegram_id'])
         
+        # Проверяем существование пользователя
         if db.get_user(telegram_id=telegram_id):
-            return jsonify({"error": "Supervisor with this Telegram ID already exists"}), 400
-
-        login = f"sv_{str(uuid.uuid4())[:8]}"
-        password = str(uuid.uuid4())[:8]
+            return jsonify({"error": "SV with this Telegram ID already exists"}), 400
+        
+        # Создаем супервайзера
         sv_id = db.create_user(
             telegram_id=telegram_id,
             name=name,
-            role='sv',
-            login=login,
-            password=password
+            role='sv'
         )
         
         telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
         payload = {
             "chat_id": telegram_id,
-            "text": f"Принятие в команду прошло успешно <b>успешно✅</b>\nЛогин: <code>{login}</code>\nПароль: <code>{password}</code>",
+            "text": f"Принятие в команду прошло успешно <b>успешно✅</b>",
             "parse_mode": "HTML"
         }
         response = requests.post(telegram_url, json=payload, timeout=10)
         if response.status_code != 200:
-            logging.error(f"Telegram API error: {response.json().get('description', 'Unknown error')}")
+            error_detail = response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error: {error_detail}")
         
-        return jsonify({
-            "status": "success",
-            "message": f"Supervisor {name} added",
-            "id": sv_id,
-            "login": login,
-            "password": password
-        }), 201
+        return jsonify({"status": "success", "message": f"SV {name} added", "id": sv_id})
     except Exception as e:
-        logging.error(f"Error adding supervisor: {e}")
+        logging.error(f"Error adding SV: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/admin/supervisors/<int:sv_id>', methods=['DELETE'])
-@require_auth
+@app.route('/api/admin/remove_sv', methods=['POST'])
 @require_api_key
-def remove_supervisor(sv_id):
+def remove_sv():
     try:
-        user = db.get_user(id=request.user_id)
-        if user[3] != 'admin':
-            return jsonify({"error": "Unauthorized: Admin access required"}), 403
+        data = request.get_json()
+        if not data or 'id' not in data:
+            return jsonify({"error": "Missing ID field"}), 400
 
-        supervisor = db.get_user(id=sv_id)
-        if not supervisor or supervisor[3] != 'sv':
-            return jsonify({"error": "Supervisor not found"}), 404
-
-        telegram_id = supervisor[1]
-        name = supervisor[2]
+        sv_id = int(data['id'])
+        user = db.get_user(id=sv_id)
+        if not user or user[3] != 'sv':
+            return jsonify({"error": "SV not found"}), 404
         
+        telegram_id = user[1]
+        name = user[2]
+        
+        # Удаление пользователя
         with db._get_cursor() as cursor:
             cursor.execute("DELETE FROM users WHERE id = %s", (sv_id,))
         
@@ -278,23 +238,27 @@ def remove_supervisor(sv_id):
         }
         response = requests.post(telegram_url, json=payload, timeout=10)
         if response.status_code != 200:
-            logging.error(f"Telegram API error: {response.json().get('description', 'Unknown error')}")
+            error_detail = response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error: {error_detail}")
         
-        return jsonify({"status": "success", "message": f"Supervisor {name} removed"}), 200
+        return jsonify({"status": "success", "message": f"SV {name} removed"})
     except Exception as e:
-        logging.error(f"Error removing supervisor: {e}")
+        logging.error(f"Error removing SV: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/users/<int:user_id>', methods=['GET'])
-@require_auth
-def get_user_data(user_id):
+@app.route('/api/sv/data', methods=['GET'])
+def get_sv_data():
     try:
-        user = db.get_user(id=request.user_id)
-        target_user = db.get_user(id=user_id)
-        if not target_user or target_user[3] not in ['sv', 'operator'] or (user[3] != 'admin' and user[0] != user_id):
-            return jsonify({"error": "Unauthorized or user not found"}), 403
-
-        table_url = target_user[9]
+        user_id = request.args.get('id')
+        if not user_id:
+            return jsonify({"error": "Missing ID parameter"}), 400
+        user_id = int(user_id)
+        
+        user = db.get_user(id=user_id)
+        if not user or user[3] not in ['sv', 'operator']:
+            return jsonify({"error": "User not found"}), 404
+        
+        table_url = user[9]
         operators = []
         error = None
         if table_url:
@@ -304,38 +268,32 @@ def get_user_data(user_id):
                 
         return jsonify({
             "status": "success",
-            "user": {
-                "id": target_user[0],
-                "name": target_user[2],
-                "role": target_user[3],
-                "table": table_url,
-                "operators": operators
-            }
-        }), 200
+            "name": user[2],
+            "table": table_url,
+            "operators": operators
+        })
     except Exception as e:
-        logging.error(f"Error fetching user data: {e}")
+        logging.error(f"Error fetching SV data: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/admin/supervisors/<int:sv_id>/notify', methods=['POST'])
-@require_auth
+@app.route('/api/admin/notify_sv', methods=['POST'])
 @require_api_key
-def notify_supervisor(sv_id):
+def notify_supervisor():
     try:
-        user = db.get_user(id=request.user_id)
-        if user[3] != 'admin':
-            return jsonify({"error": "Unauthorized: Admin access required"}), 403
-
         data = request.get_json()
-        if not data or 'operator_name' not in data:
-            return jsonify({"error": "Missing operator_name field"}), 400
+        required_fields = ['sv_id', 'operator_name']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields"}), 400
 
+        sv_id = int(data['sv_id'])
         operator_name = data['operator_name']
+        
         current_week = get_current_week_of_month()
         expected_calls = get_expected_calls(current_week)
         
-        supervisor = db.get_user(id=sv_id)
-        if not supervisor or supervisor[3] != 'sv':
-            return jsonify({"error": "Supervisor not found"}), 404
+        user = db.get_user(id=sv_id)
+        if not user or user[3] != 'sv':
+            return jsonify({"error": "SV not found"}), 404
 
         notification_text = (
             f"⚠️ <b>Требуется внимание!</b>\n\n"
@@ -347,37 +305,39 @@ def notify_supervisor(sv_id):
         
         telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
         payload = {
-            "chat_id": supervisor[1],
+            "chat_id": user[1],
             "text": notification_text,
             "parse_mode": "HTML"
         }
         response = requests.post(telegram_url, json=payload, timeout=10)
         
         if response.status_code != 200:
-            logging.error(f"Telegram API error: {response.json().get('description', 'Unknown error')}")
-            return jsonify({"error": "Failed to send notification"}), 500
+            error_detail = response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error: {error_detail}")
+            return jsonify({"error": f"Failed to send Telegram message: {error_detail}"}), 500
 
-        return jsonify({"status": "success", "message": f"Notification sent to {supervisor[2]}"}), 200
+        return jsonify({"status": "success", "message": f"Notification sent to {user[2]}"}), 200
     except Exception as e:
         logging.error(f"Error in notify_supervisor: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/admin/supervisors/<int:sv_id>/operators', methods=['GET'])
-@require_auth
+@app.route('/api/admin/sv_operators', methods=['GET'])
 @require_api_key
-def get_supervisor_operators(sv_id):
+def get_sv_operators():
     try:
-        user = db.get_user(id=request.user_id)
-        if user[3] != 'admin':
-            return jsonify({"error": "Unauthorized: Admin access required"}), 403
-
-        supervisor = db.get_user(id=sv_id)
-        if not supervisor or supervisor[3] != 'sv':
-            return jsonify({"error": "Supervisor not found"}), 404
+        sv_id = request.args.get('sv_id')
+        if not sv_id:
+            return jsonify({"error": "Missing sv_id parameter"}), 400
         
-        table_url = supervisor[9]
+        sv_id = int(sv_id)
+        user = db.get_user(id=sv_id)
+        if not user or user[3] != 'sv':
+            return jsonify({"error": "SV not found"}), 404
+        
+        table_url = user[6]  # table_url stored in 7th column
         operators = []
         error = None
+        
         if table_url:
             sheet_name, operators, error = extract_fio_and_links(table_url)
             if error:
@@ -411,203 +371,60 @@ def get_supervisor_operators(sv_id):
             "operators_with_issues": operators_with_issues,
             "current_week": current_week,
             "expected_calls": expected_calls
-        }), 200
+        })
     except Exception as e:
-        logging.error(f"Error fetching supervisor operators: {e}")
+        logging.error(f"Error fetching SV operators: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/admin/reports/weekly', methods=['POST'])
-@require_auth
+@app.route('/api/admin/generate_report', methods=['GET'])
 @require_api_key
-def generate_weekly_report_endpoint():
+def handle_generate_report():
     try:
-        user = db.get_user(id=request.user_id)
-        if user[3] != 'admin':
-            return jsonify({"error": "Unauthorized: Admin access required"}), 403
-
         if not report_lock.acquire(blocking=False):
             return jsonify({"error": "Report generation is already in progress"}), 429
-        
+            
         executor_pool.submit(sync_generate_weekly_report)
-        return jsonify({"status": "success", "message": "Report generation started"}), 202
+        return jsonify({"status": "success", "message": "Report generation started"})
     except Exception as e:
         logging.error(f"Error in generate_report: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/api/users/<int:user_id>/table', methods=['PUT'])
-@require_auth
-def update_user_table(user_id):
+@app.route('/api/sv/update_table', methods=['POST'])
+def update_sv_table():
     try:
-        user = db.get_user(id=request.user_id)
-        target_user = db.get_user(id=user_id)
-        if user[3] not in ['admin', 'sv'] or (user[3] == 'sv' and user[0] != user_id):
-            return jsonify({"error": "Unauthorized access"}), 403
-
         data = request.get_json()
-        if not data or 'table_url' not in data:
-            return jsonify({"error": "Missing table_url field"}), 400
+        required_fields = ['id', 'table_url']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields"}), 400
 
+        user_id = int(data['id'])
         table_url = data['table_url']
+        
+        user = db.get_user(id=user_id)
+        if not user or user[3] not in ['sv', 'operator']:
+            return jsonify({"error": "User not found"}), 404
+        
         sheet_name, operators, error = extract_fio_and_links(table_url)
         if error:
             return jsonify({"error": error}), 400
         
-        db.update_user_table(user_id, scores_table_url=table_url)
+        db.update_user_table(user_id = user_id, scores_table_url = table_url)
         
         telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
         payload = {
-            "chat_id": target_user[1],
+            "chat_id": user[1],
             "text": f"Таблица успешно обновлена <b>успешно✅</b>",
             "parse_mode": "HTML"
         }
         response = requests.post(telegram_url, json=payload, timeout=10)
         if response.status_code != 200:
-            logging.error(f"Telegram API error: {response.json().get('description', 'Unknown error')}")
+            error_detail = response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error: {error_detail}")
         
-        return jsonify({
-            "status": "success",
-            "message": "Table updated",
-            "operators": operators
-        }), 200
+        return jsonify({"status": "success", "message": "Table updated", "operators": operators})
     except Exception as e:
         logging.error(f"Error updating table: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/api/evaluations', methods=['POST'])
-@require_auth
-@require_api_key
-def submit_call_evaluation():
-    try:
-        user = db.get_user(id=request.user_id)
-        if user[3] not in ['admin', 'sv']:
-            return jsonify({"error": "Unauthorized: Supervisor or Admin access required"}), 403
-
-        data = request.get_json()
-        required_fields = ['evaluator', 'operator', 'call_number', 'phone_number', 'score', 'comment']
-        if not data or not all(field in data for field in required_fields):
-            return jsonify({"error": "Missing or invalid required fields"}), 400
-
-        month = data.get('month', datetime.now().strftime('%Y-%m'))
-        evaluator = db.get_user(name=data['evaluator'])
-        operator = db.get_user(name=data['operator'])
-
-        if not evaluator or not operator:
-            return jsonify({"error": "Evaluator or operator not found"}), 404
-
-        existing_calls = db.get_call_evaluations(operator_id=operator[0], month=month)
-        is_correction = any(call['call_number'] == data['call_number'] for call in existing_calls)
-
-        db.add_call_evaluation(
-            evaluator_id=evaluator[0],
-            operator_id=operator[0],
-            month=month,
-            call_number=data['call_number'],
-            phone_number=data['phone_number'],
-            score=data['score'],
-            comment=data['comment']
-        )
-
-        message = (
-            f"📞 <b>Оценка звонка{' (корректировка)' if is_correction else ''}</b>\n"
-            f"👤 Оценивающий: <b>{evaluator[2]}</b>\n"
-            f"📋 Оператор: <b>{operator[2]}</b>\n"
-            f"📄 За месяц: <b>{month}</b>\n"
-            f"📞 Звонок: <b>№{data['call_number']}</b>\n"
-            f"📱 Номер телефона: <b>{data['phone_number']}</b>\n"
-            f"💯 Оценка: <b>{data['score']}</b>\n"
-        )
-        if data['score'] < 100 and data['comment']:
-            message += f"\n💬 Комментарий: \n{data['comment']}\n"
-
-        admin = db.get_user(role='admin')
-        if admin:
-            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": admin[1],
-                "text": message,
-                "parse_mode": "HTML"
-            }
-            response = requests.post(telegram_url, json=payload, timeout=10)
-            if response.status_code != 200:
-                logging.error(f"Telegram API error: {response.json().get('description', 'Unknown error')}")
-
-        return jsonify({"status": "success", "message": "Evaluation submitted"}), 201
-    except Exception as e:
-        logging.error(f"Error processing call evaluation: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/api/admin/operators', methods=['POST'])
-@require_auth
-@require_api_key
-def add_operator():
-    try:
-        user = db.get_user(id=request.user_id)
-        if user[3] != 'admin':
-            return jsonify({"error": "Unauthorized: Admin access required"}), 403
-
-        data = request.get_json()
-        required_fields = ['name', 'telegram_id', 'supervisor_id']
-        if not data or not all(field in data for field in required_fields):
-            return jsonify({"error": "Missing required fields: name, telegram_id, supervisor_id"}), 400
-
-        name = data['name']
-        telegram_id = int(data['telegram_id'])
-        supervisor_id = int(data['supervisor_id'])
-        
-        if db.get_user(telegram_id=telegram_id):
-            return jsonify({"error": "Operator with this Telegram ID already exists"}), 400
-        
-        operator_id = db.create_user(
-            telegram_id=telegram_id,
-            name=name,
-            role='operator',
-            supervisor_id=supervisor_id
-        )
-        
-        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": telegram_id,
-            "text": f"Вы добавлены как оператор в команду <b>успешно✅</b>",
-            "parse_mode": "HTML"
-        }
-        response = requests.post(telegram_url, json=payload, timeout=10)
-        if response.status_code != 200:
-            logging.error(f"Telegram API error: {response.json().get('description', 'Unknown error')}")
-        
-        return jsonify({
-            "status": "success",
-            "message": f"Operator {name} added",
-            "id": operator_id
-        }), 201
-    except Exception as e:
-        logging.error(f"Error adding operator: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/api/users/<int:user_id>/hours', methods=['GET'])
-@require_auth
-def get_user_hours(user_id):
-    try:
-        user = db.get_user(id=request.user_id)
-        target_user = db.get_user(id=user_id)
-        if not target_user or (user[3] != 'admin' and user[3] != 'sv' and user[0] != user_id):
-            return jsonify({"error": "Unauthorized or user not found"}), 403
-
-        month = request.args.get('month', datetime.now().strftime('%Y-%m'))
-        hours_data = db.get_hours_summary(operator_id=user_id, month=month)
-        if not hours_data:
-            return jsonify({"status": "success", "hours": {}}), 200
-        
-        return jsonify({
-            "status": "success",
-            "hours": hours_data[0]
-        }), 200
-    except Exception as e:
-        logging.error(f"Error fetching user hours: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-def run_flask():
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False, use_reloader=False)
-
 
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
@@ -675,6 +492,49 @@ def receive_call_evaluation():
         logging.error(f"Error processing call evaluation: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/admin/add_operator', methods=['POST'])
+@require_api_key
+def add_operator():
+    try:
+        data = request.get_json()
+        required_fields = ['name', 'telegram_id', 'supervisor_id']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        name = data['name']
+        telegram_id = int(data['telegram_id'])
+        supervisor_id = int(data['supervisor_id'])
+        
+        # Проверяем существование пользователя
+        if db.get_user(telegram_id=telegram_id):
+            return jsonify({"error": "Operator with this Telegram ID already exists"}), 400
+        
+        # Создаем оператора
+        operator_id = db.create_user(
+            telegram_id=telegram_id,
+            name=name,
+            role='operator',
+            supervisor_id=supervisor_id
+        )
+        
+        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": telegram_id,
+            "text": f"Вы добавлены как оператор в команду <b>успешно✅</b>",
+            "parse_mode": "HTML"
+        }
+        response = requests.post(telegram_url, json=payload, timeout=10)
+        if response.status_code != 200:
+            error_detail = response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error: {error_detail}")
+        
+        return jsonify({"status": "success", "message": f"Operator {name} added", "id": operator_id})
+    except Exception as e:
+        logging.error(f"Error adding operator: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+def run_flask():
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False, use_reloader=False)
 
 # === Классы =====================================================================================================
 class new_sv(StatesGroup):
