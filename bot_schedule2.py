@@ -807,10 +807,10 @@ async def process_password(message: types.Message, state: FSMContext):
                 parse_mode='HTML',
                 reply_markup=get_sv_keyboard()
             )
-        elif user[3] == 'operator':
+        elif role == 'operator':
             await message.answer(
                 chat_id=message.from_user.id,
-                text=f"<b>Добро пожаловать, оператор {user[2]}!</b>\n\n"
+                text=f"<b>Добро пожаловать, оператор {name}!</b>\n\n"
                     "Используйте кнопки ниже для просмотра вашей статистики.",
                 parse_mode='HTML',
                 reply_markup=get_operator_keyboard()
