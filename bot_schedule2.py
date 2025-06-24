@@ -568,6 +568,14 @@ class Auth(StatesGroup):
 
 MAX_LOGIN_ATTEMPTS = 3
 
+def get_access_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton('Сменить логин'))
+    kb.insert(KeyboardButton('Сменить пароль'))
+    kb.add(KeyboardButton('Выход🚪')) 
+    kb.add(KeyboardButton('Отмена ❌'))
+    return kb
+
 def get_current_week_of_month():
     today = datetime.now()
     week_number = (today.day - 1) // 7 + 1
@@ -658,6 +666,10 @@ async def cancel_handler(message: types.Message, state: FSMContext):
     user = db.get_user(telegram_id=message.from_user.id)
     if user and user[3] == 'admin':
         kb = get_admin_keyboard()
+    if user and user[3] == 'sv':
+        kb = get_sv_keyboard()
+    elif user and user[3] == 'operator':
+        kb = get_operator_keyboard()
     else:
         kb = ReplyKeyboardRemove()
     await bot.send_message(
@@ -692,8 +704,10 @@ async def start_command(message: types.Message):
         elif user[3] == 'operator':
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text=f"<b>Бобро пожаловать, оператор {user[2]}!</b>",
-                parse_mode='HTML'
+                text=f"<b>Добро пожаловать, оператор {user[2]}!</b>\n\n"
+                    "Используйте кнопки ниже для просмотра вашей статистики.",
+                parse_mode='HTML',
+                reply_markup=get_operator_keyboard()
             )
     else:
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -707,6 +721,17 @@ async def start_command(message: types.Message):
 
 @dp.message_handler(regexp='Вход👤')
 async def start_auth(message: types.Message):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user:
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text=f"<b>Вы уже авторизованы как {user[2]} ({user[3]})</b>.\n\n",
+            parse_mode='HTML',
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await message.delete()
+        return
+    
     await message.delete()
     await message.answer(
         "<b>Введите ваш логин:</b>",
@@ -1789,21 +1814,16 @@ async def save_hours_table(message: types.Message, state: FSMContext):
 @dp.message_handler(regexp='Доступ🔑')
 async def change_credentials_menu(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)
-    if user:
-        kb = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add(KeyboardButton('Изменить логин'))
-        kb.add(KeyboardButton('Изменить пароль'))
-        kb.add(KeyboardButton('Назад 🔙'))
-        
+    if user:        
         await bot.send_message(
             chat_id=message.from_user.id,
             text="<b>Выберите что хотите изменить:</b>",
             parse_mode='HTML',
-            reply_markup=kb
+            reply_markup=get_access_keyboard()
         )
     await message.delete()
 
-@dp.message_handler(regexp='Изменить логин')
+@dp.message_handler(regexp='Сменить логин')
 async def change_login_start(message: types.Message):
     await bot.send_message(
         chat_id=message.from_user.id,
@@ -1857,7 +1877,7 @@ async def process_new_login(message: types.Message, state: FSMContext):
     await state.finish()
     await message.delete()
 
-@dp.message_handler(regexp='Изменить пароль')
+@dp.message_handler(regexp='Сменить пароль')
 async def change_password_start(message: types.Message):
     await bot.send_message(
         chat_id=message.from_user.id,
@@ -1924,6 +1944,26 @@ async def process_new_password(message: types.Message, state: FSMContext):
     await state.finish()
     await message.delete()
 
+@dp.message_handler(regexp='Выход🚪')
+async def logout_user(message: types.Message):
+    user = db.get_user(telegram_id=message.from_user.id)
+    if user:
+        # Обнуляем telegram_id в базе данных
+        with db._get_cursor() as cursor:
+            cursor.execute("UPDATE users SET telegram_id = NULL WHERE id = %s", (user[0],))
+        await bot.send_message(  
+            chat_id=message.from_user.id,
+            text="✅ <b>Вы успешно вышли из системы.</b>Для входа снова нажмите 'Вход👤'.",
+            parse_mode='HTML',
+            reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton('Вход👤'))
+            )
+    else:
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text="❌ Вы не вошли в систему.",
+            parse_mode='HTML'
+        )
+    await message.delete()
 
 # === Операторам =============================================================================================
 
