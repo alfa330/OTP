@@ -50,7 +50,7 @@ executor_pool = ThreadPoolExecutor(max_workers=4)
 
 # === Flask-сервер ================================================================================================
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["https://alfa330.github.io", "http://localhost:3000", "*"]}})
+CORS(app, resources={r"/api/*": {"origins": ["https://alfa330.github.io/OTP/", "http://localhost:3000", "*"]}})
 
 def require_api_key(f):
     @wraps(f)
