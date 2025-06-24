@@ -1421,8 +1421,7 @@ async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
     for op in operators_with_issues:
         ikb.add(InlineKeyboardButton(
             text=f"Уведомить о {op['name']}",
-            callback_data=f"notify_{sv_id}_{op['name'].split(" ")[1]}"
-        ))
+            callback_data=f"notify_{sv_id}_{1}"))
     
     await bot.send_message(
         chat_id=callback.from_user.id,
