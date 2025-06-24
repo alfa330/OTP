@@ -834,7 +834,6 @@ async def process_password(message: types.Message, state: FSMContext):
             )
         elif role == 'operator':
             await message.answer(
-                chat_id=message.from_user.id,
                 text=f"<b>Добро пожаловать, оператор {name}!</b>\n\n"
                     "Используйте кнопки ниже для просмотра вашей статистики.",
                 parse_mode='HTML',
