@@ -26,7 +26,7 @@
     <div id="root"></div>
 
     <script type="text/babel" data-presets="react">
-        const { useState, useEffect } = React;
+        const { useState, useEffect, Component } = React;
 
         // API Base URL
         const API_BASE_URL = 'https://otp-wif3.onrender.com/api';
@@ -39,6 +39,28 @@
                 'X-API-Key': apiKey || ''
             };
         };
+
+        // Error Boundary Component
+        class ErrorBoundary extends Component {
+            state = { error: null };
+
+            static getDerivedStateFromError(error) {
+                return { error: error.message };
+            }
+
+            render() {
+                if (this.state.error) {
+                    return (
+                        <div className="flex items-center justify-center min-h-screen">
+                            <div className="bg-white p-8 rounded-lg shadow-lg">
+                                <p className="text-red-500 text-center">An error occurred: {this.state.error}</p>
+                            </div>
+                        </div>
+                    );
+                }
+                return this.props.children;
+            }
+        }
 
         // Login Component
         const Login = ({ setUser }) => {
@@ -601,14 +623,14 @@
                                 </tr>
                             </thead>
                             <tbody>
-                                {evaluations.map((eval) => (
-                                    <tr key={eval.call_number} className="border">
-                                        <td className="p-2">{eval.call_number} {eval.is_correction ? '(Correction)' : ''}</td>
-                                        <td className="p-2">{eval.month}</td>
-                                        <td className="p-2">{eval.phone_number}</td>
-                                        <td className="p-2">{eval.score}</td>
-                                        <td className="p-2">{eval.comment || 'N/A'}</td>
-                                        <td className="p-2">{eval.evaluation_date}</td>
+                                {evaluations.map((evaluation) => (
+                                    <tr key={evaluation.call_number} className="border">
+                                        <td className="p-2">{evaluation.call_number} {evaluation.is_correction ? '(Correction)' : ''}</td>
+                                        <td className="p-2">{evaluation.month}</td>
+                                        <td className="p-2">{evaluation.phone_number}</td>
+                                        <td className="p-2">{evaluation.score}</td>
+                                        <td className="p-2">{evaluation.comment || 'N/A'}</td>
+                                        <td className="p-2">{evaluation.evaluation_date}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -696,20 +718,20 @@
                 }
             }, [apiKey]);
 
-            if (error) {
-                return (
-                    <div className="flex items-center justify-center min-h-screen">
-                        <div className="bg-white p-8 rounded-lg shadow-lg">
-                            <p className="text-red-500 text-center">{error}</p>
-                        </div>
-                    </div>
-                );
-            }
-
             return (
-                <div>
-                    {user ? <Dashboard user={user} setUser={setUser} apiKey={apiKey} /> : <Login setUser={setUser} />}
-                </div>
+                <ErrorBoundary>
+                    {error ? (
+                        <div className="flex items-center justify-center min-h-screen">
+                            <div className="bg-white p-8 rounded-lg shadow-lg">
+                                <p className="text-red-500 text-center">{error}</p>
+                            </div>
+                        </div>
+                    ) : (
+                        <div>
+                            {user ? <Dashboard user={user} setUser={setUser} apiKey={apiKey} /> : <Login setUser={setUser} />}
+                        </div>
+                    )}
+                </ErrorBoundary>
             );
         };
 
