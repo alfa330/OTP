@@ -50,7 +50,7 @@ executor_pool = ThreadPoolExecutor(max_workers=4)
 
 # === Flask-сервер ================================================================================================
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["https://alfa330.github.io/OTP/", "http://localhost:3000"]}})
+CORS(app, resources={r"/api/*": {"origins": ["https://alfa330.github.io"]}})
 
 def require_api_key(f):
     @wraps(f)
@@ -78,6 +78,7 @@ def health_check():
         logging.error(f"Health check failed: {e}")
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
+# Your existing login endpoint
 @app.route('/api/login', methods=['POST'])
 def login():
     try:
