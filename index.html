@@ -127,7 +127,7 @@
             };
 
             const getHoursPerformanceColor = (hours, norm) => {
-                if (hours >= norm) return 'text-green-600';
+                if (hours >= norm * 0.9) return 'text-green-600';
                 if (hours >= norm * 0.5) return 'text-yellow-600';
                 return 'text-red-600';
             };
