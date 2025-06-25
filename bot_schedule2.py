@@ -109,38 +109,58 @@ def login():
 @require_api_key
 def get_user_profile():
     try:
-        user_id = request.args.get('id')
+        user_id = request.args.get('user_id')  # Changed to 'user_id' for consistency
         if not user_id:
+            logging.warning("Missing user_id parameter in profile request")
             return jsonify({"error": "Missing user_id parameter"}), 400
 
-        user_id = int(user_id)
+        try:
+            user_id = int(user_id)
+        except ValueError:
+            logging.error(f"Invalid user_id format: {user_id}")
+            return jsonify({"error": "Invalid user_id format"}), 400
+
+        # Test database connectivity
+        try:
+            with db._get_cursor() as cursor:
+                cursor.execute("SELECT 1")
+        except Exception as e:
+            logging.error(f"Database connectivity check failed: {str(e)}")
+            return jsonify({"error": "Database connectivity issue"}), 500
+
+        # Fetch user data
         user = db.get_user(id=user_id)
         if not user:
+            logging.warning(f"User not found with ID: {user_id}")
             return jsonify({"error": "User not found"}), 404
 
         # Fetch supervisor name if supervisor_id exists
         supervisor_name = None
         if user[6]:  # supervisor_id is at index 6
             supervisor = db.get_user(id=user[6])
-            if supervisor:
-                supervisor_name = supervisor[2]  # name is at index 2
+            supervisor_name = supervisor[2] if supervisor else None
 
         # Format hire_date if it exists
         hire_date = user[5].strftime('%Y-%m-%d') if user[5] else None
 
+        # Construct profile data with fallback values
         profile_data = {
-            "name": user[2],
-            "role": user[3],
-            "direction": user[4],
+            "id": user[0],
+            "name": user[2] or "Unknown",
+            "role": user[3] or "Unknown",
+            "direction": user[4] or None,
             "hire_date": hire_date,
             "supervisor_name": supervisor_name,
-            "scores_table_url": user[9],
-            "hours_table_url": user[8]
+            "telegram_id": user[1] or None,
+            "scores_table_url": user[9] or None,
+            "hours_table_url": user[8] or None
         }
 
+        logging.info(f"Profile data fetched successfully for user_id: {user_id}")
         return jsonify({"status": "success", "profile": profile_data}), 200
+
     except Exception as e:
-        logging.error(f"Error fetching user profile: {e}")
+        logging.error(f"Error fetching user profile for user_id {user_id}: {str(e)}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/user/hours', methods=['GET'])
