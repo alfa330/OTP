@@ -152,13 +152,16 @@ def get_user_hours():
             return jsonify({"error": "Missing operator_id parameter"}), 400
 
         operator_id = int(operator_id)
-        # Assuming db is the instance of your Database class
-        hours_summary = db.get_hours_summary(operator_id=operator_id)
+        month = datetime.now().strftime('%Y-%m')  # Default to current month
+        hours_summary = db.get_hours_summary(operator_id=operator_id, month=month)
+        
         if not hours_summary:
-            return jsonify({"success": False, "error": "No hours data found for this operator"}), 404
+            return jsonify({"error": "No hours data found for this operator"}), 404
 
-        # Return the first record since operator_id should return one row
-        return jsonify({"success": True, "status": "success", "hours": hours_summary[0]}), 200
+        # Assuming get_hours_summary returns a list, take the first item
+        hours_data = hours_summary[0]
+
+        return jsonify({"status": "success", "hours": hours_data}), 200
     except Exception as e:
         logging.error(f"Error fetching hours data: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
