@@ -273,7 +273,7 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/user/profile?id=${user.id}`, {
+                    const response = await axios.get(`${API_BASE_URL}/api/user/profile?operator_id=${user.id}`, {
                         headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
