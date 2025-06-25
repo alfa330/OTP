@@ -50,7 +50,7 @@ executor_pool = ThreadPoolExecutor(max_workers=4)
 
 # === Flask-сервер ================================================================================================
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["https://alfa330.github.io"]}})
+CORS(app, resources={r"/api/*": {"origins": ["https://alfa330.github.io", "http://localhost:3000"]}})
 
 def require_api_key(f):
     @wraps(f)
@@ -78,7 +78,6 @@ def health_check():
         logging.error(f"Health check failed: {e}")
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
-# Your existing login endpoint
 @app.route('/api/login', methods=['POST'])
 def login():
     try:
@@ -104,47 +103,6 @@ def login():
         return jsonify({"error": "Invalid credentials"}), 401
     except Exception as e:
         logging.error(f"Login error: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/api/sv/update_operator_credentials', methods=['POST'])
-@require_api_key
-def update_operator_credentials():
-    try:
-        data = request.get_json()
-        required_fields = ['supervisor_id', 'operator_id', 'field', 'value']
-        if not data or not all(field in data for field in required_fields):
-            return jsonify({"error": "Missing required fields"}), 400
-        supervisor_id = int(data['supervisor_id'])
-        operator_id = int(data['operator_id'])
-        field = data['field']
-        value = data['value']
-        if field == 'login':
-            success = db.update_operator_login(operator_id, supervisor_id, value)
-        elif field == 'password':
-            success = db.update_operator_password(operator_id, supervisor_id, value)
-        else:
-            return jsonify({"error": "Invalid field specified"}), 400
-        if success:
-            return jsonify({"status": "success", "message": f"Operator {field} updated"})
-        return jsonify({"error": "Failed to update operator credentials"}), 400
-    except Exception as e:
-        logging.error(f"Error updating operator credentials: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/api/operator/stats', methods=['GET'])
-def get_operator_stats():
-    try:
-        operator_id = request.args.get('operator_id')
-        if not operator_id:
-            return jsonify({"error": "Missing operator_id parameter"}), 400
-        operator_id = int(operator_id)
-        user = db.get_user(id=operator_id)
-        if not user or user[3] != 'operator':
-            return jsonify({"error": "Operator not found"}), 404
-        stats = db.get_operator_stats(operator_id)
-        return jsonify({"status": "success", "stats": stats})
-    except Exception as e:
-        logging.error(f"Error fetching operator stats: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/admin/sv_list', methods=['GET'])
