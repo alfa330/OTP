@@ -55,11 +55,9 @@
             const [svList, setSvList] = useState([]);
             const [svData, setSvData] = useState(null);
             const [operatorData, setOperatorData] = useState(null);
-            const [profileData, setProfileData] = useState(null); // New state for profile data
-            const [showProfile, setShowProfile] = useState(false); // New state for profile visibility
-            const [newSvName, setNewSvName] = useState('');
-            const [newSvId, setNewSvId] = useState('');
-            const [newTableUrl, setNewTableUrl] = useState('');
+            const [hoursData, setHoursData] = useState(null); // New state for hours data
+            const [profileData, setProfileData] = useState(null); // State for profile data
+            const [showSection, setShowSection] = useState('none'); // Controls visible section: 'none', 'hours', or 'evaluations'
             const [isLoading, setIsLoading] = useState(false);
             const [isAdminDataLoading, setIsAdminDataLoading] = useState(false);
             const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
@@ -76,6 +74,9 @@
             });
             const [showEvaluationForm, setShowEvaluationForm] = useState(false);
             const [showChangeTableForm, setShowChangeTableForm] = useState(false);
+            const [newSvName, setNewSvName] = useState('');
+            const [newSvId, setNewSvId] = useState('');
+            const [newTableUrl, setNewTableUrl] = useState('');
             const [currentSvForTableChange, setCurrentSvForTableChange] = useState(null);
 
             const debouncedFetch = useCallback(_.debounce((fn) => {
@@ -110,6 +111,12 @@
                 return 'text-red-600';
             };
 
+            const getHoursPercentageColor = (percentage) => {
+                if (percentage >= 100) return 'text-green-600';
+                if (percentage >= 50) return 'text-yellow-500';
+                return 'text-red-600';
+            };
+
             const getCurrentWeekOfMonth = () => {
                 const today = new Date();
                 const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
@@ -119,6 +126,15 @@
 
             const getExpectedCalls = (weekNumber) => {
                 return weekNumber * 5;
+            };
+
+            const formatComment = (comment) => {
+                if (!comment || comment === '-') return '-';
+                const parts = comment.split(': ');
+                if (parts.length < 2) return comment;
+                const criterion = parts[0];
+                const commentText = parts.slice(1).join(': ');
+                return `<b>${criterion}</b>: <i>${commentText}</i>`;
             };
 
             const handleLogin = async () => {
@@ -173,8 +189,9 @@
                 setSvList([]);
                 setSvData(null);
                 setOperatorData(null);
+                setHoursData(null);
                 setProfileData(null);
-                setShowProfile(false);
+                setShowSection('none');
                 setLogin('');
                 setPassword('');
                 setShowLogoutConfirm(false);
@@ -242,6 +259,27 @@
                 }
             };
 
+            const fetchHoursData = async () => {
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await axios.get(`${API_BASE_URL}/api/operator/hours?operator_id=${user.id}`, {
+                        headers: { 'X-API-Key': user.apiKey }
+                    });
+                    const data = response.data;
+                    if (data.status === 'success') {
+                        setHoursData(data.hours);
+                    } else {
+                        setError(data.error || 'Failed to fetch hours data');
+                    }
+                } catch (err) {
+                    console.error('Fetch hours data error:', err);
+                    setError(err.response?.data?.error || 'Failed to fetch hours data');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
             const fetchProfileData = async () => {
                 setIsLoading(true);
                 clearMessages();
@@ -252,7 +290,6 @@
                     const data = response.data;
                     if (data.status === 'success') {
                         setProfileData(data.profile);
-                        setShowProfile(true);
                     } else {
                         setError(data.error || 'Failed to fetch profile data');
                     }
@@ -536,10 +573,17 @@
                     } else if (user.role === 'sv') {
                         debouncedFetch(fetchSvData);
                     } else if (user.role === 'operator') {
+                        debouncedFetch(fetchProfileData); // Fetch profile data on login
                         debouncedFetch(fetchOperatorData);
                     }
                 }
             }, [user]);
+
+            useEffect(() => {
+                if (user && user.role === 'operator' && showSection === 'hours') {
+                    debouncedFetch(fetchHoursData);
+                }
+            }, [user, showSection]);
 
             useEffect(() => {
                 if (user && user.role === 'admin' && selectedSvId) {
@@ -1004,24 +1048,15 @@
                     <div className="min-h-screen bg-gray-100 p-6">
                         <div className="flex justify-between items-center mb-6">
                             <h1 className="text-3xl font-bold">Operator Dashboard</h1>
-                            <div className="flex space-x-4">
-                                <button
-                                    onClick={fetchProfileData}
-                                    className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600"
-                                    disabled={isLoading}
-                                >
-                                    {isLoading ? 'Loading...' : 'View Profile'}
-                                </button>
-                                <button
-                                    onClick={handleLogout}
-                                    className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700"
-                                >
-                                    Logout
-                                </button>
-                            </div>
+                            <button
+                                onClick={handleLogout}
+                                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700"
+                            >
+                                Logout
+                            </button>
                         </div>
 
-                        {showProfile && profileData && (
+                        {profileData ? (
                             <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                                 <h2 className="text-xl font-semibold mb-4">Your Profile</h2>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1062,52 +1097,104 @@
                                         )}
                                     </div>
                                 </div>
-                                <button
-                                    onClick={() => setShowProfile(false)}
-                                    className="mt-4 bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                >
-                                    Close Profile
-                                </button>
+                            </div>
+                        ) : (
+                            <p className="text-center">Loading profile data...</p>
+                        )}
+
+                        <div className="flex space-x-4 mb-6">
+                            <button
+                                onClick={() => setShowSection('hours')}
+                                className={`px-4 py-2 rounded-lg ${showSection === 'hours' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
+                                disabled={isLoading}
+                            >
+                                My Hours
+                            </button>
+                            <button
+                                onClick={() => setShowSection('evaluations')}
+                                className={`px-4 py-2 rounded-lg ${showSection === 'evaluations' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
+                                disabled={isLoading}
+                            >
+                                Call Evaluations
+                            </button>
+                        </div>
+
+                        {showSection === 'hours' && (
+                            <div className="bg-white p-6 rounded-lg shadow-lg">
+                                <h2 className="text-xl font-semibold mb-4">Your Hours</h2>
+                                {isLoading ? (
+                                    <p className="text-center">Loading...</p>
+                                ) : hoursData && hoursData.length > 0 ? (
+                                    <div className="overflow-x-auto">
+                                        <table className="min-w-full bg-white border-collapse">
+                                            <thead>
+                                                <tr className="bg-gray-100">
+                                                    <th className="p-3 border-b text-left">Month</th>
+                                                    <th className="p-3 border-b text-left">Expected Hours</th>
+                                                    <th className="p-3 border-b text-left">Actual Hours</th>
+                                                    <th className="p-3 border-b text-left">Percentage</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {hoursData.map((entry, index) => (
+                                                    <tr key={index} className="hover:bg-gray-50">
+                                                        <td className="p-3 border-b">{entry.month}</td>
+                                                        <td className="p-3 border-b">{entry.expected_hours}</td>
+                                                        <td className="p-3 border-b">{entry.actual_hours}</td>
+                                                        <td className={`p-3 border-b ${getHoursPercentageColor(entry.percentage)}`}>
+                                                            {entry.percentage.toFixed(2)}%
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                ) : (
+                                    <p className="text-center">No hours data found.</p>
+                                )}
                             </div>
                         )}
 
-                        <div className="bg-white p-6 rounded-lg shadow-lg">
-                            <h2 className="text-xl font-semibold mb-4">Your Call Evaluations</h2>
-                            {isLoading ? (
-                                <p className="text-center">Loading...</p>
-                            ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
-                                <div className="overflow-x-auto">
-                                    <table className="min-w-full bg-white border-collapse">
-                                        <thead>
-                                            <tr className="bg-gray-100">
-                                                <th className="p-3 border-b text-left">Call Number</th>
-                                                <th className="p-3 border-b text-left">Phone Number</th>
-                                                <th className="p-3 border-b text-left">Score</th>
-                                                <th className="p-3 border-b text-left">Comment</th>
-                                                <th className="p-3 border-b text-left">Month</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {operatorData.evaluations.map((eval1, index) => (
-                                                <tr key={index} className="hover:bg-gray-50">
-                                                    <td className="p-3 border-b">{eval1.call_number}</td>
-                                                    <td className="p-3 border-b">{eval1.phone_number}</td>
-                                                    <td className={`p-3 border-b ${getScoreColor(eval1.score)}`}>
-                                                        {eval1.score}
-                                                    </td>
-                                                    <td className="p-3 border-b">{eval1.comment || '-'}</td>
-                                                    <td className="p-3 border-b">{eval1.month}</td>
+                        {showSection === 'evaluations' && (
+                            <div className="bg-white p-6 rounded-lg shadow-lg">
+                                <h2 className="text-xl font-semibold mb-4">Your Call Evaluations</h2>
+                                {isLoading ? (
+                                    <p className="text-center">Loading...</p>
+                                ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
+                                    <div className="overflow-x-auto">
+                                        <table className="min-w-full bg-white border-collapse">
+                                            <thead>
+                                                <tr className="bg-gray-100">
+                                                    <th className="p-3 border-b text-left">Call Number</th>
+                                                    <th className="p-3 border-b text-left">Phone Number</th>
+                                                    <th className="p-3 border-b text-left">Score</th>
+                                                    <th className="p-3 border-b text-left">Comment</th>
+                                                    <th className="p-3 border-b text-left">Month</th>
                                                 </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            ) : (
-                                <p className="text-center">No evaluations found.</p>
-                            )}
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                        </div>
+                                            </thead>
+                                            <tbody>
+                                                {operatorData.evaluations.map((eval1, index) => (
+                                                    <tr key={index} className="hover:bg-gray-50">
+                                                        <td className="p-3 border-b">{eval1.call_number}</td>
+                                                        <td className="p-3 border-b">{eval1.phone_number}</td>
+                                                        <td className={`p-3 border-b ${getScoreColor(eval1.score)}`}>
+                                                            {eval1.score}
+                                                        </td>
+                                                        <td className="p-3 border-b" dangerouslySetInnerHTML={{ __html: formatComment(eval1.comment) }} />
+                                                        <td className="p-3 border-b">{eval1.month}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                ) : (
+                                    <p className="text-center">No evaluations found.</p>
+                                )}
+                            </div>
+                        )}
+
+                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                     </div>
                 );
             }
