@@ -1283,8 +1283,13 @@
                                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                                             <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-2">
                                                 <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Total Evaluated Calls</p>
-                                                    <p className="text-lg font-semibold text-gray-900">{operatorData.evaluations.length}</p>
+                                                    <p className="text-sm font-medium text-gray-500 mb-2">Total Evaluated Calls</p>
+                                                    <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
+                                                    <p className={`text-lg font-medium mt-2 ${
+                                                        (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
+                                                    }`}>
+                                                        {20 - operatorData.evaluations.length} calls remaining out of 20
+                                                    </p>
                                                 </div>
                                             </div>
                                             <div className="col-span-1 flex justify-center items-center">
@@ -1314,10 +1319,20 @@
                                                             </td>
                                                             <td className="p-4 border-b text-sm">
                                                                 {eval1.comment ? (
-                                                                    <span dangerouslySetInnerHTML={{ __html: eval1.comment.replace(
-                                                                        /(\w+): ([^:]+)/g,
-                                                                        '<b>$1</b>: <i>$2</i>\n'
-                                                                    ) }} />
+                                                                    <div className="space-y-1">
+                                                                        {eval1.comment.split('\n').map((line, i) => {
+                                                                            const match = line.match(/^(.*?):\s*(.*)$/);
+                                                                            if (match) {
+                                                                                return (
+                                                                                    <p key={i} className="text-sm">
+                                                                                        <span className="font-semibold">{match[1]}:</span>{' '}
+                                                                                        <span className="italic">{match[2]}</span>
+                                                                                    </p>
+                                                                                );
+                                                                            }
+                                                                            return <p key={i} className="text-sm">{line}</p>;
+                                                                        })}
+                                                                    </div>
                                                                 ) : '-'}
                                                             </td>
                                                             <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
