@@ -47,7 +47,7 @@
         }
 
         // SemiCircle Progress Component
-        const SemiCircleProgress = ({ percentage }) => {
+        const SemiCircleProgress = ({ percentage, label }) => {
             const canvasRef = useRef(null);
 
             useEffect(() => {
@@ -84,13 +84,13 @@
                 ctx.fillStyle = '#1f2937';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
-                ctx.fillText(`${percentage.toFixed(0)}%`, centerX, centerY - radius - 20);
+                ctx.fillText(`${percentage.toFixed(2)}%`, centerX, centerY - radius - 20);
             }, [percentage]);
 
             return (
-                <div className="flex flex-col items-center">
+                <div className="flex flex-col items-center transition-transform duration-300 hover:scale-105">
                     <canvas ref={canvasRef} width={200} height={120} />
-                    <p className="text-sm font-medium text-gray-600 mt-2">Average Score</p>
+                    <p className="text-sm font-medium text-gray-600 mt-2">{label}</p>
                 </div>
             );
         };
@@ -1132,7 +1132,7 @@
                             <h1 className="text-3xl font-bold">Operator Dashboard</h1>
                             <button
                                 onClick={handleLogout}
-                                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700"
+                                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors duration-200"
                             >
                                 Logout
                             </button>
@@ -1145,27 +1145,27 @@
                                 <p className="text-center text-gray-600">Loading...</p>
                             ) : profileData ? (
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
                                         <p className="text-sm font-medium text-gray-500 mb-1">Name</p>
                                         <p className="text-lg font-medium text-gray-900">{profileData.name || '-'}</p>
                                     </div>
-                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
                                         <p className="text-sm font-medium text-gray-500 mb-1">Role</p>
                                         <p className="text-lg font-medium text-gray-900">{profileData.role || '-'}</p>
                                     </div>
-                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
                                         <p className="text-sm font-medium text-gray-500 mb-1">Direction</p>
                                         <p className="text-lg font-medium text-gray-900">{profileData.direction || '-'}</p>
                                     </div>
-                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
                                         <p className="text-sm font-medium text-gray-500 mb-1">Hire Date</p>
                                         <p className="text-lg font-medium text-gray-900">{profileData.hire_date || '-'}</p>
                                     </div>
-                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
                                         <p className="text-sm font-medium text-gray-500 mb-1">Supervisor</p>
                                         <p className="text-lg font-medium text-gray-900">{profileData.supervisor_name || '-'}</p>
                                     </div>
-                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
                                         <p className="text-sm font-medium text-gray-500 mb-1">Scores Table</p>
                                         {profileData.scores_table_url ? (
                                             <a
@@ -1180,7 +1180,7 @@
                                             <p className="text-lg text-gray-900">-</p>
                                         )}
                                     </div>
-                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
                                         <p className="text-sm font-medium text-gray-500 mb-1">Hours Table</p>
                                         {profileData.hours_table_url ? (
                                             <a
@@ -1204,15 +1204,21 @@
                         {/* View Toggle Buttons */}
                         <div className="flex justify-center space-x-4 mb-6">
                             <button
+                                type="button"
                                 onClick={() => setView('hours')}
-                                className={`px-4 py-2 rounded-lg ${view === 'hours' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
+                                className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
+                                    view === 'hours' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
+                                }`} 
                                 disabled={isLoading}
                             >
                                 My Hours
                             </button>
                             <button
-                                onClick={() => setView('evaluations')}
-                                className={`px-4 py-2 rounded-lg ${view === 'evaluations' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
+                                type="button"
+                                onClick={() => setView('evaluation')}
+                                className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
+                                    view === 'evaluation' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
+                                }`} 
                                 disabled={isLoading}
                             >
                                 Call Evaluations
@@ -1221,34 +1227,34 @@
 
                         {/* Hours Section */}
                         {view === 'hours' && (
-                            <div className="bg-white p-6 rounded-lg shadow-lg">
-                                <h2 className="text-xl font-semibold mb-4">Your Work Hours</h2>
+                            <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
                                 {isLoading ? (
-                                    <p className="text-center">Loading...</p>
+                                    <p className="text-center text-gray-600">Loading...</p>
                                 ) : hoursData ? (
-                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                        <div className="col-span-1 md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
-                                            <div>
-                                                <p className="text-sm font-medium text-gray-600">Regular Hours</p>
-                                                <p className={`text-lg ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                        <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Regular Hours</p>
+                                                <p className={`text-lg font-semibold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
                                                     {hoursData.regular_hours.toFixed(2)} hours
                                                 </p>
                                             </div>
-                                            <div>
-                                                <p className="text-sm font-medium text-gray-600">Training Hours</p>
-                                                <p className="text-lg">{hoursData.training_hours.toFixed(2)} hours</p>
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Training Hours</p>
+                                                <p className="text-lg font-semibold">{hoursData.training_hours.toFixed(2)} hours</p>
                                             </div>
-                                            <div>
-                                                <p className="text-sm font-medium text-gray-600">Fines</p>
-                                                <p className="text-lg text-red-600">{hoursData.fines.toFixed(2)}</p>
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Fines</p>
+                                                <p className="text-lg font-semibold text-red-600">{hoursData.fines.toFixed(2)}</p>
                                             </div>
-                                            <div>
-                                                <p className="text-sm font-medium text-gray-600">Norm Hours</p>
-                                                <p className="text-lg">{hoursData.norm_hours.toFixed(2)} hours</p>
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Norm Hours</p>
+                                                <p className="text-lg font-semibold">{hoursData.norm_hours.toFixed(2)} hours</p>
                                             </div>
-                                            <div>
-                                                <p className="text-sm font-medium text-gray-600">Performance</p>
-                                                <p className={`text-lg ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Performance</p>
+                                                <p className={`text-lg font-semibold ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
                                                     {((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%
                                                 </p>
                                             </div>
@@ -1256,74 +1262,75 @@
                                         <div className="col-span-1 flex justify-center items-center">
                                             <SemiCircleProgress
                                                 percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
+                                                label="Выполнение нормы"
                                             />
                                         </div>
                                     </div>
                                 ) : (
-                                    <p className="text-center">No hours data available.</p>
+                                    <p className="text-center text-gray-600">No hours data available.</p>
                                 )}
                             </div>
                         )}
 
                         {/* Evaluations Section */}
-                        {view === 'evaluations' && (
-                            <div className="bg-white p-6 rounded-lg shadow-lg">
-                                <h2 className="text-xl font-semibold mb-4">Your Call Evaluations</h2>
+                        {view === 'evaluation' && (
+                            <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
                                 {isLoading ? (
-                                    <p className="text-center">Loading...</p>
+                                    <p className="text-center text-gray-600">Loading...</p>
                                 ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
-                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                                        <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-4">
-                                            <div>
-                                                <p className="text-sm font-medium text-gray-600">Total Evaluated Calls</p>
-                                                <p className="text-lg font-medium text-gray-900">{operatorData.evaluations.length}</p>
+                                    <div>
+                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                                            <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-2">
+                                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                    <p className="text-sm font-medium text-gray-500 mb-1">Total Evaluated Calls</p>
+                                                    <p className="text-lg font-semibold text-gray-900">{operatorData.evaluations.length}</p>
+                                                </div>
+                                            </div>
+                                            <div className="col-span-1 flex justify-center items-center">
+                                                <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
                                             </div>
                                         </div>
-                                        <div className="col-span-1 flex justify-center items-center">
-                                            <SemiCircleProgress percentage={Math.min(averageScore, 100)} />
+                                        <div className="overflow-x-auto rounded-lg shadow-sm">
+                                            <table className="min-w-full bg-white border-collapse">
+                                                <thead>
+                                                    <tr className="bg-blue-50">
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call Number</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Score</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Comment</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Month</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Evaluation Date</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Correction</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {operatorData.evaluations.map((eval1, index) => (
+                                                        <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
+                                                            <td className="p-4 border-b text-sm">{eval1.call_number || '-'}</td>
+                                                            <td className="p-4 border-b text-sm">{eval1.phone_number || '-'}</td>
+                                                            <td className={`p-4 border-b text-sm font-medium ${getScoreColor(eval1.score)}`}>
+                                                                {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
+                                                            </td>
+                                                            <td className="p-4 border-b text-sm">
+                                                                {eval1.comment ? (
+                                                                    <span dangerouslySetInnerHTML={{ __html: eval1.comment.replace(
+                                                                        /(\w+): ([^:]+)/g,
+                                                                        '<b>$1</b>: <i>$2</i>'
+                                                                    ) }} />
+                                                                ) : '-'}
+                                                            </td>
+                                                            <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
+                                                            <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
+                                                            <td className="p-4 border-b text-sm">{eval1.is_correction ? 'Yes' : 'No'}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
                                         </div>
                                     </div>
-                                ) : null}
-                                {operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
-                                    <div className="overflow-x-auto">
-                                        <table className="min-w-full bg-white border-collapse">
-                                            <thead>
-                                                <tr className="bg-gray-100">
-                                                    <th className="p-3 border-b text-left">Call Number</th>
-                                                    <th className="p-3 border-b text-left">Phone Number</th>
-                                                    <th className="p-3 border-b text-left">Score</th>
-                                                    <th className="p-3 border-b text-left">Comment</th>
-                                                    <th className="p-3 border-b text-left">Month</th>
-                                                    <th className="p-3 border-b text-left">Evaluation Date</th>
-                                                    <th className="p-3 border-b text-left">Correction</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {operatorData.evaluations.map((eval1, index) => (
-                                                    <tr key={index} className="hover:bg-gray-50">
-                                                        <td className="p-3 border-b">{eval1.call_number || '-'}</td>
-                                                        <td className="p-3 border-b">{eval1.phone_number || '-'}</td>
-                                                        <td className={`p-3 border-b ${getScoreColor(eval1.score)}`}>
-                                                            {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
-                                                        </td>
-                                                        <td className="p-3 border-b">
-                                                            {eval1.comment ? (
-                                                                <span dangerouslySetInnerHTML={{ __html: eval1.comment.replace(
-                                                                    /(\w+): ([^:]+)/g,
-                                                                    '<b>$1</b>: <i>$2</i>'
-                                                                ) }} />
-                                                            ) : '-'}
-                                                        </td>
-                                                        <td className="p-3 border-b">{eval1.month || '-'}</td>
-                                                        <td className="p-3 border-b">{eval1.evaluation_date || '-'}</td>
-                                                        <td className="p-3 border-b">{eval1.is_correction ? 'Yes' : 'No'}</td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
                                 ) : (
-                                    <p className="text-center">No evaluations found for this period.</p>
+                                    <p className="text-center text-gray-600">No evaluations found for this period.</p>
                                 )}
                             </div>
                         )}
