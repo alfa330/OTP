@@ -55,6 +55,8 @@
             const [svList, setSvList] = useState([]);
             const [svData, setSvData] = useState(null);
             const [operatorData, setOperatorData] = useState(null);
+            const [profileData, setProfileData] = useState(null); // New state for profile data
+            const [showProfile, setShowProfile] = useState(false); // New state for profile visibility
             const [newSvName, setNewSvName] = useState('');
             const [newSvId, setNewSvId] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
@@ -104,7 +106,7 @@
 
             const getCallCountColor = (count, expected) => {
                 if (count >= expected) return 'text-green-600';
-                if (count >= expected * 0.5) return 'text-yellow-600';
+                if (count >= expected * 0.5) return 'text-yellow-500';
                 return 'text-red-600';
             };
 
@@ -140,7 +142,7 @@
                             id: data.id,
                             name: data.name,
                             telegram_id: data.telegram_id,
-                            apiKey: data.apiKey  // Используем полученный ключ или фиксированный
+                            apiKey: data.apiKey
                         });
                         setLogin('');
                         setPassword('');
@@ -150,7 +152,7 @@
                     }
                 } catch (err) {
                     console.error('Login error:', err);
-                    setError(err.response?.data?.error || 'Failed to connect to server. Please check your network or try again later.');
+                    setError(err.response?.data?.error || 'Failed to connect to server');
                 } finally {
                     setIsLoading(false);
                 }
@@ -171,6 +173,8 @@
                 setSvList([]);
                 setSvData(null);
                 setOperatorData(null);
+                setProfileData(null);
+                setShowProfile(false);
                 setLogin('');
                 setPassword('');
                 setShowLogoutConfirm(false);
@@ -182,7 +186,6 @@
             const fetchSvList = async () => {
                 setIsAdminDataLoading(true);
                 clearMessages();
-                console.log('Fetching SV list with API key:', user.apiKey); // Added for debugging
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
                         headers: { 'X-API-Key': user.apiKey }
@@ -194,7 +197,7 @@
                         setError(data.error || 'Failed to fetch supervisor list');
                     }
                 } catch (err) {
-                    console.error('Fetch SV list error:', err, err.response); // Enhanced error logging
+                    console.error('Fetch SV list error:', err);
                     setError(err.response?.data?.error || 'Failed to fetch supervisor list');
                 } finally {
                     setIsAdminDataLoading(false);
@@ -234,6 +237,28 @@
                 } catch (err) {
                     console.error('Fetch operator data error:', err);
                     setError('Failed to fetch operator data');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            const fetchProfileData = async () => {
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await axios.get(`${API_BASE_URL}/api/user/profile?id=${user.id}`, {
+                        headers: { 'X-API-Key': user.apiKey }
+                    });
+                    const data = response.data;
+                    if (data.status === 'success') {
+                        setProfileData(data.profile);
+                        setShowProfile(true);
+                    } else {
+                        setError(data.error || 'Failed to fetch profile data');
+                    }
+                } catch (err) {
+                    console.error('Fetch profile data error:', err);
+                    setError(err.response?.data?.error || 'Failed to fetch profile data');
                 } finally {
                     setIsLoading(false);
                 }
@@ -678,7 +703,6 @@
                                         value={evaluationData.comment}
                                         onChange={(e) => setEvaluationData({...evaluationData, comment: e.target.value})}
                                         className="w-full p-2 border rounded"
-                                        class="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         rows="3"
                                     />
                                 </div>
@@ -711,7 +735,7 @@
                                 disabled={isLoading}
                             />
                             <input
-                                type="Supervisor ID"
+                                type="text"
                                 placeholder="Enter Supervisor ID"
                                 value={newSvId}
                                 onChange={(e) => setNewSvId(e.target.value)}
@@ -776,7 +800,7 @@
                                                                 setShowChangeTableForm(true);
                                                             }}
                                                             className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
-                                                                >
+                                                        >
                                                             Change Table
                                                         </button>
                                                     </td>
@@ -980,13 +1004,73 @@
                     <div className="min-h-screen bg-gray-100 p-6">
                         <div className="flex justify-between items-center mb-6">
                             <h1 className="text-3xl font-bold">Operator Dashboard</h1>
-                            <button
-                                onClick={handleLogout}
-                                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700"
-                            >
-                                Logout
-                            </button>
+                            <div className="flex space-x-4">
+                                <button
+                                    onClick={fetchProfileData}
+                                    className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600"
+                                    disabled={isLoading}
+                                >
+                                    {isLoading ? 'Loading...' : 'View Profile'}
+                                </button>
+                                <button
+                                    onClick={handleLogout}
+                                    className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700"
+                                >
+                                    Logout
+                                </button>
+                            </div>
                         </div>
+
+                        {showProfile && profileData && (
+                            <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                <h2 className="text-xl font-semibold mb-4">Your Profile</h2>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div>
+                                        <p className="text-sm font-medium text-gray-600">Name</p>
+                                        <p className="text-lg">{profileData.name}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-medium text-gray-600">Role</p>
+                                        <p className="text-lg">{profileData.role}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-medium text-gray-600">Direction</p>
+                                        <p className="text-lg">{profileData.direction || '-'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-medium text-gray-600">Hire Date</p>
+                                        <p className="text-lg">{profileData.hire_date || '-'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-medium text-gray-600">Supervisor</p>
+                                        <p className="text-lg">{profileData.supervisor_name || '-'}</p>
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-medium text-gray-600">Scores Table URL</p>
+                                        {profileData.scores_table_url ? (
+                                            <a href={profileData.scores_table_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
+                                        ) : (
+                                            <p className="text-lg">-</p>
+                                        )}
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-medium text-gray-600">Hours Table URL</p>
+                                        {profileData.hours_table_url ? (
+                                            <a href={profileData.hours_table_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
+                                        ) : (
+                                            <p className="text-lg">-</p>
+                                        )}
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => setShowProfile(false)}
+                                    className="mt-4 bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                >
+                                    Close Profile
+                                </button>
+                            </div>
+                        )}
+
                         <div className="bg-white p-6 rounded-lg shadow-lg">
                             <h2 className="text-xl font-semibold mb-4">Your Call Evaluations</h2>
                             {isLoading ? (
