@@ -14,7 +14,7 @@
 <body class="bg-gray-100">
     <div id="root"></div>
     <script type="text/babel">
-        const { useState, useEffect, useCallback } = React;
+        const { useState, useEffect, useCallback, useRef } = React;
 
         const API_BASE_URL = 'https://otp-wif3.onrender.com';
 
@@ -79,18 +79,33 @@
             const [showChangeTableForm, setShowChangeTableForm] = useState(false);
             const [currentSvForTableChange, setCurrentSvForTableChange] = useState(null);
 
+            // Reference to track mounted state and prevent state updates after unmount
+            const isMounted = useRef(true);
+
+            // Debounced fetch with cleanup
             const debouncedFetch = useCallback(_.debounce((fn) => {
-                try {
-                    fn();
-                } catch (err) {
-                    console.error('Debounced fetch error:', err);
-                    setError('An error occurred while fetching data');
+                if (isMounted.current) {
+                    try {
+                        fn();
+                    } catch (err) {
+                        console.error('Debounced fetch error:', err);
+                        setError('An error occurred while fetching data');
+                    }
                 }
             }, 300), []);
 
+            // Cleanup on unmount
+            useEffect(() => {
+                return () => {
+                    isMounted.current = false;
+                };
+            }, []);
+
             const clearMessages = () => {
-                setError('');
-                setSuccess('');
+                if (isMounted.current) {
+                    setError('');
+                    setSuccess('');
+                }
             };
 
             const validateUrl = (url) => {
@@ -143,7 +158,7 @@
                         headers: { 'Content-Type': 'application/json' }
                     });
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setUser({
                             role: data.role,
                             id: data.id,
@@ -161,7 +176,7 @@
                     console.error('Login error:', err);
                     setError(err.response?.data?.error || 'Failed to connect to server');
                 } finally {
-                    setIsLoading(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
@@ -176,19 +191,21 @@
             };
 
             const confirmLogout = () => {
-                setUser(null);
-                setSvList([]);
-                setSvData(null);
-                setOperatorData(null);
-                setProfileData(null);
-                setHoursData(null);
-                setView('profile');
-                setLogin('');
-                setPassword('');
-                setShowLogoutConfirm(false);
-                setSelectedSvId('');
-                setSelectedSvData(null);
-                clearMessages();
+                if (isMounted.current) {
+                    setUser(null);
+                    setSvList([]);
+                    setSvData(null);
+                    setOperatorData(null);
+                    setProfileData(null);
+                    setHoursData(null);
+                    setView('profile');
+                    setLogin('');
+                    setPassword('');
+                    setShowLogoutConfirm(false);
+                    setSelectedSvId('');
+                    setSelectedSvData(null);
+                    clearMessages();
+                }
             };
 
             const fetchSvList = async () => {
@@ -199,7 +216,7 @@
                         headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setSvList(data.sv_list || []);
                     } else {
                         setError(data.error || 'Failed to fetch supervisor list');
@@ -208,7 +225,7 @@
                     console.error('Fetch SV list error:', err);
                     setError(err.response?.data?.error || 'Failed to fetch supervisor list');
                 } finally {
-                    setIsAdminDataLoading(false);
+                    if (isMounted.current) setIsAdminDataLoading(false);
                 }
             };
 
@@ -218,7 +235,7 @@
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/sv/data?id=${user.id}`);
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setSvData(data);
                     } else {
                         setError(data.error || 'Failed to fetch supervisor data');
@@ -227,7 +244,7 @@
                     console.error('Fetch SV data error:', err);
                     setError('Failed to fetch supervisor data');
                 } finally {
-                    setIsLoading(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
@@ -235,18 +252,20 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}`);
+                    const response = await axios.get(`${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}`, {
+                        headers: { 'X-API-Key': user.apiKey }
+                    });
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setOperatorData(data);
                     } else {
                         setError(data.error || 'Failed to fetch operator data');
                     }
                 } catch (err) {
                     console.error('Fetch operator data error:', err);
-                    setError('Failed to fetch operator data');
+                    setError(err.response?.data?.error || 'Failed to fetch operator data');
                 } finally {
-                    setIsLoading(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
@@ -258,7 +277,7 @@
                         headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setProfileData(data.profile);
                     } else {
                         setError(data.error || 'Failed to fetch profile data');
@@ -267,7 +286,7 @@
                     console.error('Fetch profile data error:', err);
                     setError(err.response?.data?.error || 'Failed to fetch profile data');
                 } finally {
-                    setIsLoading(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
@@ -279,7 +298,7 @@
                         headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setHoursData(data.hours);
                     } else {
                         setError(data.error || 'Failed to fetch hours data');
@@ -288,13 +307,13 @@
                     console.error('Fetch hours data error:', err);
                     setError(err.response?.data?.error || 'Failed to fetch hours data');
                 } finally {
-                    setIsLoading(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
             const fetchSelectedSvData = async (svId) => {
                 if (!svId) {
-                    setSelectedSvData(null);
+                    if (isMounted.current) setSelectedSvData(null);
                     return;
                 }
                 setIsAdminDataLoading(true);
@@ -304,7 +323,7 @@
                         headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setSelectedSvData(data);
                     } else {
                         setError(data.error || 'Failed to fetch supervisor data');
@@ -313,7 +332,7 @@
                     console.error('Fetch selected SV data error:', err);
                     setError('Failed to fetch supervisor data');
                 } finally {
-                    setIsAdminDataLoading(false);
+                    if (isMounted.current) setIsAdminDataLoading(false);
                 }
             };
 
@@ -339,7 +358,7 @@
                         }
                     });
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setSuccess('Supervisor added successfully');
                         fetchSvList();
                         setNewSvName('');
@@ -351,7 +370,7 @@
                     console.error('Add SV error:', err);
                     setError('Failed to add supervisor');
                 } finally {
-                    setIsLoading(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
@@ -367,7 +386,7 @@
                         }
                     });
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setSuccess('Supervisor removed successfully');
                         fetchSvList();
                         if (selectedSvId === svId) {
@@ -381,7 +400,7 @@
                     console.error('Remove SV error:', err);
                     setError('Failed to remove supervisor');
                 } finally {
-                    setIsLoading(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
@@ -404,7 +423,7 @@
                         headers: { 'Content-Type': 'application/json' }
                     });
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setSuccess('Table updated successfully');
                         fetchSvData();
                         setNewTableUrl('');
@@ -415,7 +434,7 @@
                     console.error('Update table error:', err);
                     setError('Failed to update table');
                 } finally {
-                    setIsLoading(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
@@ -441,8 +460,8 @@
                         }
                     });
                     const data = response.data;
-                    if (data.status === 'success') {
-                        setSuccess(`Table updated successfully for ${data.sv_name}`);
+                    if (data.status === 'success' && isMounted.current) {
+                        setSuccess(`Table updated successfully for ${data.sv_name || 'supervisor'}`);
                         fetchSvList();
                         setShowChangeTableForm(false);
                         setNewTableUrl('');
@@ -453,7 +472,7 @@
                     console.error('Change SV table error:', err);
                     setError('Failed to update supervisor table');
                 } finally {
-                    setIsLoading(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
@@ -464,8 +483,8 @@
                     setError('Please fill all required fields');
                     return;
                 }
-                if (isNaN(evaluationData.score)) {
-                    setError('Score must be a number');
+                if (isNaN(evaluationData.score) || evaluationData.score < 0 || evaluationData.score > 100) {
+                    setError('Score must be a number between 0 and 100');
                     return;
                 }
                 setIsLoading(true);
@@ -482,7 +501,7 @@
                         }
                     });
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setSuccess('Call evaluation submitted successfully');
                         setEvaluationData({
                             evaluator: evaluationData.evaluator,
@@ -502,9 +521,9 @@
                     }
                 } catch (err) {
                     console.error('Send evaluation error:', err);
-                    setError('Failed to submit evaluation');
+                    setError(err.response?.data?.error || 'Failed to submit evaluation');
                 } finally {
-                    setIsLoading(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
@@ -523,16 +542,16 @@
                         }
                     });
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setSuccess(`Notification sent to supervisor: ${data.message}`);
                     } else {
                         setError(data.error || 'Failed to send notification');
                     }
                 } catch (err) {
                     console.error('Notify supervisor error:', err);
-                    setError('Failed to send notification');
+                    setError(err.response?.data?.error || 'Failed to send notification');
                 } finally {
-                    setIsLoading(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
@@ -544,16 +563,16 @@
                         headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
-                    if (data.status === 'success') {
+                    if (data.status === 'success' && isMounted.current) {
                         setSuccess('Report generation started. This may take a few minutes.');
                     } else {
                         setError(data.error || 'Failed to start report generation');
                     }
                 } catch (err) {
                     console.error('Generate report error:', err);
-                    setError('Failed to connect to server');
+                    setError(err.response?.data?.error || 'Failed to connect to server');
                 } finally {
-                    setIsLoading(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
@@ -564,18 +583,18 @@
                     } else if (user.role === 'sv') {
                         debouncedFetch(fetchSvData);
                     } else if (user.role === 'operator') {
-                        debouncedFetch(fetchProfileData); // Fetch profile on login
+                        debouncedFetch(fetchProfileData);
                         debouncedFetch(fetchOperatorData);
                         debouncedFetch(fetchHoursData);
                     }
                 }
-            }, [user]);
+            }, [user, debouncedFetch]);
 
             useEffect(() => {
                 if (user && user.role === 'admin' && selectedSvId) {
                     debouncedFetch(() => fetchSelectedSvData(selectedSvId));
                 }
-            }, [selectedSvId]);
+            }, [selectedSvId, user, debouncedFetch]);
 
             if (!user) {
                 return (
@@ -821,6 +840,7 @@
                                                         <button
                                                             onClick={() => removeSv(sv.id)}
                                                             className="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 text-sm"
+                                                            disabled={isLoading}
                                                         >
                                                             Remove
                                                         </button>
@@ -830,6 +850,7 @@
                                                                 setShowChangeTableForm(true);
                                                             }}
                                                             className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                            disabled={isLoading}
                                                         >
                                                             Change Table
                                                         </button>
@@ -907,12 +928,13 @@
                                             {selectedSvData.operators.map((op, index) => {
                                                 const currentWeek = getCurrentWeekOfMonth();
                                                 const expectedCalls = getExpectedCalls(currentWeek);
-                                                const hasIssue = op.call_count < expectedCalls;
+                                                const callCount = parseInt(op.call_count) || 0;
+                                                const hasIssue = callCount < expectedCalls;
                                                 return (
                                                     <tr key={index} className="hover:bg-gray-50">
                                                         <td className="p-3 border-b">{op.name}</td>
-                                                        <td className={`p-3 border-b ${getCallCountColor(op.call_count, expectedCalls)}`}>
-                                                            {op.call_count}
+                                                        <td className={`p-3 border-b ${getCallCountColor(callCount, expectedCalls)}`}>
+                                                            {callCount}
                                                         </td>
                                                         <td className="p-3 border-b">{expectedCalls}</td>
                                                         <td className="p-3 border-b">
@@ -998,24 +1020,27 @@
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {svData.operators.map((op, index) => (
-                                                <tr key={index} className="hover:bg-gray-50">
-                                                    <td className="p-3 border-b">{op.name}</td>
-                                                    <td className={`p-3 border-b ${getCallCountColor(op.call_count, svData.expected_calls)}`}>
-                                                        {op.call_count}
-                                                    </td>
-                                                    <td className="p-3 border-b">
-                                                        <span className={getScoreColor(op.avg_score)}>
-                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                        </span>
-                                                    </td>
-                                                    <td className="p-3 border-b">
-                                                        {op.link ? (
-                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                        ) : '-'}
-                                                    </td>
-                                                </tr>
-                                            ))}
+                                            {svData.operators.map((op, index) => {
+                                                const callCount = parseInt(op.call_count) || 0;
+                                                return (
+                                                    <tr key={index} className="hover:bg-gray-50">
+                                                        <td className="p-3 border-b">{op.name}</td>
+                                                        <td className={`p-3 border-b ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
+                                                            {callCount}
+                                                        </td>
+                                                        <td className="p-3 border-b">
+                                                            <span className={getScoreColor(op.avg_score)}>
+                                                                {op.avg_score ? op.avg_score.toFixed(2) : '-'}
+                                                            </span>
+                                                        </td>
+                                                        <td className="p-3 border-b">
+                                                            {op.link ? (
+                                                                <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
+                                                            ) : '-'}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
                                         </tbody>
                                     </table>
                                 </div>
@@ -1051,11 +1076,11 @@
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <div>
                                         <p className="text-sm font-medium text-gray-600">Name</p>
-                                        <p className="text-lg">{profileData.name}</p>
+                                        <p className="text-lg">{profileData.name || '-'}</p>
                                     </div>
                                     <div>
                                         <p className="text-sm font-medium text-gray-600">Role</p>
-                                        <p className="text-lg">{profileData.role}</p>
+                                        <p className="text-lg">{profileData.role || '-'}</p>
                                     </div>
                                     <div>
                                         <p className="text-sm font-medium text-gray-600">Direction</p>
@@ -1087,12 +1112,19 @@
                                     </div>
                                 </div>
                             ) : (
-                                <p className="text-center">No profile data available.</p>
+                                <p className="text-center">No profile data available. Please try refreshing or contact support.</p>
                             )}
                         </div>
 
                         {/* View Toggle Buttons */}
                         <div className="flex justify-center space-x-4 mb-6">
+                            <button
+                                onClick={() => setView('profile')}
+                                className={`px-4 py-2 rounded-lg ${view === 'profile' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
+                                disabled={isLoading}
+                            >
+                                Profile
+                            </button>
                             <button
                                 onClick={() => setView('hours')}
                                 className={`px-4 py-2 rounded-lg ${view === 'hours' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
@@ -1129,7 +1161,7 @@
                                         </div>
                                         <div>
                                             <p className="text-sm font-medium text-gray-600">Fines</p>
-                                            <p className="text-lg text-red-600">{hoursData.fines.toFixed(2)} hours</p>
+                                            <p className="text-lg text-red-600">{hoursData.fines.toFixed(2)}</p>
                                         </div>
                                         <div>
                                             <p className="text-sm font-medium text-gray-600">Norm Hours</p>
@@ -1138,7 +1170,7 @@
                                         <div>
                                             <p className="text-sm font-medium text-gray-600">Performance</p>
                                             <p className={`text-lg ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
-                                                {((hoursData.regular_hours / hoursData.norm_hours) * 100).toFixed(2)}% / 100%
+                                                {((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%
                                             </p>
                                         </div>
                                     </div>
@@ -1164,15 +1196,17 @@
                                                     <th className="p-3 border-b text-left">Score</th>
                                                     <th className="p-3 border-b text-left">Comment</th>
                                                     <th className="p-3 border-b text-left">Month</th>
+                                                    <th className="p-3 border-b text-left">Evaluation Date</th>
+                                                    <th className="p-3 border-b text-left">Correction</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
                                                 {operatorData.evaluations.map((eval1, index) => (
                                                     <tr key={index} className="hover:bg-gray-50">
-                                                        <td className="p-3 border-b">{eval1.call_number}</td>
-                                                        <td className="p-3 border-b">{eval1.phone_number}</td>
+                                                        <td className="p-3 border-b">{eval1.call_number || '-'}</td>
+                                                        <td className="p-3 border-b">{eval1.phone_number || '-'}</td>
                                                         <td className={`p-3 border-b ${getScoreColor(eval1.score)}`}>
-                                                            {eval1.score}
+                                                            {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
                                                         </td>
                                                         <td className="p-3 border-b">
                                                             {eval1.comment ? (
@@ -1182,14 +1216,16 @@
                                                                 ) }} />
                                                             ) : '-'}
                                                         </td>
-                                                        <td className="p-3 border-b">{eval1.month}</td>
+                                                        <td className="p-3 border-b">{eval1.month || '-'}</td>
+                                                        <td className="p-3 border-b">{eval1.evaluation_date || '-'}</td>
+                                                        <td className="p-3 border-b">{eval1.is_correction ? 'Yes' : 'No'}</td>
                                                     </tr>
                                                 ))}
                                             </tbody>
                                         </table>
                                     </div>
                                 ) : (
-                                    <p className="text-center">No evaluations found.</p>
+                                    <p className="text-center">No evaluations found for this period.</p>
                                 )}
                             </div>
                         )}
@@ -1200,7 +1236,11 @@
                 );
             }
 
-            return null;
+            return (
+                <div className="min-h-screen flex items-center justify-center bg-gray-100">
+                    <p className="text-center">Invalid role. Please contact support.</p>
+                </div>
+            );
         };
 
         try {
