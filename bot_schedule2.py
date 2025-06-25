@@ -143,6 +143,38 @@ def get_user_profile():
         logging.error(f"Error fetching user profile: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/operator/hours', methods=['GET'])
+@require_api_key
+def get_operator_hours():
+    try:
+        operator_id = request.args.get('operator_id')
+        if not operator_id:
+            return jsonify({"error": "Missing operator_id parameter"}), 400
+
+        operator_id = int(operator_id)
+        # Fetch hours data from database
+        hours_data = db.get_operator_hours(operator_id)
+        
+        if not hours_data:
+            return jsonify({"status": "success", "hours": []}), 200
+
+        # Format hours data with percentage calculation
+        formatted_hours = [
+            {
+                "month": entry.month,
+                "expected_hours": entry.expected_hours,
+                "actual_hours": entry.actual_hours,
+                "percentage": (entry.actual_hours / entry.expected_hours * 100) if entry.expected_hours > 0 else 0
+            } for entry in hours_data
+        ]
+
+        return jsonify({"status": "success", "hours": formatted_hours}), 200
+    except ValueError:
+        return jsonify({"error": "Invalid operator_id format"}), 400
+    except Exception as e:
+        logging.error(f"Error fetching hours data: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/admin/sv_list', methods=['GET'])
 @require_api_key
 def get_sv_list():
