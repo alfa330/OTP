@@ -1321,7 +1321,8 @@
                                                                 {eval1.comment ? (
                                                                     <div className="space-y-1">
                                                                         {eval1.comment.split('\n').map((line, i) => {
-                                                                            const match = line.match(/^(.*?):\s*(.*)$/);
+                                                                            const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
+                                                                            const match = cleanLine.match(/^(.*?):\s*(.*)$/);
                                                                             if (match) {
                                                                                 return (
                                                                                     <p key={i} className="text-sm">
@@ -1330,7 +1331,7 @@
                                                                                     </p>
                                                                                 );
                                                                             }
-                                                                            return <p key={i} className="text-sm">{line}</p>;
+                                                                            return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
                                                                         })}
                                                                     </div>
                                                                 ) : '-'}
