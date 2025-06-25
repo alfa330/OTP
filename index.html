@@ -55,9 +55,12 @@
             const [svList, setSvList] = useState([]);
             const [svData, setSvData] = useState(null);
             const [operatorData, setOperatorData] = useState(null);
-            const [hoursData, setHoursData] = useState(null); // New state for hours data
-            const [profileData, setProfileData] = useState(null); // State for profile data
-            const [showSection, setShowSection] = useState('none'); // Controls visible section: 'none', 'hours', or 'evaluations'
+            const [profileData, setProfileData] = useState(null);
+            const [hoursData, setHoursData] = useState(null);
+            const [view, setView] = useState('profile'); // Default to profile view
+            const [newSvName, setNewSvName] = useState('');
+            const [newSvId, setNewSvId] = useState('');
+            const [newTableUrl, setNewTableUrl] = useState('');
             const [isLoading, setIsLoading] = useState(false);
             const [isAdminDataLoading, setIsAdminDataLoading] = useState(false);
             const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
@@ -74,9 +77,6 @@
             });
             const [showEvaluationForm, setShowEvaluationForm] = useState(false);
             const [showChangeTableForm, setShowChangeTableForm] = useState(false);
-            const [newSvName, setNewSvName] = useState('');
-            const [newSvId, setNewSvId] = useState('');
-            const [newTableUrl, setNewTableUrl] = useState('');
             const [currentSvForTableChange, setCurrentSvForTableChange] = useState(null);
 
             const debouncedFetch = useCallback(_.debounce((fn) => {
@@ -111,9 +111,9 @@
                 return 'text-red-600';
             };
 
-            const getHoursPercentageColor = (percentage) => {
-                if (percentage >= 100) return 'text-green-600';
-                if (percentage >= 50) return 'text-yellow-500';
+            const getHoursPerformanceColor = (hours, norm) => {
+                if (hours >= norm) return 'text-green-600';
+                if (hours >= norm * 0.5) return 'text-yellow-600';
                 return 'text-red-600';
             };
 
@@ -126,15 +126,6 @@
 
             const getExpectedCalls = (weekNumber) => {
                 return weekNumber * 5;
-            };
-
-            const formatComment = (comment) => {
-                if (!comment || comment === '-') return '-';
-                const parts = comment.split(': ');
-                if (parts.length < 2) return comment;
-                const criterion = parts[0];
-                const commentText = parts.slice(1).join(': ');
-                return `<b>${criterion}</b>: <i>${commentText}</i>`;
             };
 
             const handleLogin = async () => {
@@ -189,9 +180,9 @@
                 setSvList([]);
                 setSvData(null);
                 setOperatorData(null);
-                setHoursData(null);
                 setProfileData(null);
-                setShowSection('none');
+                setHoursData(null);
+                setView('profile');
                 setLogin('');
                 setPassword('');
                 setShowLogoutConfirm(false);
@@ -259,27 +250,6 @@
                 }
             };
 
-            const fetchHoursData = async () => {
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.get(`${API_BASE_URL}/api/operator/hours?operator_id=${user.id}`, {
-                        headers: { 'X-API-Key': user.apiKey }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setHoursData(data.hours);
-                    } else {
-                        setError(data.error || 'Failed to fetch hours data');
-                    }
-                } catch (err) {
-                    console.error('Fetch hours data error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch hours data');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
             const fetchProfileData = async () => {
                 setIsLoading(true);
                 clearMessages();
@@ -296,6 +266,27 @@
                 } catch (err) {
                     console.error('Fetch profile data error:', err);
                     setError(err.response?.data?.error || 'Failed to fetch profile data');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            const fetchHoursData = async () => {
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await axios.get(`${API_BASE_URL}/api/user/hours?operator_id=${user.id}`, {
+                        headers: { 'X-API-Key': user.apiKey }
+                    });
+                    const data = response.data;
+                    if (data.status === 'success') {
+                        setHoursData(data.hours);
+                    } else {
+                        setError(data.error || 'Failed to fetch hours data');
+                    }
+                } catch (err) {
+                    console.error('Fetch hours data error:', err);
+                    setError(err.response?.data?.error || 'Failed to fetch hours data');
                 } finally {
                     setIsLoading(false);
                 }
@@ -573,17 +564,12 @@
                     } else if (user.role === 'sv') {
                         debouncedFetch(fetchSvData);
                     } else if (user.role === 'operator') {
-                        debouncedFetch(fetchProfileData); // Fetch profile data on login
+                        debouncedFetch(fetchProfileData); // Fetch profile on login
                         debouncedFetch(fetchOperatorData);
+                        debouncedFetch(fetchHoursData);
                     }
                 }
             }, [user]);
-
-            useEffect(() => {
-                if (user && user.role === 'operator' && showSection === 'hours') {
-                    debouncedFetch(fetchHoursData);
-                }
-            }, [user, showSection]);
 
             useEffect(() => {
                 if (user && user.role === 'admin' && selectedSvId) {
@@ -743,7 +729,7 @@
                                 <div className="mb-4">
                                     <label className="block text-sm font-semibold mb-1">Comment (optional)</label>
                                     <textarea
-                                        placeholder="Enter comment"
+                                        placeholder="Enter comment (e.g., Стилистика и грамотность речи: Использование жаргона - 'Щас')"
                                         value={evaluationData.comment}
                                         onChange={(e) => setEvaluationData({...evaluationData, comment: e.target.value})}
                                         className="w-full p-2 border rounded"
@@ -1056,9 +1042,12 @@
                             </button>
                         </div>
 
-                        {profileData ? (
-                            <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                <h2 className="text-xl font-semibold mb-4">Your Profile</h2>
+                        {/* Profile Section */}
+                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                            <h2 className="text-xl font-semibold mb-4">Your Profile</h2>
+                            {isLoading ? (
+                                <p className="text-center">Loading...</p>
+                            ) : profileData ? (
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <div>
                                         <p className="text-sm font-medium text-gray-600">Name</p>
@@ -1097,65 +1086,70 @@
                                         )}
                                     </div>
                                 </div>
-                            </div>
-                        ) : (
-                            <p className="text-center">Loading profile data...</p>
-                        )}
+                            ) : (
+                                <p className="text-center">No profile data available.</p>
+                            )}
+                        </div>
 
-                        <div className="flex space-x-4 mb-6">
+                        {/* View Toggle Buttons */}
+                        <div className="flex justify-center space-x-4 mb-6">
                             <button
-                                onClick={() => setShowSection('hours')}
-                                className={`px-4 py-2 rounded-lg ${showSection === 'hours' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
+                                onClick={() => setView('hours')}
+                                className={`px-4 py-2 rounded-lg ${view === 'hours' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
                                 disabled={isLoading}
                             >
                                 My Hours
                             </button>
                             <button
-                                onClick={() => setShowSection('evaluations')}
-                                className={`px-4 py-2 rounded-lg ${showSection === 'evaluations' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
+                                onClick={() => setView('evaluations')}
+                                className={`px-4 py-2 rounded-lg ${view === 'evaluations' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
                                 disabled={isLoading}
                             >
                                 Call Evaluations
                             </button>
                         </div>
 
-                        {showSection === 'hours' && (
+                        {/* Hours Section */}
+                        {view === 'hours' && (
                             <div className="bg-white p-6 rounded-lg shadow-lg">
-                                <h2 className="text-xl font-semibold mb-4">Your Hours</h2>
+                                <h2 className="text-xl font-semibold mb-4">Your Work Hours</h2>
                                 {isLoading ? (
                                     <p className="text-center">Loading...</p>
-                                ) : hoursData && hoursData.length > 0 ? (
-                                    <div className="overflow-x-auto">
-                                        <table className="min-w-full bg-white border-collapse">
-                                            <thead>
-                                                <tr className="bg-gray-100">
-                                                    <th className="p-3 border-b text-left">Month</th>
-                                                    <th className="p-3 border-b text-left">Expected Hours</th>
-                                                    <th className="p-3 border-b text-left">Actual Hours</th>
-                                                    <th className="p-3 border-b text-left">Percentage</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {hoursData.map((entry, index) => (
-                                                    <tr key={index} className="hover:bg-gray-50">
-                                                        <td className="p-3 border-b">{entry.month}</td>
-                                                        <td className="p-3 border-b">{entry.expected_hours}</td>
-                                                        <td className="p-3 border-b">{entry.actual_hours}</td>
-                                                        <td className={`p-3 border-b ${getHoursPercentageColor(entry.percentage)}`}>
-                                                            {entry.percentage.toFixed(2)}%
-                                                        </td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
+                                ) : hoursData ? (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <div>
+                                            <p className="text-sm font-medium text-gray-600">Regular Hours</p>
+                                            <p className={`text-lg ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
+                                                {hoursData.regular_hours.toFixed(2)} hours
+                                            </p>
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-medium text-gray-600">Training Hours</p>
+                                            <p className="text-lg">{hoursData.training_hours.toFixed(2)} hours</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-medium text-gray-600">Fines</p>
+                                            <p className="text-lg text-red-600">{hoursData.fines.toFixed(2)} hours</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-medium text-gray-600">Norm Hours</p>
+                                            <p className="text-lg">{hoursData.norm_hours.toFixed(2)} hours</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-medium text-gray-600">Performance</p>
+                                            <p className={`text-lg ${getHoursPerformanceColor(hoursData.regular_hours + hoursData.training_hours - hoursData.fines, hoursData.norm_hours)}`}>
+                                                {(hoursData.regular_hours + hoursData.training_hours - hoursData.fines).toFixed(2)} / {hoursData.norm_hours.toFixed(2)} hours
+                                            </p>
+                                        </div>
                                     </div>
                                 ) : (
-                                    <p className="text-center">No hours data found.</p>
+                                    <p className="text-center">No hours data available.</p>
                                 )}
                             </div>
                         )}
 
-                        {showSection === 'evaluations' && (
+                        {/* Evaluations Section */}
+                        {view === 'evaluations' && (
                             <div className="bg-white p-6 rounded-lg shadow-lg">
                                 <h2 className="text-xl font-semibold mb-4">Your Call Evaluations</h2>
                                 {isLoading ? (
@@ -1180,7 +1174,14 @@
                                                         <td className={`p-3 border-b ${getScoreColor(eval1.score)}`}>
                                                             {eval1.score}
                                                         </td>
-                                                        <td className="p-3 border-b" dangerouslySetInnerHTML={{ __html: formatComment(eval1.comment) }} />
+                                                        <td className="p-3 border-b">
+                                                            {eval1.comment ? (
+                                                                <span dangerouslySetInnerHTML={{ __html: eval1.comment.replace(
+                                                                    /(\w+): ([^:]+)/g,
+                                                                    '<b>$1</b>: <i>$2</i>'
+                                                                ) }} />
+                                                            ) : '-'}
+                                                        </td>
                                                         <td className="p-3 border-b">{eval1.month}</td>
                                                     </tr>
                                                 ))}
