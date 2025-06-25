@@ -46,6 +46,55 @@
             }
         }
 
+        // SemiCircle Progress Component
+        const SemiCircleProgress = ({ percentage }) => {
+            const canvasRef = useRef(null);
+
+            useEffect(() => {
+                const canvas = canvasRef.current;
+                const ctx = canvas.getContext('2d');
+                const width = canvas.width;
+                const height = canvas.height;
+                const centerX = width / 2;
+                const centerY = height;
+                const radius = Math.min(width, height) * 0.45;
+                const startAngle = Math.PI;
+                const maxAngle = 2 * Math.PI;
+
+                // Clear canvas
+                ctx.clearRect(0, 0, width, height);
+
+                // Draw background arc (gray)
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, radius, startAngle, maxAngle);
+                ctx.strokeStyle = '#e5e7eb';
+                ctx.lineWidth = 10;
+                ctx.stroke();
+
+                // Draw progress arc (colored based on percentage)
+                const progressAngle = startAngle + (percentage / 100) * Math.PI;
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, radius, startAngle, progressAngle);
+                ctx.strokeStyle = percentage >= 90 ? '#16a34a' : percentage >= 50 ? '#eab308' : '#dc2626';
+                ctx.lineWidth = 10;
+                ctx.stroke();
+
+                // Draw percentage text
+                ctx.font = '20px Arial';
+                ctx.fillStyle = '#1f2937';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(`${percentage.toFixed(0)}%`, centerX, centerY - radius - 20);
+            }, [percentage]);
+
+            return (
+                <div className="flex flex-col items-center">
+                    <canvas ref={canvasRef} width={200} height={120} />
+                    <p className="text-sm font-medium text-gray-600 mt-2">Norm Completion</p>
+                </div>
+            );
+        };
+
         const App = () => {
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
@@ -57,7 +106,7 @@
             const [operatorData, setOperatorData] = useState(null);
             const [profileData, setProfileData] = useState(null);
             const [hoursData, setHoursData] = useState(null);
-            const [view, setView] = useState('hours'); // Default to hours view
+            const [view, setView] = useState('hours');
             const [newSvName, setNewSvName] = useState('');
             const [newSvId, setNewSvId] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
@@ -262,7 +311,7 @@
                     console.error('Fetch operator data error:', err);
                     setError(err.response?.data?.error || 'Failed to fetch operator data');
                 } finally {
-                    if (isMounted.current) setIsLoading4(false);
+                    if (isMounted.current) setIsLoading(false);
                 }
             };
 
@@ -1173,30 +1222,37 @@
                                 {isLoading ? (
                                     <p className="text-center">Loading...</p>
                                 ) : hoursData ? (
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        <div>
-                                            <p className="text-sm font-medium text-gray-600">Regular Hours</p>
-                                            <p className={`text-lg ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
-                                                {hoursData.regular_hours.toFixed(2)} hours
-                                            </p>
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                        <div className="col-span-1 md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            <div>
+                                                <p className="text-sm font-medium text-gray-600">Regular Hours</p>
+                                                <p className={`text-lg ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
+                                                    {hoursData.regular_hours.toFixed(2)} hours
+                                                </p>
+                                            </div>
+                                            <div>
+                                                <p className="text-sm font-medium text-gray-600">Training Hours</p>
+                                                <p className="text-lg">{hoursData.training_hours.toFixed(2)} hours</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-sm font-medium text-gray-600">Fines</p>
+                                                <p className="text-lg text-red-600">{hoursData.fines.toFixed(2)}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-sm font-medium text-gray-600">Norm Hours</p>
+                                                <p className="text-lg">{hoursData.norm_hours.toFixed(2)} hours</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-sm font-medium text-gray-600">Performance</p>
+                                                <p className={`text-lg ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
+                                                    {((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%
+                                                </p>
+                                            </div>
                                         </div>
-                                        <div>
-                                            <p className="text-sm font-medium text-gray-600">Training Hours</p>
-                                            <p className="text-lg">{hoursData.training_hours.toFixed(2)} hours</p>
-                                        </div>
-                                        <div>
-                                            <p className="text-sm font-medium text-gray-600">Fines</p>
-                                            <p className="text-lg text-red-600">{hoursData.fines.toFixed(2)}</p>
-                                        </div>
-                                        <div>
-                                            <p className="text-sm font-medium text-gray-600">Norm Hours</p>
-                                            <p className="text-lg">{hoursData.norm_hours.toFixed(2)} hours</p>
-                                        </div>
-                                        <div>
-                                            <p className="text-sm font-medium text-gray-600">Performance</p>
-                                            <p className={`text-lg ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
-                                                {((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%
-                                            </p>
+                                        <div className="col-span-1 flex justify-center items-center">
+                                            <SemiCircleProgress
+                                                percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
+                                            />
                                         </div>
                                     </div>
                                 ) : (
