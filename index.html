@@ -57,7 +57,7 @@
             const [operatorData, setOperatorData] = useState(null);
             const [profileData, setProfileData] = useState(null);
             const [hoursData, setHoursData] = useState(null);
-            const [view, setView] = useState('profile'); // Default to profile view
+            const [view, setView] = useState('hours'); // Default to hours view
             const [newSvName, setNewSvName] = useState('');
             const [newSvId, setNewSvId] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
@@ -79,10 +79,8 @@
             const [showChangeTableForm, setShowChangeTableForm] = useState(false);
             const [currentSvForTableChange, setCurrentSvForTableChange] = useState(null);
 
-            // Reference to track mounted state and prevent state updates after unmount
             const isMounted = useRef(true);
 
-            // Debounced fetch with cleanup
             const debouncedFetch = useCallback(_.debounce((fn) => {
                 if (isMounted.current) {
                     try {
@@ -94,7 +92,6 @@
                 }
             }, 300), []);
 
-            // Cleanup on unmount
             useEffect(() => {
                 return () => {
                     isMounted.current = false;
@@ -198,7 +195,7 @@
                     setOperatorData(null);
                     setProfileData(null);
                     setHoursData(null);
-                    setView('profile');
+                    setView('hours');
                     setLogin('');
                     setPassword('');
                     setShowLogoutConfirm(false);
@@ -265,7 +262,7 @@
                     console.error('Fetch operator data error:', err);
                     setError(err.response?.data?.error || 'Failed to fetch operator data');
                 } finally {
-                    if (isMounted.current) setIsLoading(false);
+                    if (isMounted.current) setIsLoading4(false);
                 }
             };
 
@@ -1088,64 +1085,71 @@
                             </button>
                         </div>
 
-                        {/* Profile Section */}
-                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                            <h2 className="text-xl font-semibold mb-4">Your Profile</h2>
+                        {/* Enhanced Profile Section */}
+                        <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
+                            <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
                             {isLoading ? (
-                                <p className="text-center">Loading...</p>
+                                <p className="text-center text-gray-600">Loading...</p>
                             ) : profileData ? (
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <div>
-                                        <p className="text-sm font-medium text-gray-600">Name</p>
-                                        <p className="text-lg">{profileData.name || '-'}</p>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Name</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.name || '-'}</p>
                                     </div>
-                                    <div>
-                                        <p className="text-sm font-medium text-gray-600">Role</p>
-                                        <p className="text-lg">{profileData.role || '-'}</p>
+                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Role</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.role || '-'}</p>
                                     </div>
-                                    <div>
-                                        <p className="text-sm font-medium text-gray-600">Direction</p>
-                                        <p className="text-lg">{profileData.direction || '-'}</p>
+                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Direction</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.direction || '-'}</p>
                                     </div>
-                                    <div>
-                                        <p className="text-sm font-medium text-gray-600">Hire Date</p>
-                                        <p className="text-lg">{profileData.hire_date || '-'}</p>
+                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Hire Date</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.hire_date || '-'}</p>
                                     </div>
-                                    <div>
-                                        <p className="text-sm font-medium text-gray-600">Supervisor</p>
-                                        <p className="text-lg">{profileData.supervisor_name || '-'}</p>
+                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Supervisor</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.supervisor_name || '-'}</p>
                                     </div>
-                                    <div>
-                                        <p className="text-sm font-medium text-gray-600">Scores Table URL</p>
+                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Scores Table</p>
                                         {profileData.scores_table_url ? (
-                                            <a href={profileData.scores_table_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
+                                            <a
+                                                href={profileData.scores_table_url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
+                                            >
+                                                View Scores Table
+                                            </a>
                                         ) : (
-                                            <p className="text-lg">-</p>
+                                            <p className="text-lg text-gray-900">-</p>
                                         )}
                                     </div>
-                                    <div>
-                                        <p className="text-sm font-medium text-gray-600">Hours Table URL</p>
+                                    <div className="bg-gray-50 p-4 rounded-lg">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Hours Table</p>
                                         {profileData.hours_table_url ? (
-                                            <a href={profileData.hours_table_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
+                                            <a
+                                                href={profileData.hours_table_url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
+                                            >
+                                                View Hours Table
+                                            </a>
                                         ) : (
-                                            <p className="text-lg">-</p>
+                                            <p className="text-lg text-gray-900">-</p>
                                         )}
                                     </div>
                                 </div>
                             ) : (
-                                <p className="text-center">No profile data available. Please try refreshing or contact support.</p>
+                                <p className="text-center text-gray-600">No profile data available. Please try refreshing or contact support.</p>
                             )}
                         </div>
 
                         {/* View Toggle Buttons */}
                         <div className="flex justify-center space-x-4 mb-6">
-                            <button
-                                onClick={() => setView('profile')}
-                                className={`px-4 py-2 rounded-lg ${view === 'profile' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
-                                disabled={isLoading}
-                            >
-                                Profile
-                            </button>
                             <button
                                 onClick={() => setView('hours')}
                                 className={`px-4 py-2 rounded-lg ${view === 'hours' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
