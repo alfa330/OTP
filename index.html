@@ -1137,8 +1137,8 @@
                                         </div>
                                         <div>
                                             <p className="text-sm font-medium text-gray-600">Performance</p>
-                                            <p className={`text-lg ${getHoursPerformanceColor(hoursData.regular_hours + hoursData.training_hours - hoursData.fines, hoursData.norm_hours)}`}>
-                                                {(hoursData.regular_hours + hoursData.training_hours - hoursData.fines).toFixed(2)} / {hoursData.norm_hours.toFixed(2)} hours
+                                            <p className={`text-lg ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
+                                                {((hoursData.regular_hours / hoursData.norm_hours) * 100).toFixed(2)}% / 100%
                                             </p>
                                         </div>
                                     </div>
