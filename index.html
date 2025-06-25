@@ -577,18 +577,39 @@
             };
 
             useEffect(() => {
-                if (user) {
-                    if (user.role === 'admin') {
-                        debouncedFetch(fetchSvList);
-                    } else if (user.role === 'sv') {
-                        debouncedFetch(fetchSvData);
-                    } else if (user.role === 'operator') {
-                        debouncedFetch(fetchProfileData);
-                        debouncedFetch(fetchOperatorData);
-                        debouncedFetch(fetchHoursData);
-                    }
+                if (user && user.role === 'admin') {
+                    console.log('Fetching supervisor list...');
+                    fetchSvList();
                 }
-            }, [user, debouncedFetch]);
+            }, [user]);
+            
+            useEffect(() => {
+                if (user && user.role === 'sv') {
+                    console.log('Fetching supervisor data...');
+                    fetchSvData();
+                }
+            }, [user]);
+            
+            useEffect(() => {
+                if (user && user.role === 'operator') {
+                    console.log('Fetching profile data...');
+                    fetchProfileData();
+                }
+            }, [user]);
+            
+            useEffect(() => {
+                if (user && user.role === 'operator') {
+                    console.log('Fetching operator data...');
+                    fetchOperatorData();
+                }
+            }, [user]);
+            
+            useEffect(() => {
+                if (user && user.role === 'operator') {
+                    console.log('Fetching hours data...');
+                    fetchHoursData();
+                }
+            }, [user]);
 
             useEffect(() => {
                 if (user && user.role === 'admin' && selectedSvId) {
