@@ -352,6 +352,16 @@ class Database:
                 WHERE u.id = %s AND u.role = 'operator' AND u.supervisor_id = %s
             """, (operator_id, supervisor_id))
             return cursor.fetchone()
+
+    def update_user_password(self, user_id, new_password):
+        password_hash = pbkdf2_sha256.hash(new_password)
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE users SET password_hash = %s
+                WHERE id = %s
+                RETURNING id
+            """, (password_hash, user_id))
+            return cursor.fetchone() is not None
     
     def update_operator_login(self, operator_id, supervisor_id, new_login):
         """Обновить логин оператора с проверкой принадлежности"""
