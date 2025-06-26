@@ -111,16 +111,6 @@
             const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
             const [selectedSvId, setSelectedSvId] = useState('');
             const [selectedSvData, setSelectedSvData] = useState(null);
-            const [evaluationData, setEvaluationData] = useState({
-                evaluator: '',
-                operator: '',
-                month: new Date().toLocaleString('default', { month: 'long', year: 'numeric' }),
-                call_number: '',
-                phone_number: '',
-                score: '',
-                comment: ''
-            });
-            const [showEvaluationForm, setShowEvaluationForm] = useState(false);
             const [showChangeTableForm, setShowChangeTableForm] = useState(false);
             const [currentSvForTableChange, setCurrentSvForTableChange] = useState(null);
             const [showAccountMenu, setShowAccountMenu] = useState(false);
@@ -404,7 +394,7 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}`, {
+                    const response = await axios.get(`${API_BASE_URL}/api/call_evaluations?operator reduces operatorData =${user.id}`, {
                         headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
@@ -623,57 +613,6 @@
                 } catch (err) {
                     console.error('Change SV table error:', err);
                     setError('Failed to update supervisor table');
-                } finally {
-                    if (isMounted.current) setIsLoading(false);
-                }
-            };
-
-            const sendEvaluation = async () => {
-                if (!evaluationData.evaluator || !evaluationData.operator ||
-                    !evaluationData.call_number || !evaluationData.phone_number ||
-                    !evaluationData.score) {
-                    setError('Please fill all required fields');
-                    return;
-                }
-                if (isNaN(evaluationData.score) || evaluationData.score < 0 || evaluationData.score > 100) {
-                    setError('Score must be a number between 0 and 100');
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.post(`${API_BASE_URL}/api/call_evaluation`, {
-                        ...evaluationData,
-                        evaluator_id: user.id,
-                        operator_id: evaluationData.operator_id || user.id
-                    }, {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey
-                        }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Call evaluation submitted successfully');
-                        setEvaluationData({
-                            evaluator: evaluationData.evaluator,
-                            operator: '',
-                            month: evaluationData.month,
-                            call_number: '',
-                            phone_number: '',
-                            score: '',
-                            comment: ''
-                        });
-                        setShowEvaluationForm(false);
-                        if (user.role === 'operator') {
-                            fetchOperatorData();
-                        }
-                    } else {
-                        setError(data.error || 'Failed to submit evaluation');
-                    }
-                } catch (err) {
-                    console.error('Send evaluation error:', err);
-                    setError(err.response?.data?.error || 'Failed to submit evaluation');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -949,12 +888,6 @@
                             <h1 className="text-3xl font-bold">Admin Dashboard</h1>
                             <div className="relative flex space-x-4">
                                 <button
-                                    onClick={() => setShowEvaluationForm(!showEvaluationForm)}
-                                    className="bg-purple-500 text-white px-4 py-2 rounded hover:bg-purple-600"
-                                >
-                                    {showEvaluationForm ? 'Hide Evaluation Form' : 'Add Call Evaluation'}
-                                </button>
-                                <button
                                     onClick={() => setShowAccountMenu(!showAccountMenu)}
                                     className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
                                 >
@@ -990,100 +923,6 @@
                                 </button>
                             </div>
                         </div>
-
-                        {showEvaluationForm && (
-                            <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                <h2 className="text-xl font-semibold mb-4">Call Evaluation</h2>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                                    <div>
-                                        <label className="block text-sm font-medium mb-1">Evaluator</label>
-                                        <input
-                                            type="text"
-                                            placeholder="Evaluator Name"
-                                            value={evaluationData.evaluator}
-                                            onChange={(e) => setEvaluationData({...evaluationData, evaluator: e.target.value})}
-                                            className="w-full p-2 border rounded"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium mb-1">Operator</label>
-                                        <input
-                                            type="text"
-                                            placeholder="Operator Name"
-                                            value={evaluationData.operator}
-                                            onChange={(e) => setEvaluationData({...evaluationData, operator: e.target.value})}
-                                            className="w-full p-2 border rounded"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium mb-1">Month</label>
-                                        <input
-                                            type="text"
-                                            value={evaluationData.month}
-                                            onChange={(e) => setEvaluationData({...evaluationData, month: e.target.value})}
-                                            className="w-full p-2 border rounded"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium mb-1">Call Number</label>
-                                        <input
-                                            type="text"
-                                            placeholder="Call Number"
-                                            value={evaluationData.call_number}
-                                            onChange={(e) => setEvaluationData({...evaluationData, call_number: e.target.value})}
-                                            className="w-full p-2 border rounded"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium mb-1">Phone Number</label>
-                                        <input
-                                            type="text"
-                                            placeholder="Phone Number"
-                                            value={evaluationData.phone_number}
-                                            onChange={(e) => setEvaluationData({...evaluationData, phone_number: e.target.value})}
-                                            className="w-full p-2 border rounded"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium mb-1">Score (0-100)</label>
-                                        <input
-                                            type="number"
-                                            placeholder="Score"
-                                            min="0"
-                                            max="100"
-                                            value={evaluationData.score}
-                                            onChange={(e) => setEvaluationData({...evaluationData, score: e.target.value})}
-                                            className="w-full p-2 border rounded"
-                                        />
-                                    </div>
-                                </div>
-                                <div className="mb-4">
-                                    <label className="block text-sm font-semibold mb-1">Comment (optional)</label>
-                                    <textarea
-                                        placeholder="Enter comment (e.g., Стилистика и грамотность речи: Использование жаргона - 'Щас')"
-                                        value={evaluationData.comment}
-                                        onChange={(e) => setEvaluationData({...evaluationData, comment: e.target.value})}
-                                        className="w-full p-2 border rounded"
-                                        rows="3"
-                                    />
-                                </div>
-                                <div className="flex justify-between">
-                                    <button
-                                        onClick={sendEvaluation}
-                                        className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-                                        disabled={isLoading}
-                                    >
-                                        {isLoading ? 'Submitting...' : 'Submit Evaluation'}
-                                    </button>
-                                    <button
-                                        onClick={() => setShowEvaluationForm(false)}
-                                        className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                    >
-                                        Cancel
-                                    </button>
-                                </div>
-                            </div>
-                        )}
 
                         <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                             <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
