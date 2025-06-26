@@ -10,6 +10,548 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+    
+        .salary-calculator {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 3rem 1rem;
+            background: #f1f5f9;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #1f2937;
+        }
+    
+        .container {
+            background: #ffffff;
+            padding: 3rem;
+            border-radius: 1rem;
+            box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
+            width: 100%;
+            max-width: 900px;
+            transition: box-shadow 0.3s ease, transform 0.3s ease;
+        }
+    
+        .container:hover {
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+            transform: translateY(-4px);
+        }
+    
+        .direction-buttons {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            opacity: 0;
+            animation: slideIn 0.5s ease forwards;
+        }
+    
+        @keyframes slideIn {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+    
+        .direction-buttons button {
+            padding: 0.75rem 2rem;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            border-radius: 0.625rem;
+            background: #3b82f6;
+            color: #ffffff;
+            transition: background 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease;
+            min-width: 120px;
+        }
+    
+        .direction-buttons button:hover {
+            background: #1d4ed8;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 16px rgba(59, 130, 246, 0.2);
+        }
+    
+        .direction-buttons button:active {
+            transform: translateY(0);
+            box-shadow: none;
+        }
+    
+        .form-section {
+            display: none;
+            opacity: 0;
+            transform: translateY(12px);
+            transition: opacity 0.4s ease, transform 0.4s ease;
+        }
+    
+        .form-section.active {
+            display: block;
+            opacity: 1;
+            transform: translateY(0);
+        }
+    
+        .form-group {
+            margin-bottom: 1.5rem;
+            opacity: 0;
+            transform: translateY(8px);
+            animation: formItemFadeIn 0.4s ease forwards;
+            animation-delay: calc(var(--index) * 0.07s);
+        }
+    
+        .form-group:nth-child(1) { --index: 1; }
+        .form-group:nth-child(2) { --index: 2; }
+        .form-group:nth-child(3) { --index: 3; }
+        .form-group:nth-child(4) { --index: 4; }
+        .form-group:nth-child(5) { --index: 5; }
+        .form-group:nth-child(6) { --index: 6; }
+        .form-group:nth-child(7) { --index: 7; }
+        .form-group:nth-child(8) { --index: 8; }
+    
+        @keyframes formItemFadeIn {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+    
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+            font-size: 0.95rem;
+            color: #374151;
+        }
+    
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.625rem;
+            font-size: 0.95rem;
+            background: #f9fafb;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease, background 0.3s ease;
+        }
+    
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+            background: #ffffff;
+        }
+    
+        .form-group input:invalid {
+            border-color: #ef4444;
+            box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.1);
+        }
+    
+        .bonus-group {
+            margin-bottom: 1rem;
+        }
+    
+        .bonus-checkbox {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+    
+        .bonus-checkbox label {
+            margin-bottom: 0;
+            flex: 1;
+            font-size: 0.9rem;
+        }
+    
+        .bonus-checkbox input[type="checkbox"] {
+            width: 1.125rem;
+            height: 1.125rem;
+            cursor: pointer;
+            accent-color: #3b82f6;
+        }
+    
+        .bonus-checkbox input[type="number"] {
+            width: 8rem;
+            display: none;
+        }
+    
+        .bonus-checkbox input[type="number"].visible {
+            display: block;
+        }
+    
+        .button-group {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 1rem;
+            margin-top: 2rem;
+            opacity: 0;
+            transform: translateY(12px);
+            transition: opacity 0.4s ease, transform 0.4s ease;
+        }
+    
+        .button-group.active {
+            display: flex;
+            opacity: 1;
+            transform: translateY(0);
+        }
+    
+        .button-group button {
+            padding: 0.875rem 2rem;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            border-radius: 0.625rem;
+            transition: background 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease;
+            min-width: 120px;
+        }
+    
+        .calculate-button {
+            background: #10b981;
+            color: #ffffff;
+        }
+    
+        .calculate-button:disabled {
+            background: #d1d5db;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+    
+        .calculate-button:hover:not(:disabled) {
+            background: #059669;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 16px rgba(16, 185, 129, 0.2);
+        }
+    
+        .calculate-button:active:not(:disabled) {
+            transform: translateY(0);
+            box-shadow: none;
+        }
+    
+        .toggle-table-button {
+            background: #8b5cf6;
+            color: #ffffff;
+        }
+    
+        .toggle-table-button:hover:not(:disabled) {
+            background: #7c3aed;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 16px rgba(139, 92, 246, 0.2);
+        }
+    
+        .toggle-table-button:active:not(:disabled) {
+            transform: translateY(0);
+            box-shadow: none;
+        }
+    
+        .toggle-table-button:disabled {
+            background: #d1d5db;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+    
+        .clear-button {
+            background: #ef4444;
+            color: #ffffff;
+        }
+    
+        .clear-button:hover:not(:disabled) {
+            background: #dc2626;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 16px rgba(239, 68, 68, 0.2);
+        }
+    
+        .clear-button:active:not(:disabled) {
+            transform: translateY(0);
+            box-shadow: none;
+        }
+    
+        .clear-button:disabled {
+            background: #d1d5db;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+    
+        #result {
+            margin-top: 2rem;
+            padding: 1.5rem;
+            border-radius: 0.75rem;
+            background: #f9fafb;
+            font-size: 0.95rem;
+            line-height: 1.6;
+            color: #1f2937;
+            display: none;
+            opacity: 0;
+            transform: translateY(12px);
+            transition: opacity 0.4s ease, transform 0.4s ease;
+            border: 1px solid #e5e7eb;
+        }
+    
+        #result.active {
+            display: block;
+            opacity: 1;
+            transform: translateY(0);
+        }
+    
+        #result .result-title {
+            font-size: 1.125rem;
+            font-weight: 700;
+            color: #111827;
+            margin-bottom: 1rem;
+            border-bottom: 2px solid #e5e7eb;
+            padding-bottom: 0.5rem;
+        }
+    
+        #result .result-item {
+            display: flex;
+            justify-content: space-between;
+            margin: 0.75rem 0;
+            font-weight: 500;
+        }
+    
+        #result .result-item .label {
+            color: #374151;
+        }
+    
+        #result .result-item .value {
+            color: #1f2937;
+            font-weight: 600;
+        }
+    
+        #result .result-item .value.highlight {
+            color: #10b981;
+        }
+    
+        #points-table {
+            margin-top: 1.5rem;
+            padding: 1.5rem;
+            border-radius: 0.75rem;
+            background: #f9fafb;
+            display: none;
+            opacity: 0;
+            transform: translateY(12px);
+            transition: opacity 0.4s ease, transform 0.4s ease;
+            border: 1px solid #e5e7eb;
+            overflow-x: auto;
+        }
+    
+        #points-table.active {
+            display: block;
+            opacity: 1;
+            transform: translateY(0);
+        }
+    
+        #points-table table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-size: 0.9rem;
+            min-width: 300px;
+        }
+    
+        #points-table th,
+        #points-table td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+    
+        #points-table th {
+            background: #e5e7eb;
+            font-weight: 600;
+            color: #111827;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+    
+        #points-table tr.selected {
+            background: #eff6ff;
+            font-weight: 600;
+        }
+    
+        #points-table tr.selected td {
+            color: #1e40af;
+        }
+    
+        #points-table tr.category-header {
+            background: #d1d5db;
+            font-weight: 700;
+            font-size: 0.95rem;
+            color: #111827;
+        }
+    
+        #points-table tr.category-header td {
+            padding: 0.875rem 1rem;
+            border-top: 2px solid #9ca3af;
+            border-bottom: 2px solid #9ca3af;
+        }
+    
+        .tooltip {
+            position: relative;
+            cursor: help;
+        }
+    
+        .tooltip:hover::after {
+            content: attr(data-tooltip);
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #1f2937;
+            color: #ffffff;
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.375rem;
+            font-size: 0.8rem;
+            white-space: nowrap;
+            z-index: 100;
+            margin-bottom: 0.5rem;
+        }
+    
+        @media (max-width: 768px) {
+            .salary-calculator {
+                padding: 1.5rem 0.5rem;
+            }
+    
+            .container {
+                padding: 1.5rem;
+                margin: 0 0.5rem;
+            }
+    
+            .direction-buttons {
+                flex-direction: column;
+                gap: 0.75rem;
+            }
+    
+            .direction-buttons button {
+                width: 100%;
+                padding: 0.75rem;
+            }
+    
+            .form-group {
+                margin-bottom: 1rem;
+            }
+    
+            .form-group label {
+                font-size: 0.9rem;
+            }
+    
+            .form-group input,
+            .form-group select {
+                padding: 0.625rem;
+                font-size: 0.9rem;
+            }
+    
+            .bonus-checkbox label {
+                font-size: 0.85rem;
+            }
+    
+            .button-group {
+                flex-direction: column;
+                gap: 0.75rem;
+            }
+    
+            .button-group button {
+                width: 100%;
+                padding: 0.75rem;
+            }
+    
+            #result {
+                padding: 1rem;
+                font-size: 0.9rem;
+            }
+    
+            #result .result-title {
+                font-size: 1rem;
+            }
+    
+            #points-table {
+                padding: 1rem;
+            }
+    
+            #points-table table {
+                font-size: 0.85rem;
+            }
+    
+            #points-table th,
+            #points-table td {
+                padding: 0.5rem 0.75rem;
+            }
+        }
+    
+        @media (max-width: 480px) {
+            .salary-calculator {
+                padding: 1rem 0.25rem;
+            }
+    
+            .container {
+                padding: 1rem;
+                margin: 0 0.25rem;
+            }
+    
+            .direction-buttons button {
+                font-size: 0.9rem;
+                padding: 0.625rem;
+            }
+    
+            .form-group label {
+                font-size: 0.85rem;
+            }
+    
+            .form-group input,
+            .form-group select {
+                padding: 0.5rem;
+                font-size: 0.85rem;
+            }
+    
+            .bonus-checkbox {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+    
+            .bonus-checkbox input[type="number"] {
+                width: 100%;
+            }
+    
+            .button-group button {
+                font-size: 0.9rem;
+                padding: 0.625rem;
+            }
+    
+            #result {
+                padding: 0.75rem;
+                font-size: 0.85rem;
+            }
+    
+            #result .result-title {
+                font-size: 0.95rem;
+            }
+    
+            #points-table table {
+                font-size: 0.8rem;
+            }
+    
+            #points-table th,
+            #points-table td {
+                padding: 0.4rem 0.5rem;
+            }
+    
+            .tooltip:hover::after {
+                font-size: 0.75rem;
+                padding: 0.4rem 0.6rem;
+            }
+        }
+    </style>
 </head>
 <body class="bg-gray-100">
     <div id="root"></div>
