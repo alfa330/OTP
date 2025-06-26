@@ -230,71 +230,71 @@
             // Add this function to generate points table
             const generatePointsTable = () => {
                 const { experience, quality, callsPerHour } = salaryData;
-                let tableHtml = `
-                    <table class="min-w-full bg-white border-collapse">
-                        <thead>
-                            <tr class="bg-blue-50">
-                                <th class="p-4 border-b text-left text-sm font-semibold text-gray-700">Category</th>
-                                <th class="p-4 border-b text-left text-sm font-semibold text-gray-700">Condition</th>
-                                <th class="p-4 border-b text-left text-sm font-semibold text-gray-700">Points</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr class="bg-gray-100 font-semibold">
-                                <td class="p-4 border-b" colspan="3">Experience</td>
-                            </tr>
-                `;
+            
                 const experienceRanges = [
                     { range: '0-3 months', points: 15, selected: experience === '0-3' },
                     { range: '4-9 months', points: 25, selected: experience === '4-9' },
                     { range: '10-15 months', points: 35, selected: experience === '10-15' },
                     { range: '≥16 months', points: 50, selected: experience === '16+' }
                 ];
-                tableHtml += experienceRanges.map(row => `
-                    <tr ${row.selected ? 'class="bg-blue-100"' : ''}>
-                        <td class="p-4 border-b"></td>
-                        <td class="p-4 border-b">${row.range}</td>
-                        <td class="p-4 border-b">${row.points}</td>
-                    </tr>
-                `).join('');
-                tableHtml += `
-                    <tr class="bg-gray-100 font-semibold">
-                        <td class="p-4 border-b" colspan="3">Quality</td>
-                    </tr>
-                `;
+            
                 const qualityRanges = [
                     { range: '85-89%', points: 20, selected: quality >= 85 && quality < 90 },
                     { range: '90-94%', points: 25, selected: quality >= 90 && quality < 95 },
                     { range: '95-98%', points: 30, selected: quality >= 95 && quality < 99 },
                     { range: '99-100%', points: 50, selected: quality >= 99 && quality <= 100 }
                 ];
-                tableHtml += qualityRanges.map(row => `
-                    <tr ${row.selected ? 'class="bg-blue-100"' : ''}>
-                        <td class="p-4 border-b"></td>
-                        <td class="p-4 border-b">${row.range}</td>
-                        <td class="p-4 border-b">${row.points}</td>
-                    </tr>
-                `).join('');
-                tableHtml += `
-                    <tr class="bg-gray-100 font-semibold">
-                        <td class="p-4 border-b" colspan="3">Calls per Hour</td>
-                    </tr>
-                `;
+            
                 const callsPerHourRanges = [
                     { range: '≥5', points: 20, selected: callsPerHour >= 5 && callsPerHour < 10 },
                     { range: '≥10', points: 25, selected: callsPerHour >= 10 && callsPerHour < 15 },
                     { range: '≥15', points: 30, selected: callsPerHour >= 15 && callsPerHour < 20 },
                     { range: '≥20', points: 50, selected: callsPerHour >= 20 }
                 ];
-                tableHtml += callsPerHourRanges.map(row => `
-                    <tr ${row.selected ? 'class="bg-blue-100"' : ''}>
-                        <td class="p-4 border-b"></td>
-                        <td class="p-4 border-b">${row.range}</td>
-                        <td class="p-4 border-b">${row.points}</td>
-                    </tr>
-                `).join('');
-                tableHtml += `</tbody></table>`;
-                return tableHtml;
+            
+                return (
+                    <table className="min-w-full bg-white border-collapse">
+                        <thead>
+                            <tr className="bg-blue-50">
+                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Category</th>
+                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Condition</th>
+                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Points</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr className="bg-gray-100 font-semibold">
+                                <td className="p-4 border-b" colSpan="3">Experience</td>
+                            </tr>
+                            {experienceRanges.map((row, index) => (
+                                <tr key={`exp-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
+                                    <td className="p-4 border-b"></td>
+                                    <td className="p-4 border-b">{row.range}</td>
+                                    <td className="p-4 border-b">{row.points}</td>
+                                </tr>
+                            ))}
+                            <tr className="bg-gray-100 font-semibold">
+                                <td className="p-4 border-b" colSpan="3">Quality</td>
+                            </tr>
+                            {qualityRanges.map((row, index) => (
+                                <tr key={`qual-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
+                                    <td className="p-4 border-b"></td>
+                                    <td className="p-4 border-b">{row.range}</td>
+                                    <td className="p-4 border-b">{row.points}</td>
+                                </tr>
+                            ))}
+                            <tr className="bg-gray-100 font-semibold">
+                                <td className="p-4 border-b" colSpan="3">Calls per Hour</td>
+                            </tr>
+                            {callsPerHourRanges.map((row, index) => (
+                                <tr key={`cph-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
+                                    <td className="p-4 border-b"></td>
+                                    <td className="p-4 border-b">{row.range}</td>
+                                    <td className="p-4 border-b">{row.points}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                );
             };
             
             // Add this function to clear the salary form
