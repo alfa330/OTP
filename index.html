@@ -211,39 +211,7 @@
                 } finally {
                     setIsLoading(false);
                 }
-            };
-
-            const DisputeModal = () => (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                        <h2 className="text-xl font-semibold mb-4">Dispute Evaluation</h2>
-                        <p className="mb-2">Call #{selectedEvaluation?.call_number} - Score: {selectedEvaluation?.score}</p>
-                        <textarea
-                            value={disputeText}
-                            onChange={(e) => setDisputeText(e.target.value)}
-                            placeholder="Enter your dispute reason..."
-                            className="w-full p-3 border rounded-lg mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            rows={5}
-                        />
-                        <div className="flex justify-between">
-                            <button
-                                onClick={handleSubmitDispute}
-                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                disabled={isLoading}
-                            >
-                                {isLoading ? 'Submitting...' : 'Submit Dispute'}
-                            </button>
-                            <button
-                                onClick={() => setShowDisputeModal(false)}
-                                className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                            >
-                                Cancel
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            );            
-        
+            };        
             const calculateSalary = () => {
                 let points = 0;
                 let premiumCoefficient = 1;
@@ -1808,15 +1776,17 @@
                                                             <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
                                                             <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
                                                             <td className="p-4 border-b text-sm">
-                                                                <button
-                                                                    onClick={() => {
-                                                                        setSelectedEvaluation(eval1);
-                                                                        setShowDisputeModal(true);
-                                                                    }}
-                                                                    className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
-                                                                >
-                                                                    Dispute
-                                                                </button>
+                                                                {eval1.score < 100 && (
+                                                                    <button
+                                                                        onClick={() => {
+                                                                            setSelectedEvaluation(eval1);
+                                                                            setShowDisputeModal(true);
+                                                                        }}
+                                                                        className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
+                                                                    >
+                                                                        Dispute
+                                                                    </button>
+                                                                )}
                                                             </td>
                                                         </tr>
                                                     ))}
@@ -2079,6 +2049,58 @@
                         )}
                         {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
                         {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                        const DisputeModal = () => (
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                                    <h2 className="text-xl font-semibold mb-4">Оспорить оценку</h2>
+                                    
+                                    <div className="mb-4 space-y-2">
+                                        <p className="font-medium">Информация об оценке:</p>
+                                        <div className="pl-4">
+                                            <p>• Номер звонка: <span className="font-semibold">{selectedEvaluation?.call_number}</span></p>
+                                            <p>• Телефон: <span className="font-semibold">{selectedEvaluation?.phone_number}</span></p>
+                                            <p>• Оценка: <span className={`font-semibold ${getScoreColor(selectedEvaluation?.score)}`}>
+                                                {selectedEvaluation?.score?.toFixed(2)}
+                                            </span></p>
+                                            <p>• Месяц: <span className="font-semibold">{selectedEvaluation?.month}</span></p>
+                                        </div>
+                                    </div>
+                        
+                                    <div className="mb-4">
+                                        <label className="block mb-2 font-medium">Ваше сообщение супервайзеру:</label>
+                                        <textarea
+                                            value={disputeText}
+                                            onChange={(e) => setDisputeText(e.target.value)}
+                                            placeholder="Опишите причину оспаривания оценки..."
+                                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            rows={5}
+                                        />
+                                    </div>
+                        
+                                    <div className="flex justify-between">
+                                        <button
+                                            onClick={handleSubmitDispute}
+                                            className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                            disabled={isLoading}
+                                        >
+                                            {isLoading ? 'Отправка...' : 'Отправить запрос'}
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setShowDisputeModal(false);
+                                                setDisputeText('');
+                                            }}
+                                            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                        >
+                                            Отмена
+                                        </button>
+                                    </div>
+                                    
+                                    {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                                    {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                                </div>
+                            </div>
+                        );
                         {showDisputeModal && <DisputeModal />}
                     </div>
                 );
