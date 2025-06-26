@@ -394,7 +394,7 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/call_evaluations?operator reduces operatorData =${user.id}`, {
+                    const response = await axios.get(`${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}`, {
                         headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
