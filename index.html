@@ -10,597 +10,6 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
-    <style>
-      /* Modal Styles */
-      .modal {
-        display: none;
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(0, 0, 0, 0.5);
-        z-index: 1000;
-        align-items: center;
-        justify-content: center;
-        overflow: auto;
-        padding: 1rem;
-      }
-    
-      .modal.active {
-        display: flex;
-      }
-    
-      .modal-content {
-        background: #ffffff;
-        padding: 2rem;
-        border-radius: 1rem;
-        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
-        max-width: 900px;
-        width: 100%;
-        max-height: 90vh;
-        overflow-y: auto;
-        position: relative;
-        animation: slideInModal 0.3s ease;
-      }
-    
-      @keyframes slideInModal {
-        from {
-          opacity: 0;
-          transform: translateY(20px);
-        }
-        to {
-          opacity: 1;
-          transform: translateY(0);
-        }
-      }
-    
-      .modal-close {
-        position: absolute;
-        top: 1rem;
-        right: 1rem;
-        background: #ef4444;
-        color: #ffffff;
-        border: none;
-        border-radius: 50%;
-        width: 30px;
-        height: 30px;
-        font-size: 1rem;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        transition: background 0.2s ease;
-      }
-    
-      .modal-close:hover {
-        background: #dc2626;
-      }
-    
-      /* Calculator Styles (Copied from Second HTML) */
-      .calculator-container {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        color: #1f2937;
-      }
-    
-      .calculator-container h1 {
-        text-align: center;
-        font-size: 2rem;
-        font-weight: 700;
-        color: #111827;
-        margin-bottom: 2rem;
-        letter-spacing: -0.6px;
-      }
-    
-      .direction-buttons {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
-        gap: 1rem;
-        margin-bottom: 2rem;
-        opacity: 0;
-        animation: slideIn 0.5s ease forwards;
-      }
-    
-      @keyframes slideIn {
-        to {
-          opacity: 1;
-          transform: translateY(0);
-        }
-      }
-    
-      .direction-buttons button {
-        padding: 0.75rem 2rem;
-        font-size: 1rem;
-        font-weight: 600;
-        cursor: pointer;
-        border: none;
-        border-radius: 0.625rem;
-        background: #3b82f6;
-        color: #ffffff;
-        transition: background 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease;
-        min-width: 120px;
-      }
-    
-      .direction-buttons button:hover {
-        background: #1d4ed8;
-        transform: translateY(-2px);
-        box-shadow: 0 4px 16px rgba(59, 130, 246, 0.2);
-      }
-    
-      .direction-buttons button:active {
-        transform: translateY(0);
-        box-shadow: none;
-      }
-    
-      .form-section {
-        display: none;
-        opacity: 0;
-        transform: translateY(12px);
-        transition: opacity 0.4s ease, transform 0.4s ease;
-      }
-    
-      .form-section.active {
-        display: block;
-        opacity: 1;
-        transform: translateY(0);
-      }
-    
-      .form-group {
-        margin-bottom: 1.5rem;
-        opacity: 0;
-        transform: translateY(8px);
-        animation: formItemFadeIn 0.4s ease forwards;
-        animation-delay: calc(var(--index) * 0.07s);
-      }
-    
-      .form-group:nth-child(1) { --index: 1; }
-      .form-group:nth-child(2) { --index: 2; }
-      .form-group:nth-child(3) { --index: 3; }
-      .form-group:nth-child(4) { --index: 4; }
-      .form-group:nth-child(5) { --index: 5; }
-      .form-group:nth-child(6) { --index: 6; }
-      .form-group:nth-child(7) { --index: 7; }
-      .form-group:nth-child(8) { --index: 8; }
-    
-      @keyframes formItemFadeIn {
-        to {
-          opacity: 1;
-          transform: translateY(0);
-        }
-      }
-    
-      .form-group label {
-        display: block;
-        margin-bottom: 0.5rem;
-        font-weight: 600;
-        font-size: 0.95rem;
-        color: #374151;
-      }
-    
-      .form-group input,
-      .form-group select {
-        width: 100%;
-        padding: 0.75rem 1rem;
-        border: 1px solid #d1d5db;
-        border-radius: 0.625rem;
-        font-size: 0.95rem;
-        background: #f9fafb;
-        transition: border-color 0.3s ease, box-shadow 0.3s ease, background 0.3s ease;
-      }
-    
-      .form-group input:focus,
-      .form-group select:focus {
-        outline: none;
-        border-color: #3b82f6;
-        box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
-        background: #ffffff;
-      }
-    
-      .form-group input:invalid {
-        border-color: #ef4444;
-        box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.1);
-      }
-    
-      .bonus-group {
-        margin-bottom: 1rem;
-      }
-    
-      .bonus-checkbox {
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        margin-bottom: 0.75rem;
-      }
-    
-      .bonus-checkbox label {
-        margin-bottom: 0;
-        flex: 1;
-        font-size: 0.9rem;
-      }
-    
-      .bonus-checkbox input[type="checkbox"] {
-        width: 1.125rem;
-        height: 1.125rem;
-        cursor: pointer;
-        accent-color: #3b82f6;
-      }
-    
-      .bonus-checkbox input[type="number"] {
-        width: 8rem;
-        display: none;
-      }
-    
-      .bonus-checkbox input[type="number"].visible {
-        display: block;
-      }
-    
-      .button-group {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
-        gap: 1rem;
-        margin-top: 2rem;
-        opacity: 0;
-        transform: translateY(12px);
-        transition: opacity 0.4s ease, transform 0.4s ease;
-      }
-    
-      .button-group.active {
-        display: flex;
-        opacity: 1;
-        transform: translateY(0);
-      }
-    
-      .button-group button {
-        padding: 0.875rem 2rem;
-        font-size: 1rem;
-        font-weight: 600;
-        cursor: pointer;
-        border: none;
-        border-radius: 0.625rem;
-        transition: background 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease;
-        min-width: 120px;
-      }
-    
-      .calculate-button {
-        background: #10b981;
-        color: #ffffff;
-      }
-    
-      .calculate-button:disabled {
-        background: #d1d5db;
-        cursor: not-allowed;
-        box-shadow: none;
-      }
-    
-      .calculate-button:hover:not(:disabled) {
-        background: #059669;
-        transform: translateY(-2px);
-        box-shadow: 0 4px 16px rgba(16, 185, 129, 0.2);
-      }
-    
-      .calculate-button:active:not(:disabled) {
-        transform: translateY(0);
-        box-shadow: none;
-      }
-    
-      .toggle-table-button {
-        background: #8b5cf6;
-        color: #ffffff;
-      }
-    
-      .toggle-table-button:hover:not(:disabled) {
-        background: #7c3aed;
-        transform: translateY(-2px);
-        box-shadow: 0 4px 16px rgba(139, 92, 246, 0.2);
-      }
-    
-      .toggle-table-button:active:not(:disabled) {
-        transform: translateY(0);
-        box-shadow: none;
-      }
-    
-      .toggle-table-button:disabled {
-        background: #d1d5db;
-        cursor: not-allowed;
-        box-shadow: none;
-      }
-    
-      .clear-button {
-        background: #ef4444;
-        color: #ffffff;
-      }
-    
-      .clear-button:hover:not(:disabled) {
-        background: #dc2626;
-        transform: translateY(-2px);
-        box-shadow: 0 4px 16px rgba(239, 68, 68, 0.2);
-      }
-    
-      .clear-button:active:not(:disabled) {
-        transform: translateY(0);
-        box-shadow: none;
-      }
-    
-      .clear-button:disabled {
-        background: #d1d5db;
-        cursor: not-allowed;
-        box-shadow: none;
-      }
-    
-      #result {
-        margin-top: 2rem;
-        padding: 1.5rem;
-        border-radius: 0.75rem;
-        background: #f9fafb;
-        font-size: 0.95rem;
-        line-height: 1.6;
-        color: #1f2937;
-        display: none;
-        opacity: 0;
-        transform: translateY(12px);
-        transition: opacity 0.4s ease, transform 0.4s ease;
-        border: 1px solid #e5e7eb;
-      }
-    
-      #result.active {
-        display: block;
-        opacity: 1;
-        transform: translateY(0);
-      }
-    
-      #result .result-title {
-        font-size: 1.125rem;
-        font-weight: 700;
-        color: #111827;
-        margin-bottom: 1rem;
-        border-bottom: 2px solid #e5e7eb;
-        padding-bottom: 0.5rem;
-      }
-    
-      #result .result-item {
-        display: flex;
-        justify-content: space-between;
-        margin: 0.75rem 0;
-        font-weight: 500;
-      }
-    
-      #result .result-item .label {
-        color: #374151;
-      }
-    
-      #result .result-item .value {
-        color: #1f2937;
-        font-weight: 600;
-      }
-    
-      #result .result-item .value.highlight {
-        color: #10b981;
-      }
-    
-      #points-table {
-        margin-top: 1.5rem;
-        padding: 1.5rem;
-        border-radius: 0.75rem;
-        background: #f9fafb;
-        display: none;
-        opacity: 0;
-        transform: translateY(12px);
-        transition: opacity 0.4s ease, transform 0.4s ease;
-        border: 1px solid #e5e7eb;
-        overflow-x: auto;
-      }
-    
-      #points-table.active {
-        display: block;
-        opacity: 1;
-        transform: translateY(0);
-      }
-    
-      #points-table table {
-        width: 100%;
-        border-collapse: separate;
-        border-spacing: 0;
-        font-size: 0.9rem;
-        min-width: 300px;
-      }
-    
-      #points-table th,
-      #points-table td {
-        padding: 0.75rem 1rem;
-        text-align: left;
-        border-bottom: 1px solid #e5e7eb;
-      }
-    
-      #points-table th {
-        background: #e5e7eb;
-        font-weight: 600;
-        color: #111827;
-        position: sticky;
-        top: 0;
-        z-index: 10;
-      }
-    
-      #points-table tr.selected {
-        background: #eff6ff;
-        font-weight: 600;
-      }
-    
-      #points-table tr.selected td {
-        color: #1e40af;
-      }
-    
-      #points-table tr.category-header {
-        background: #d1d5db;
-        font-weight: 700;
-        font-size: 0.95rem;
-        color: #111827;
-      }
-    
-      #points-table tr.category-header td {
-        padding: 0.875rem 1rem;
-        border-top: 2px solid #9ca3af;
-        border-bottom: 2px solid #9ca3af;
-      }
-    
-      .tooltip {
-        position: relative;
-        cursor: help;
-      }
-    
-      .tooltip:hover::after {
-        content: attr(data-tooltip);
-        position: absolute;
-        bottom: 100%;
-        left: 50%;
-        transform: translateX(-50%);
-        background: #1f2937;
-        color: #ffffff;
-        padding: 0.5rem 0.75rem;
-        border-radius: 0.375rem;
-        font-size: 0.8rem;
-        white-space: nowrap;
-        z-index: 100;
-        margin-bottom: 0.5rem;
-      }
-    
-      @media (max-width: 768px) {
-        .modal-content {
-          padding: 1.5rem;
-          margin: 0 0.5rem;
-        }
-    
-        .calculator-container h1 {
-          font-size: 1.75rem;
-          margin-bottom: 1.5rem;
-        }
-    
-        .direction-buttons {
-          flex-direction: column;
-          gap: 0.75rem;
-        }
-    
-        .direction-buttons button {
-          width: 100%;
-          padding: 0.75rem;
-        }
-    
-        .form-group {
-          margin-bottom: 1rem;
-        }
-    
-        .form-group label {
-          font-size: 0.9rem;
-        }
-    
-        .form-group input,
-        .form-group select {
-          padding: 0.625rem;
-          font-size: 0.9rem;
-        }
-    
-        .bonus-checkbox label {
-          font-size: 0.85rem;
-        }
-    
-        .button-group {
-          flex-direction: column;
-          gap: 0.75rem;
-        }
-    
-        .button-group button {
-          width: 100%;
-          padding: 0.75rem;
-        }
-    
-        #result {
-          padding: 1rem;
-          font-size: 0.9rem;
-        }
-    
-        #result .result-title {
-          font-size: 1rem;
-        }
-    
-        #points-table {
-          padding: 1rem;
-        }
-    
-        #points-table table {
-          font-size: 0.85rem;
-        }
-    
-        #points-table th,
-        #points-table td {
-          padding: 0.5rem 0.75rem;
-        }
-      }
-    
-      @media (max-width: 480px) {
-        .modal-content {
-          padding: 1rem;
-          margin: 0 0.25rem;
-        }
-    
-        .calculator-container h1 {
-          font-size: 1.5rem;
-          margin-bottom: 1rem;
-        }
-    
-        .direction-buttons button {
-          font-size: 0.9rem;
-          padding: 0.625rem;
-        }
-    
-        .form-group label {
-          font-size: 0.85rem;
-        }
-    
-        .form-group input,
-        .form-group select {
-          padding: 0.5rem;
-          font-size: 0.85rem;
-        }
-    
-        .bonus-checkbox {
-          flex-direction: column;
-          align-items: flex-start;
-        }
-    
-        .bonus-checkbox input[type="number"] {
-          width: 100%;
-        }
-    
-        .button-group button {
-          font-size: 0.9rem;
-          padding: 0.625rem;
-        }
-    
-        #result {
-          padding: 0.75rem;
-          font-size: 0.85rem;
-        }
-    
-        #result .result-title {
-          font-size: 0.95rem;
-        }
-    
-        #points-table table {
-          font-size: 0.8rem;
-        }
-    
-        #points-table th,
-        #points-table td {
-          padding: 0.4rem 0.5rem;
-        }
-    
-        .tooltip:hover::after {
-          font-size: 0.75rem;
-          padding: 0.4rem 0.6rem;
-        }
-      }
-    </style>
 </head>
 <body class="bg-gray-100">
     <div id="root"></div>
@@ -707,12 +116,23 @@
             const [showAccountMenu, setShowAccountMenu] = useState(false);
             const [showChangeLoginForm, setShowChangeLoginForm] = useState(false);
             const [showChangePasswordForm, setShowChangePasswordForm] = useState(false);
-            const [showCalculatorModal, setShowCalculatorModal] = useState(false);
-            const [calculatorDirection, setCalculatorDirection] = useState('');
             const [loginData, setLoginData] = useState({
                 new_login: '',
                 confirm_login: ''
             });
+            const [salaryData, setSalaryData] = useState({
+                experience: '',
+                quality: '',
+                callsPerHour: '',
+                hoursNorm: '',
+                totalHours: '',
+                bonusTraining: false,
+                bonusRefer: false,
+                bonusReferQuantity: '',
+                bonusFilming: false,
+                bonusFilmingQuantity: ''
+            });
+            const [salaryResult, setSalaryResult] = useState(null);
             const [passwordData, setPasswordData] = useState({
                 user_id: '',
                 new_password: '',
@@ -736,22 +156,7 @@
                     isMounted.current = false;
                 };
             }, []);
-            // Function to open the calculator modal
-              const openCalculator = (direction) => {
-                setCalculatorDirection(direction === 'Оператор' || direction === 'Line' || direction === 'Moderator' ? 'operator' : 'chat');
-                setShowCalculatorModal(true);
-              };
-            
-              // Function to close the calculator modal
-              const closeCalculator = () => {
-                setShowCalculatorModal(false);
-                setCalculatorDirection('');
-                // Reset calculator form
-                const form = document.getElementById(`${calculatorDirection}-form`);
-                if (form) {
-                  clearForm(calculatorDirection);
-                }
-              };
+
             const clearMessages = () => {
                 if (isMounted.current) {
                     setError('');
@@ -764,6 +169,151 @@
                 return googleSheetsRegex.test(url);
             };
 
+            const calculateSalary = () => {
+                let points = 0;
+                let premiumCoefficient = 1;
+                let bonuses = 0;
+                const hoursNorm = parseFloat(salaryData.hoursNorm) || 0;
+                const totalHours = parseFloat(salaryData.totalHours) || 0;
+                const quality = parseFloat(salaryData.quality) || 0;
+                const callsPerHour = parseFloat(salaryData.callsPerHour) || 0;
+                const experience = salaryData.experience;
+            
+                // Experience points
+                if (experience === '16+') points += 50;
+                else if (experience === '10-15') points += 35;
+                else if (experience === '4-9') points += 25;
+                else if (experience === '0-3') points += 15;
+            
+                // Quality points
+                if (quality >= 99 && quality <= 100) points += 50;
+                else if (quality >= 95 && quality < 99) points += 30;
+                else if (quality >= 90 && quality < 95) points += 25;
+                else if (quality >= 85 && quality < 90) points += 20;
+            
+                // Calls per hour points
+                if (callsPerHour >= 20) points += 50;
+                else if (callsPerHour >= 15) points += 30;
+                else if (callsPerHour >= 10) points += 25;
+                else if (callsPerHour >= 5) points += 20;
+            
+                // Bonuses
+                if (salaryData.bonusTraining) bonuses += 6000;
+                if (salaryData.bonusRefer) {
+                    const quantity = parseInt(salaryData.bonusReferQuantity) || 0;
+                    bonuses += 5000 * quantity;
+                }
+                if (salaryData.bonusFilming) {
+                    const quantity = parseInt(salaryData.bonusFilmingQuantity) || 0;
+                    bonuses += 5000 * quantity;
+                }
+            
+                const hoursPercentage = hoursNorm > 0 ? (totalHours / hoursNorm * 100) : 0;
+                premiumCoefficient = hoursPercentage >= 90 ? 1 : 0.75;
+                const pointsCoefficient = points / 100;
+                const baseSalary = 700 * totalHours;
+                const premiumPart = baseSalary * pointsCoefficient * premiumCoefficient;
+                const finalSalary = baseSalary + premiumPart + bonuses;
+            
+                setSalaryResult({
+                    points,
+                    premiumCoefficient,
+                    hoursNorm,
+                    hoursPercentage,
+                    baseSalary,
+                    premiumPart,
+                    bonuses,
+                    finalSalary
+                });
+            };
+            
+            // Add this function to generate points table
+            const generatePointsTable = () => {
+                const { experience, quality, callsPerHour } = salaryData;
+                let tableHtml = `
+                    <table class="min-w-full bg-white border-collapse">
+                        <thead>
+                            <tr class="bg-blue-50">
+                                <th class="p-4 border-b text-left text-sm font-semibold text-gray-700">Category</th>
+                                <th class="p-4 border-b text-left text-sm font-semibold text-gray-700">Condition</th>
+                                <th class="p-4 border-b text-left text-sm font-semibold text-gray-700">Points</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="bg-gray-100 font-semibold">
+                                <td class="p-4 border-b" colspan="3">Experience</td>
+                            </tr>
+                `;
+                const experienceRanges = [
+                    { range: '0-3 months', points: 15, selected: experience === '0-3' },
+                    { range: '4-9 months', points: 25, selected: experience === '4-9' },
+                    { range: '10-15 months', points: 35, selected: experience === '10-15' },
+                    { range: '≥16 months', points: 50, selected: experience === '16+' }
+                ];
+                tableHtml += experienceRanges.map(row => `
+                    <tr ${row.selected ? 'class="bg-blue-100"' : ''}>
+                        <td class="p-4 border-b"></td>
+                        <td class="p-4 border-b">${row.range}</td>
+                        <td class="p-4 border-b">${row.points}</td>
+                    </tr>
+                `).join('');
+                tableHtml += `
+                    <tr class="bg-gray-100 font-semibold">
+                        <td class="p-4 border-b" colspan="3">Quality</td>
+                    </tr>
+                `;
+                const qualityRanges = [
+                    { range: '85-89%', points: 20, selected: quality >= 85 && quality < 90 },
+                    { range: '90-94%', points: 25, selected: quality >= 90 && quality < 95 },
+                    { range: '95-98%', points: 30, selected: quality >= 95 && quality < 99 },
+                    { range: '99-100%', points: 50, selected: quality >= 99 && quality <= 100 }
+                ];
+                tableHtml += qualityRanges.map(row => `
+                    <tr ${row.selected ? 'class="bg-blue-100"' : ''}>
+                        <td class="p-4 border-b"></td>
+                        <td class="p-4 border-b">${row.range}</td>
+                        <td class="p-4 border-b">${row.points}</td>
+                    </tr>
+                `).join('');
+                tableHtml += `
+                    <tr class="bg-gray-100 font-semibold">
+                        <td class="p-4 border-b" colspan="3">Calls per Hour</td>
+                    </tr>
+                `;
+                const callsPerHourRanges = [
+                    { range: '≥5', points: 20, selected: callsPerHour >= 5 && callsPerHour < 10 },
+                    { range: '≥10', points: 25, selected: callsPerHour >= 10 && callsPerHour < 15 },
+                    { range: '≥15', points: 30, selected: callsPerHour >= 15 && callsPerHour < 20 },
+                    { range: '≥20', points: 50, selected: callsPerHour >= 20 }
+                ];
+                tableHtml += callsPerHourRanges.map(row => `
+                    <tr ${row.selected ? 'class="bg-blue-100"' : ''}>
+                        <td class="p-4 border-b"></td>
+                        <td class="p-4 border-b">${row.range}</td>
+                        <td class="p-4 border-b">${row.points}</td>
+                    </tr>
+                `).join('');
+                tableHtml += `</tbody></table>`;
+                return tableHtml;
+            };
+            
+            // Add this function to clear the salary form
+            const clearSalaryForm = () => {
+                setSalaryData({
+                    experience: '',
+                    quality: '',
+                    callsPerHour: '',
+                    hoursNorm: '',
+                    totalHours: '',
+                    bonusTraining: false,
+                    bonusRefer: false,
+                    bonusReferQuantity: '',
+                    bonusFilming: false,
+                    bonusFilmingQuantity: ''
+                });
+                setSalaryResult(null);
+            };
+            
             const getScoreColor = (score) => {
                 if (!score) return 'text-gray-500';
                 if (score >= 90) return 'text-green-600';
@@ -1315,470 +865,7 @@
                     debouncedFetch(() => fetchSelectedSvData(selectedSvId));
                 }
             }, [selectedSvId, user, debouncedFetch]);
-            
-            function toggleBonusQuantity(direction, bonusType) {
-              const quantityInput = document.getElementById(`${direction}-bonus-${bonusType}-quantity`);
-              const checkbox = document.getElementById(`${direction}-bonus-${bonusType}`);
-              if (quantityInput) {
-                quantityInput.classList.toggle('visible', checkbox.checked);
-                quantityInput.required = checkbox.checked;
-                if (!checkbox.checked) {
-                  quantityInput.value = '';
-                }
-              }
-              validateForm(direction);
-            }
-            
-            function showForm(direction) {
-              const chatForm = document.getElementById('chat-form');
-              const operatorForm = document.getElementById('operator-form');
-              const resultDiv = document.getElementById('result');
-              const pointsTable = document.getElementById('points-table');
-              const buttonGroup = document.getElementById('button-group');
-              const calculateBtn = document.getElementById('calculate-btn');
-              const toggleTableBtn = document.getElementById('toggle-table-btn');
-              chatForm.classList.remove('active');
-              operatorForm.classList.remove('active');
-              resultDiv.style.display = 'none';
-              resultDiv.classList.remove('active');
-              pointsTable.style.display = 'none';
-              pointsTable.classList.remove('active');
-              buttonGroup.classList.remove('active');
-              calculateBtn.disabled = true;
-              toggleTableBtn.disabled = true;
-              const selectedForm = document.getElementById(`${direction}-form`);
-              selectedForm.classList.add('active');
-              buttonGroup.classList.add('active');
-              clearForm(direction);
-            }
-            
-            function validateForm(direction) {
-              const form = document.getElementById(`${direction}-form`);
-              const calculateBtn = document.getElementById('calculate-btn');
-              const clearBtn = document.getElementById('clear-btn');
-              const inputs = form.querySelectorAll('input[required], select[required]');
-              const allInputs = form.querySelectorAll('input, select');
-              
-              // Validate for calculate button
-              let isValid = true;
-              inputs.forEach(input => {
-                if (input.tagName === 'SELECT' && input.value === '') {
-                  isValid = false;
-                } else if (input.type === 'number') {
-                  const value = input.value;
-                  if (value === '' || isNaN(value)) {
-                    isValid = false;
-                  } else {
-                    const min = parseFloat(input.min);
-                    const max = parseFloat(input.max);
-                    const numValue = parseFloat(value);
-                    if (numValue < min || numValue > max) {
-                      isValid = false;
-                    }
-                  }
-                }
-              });
-              ['refer', 'filming'].forEach(bonusType => {
-                const checkbox = document.getElementById(`${direction}-bonus-${bonusType}`);
-                const quantityInput = document.getElementById(`${direction}-bonus-${bonusType}-quantity`);
-                if (checkbox.checked && (!quantityInput.value || parseFloat(quantityInput.value) < 1)) {
-                  isValid = false;
-                }
-              });
-              calculateBtn.disabled = !isValid;
-            
-              // Check if any input has a value for clear button
-              let hasInput = false;
-              allInputs.forEach(input => {
-                if (input.type === 'checkbox' && input.checked) {
-                  hasInput = true;
-                } else if (input.tagName === 'SELECT' && input.value !== '') {
-                  hasInput = true;
-                } else if (input.type === 'number' && input.value !== '') {
-                  hasInput = true;
-                }
-              });
-              clearBtn.disabled = !hasInput;
-            }
-            
-            function clearForm(direction) {
-              const form = document.getElementById(`${direction ? direction + '-form' : (document.getElementById('chat-form').classList.contains('active') ? 'chat-form' : 'operator-form')}`);
-              const resultDiv = document.getElementById('result');
-              const pointsTable = document.getElementById('points-table');
-              const calculateBtn = document.getElementById('calculate-btn');
-              const toggleTableBtn = document.getElementById('toggle-table-btn');
-              const clearBtn = document.getElementById('clear-btn');
-              
-              form.querySelectorAll('input, select').forEach(input => {
-                if (input.type === 'checkbox') {
-                  input.checked = false;
-                } else if (input.tagName === 'SELECT') {
-                  input.value = '';
-                } else {
-                  input.value = '';
-                }
-                input.dispatchEvent(new Event('input'));
-              });
-              ['training', 'refer', 'filming'].forEach(bonusType => toggleBonusQuantity(form.id.split('-')[0], bonusType));
-              resultDiv.style.display = 'none';
-              resultDiv.classList.remove('active');
-              pointsTable.style.display = 'none';
-              pointsTable.classList.remove('active');
-              calculateBtn.disabled = true;
-              toggleTableBtn.disabled = true;
-              clearBtn.disabled = true;
-              toggleTableBtn.textContent = 'Показать таблицу баллов';
-            }
-            
-            function togglePointsTable() {
-              const pointsTable = document.getElementById('points-table');
-              const toggleButton = document.getElementById('toggle-table-btn');
-              const isActive = pointsTable.classList.contains('active');
-              if (isActive) {
-                pointsTable.classList.remove('active');
-                pointsTable.style.display = 'none';
-                toggleButton.textContent = 'Показать таблицу баллов';
-              } else {
-                pointsTable.classList.add('active');
-                pointsTable.style.display = 'block';
-                toggleButton.textContent = 'Скрыть таблицу баллов';
-              }
-            }
-            
-            function generatePointsTable(direction, data) {
-              let tableHtml = `
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Категория</th>
-                      <th>Условие</th>
-                      <th>Баллы</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-              `;
-              if (direction === 'chat') {
-                const { experience, quality, avgScore, responseTime, chatsPerHour } = data;
-                tableHtml += `
-                  <tr class="category-header">
-                    <td colspan="3">Стаж</td>
-                  </tr>
-                `;
-                const experienceRanges = [
-                  { range: '0-2 месяца', points: 5, selected: experience === '0-2', tooltip: 'Начальный стаж' },
-                  { range: '3-5 месяцев', points: 10, selected: experience === '3-5', tooltip: 'Ранний опыт' },
-                  { range: '6-9 месяцев', points: 15, selected: experience === '6-9', tooltip: 'Средний стаж' },
-                  { range: '10-12 месяцев', points: 25, selected: experience === '10-12', tooltip: 'Продвинутый стаж' },
-                  { range: '13-17 месяцев', points: 35, selected: experience === '13-17', tooltip: 'Высокий стаж' },
-                  { range: '≥18 месяцев', points: 50, selected: experience === '18+', tooltip: 'Экспертный уровень' }
-                ];
-                tableHtml += experienceRanges.map(row => `
-                  <tr ${row.selected ? 'class="selected"' : ''}>
-                    <td></td>
-                    <td class="tooltip" data-tooltip="${row.tooltip}">${row.range}</td>
-                    <td>${row.points}</td>
-                  </tr>
-                `).join('');
-                tableHtml += `
-                  <tr class="category-header">
-                    <td colspan="3">Качество</td>
-                  </tr>
-                `;
-                const qualityRanges = [
-                  { range: '80-85%', points: 5, selected: quality >= 80 && quality < 86, tooltip: 'Базовое качество' },
-                  { range: '86-89%', points: 10, selected: quality >= 86 && quality < 90, tooltip: 'Хорошее качество' },
-                  { range: '90-93%', points: 15, selected: quality >= 90 && quality < 94, tooltip: 'Высокое качество' },
-                  { range: '94-96%', points: 20, selected: quality >= 94 && quality < 97, tooltip: 'Отличное качество' },
-                  { range: '97-100%', points: 25, selected: quality >= 97 && quality <= 100, tooltip: 'Идеальное качество' }
-                ];
-                tableHtml += qualityRanges.map(row => `
-                  <tr ${row.selected ? 'class="selected"' : ''}>
-                    <td></td>
-                    <td class="tooltip" data-tooltip="${row.tooltip}">${row.range}</td>
-                    <td>${row.points}</td>
-                  </tr>
-                `).join('');
-                tableHtml += `
-                  <tr class="category-header">
-                    <td colspan="3">Средний балл по чатам</td>
-                  </tr>
-                `;
-                const scoreRanges = [
-                  { range: '≥4.5', points: 5, selected: avgScore >= 4.5 && avgScore < 4.6, tooltip: 'Хороший балл' },
-                  { range: '≥4.6', points: 10, selected: avgScore >= 4.6 && avgScore < 4.7, tooltip: 'Очень хороший балл' },
-                  { range: '≥4.7', points: 20, selected: avgScore >= 4.7 && avgScore < 4.8, tooltip: 'Отличный балл' },
-                  { range: '≥4.8', points: 25, selected: avgScore >= 4.8 && avgScore < 4.9, tooltip: 'Превосходный балл' },
-                  { range: '≥4.9', points: 30, selected: avgScore >= 4.9, tooltip: 'Идеальный балл' }
-                ];
-                tableHtml += scoreRanges.map(row => `
-                  <tr ${row.selected ? 'class="selected"' : ''}>
-                    <td></td>
-                    <td class="tooltip" data-tooltip="${row.tooltip}">${row.range}</td>
-                    <td>${row.points}</td>
-                  </tr>
-                `).join('');
-                tableHtml += `
-                  <tr class="category-header">
-                    <td colspan="3">Время ответа</td>
-                  </tr>
-                `;
-                const responseTimeRanges = [
-                  { range: '≤4.5 мин', points: 5, selected: responseTime <= 4.5 && responseTime > 4, tooltip: 'Приемлемое время' },
-                  { range: '≤4 мин', points: 10, selected: responseTime <= 4 && responseTime > 3, tooltip: 'Хорошее время' },
-                  { range: '≤3 мин', points: 15, selected: responseTime <= 3 && responseTime > 2, tooltip: 'Отличное время' },
-                  { range: '≤2 мин', points: 20, selected: responseTime <= 2, tooltip: 'Идеальное время' }
-                ];
-                tableHtml += responseTimeRanges.map(row => `
-                  <tr ${row.selected ? 'class="selected"' : ''}>
-                    <td></td>
-                    <td class="tooltip" data-tooltip="${row.tooltip}">${row.range}</td>
-                    <td>${row.points}</td>
-                  </tr>
-                `).join('');
-                tableHtml += `
-                  <tr class="category-header">
-                    <td colspan="3">Количество чатов в час</td>
-                  </tr>
-                `;
-                const chatsPerHourRanges = [
-                  { range: '≥10', points: 5, selected: chatsPerHour >= 10 && chatsPerHour < 15, tooltip: 'Базовая производительность' },
-                  { range: '≥15', points: 10, selected: chatsPerHour >= 15 && chatsPerHour < 20, tooltip: 'Хорошая производительность' },
-                  { range: '≥20', points: 15, selected: chatsPerHour >= 20 && chatsPerHour < 25, tooltip: 'Высокая производительность' },
-                  { range: '≥25', points: 25, selected: chatsPerHour >= 25, tooltip: 'Исключительная производительность' }
-                ];
-                tableHtml += chatsPerHourRanges.map(row => `
-                  <tr ${row.selected ? 'class="selected"' : ''}>
-                    <td></td>
-                    <td class="tooltip" data-tooltip="${row.tooltip}">${row.range}</td>
-                    <td>${row.points}</td>
-                  </tr>
-                `).join('');
-              } else if (direction === 'operator') {
-                const { experience, quality, callsPerHour } = data;
-                tableHtml += `
-                  <tr class="category-header">
-                    <td colspan="3">Стаж</td>
-                  </tr>
-                `;
-                const experienceRanges = [
-                  { range: '0-3 месяца', points: 15, selected: experience === '0-3', tooltip: 'Начальный стаж' },
-                  { range: '4-9 месяцев', points: 25, selected: experience === '4-9', tooltip: 'Ранний опыт' },
-                  { range: '10-15 месяцев', points: 35, selected: experience === '10-15', tooltip: 'Продвинутый стаж' },
-                  { range: '≥16 месяцев', points: 50, selected: experience === '16+', tooltip: 'Экспертный уровень' }
-                ];
-                tableHtml += experienceRanges.map(row => `
-                  <tr ${row.selected ? 'class="selected"' : ''}>
-                    <td></td>
-                    <td class="tooltip" data-tooltip="${row.tooltip}">${row.range}</td>
-                    <td>${row.points}</td>
-                  </tr>
-                `).join('');
-                tableHtml += `
-                  <tr class="category-header">
-                    <td colspan="3">Качество</td>
-                  </tr>
-                `;
-                const qualityRanges = [
-                  { range: '85-89%', points: 20, selected: quality >= 85 && quality < 90, tooltip: 'Хорошее качество' },
-                  { range: '90-94%', points: 25, selected: quality >= 90 && quality < 95, tooltip: 'Высокое качество' },
-                  { range: '95-98%', points: 30, selected: quality >= 95 && quality < 99, tooltip: 'Отличное качество' },
-                  { range: '99-100%', points: 50, selected: quality >= 99 && quality <= 100, tooltip: 'Идеальное качество' }
-                ];
-                tableHtml += qualityRanges.map(row => `
-                  <tr ${row.selected ? 'class="selected"' : ''}>
-                    <td></td>
-                    <td class="tooltip" data-tooltip="${row.tooltip}">${row.range}</td>
-                    <td>${row.points}</td>
-                  </tr>
-                `).join('');
-                tableHtml += `
-                  <tr class="category-header">
-                    <td colspan="3">Количество звонков в час</td>
-                  </tr>
-                `;
-                const callsPerHourRanges = [
-                  { range: '≥5', points: 20, selected: callsPerHour >= 5 && callsPerHour < 10, tooltip: 'Базовая производительность' },
-                  { range: '≥10', points: 25, selected: callsPerHour >= 10 && callsPerHour < 15, tooltip: 'Хорошая производительность' },
-                  { range: '≥15', points: 30, selected: callsPerHour >= 15 && callsPerHour < 20, tooltip: 'Высокая производительность' },
-                  { range: '≥20', points: 50, selected: callsPerHour >= 20, tooltip: 'Исключительная производительность' }
-                ];
-                tableHtml += callsPerHourRanges.map(row => `
-                  <tr ${row.selected ? 'class="selected"' : ''}>
-                    <td></td>
-                    <td class="tooltip" data-tooltip="${row.tooltip}">${row.range}</td>
-                    <td>${row.points}</td>
-                  </tr>
-                `).join('');
-              }
-              tableHtml += `
-                  </tbody>
-                </table>
-              `;
-              return tableHtml;
-            }
-            
-            function calculateSalary() {
-              const chatForm = document.getElementById('chat-form');
-              const operatorForm = document.getElementById('operator-form');
-              const toggleTableBtn = document.getElementById('toggle-table-btn');
-              let points = 0;
-              let premiumCoefficient = 1;
-              let totalHours = 0;
-              let hoursNorm = 0;
-              let hoursPercentage = 0;
-              let bonuses = 0;
-              let resultText = '';
-              let pointsTableData = {};
-              if (chatForm.classList.contains('active')) {
-                const experience = document.getElementById('chat-experience').value;
-                const quality = parseFloat(document.getElementById('chat-quality').value);
-                const avgScore = parseFloat(document.getElementById('chat-avg-score').value);
-                const responseTime = parseFloat(document.getElementById('chat-response-time').value);
-                const chatsPerHour = parseFloat(document.getElementById('chat-per-hour').value);
-                hoursNorm = parseFloat(document.getElementById('chat-hours-norm').value);
-                totalHours = parseFloat(document.getElementById('chat-total-hours').value);
-                pointsTableData = { experience, quality, avgScore, responseTime, chatsPerHour };
-                if (experience === '18+') points += 50;
-                else if (experience === '13-17') points += 35;
-                else if (experience === '10-12') points += 25;
-                else if (experience === '6-9') points += 15;
-                else if (experience === '3-5') points += 10;
-                else if (experience === '0-2') points += 5;
-                if (quality >= 97 && quality <= 100) points += 25;
-                else if (quality >= 94 && quality < 97) points += 20;
-                else if (quality >= 90 && quality < 94) points += 15;
-                else if (quality >= 86 && quality < 90) points += 10;
-                else if (quality >= 80 && quality < 86) points += 5;
-                if (avgScore >= 4.9) points += 30;
-                else if (avgScore >= 4.8) points += 25;
-                else if (avgScore >= 4.7) points += 20;
-                else if (avgScore >= 4.6) points += 10;
-                else if (avgScore >= 4.5) points += 5;
-                if (responseTime <= 2) points += 20;
-                else if (responseTime <= 3) points += 15;
-                else if (responseTime <= 4) points += 10;
-                else if (responseTime <= 4.5) points += 5;
-                if (chatsPerHour >= 25) points += 25;
-                else if (chatsPerHour >= 20) points += 15;
-                else if (chatsPerHour >= 15) points += 10;
-                else if (chatsPerHour >= 10) points += 5;
-                let bonusDetails = [];
-                if (document.getElementById('chat-bonus-training').checked) {
-                  bonuses += 6000;
-                  bonusDetails.push('Обучение: 6000 тг');
-                }
-                if (document.getElementById('chat-bonus-refer').checked) {
-                  const quantity = parseInt(document.getElementById('chat-bonus-refer-quantity').value) || 0;
-                  const referBonus = 5000 * quantity;
-                  bonuses += referBonus;
-                  bonusDetails.push(`Приведи друга: ${referBonus} тг (${quantity} чел.)`);
-                }
-                if (document.getElementById('chat-bonus-filming').checked) {
-                  const quantity = parseInt(document.getElementById('chat-bonus-filming-quantity').value) || 0;
-                  const filmingBonus = 5000 * quantity;
-                  bonuses += filmingBonus;
-                  bonusDetails.push(`Съемки: ${filmingBonus} тг (${quantity} съемок)`);
-                }
-                hoursPercentage = hoursNorm > 0 ? (totalHours / hoursNorm * 100) : 0;
-                premiumCoefficient = hoursPercentage >= 90 ? 1 : 0.75;
-                const pointsCoefficient = points / 100;
-                const baseSalary = 700 * totalHours;
-                const premiumPart = baseSalary * pointsCoefficient * premiumCoefficient;
-                const finalSalary = baseSalary + premiumPart + bonuses;
-                resultText = `
-                  <div class="result-title">Результат расчета (Чат)</div>
-                  <div class="result-item"><span class="label">Направление:</span><span class="value">Чат</span></div>
-                  <div class="result-item"><span class="label">Баллы:</span><span class="value">${points}</span></div>
-                  <div class="result-item"><span class="label">Коэффициент премии:</span><span class="value">${premiumCoefficient}</span></div>
-                  <div class="result-item"><span class="label">Норма часов в этом месяце:</span><span class="value">${hoursNorm.toFixed(2)}</span></div>
-                  <div class="result-item"><span class="label">Процент выработки часов:</span><span class="value">${hoursPercentage.toFixed(2)}%</span></div>
-                  <div class="result-item"><span class="label">Оклад:</span><span class="value">${baseSalary.toFixed(2)} тг.</span></div>
-                  <div class="result-item"><span class="label">Премиальная часть:</span><span class="value">${premiumPart.toFixed(2)} тг.</span></div>
-                  <div class="result-item"><span class="label">Бонусы:</span><span class="value">${bonuses} тг ${bonusDetails.join(', ')}</span></div>
-                  <div class="result-item"><span class="label">Итоговая сумма:</span><span class="value highlight">${finalSalary.toFixed(2)} тг.</span></div>
-                `;
-                const pointsTable = document.getElementById('points-table');
-                pointsTable.innerHTML = generatePointsTable('chat', pointsTableData);
-              } else if (operatorForm.classList.contains('active')) {
-                const experience = document.getElementById('operator-experience').value;
-                const quality = parseFloat(document.getElementById('operator-quality').value);
-                const callsPerHour = parseFloat(document.getElementById('operator-calls-per-hour').value);
-                hoursNorm = parseFloat(document.getElementById('operator-hours-norm').value);
-                totalHours = parseFloat(document.getElementById('operator-total-hours').value);
-                pointsTableData = { experience, quality, callsPerHour };
-                if (experience === '16+') points += 50;
-                else if (experience === '10-15') points += 35;
-                else if (experience === '4-9') points += 25;
-                else if (experience === '0-3') points += 15;
-                if (quality >= 99 && quality <= 100) points += 50;
-                else if (quality >= 95 && quality < 99) points += 30;
-                else if (quality >= 90 && quality < 95) points += 25;
-                else if (quality >= 85 && quality < 90) points += 20;
-                if (callsPerHour >= 20) points += 50;
-                else if (callsPerHour >= 15) points += 30;
-                else if (callsPerHour >= 10) points += 25;
-                else if (callsPerHour >= 5) points += 20;
-                let bonusDetails = [];
-                if (document.getElementById('operator-bonus-training').checked) {
-                  bonuses += 6000;
-                  bonusDetails.push('Обучение: 6000 тг');
-                }
-                if (document.getElementById('operator-bonus-refer').checked) {
-                  const quantity = parseInt(document.getElementById('operator-bonus-refer-quantity').value) || 0;
-                  const referBonus = 5000 * quantity;
-                  bonuses += referBonus;
-                  bonusDetails.push(`Приведи друга: ${referBonus} тг (${quantity} чел.)`);
-                }
-                if (document.getElementById('operator-bonus-filming').checked) {
-                  const quantity = parseInt(document.getElementById('operator-bonus-filming-quantity').value) || 0;
-                  const filmingBonus = 5000 * quantity;
-                  bonuses += filmingBonus;
-                  bonusDetails.push(`Съемки: ${filmingBonus} тг (${quantity} съемок)`);
-                }
-                hoursPercentage = hoursNorm > 0 ? (totalHours / hoursNorm * 100) : 0;
-                premiumCoefficient = hoursPercentage >= 90 ? 1 : 0.75;
-                const pointsCoefficient = points / 100;
-                const baseSalary = 700 * totalHours;
-                const premiumPart = baseSalary * pointsCoefficient * premiumCoefficient;
-                const finalSalary = baseSalary + premiumPart + bonuses;
-                resultText = `
-                  <div class="result-title">Результат расчета (Оператор)</div>
-                  <div class="result-item"><span class="label">Направление:</span><span class="value">Оператор</span></div>
-                  <div class="result-item"><span class="label">Баллы:</span><span class="value">${points}</span></div>
-                  <div class="result-item"><span class="label">Коэффициент премии:</span><span class="value">${premiumCoefficient}</span></div>
-                  <div class="result-item"><span class="label">Норма часов в этом месяце:</span><span class="value">${hoursNorm.toFixed(2)}</span></div>
-                  <div class="result-item"><span class="label">Процент выработки часов:</span><span class="value">${hoursPercentage.toFixed(2)}%</span></div>
-                  <div class="result-item"><span class="label">Оклад:</span><span class="value">${baseSalary.toFixed(2)} тг.</span></div>
-                  <div class="result-item"><span class="label">Премиальная часть:</span><span class="value">${premiumPart.toFixed(2)} тг.</span></div>
-                  <div class="result-item"><span class="label">Бонусы:</span><span class="value">${bonuses} тг ${bonusDetails.join(', ')}</span></div>
-                  <div class="result-item"><span class="label">Итоговая сумма:</span><span class="value highlight">${finalSalary.toFixed(2)} тг.</span></div>
-                `;
-                const pointsTable = document.getElementById('points-table');
-                pointsTable.innerHTML = generatePointsTable('operator', pointsTableData);
-              }
-              const resultDiv = document.getElementById('result');
-              resultDiv.innerHTML = resultText;
-              resultDiv.style.display = 'block';
-              resultDiv.classList.add('active');
-              toggleTableBtn.disabled = false;
-            }
-            
-            // Initialize form validation
-            document.querySelectorAll('.form-section').forEach(form => {
-              form.querySelectorAll('input, select').forEach(input => {
-                input.addEventListener('input', () => {
-                  const direction = form.id.split('-')[0];
-                  validateForm(direction);
-                });
-              });
-            });
-            
-            // Automatically show the correct form when modal opens
-            useEffect(() => {
-              if (showCalculatorModal && calculatorDirection) {
-                showForm(calculatorDirection);
-              }
-            }, [showCalculatorModal, calculatorDirection]);
+
             if (!user) {
                 return (
                     <div className="min-h-screen flex items-center justify-center bg-gray-100">
@@ -2366,401 +1453,522 @@
 
             if (user.role === 'operator') {
                 const averageScore = operatorData?.evaluations?.length > 0
-                  ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
-                  : 0;
-            
+                    ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
+                    : 0;
+
                 return (
-                  <div className="min-h-screen bg-gray-100 p-6">
-                    {/* ... (existing header code) */}
-                    <div className="flex justify-between items-center mb-6">
-                      <h1 className="text-3xl font-bold">Operator Dashboard</h1>
-                      <div className="relative flex space-x-4">
-                        <button
-                          onClick={() => setShowAccountMenu(!showAccountMenu)}
-                          className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-                        >
-                          Account
-                        </button>
-                        {showAccountMenu && (
-                          <div className="absolute right-0 top-12 bg-white shadow-lg rounded-lg p-4 w-48 z-10">
+                    <div className="min-h-screen bg-gray-100 p-6">
+                        <div className="flex justify-between items-center mb-6">
+                            <h1 className="text-3xl font-bold">Operator Dashboard</h1>
+                            <div className="relative flex space-x-4">
+                                <button
+                                    onClick={() => setShowAccountMenu(!showAccountMenu)}
+                                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                                >
+                                    Account
+                                </button>
+                                {showAccountMenu && (
+                                    <div className="absolute right-0 top-12 bg-white shadow-lg rounded-lg p-4 w-48 z-10">
+                                        <button
+                                            onClick={() => {
+                                                setShowChangeLoginForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                                        >
+                                            Change Login
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setShowChangePasswordForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                                        >
+                                            Change Password
+                                        </button>
+                                    </div>
+                                )}
+                                <button
+                                    onClick={handleLogout}
+                                    className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors duration-200"
+                                >
+                                    Logout
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
+                            <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
+                            {isLoading ? (
+                                <p className="text-center text-gray-600">Loading...</p>
+                            ) : profileData ? (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Name</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.name || '-'}</p>
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Role</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.role || '-'}</p>
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Direction</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.direction || '-'}</p>
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Hire Date</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.hire_date || '-'}</p>
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Supervisor</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.supervisor_name || '-'}</p>
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Scores Table</p>
+                                        {profileData.scores_table_url ? (
+                                            <a
+                                                href={profileData.scores_table_url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
+                                            >
+                                                View Scores Table
+                                            </a>
+                                        ) : (
+                                            <p className="text-lg text-gray-900">-</p>
+                                        )}
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Hours Table</p>
+                                        {profileData.hours_table_url ? (
+                                            <a
+                                                href={profileData.hours_table_url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
+                                            >
+                                                View Hours Table
+                                            </a>
+                                        ) : (
+                                            <p className="text-lg text-gray-900">-</p>
+                                        )}
+                                    </div>
+                                </div>
+                            ) : (
+                                <p className="text-center text-gray-600">No profile data available. Please try refreshing or contact support.</p>
+                            )}
+                        </div>
+
+                        <div className="flex justify-center space-x-4 mb-6">
                             <button
-                              onClick={() => {
-                                setShowChangeLoginForm(true);
-                                setShowAccountMenu(false);
-                              }}
-                              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                                type="button"
+                                onClick={() => setView('hours')}
+                                className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
+                                    view === 'hours' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
+                                }`} 
+                                disabled={isLoading}
                             >
-                              Change Login
+                                My Hours
                             </button>
                             <button
-                              onClick={() => {
-                                setShowChangePasswordForm(true);
-                                setShowAccountMenu(false);
-                              }}
-                              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                                type="button"
+                                onClick={() => setView('evaluation')}
+                                className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
+                                    view === 'evaluation' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
+                                }`} 
+                                disabled={isLoading}
                             >
-                              Change Password
+                                Call Evaluations
                             </button>
-                          </div>
-                        )}
-                        <button
-                          onClick={handleLogout}
-                          className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors duration-200"
+                            <button
+                            type="button"
+                            onClick={() => setView('salary')}
+                            className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
+                                view === 'salary' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
+                            }`} 
+                            disabled={isLoading}
                         >
-                          Logout
+                            Salary Calculator
                         </button>
-                      </div>
-                    </div>
-            
-                    {/* Profile Section */}
-                    <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
-                      <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
-                      {isLoading ? (
-                        <p className="text-center text-gray-600">Loading...</p>
-                      ) : profileData ? (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                          <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                            <p className="text-sm font-medium text-gray-500 mb-1">Name</p>
-                            <p className="text-lg font-medium text-gray-900">{profileData.name || '-'}</p>
-                          </div>
-                          <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                            <p className="text-sm font-medium text-gray-500 mb-1">Role</p>
-                            <p className="text-lg font-medium text-gray-900">{profileData.role || '-'}</p>
-                          </div>
-                          <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                            <p className="text-sm font-medium text-gray-500 mb-1">Direction</p>
-                            <p className="text-lg font-medium text-gray-900">{profileData.direction || '-'}</p>
-                          </div>
-                          <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                            <p className="text-sm font-medium text-gray-500 mb-1">Hire Date</p>
-                            <p className="text-lg font-medium text-gray-900">{profileData.hire_date || '-'}</p>
-                          </div>
-                          <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                            <p className="text-sm font-medium text-gray-500 mb-1">Supervisor</p>
-                            <p className="text-lg font-medium text-gray-900">{profileData.supervisor_name || '-'}</p>
-                          </div>
-                          <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                            <p className="text-sm font-medium text-gray-500 mb-1">Scores Table</p>
-                            {profileData.scores_table_url ? (
-                              <a
-                                href={profileData.scores_table_url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
-                              >
-                                View Scores Table
-                              </a>
-                            ) : (
-                              <p className="text-lg text-gray-900">-</p>
-                            )}
-                          </div>
-                          <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                            <p className="text-sm font-medium text-gray-500 mb-1">Hours Table</p>
-                            {profileData.hours_table_url ? (
-                              <a
-                                href={profileData.hours_table_url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
-                              >
-                                View Hours Table
-                              </a>
-                            ) : (
-                              <p className="text-lg text-gray-900">-</p>
-                            )}
-                          </div>
                         </div>
-                      ) : (
-                        <p className="text-center text-gray-600">No profile data available. Please try refreshing or contact support.</p>
-                      )}
-                    </div>
-            
-                    {/* Navigation Buttons */}
-                    <div className="flex justify-center space-x-4 mb-6">
-                      <button
-                        type="button"
-                        onClick={() => setView('hours')}
-                        className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
-                          view === 'hours' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
-                        }`}
-                        disabled={isLoading}
-                      >
-                        My Hours
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setView('evaluation')}
-                        className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
-                          view === 'evaluation' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
-                        }`}
-                        disabled={isLoading}
-                      >
-                        Call Evaluations
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => openCalculator(profileData?.direction || 'Чат')}
-                        className="px-6 py-3 rounded-lg bg-blue-500 text-white font-semibold text-lg hover:bg-blue-700 transition-all duration-200"
-                        disabled={isLoading}
-                      >
-                        Salary Calculator
-                      </button>
-                    </div>
-            
-                    {/* ... (existing hours view) */}
-                    {view === 'hours' && (
-                      <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
-                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
-                        {isLoading ? (
-                          <p className="text-center text-gray-600">Loading...</p>
-                        ) : hoursData ? (
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                            <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
-                              <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                <p className="text-sm font-medium text-gray-500 mb-1">Regular Hours</p>
-                                <p className={`text-lg font-semibold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>{hoursData.regular_hours.toFixed(2)} hours</p>
-                              </div>
-                              <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                <p className="text-sm font-medium text-gray-500 mb-1">Training Hours</p>
-                                <p className="text-lg font-semibold">{hoursData.training_hours.toFixed(2)} hours</p>
-                              </div>
-                              <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                <p className="text-sm font-medium text-gray-500 mb-1">Fines</p>
-                                <p className="text-lg font-semibold text-red-600">{hoursData.fines.toFixed(2)}</p>
-                              </div>
-                              <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                <p className="text-sm font-medium text-gray-500 mb-1">Norm Hours</p>
-                                <p className="text-lg font-semibold">{hoursData.norm_hours.toFixed(2)} hours</p>
-                              </div>
-                              <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                <p className="text-sm font-medium text-gray-500 mb-1">Performance</p>
-                                <p className={`text-lg font-semibold ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>{((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%</p>
-                              </div>
+
+                        {view === 'hours' && (
+                            <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
+                                {isLoading ? (
+                                    <p className="text-center text-gray-600">Loading...</p>
+                                ) : hoursData ? (
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                        <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Regular Hours</p>
+                                                <p className={`text-lg font-semibold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
+                                                    {hoursData.regular_hours.toFixed(2)} hours
+                                                </p>
+                                            </div>
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Training Hours</p>
+                                                <p className="text-lg font-semibold">{hoursData.training_hours.toFixed(2)} hours</p>
+                                            </div>
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Fines</p>
+                                                <p className="text-lg font-semibold text-red-600">{hoursData.fines.toFixed(2)}</p>
+                                            </div>
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Norm Hours</p>
+                                                <p className="text-lg font-semibold">{hoursData.norm_hours.toFixed(2)} hours</p>
+                                            </div>
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Performance</p>
+                                                <p className={`text-lg font-semibold ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
+                                                    {((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <div className="col-span-1 flex justify-center items-center">
+                                            <SemiCircleProgress
+                                                percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
+                                                label="Выполнение нормы"
+                                            />
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <p className="text-center text-gray-600">No hours data available.</p>
+                                )}
                             </div>
-                            <div className="col-span-1 flex justify-center items-center">
-                              <SemiCircleProgress
-                                percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
-                                label="Выполнение нормы"
-                              />
-                            </div>
-                          </div>
-                        ) : (
-                          <p className="text-center text-gray-600">No hours data available.</p>
                         )}
-                      </div>
-                    )}
-            
-                    {/* ... (existing evaluation view) */}
-                    {view === 'evaluation' && (
-                      <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
-                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
-                        {isLoading ? (
-                          <p className="text-center text-gray-600">Loading...</p>
-                        ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
-                          <div>
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                              <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-2">
-                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                  <p className="text-sm font-medium text-gray-500 mb-2">Total Evaluated Calls</p>
-                                  <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
-                                  <p className={`text-lg font-medium mt-2 ${
-                                    (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
-                                  }`}>
-                                    {20 - operatorData.evaluations.length} calls remaining out of 20
-                                  </p>
-                                </div>
-                              </div>
-                              <div className="col-span-1 flex justify-center items-center">
-                                <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
-                              </div>
+
+                        {view === 'evaluation' && (
+                            <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
+                                {isLoading ? (
+                                    <p className="text-center text-gray-600">Loading...</p>
+                                ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
+                                    <div>
+                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                                            <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-2">
+                                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                    <p className="text-sm font-medium text-gray-500 mb-2">Total Evaluated Calls</p>
+                                                    <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
+                                                    <p className={`text-lg font-medium mt-2 ${
+                                                        (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
+                                                    }`}>
+                                                        {20 - operatorData.evaluations.length} calls remaining out of 20
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <div className="col-span-1 flex justify-center items-center">
+                                                <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
+                                            </div>
+                                        </div>
+                                        <div className="overflow-x-auto rounded-lg shadow-sm">
+                                            <table className="min-w-full bg-white border-collapse">
+                                                <thead>
+                                                    <tr className="bg-blue-50">
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call Number</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Score</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Comment</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Month</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Evaluation Date</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Correction</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {operatorData.evaluations.map((eval1, index) => (
+                                                        <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
+                                                            <td className="p-4 border-b text-sm">{eval1.call_number || '-'}</td>
+                                                            <td className="p-4 border-b text-sm">{eval1.phone_number || '-'}</td>
+                                                            <td className={`p-4 border-b text-sm font-medium ${getScoreColor(eval1.score)}`}>
+                                                                {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
+                                                            </td>
+                                                            <td className="p-4 border-b text-sm">
+                                                                {eval1.comment ? (
+                                                                    <div className="space-y-1">
+                                                                        {eval1.comment.split('\n').map((line, i) => {
+                                                                            const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
+                                                                            const match = cleanLine.match(/^(.*?):\s*(.*)$/);
+                                                                            if (match) {
+                                                                                return (
+                                                                                    <p key={i} className="text-sm">
+                                                                                        <span className="font-semibold">{match[1]}:</span>{' '}
+                                                                                        <span className="italic">{match[2]}</span>
+                                                                                    </p>
+                                                                                );
+                                                                            }
+                                                                            return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
+                                                                        })}
+                                                                    </div>
+                                                                ) : '-'}
+                                                            </td>
+                                                            <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
+                                                            <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
+                                                            <td className="p-4 border-b text-sm">{eval1.is_correction ? 'Yes' : 'No'}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <p className="text-center text-gray-600">No evaluations found for this period.</p>
+                                )}
                             </div>
-                            <div className="overflow-x-auto rounded-lg shadow-sm">
-                              <table className="min-w-full bg-white border-collapse">
-                                <thead>
-                                  <tr className="bg-blue-50">
-                                    <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call Number</th>
-                                    <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
-                                    <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Score</th>
-                                    <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Comment</th>
-                                    <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Month</th>
-                                    <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Evaluation Date</th>
-                                    <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Correction</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {operatorData.evaluations.map((eval1, index) => (
-                                    <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
-                                      <td className="p-4 border-b text-sm">{eval1.call_number || '-'}</td>
-                                      <td className="p-4 border-b text-sm">{eval1.phone_number || '-'}</td>
-                                      <td className={`p-4 border-b text-sm font-medium ${getScoreColor(eval1.score)}`}>
-                                        {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
-                                      </td>
-                                      <td className="p-4 border-b text-sm">
-                                        {eval1.comment ? (
-                                          <div className="space-y-1">
-                                            {eval1.comment.split('\n').map((line, i) => {
-                                              const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
-                                              const match = cleanLine.match(/^(.*?):\s*(.*)$/);
-                                              if (match) {
-                                                return (
-                                                  <p key={i} className="text-sm">
-                                                    <span className="font-semibold">{match[1]}:</span>{' '}
-                                                    <span className="italic">{match[2]}</span>
-                                                  </p>
-                                                );
-                                              }
-                                              return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
-                                            })}
-                                          </div>
-                                        ) : '-'}
-                                      </td>
-                                      <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
-                                      <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
-                                      <td className="p-4 border-b text-sm">{eval1.is_correction ? 'Yes' : 'No'}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </div>
-                        ) : (
-                          <p className="text-center text-gray-600">No evaluations found for this period.</p>
                         )}
-                      </div>
-                    )}
-            
-                    {/* Salary Calculator Modal */}
-                    {showCalculatorModal && (
-                      <div className={`modal ${showCalculatorModal ? 'active' : ''}`}>
-                        <div className="modal-content">
-                          <button className="modal-close" onClick={closeCalculator}>×</button>
-                          <div className="calculator-container">
-                            <h1>Калькулятор зарплаты</h1>
-                            <div className="direction-buttons" id="direction-buttons" style={{ display: 'none' }}>
-                              <button onClick={() => showForm('chat')}>Чат</button>
-                              <button onClick={() => showForm('operator')}>Оператор</button>
-                            </div>
-                            <div id="chat-form" className={`form-section ${calculatorDirection === 'chat' ? 'active' : ''}`}>
-                              <div className="form-group">
-                                <label htmlFor="chat-experience">Стаж сотрудника (месяцев):</label>
-                                <select id="chat-experience" required>
-                                  <option value="">Выберите стаж</option>
-                                  <option value="0-2">0-2 месяца</option>
-                                  <option value="3-5">3-5 месяцев</option>
-                                  <option value="3-95">6-95 месяцев</option>
-                                  <option value="10-75">10-75 месяцев</option>
-                                  <option value="13-17">13-17 месяцев</option>
-                                  <option value="18+">≥18 месяцев</option>
-                                </select>
-                              </div>
-                              <div className="form-group">
-                                  <label htmlFor="chat-quality">Качество (%):</label>
-                                  <input type="number" id="chat-quality" min="0" max="0" step="0"></input>
+                        
+                        {view === 'salary' && (
+                            <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
+                                <div className="grid grid-cols-1 gap-6">
+                                    <div className="form-group">
+                                        <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
+                                        <select
+                                            value={salaryData.experience}
+                                            onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
+                                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        >
+                                            <option value="">Select Experience</option>
+                                            <option value="0-3">0-3 months</option>
+                                            <option value="4-9">4-9 months</option>
+                                            <option value="10-15">10-15 months</option>
+                                            <option value="16+">≥16 months</option>
+                                        </select>
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
+                                        <input
+                                            type="number"
+                                            value={salaryData.quality}
+                                            onChange={(e) => setSalaryData({ ...salaryData, quality: e.target.value })}
+                                            min="0"
+                                            max="100"
+                                            step="0.01"
+                                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="block mb-2 font-semibold text-gray-700">Calls per Hour:</label>
+                                        <input
+                                            type="number"
+                                            value={salaryData.callsPerHour}
+                                            onChange={(e) => setSalaryData({ ...salaryData, callsPerHour: e.target.value })}
+                                            min="0"
+                                            max="100"
+                                            step="0.01"
+                                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
+                                        <input
+                                            type="number"
+                                            value={salaryData.hoursNorm}
+                                            onChange={(e) => setSalaryData({ ...salaryData, hoursNorm: e.target.value })}
+                                            min="0"
+                                            max="744"
+                                            step="0.01"
+                                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
+                                        <input
+                                            type="number"
+                                            value={salaryData.totalHours}
+                                            onChange={(e) => setSalaryData({ ...salaryData, totalHours: e.target.value })}
+                                            min="0"
+                                            max="744"
+                                            step="0.01"
+                                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
+                                        <div className="space-y-4">
+                                            <div className="flex items-center gap-4">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={salaryData.bonusTraining}
+                                                    onChange={(e) => setSalaryData({ ...salaryData, bonusTraining: e.target.checked })}
+                                                    className="w-5 h-5"
+                                                    disabled={isLoading}
+                                                />
+                                                <label className="text-sm">Training (6000 KZT)</label>
+                                            </div>
+                                            <div className="flex items-center gap-4">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={salaryData.bonusRefer}
+                                                    onChange={(e) => setSalaryData({ ...salaryData, bonusRefer: e.target.checked })}
+                                                    className="w-5 h-5"
+                                                    disabled={isLoading}
+                                                />
+                                                <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
+                                                {salaryData.bonusRefer && (
+                                                    <input
+                                                        type="number"
+                                                        value={salaryData.bonusReferQuantity}
+                                                        onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
+                                                        min="1"
+                                                        step="1"
+                                                        placeholder="Quantity"
+                                                        className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                        disabled={isLoading}
+                                                    />
+                                                )}
+                                            </div>
+                                            <div className="flex items-center gap-4">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={salaryData.bonusFilming}
+                                                    onChange={(e) => setSalaryData({ ...salaryData, bonusFilming: e.target.checked })}
+                                                    className="w-5 h-5"
+                                                    disabled={isLoading}
+                                                />
+                                                <label className="text-sm">Filming (5000 KZT per session)</label>
+                                                {salaryData.bonusFilming && (
+                                                    <input
+                                                        type="number"
+                                                        value={salaryData.bonusFilmingQuantity}
+                                                        onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
+                                                        min="1"
+                                                        step="1"
+                                                        placeholder="Quantity"
+                                                        className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                        disabled={isLoading}
+                                                    />
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
-                              <div className="form-group">
-                                <label for="chat-avg-score">Средний балл по чатам:</label>
-                                <input type="number" id="chat-avg-score" step="0.1" value={averageScore.toFixed(2)} required />
-                              </div>
-                              <div className="form-group">
-                                <label for="chat-response-time">Среднее время ответа (минут):</label>
-                                <input type="number" id="chat-response-time" step="0.01" min="0" max="2" required />
-                              </div>
-                              <div className="form-group">
-                                <label for="chat-per-hour">Количество чатов в час:</label>
-                                <input type="number" id="chat-per-hour" min="0" max="100" step="0.01" required />
-                              </div>
-                              <div className="form-group">
-                                <label for="chat-hours-norm">Норма часов в этом месяце:</label>
-                                <input type="number" id="chat-hours-norm" value={hoursData?.norm_hours || ''} required />
-                              </div>
-                              <div className="form-group">
-                                <label for="chat-total-hours">Выработано часов в этом месяце:</label>
-                                <input type="number" id="chat-total-hours" value={hoursData?.regular_hours || ''} required />
-                              </div>
-                              <div className="form-group">
-                                <label>Бонусы:</label>
-                                <div className="bonus-group">
-                                  <div className="bonus-checkbox">
-                                    <input type="checkbox" id="chat-bonus-training" onChange={() => toggleBonusQuantity('chat', 'training')} />
-                                    <label for="chat-bonus-training">Обучение (6000 тг)</label>
-                                  </div>
-                                  <div className="bonus-checkbox">
-                                    <input type="checkbox" id="chat-bonus-refer" onChange={() => toggleBonusQuantity('chat', 'refer')} />
-                                    <label for="chat-bonus-refer">Приведи друга (5000 тг за друга)</label>
-                                    <input type="number" id="chat-bonus-refer-quantity" min="1" step="1" placeholder="Количество" />
-                                  </div>
-                                  <div className="bonus-checkbox">
-                                    <input type="checkbox" id="chat-bonus-filming" onChange={() => toggleBonusQuantity('chat', 'filming')} />
-                                    <label for="chat-bonus-filming">Съемки (5000 тг за съемку)</label>
-                                    <input type="number" id="chat-bonus-filming-quantity" min="1" step="1" placeholder="Количество" />
-                                  </div>
+                                <div className="flex justify-center gap-4 mt-6">
+                                    <button
+                                        onClick={calculateSalary}
+                                        className={`px-6 py-3 rounded-lg font-semibold text-lg bg-green-500 text-white hover:bg-green-600 transition-all duration-200 ${
+                                            isLoading ||
+                                            !salaryData.experience ||
+                                            !salaryData.quality ||
+                                            !salaryData.callsPerHour ||
+                                            !salaryData.hoursNorm ||
+                                            !salaryData.totalHours ||
+                                            (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
+                                            (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
+                                                ? 'opacity-50 cursor-not-allowed'
+                                                : ''
+                                        }`}
+                                        disabled={
+                                            isLoading ||
+                                            !salaryData.experience ||
+                                            !salaryData.quality ||
+                                            !salaryData.callsPerHour ||
+                                            !salaryData.hoursNorm ||
+                                            !salaryData.totalHours ||
+                                            (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
+                                            (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
+                                        }
+                                    >
+                                        Calculate
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            document.getElementById('points-table').classList.toggle('hidden');
+                                            document.getElementById('points-table').classList.toggle('block');
+                                        }}
+                                        className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
+                                            !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
+                                        }`}
+                                        disabled={!salaryResult}
+                                    >
+                                        {document.getElementById('points-table')?.classList.contains('block') ? 'Hide Points Table' : 'Show Points Table'}
+                                    </button>
+                                    <button
+                                        onClick={clearSalaryForm}
+                                        className={`px-6 py-3 rounded-lg font-semibold text-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200 ${
+                                            !salaryData.experience &&
+                                            !salaryData.quality &&
+                                            !salaryData.callsPerHour &&
+                                            !salaryData.hoursNorm &&
+                                            !salaryData.totalHours &&
+                                            !salaryData.bonusTraining &&
+                                            !salaryData.bonusRefer &&
+                                            !salaryData.bonusFilming
+                                                ? 'opacity-50 cursor-not-allowed'
+                                                : ''
+                                        }`}
+                                        disabled={
+                                            !salaryData.experience &&
+                                            !salaryData.quality &&
+                                            !salaryData.callsPerHour &&
+                                            !salaryData.hoursNorm &&
+                                            !salaryData.totalHours &&
+                                            !salaryData.bonusTraining &&
+                                            !salaryData.bonusRefer &&
+                                            !salaryData.bonusFilming
+                                        }
+                                    >
+                                        Clear
+                                    </button>
                                 </div>
-                              </div>
-                            </div>
-                            <div id="operator-form" className={`form-section ${calculatorDirection === 'operator' ? 'active' : ''}`}>
-                              <div className="form-group">
-                                <label for="operator-experience">Стаж сотрудника (месяцев):</label>
-                                <select id="operator-experience" required>
-                                  <option value="">Выберите стаж</option>
-                                  <option value="0-3">0-3 месяца</option>
-                                  <option value="4-9">4-9 месяцев</option>
-                                  <option value="10-15">10-15 месяцев</option>
-                                  <option value="16+">≥16 месяцев</option>
-                                </select>
-                              </div>
-                              <div className="form-group">
-                                <label for="operator-quality">Качество (%):</label>
-                                <input type="number" id="operator-quality" min="0" max="100" step="0.01" value={(averageScore || 0).toFixed(2)} required />
-                              </div>
-                              <div className="form-group">
-                                <label for="operator-calls-per-hour">Количество звонков в час:</label>
-                                <input type="number" id="operator-calls-per-hour" min="0" max="100" step="0.01" required />
-                              </div>
-                              <div className="form-group">
-                                <label for="operator-hours-norm">Норма часов в этом месяце:</label>
-                                <input type="number" id="operator-hours-norm" value={hoursData?.norm_hours || ''} required />
-                              </div>
-                              <div className="form-group">
-                                <label for="operator-total-hours">Выработано часов в этом месяце:</label>
-                                <input type="number" id="operator-total-hours" value={hoursData?.regular_hours || ''} required />
-                              </div>
-                              <div className="form-group">
-                                <label>Бонусы:</label>
-                                <div className="bonus-group">
-                                  <div className="bonus-checkbox">
-                                    <input type="checkbox" id="operator-bonus-training" onChange={() => toggleBonusQuantity('operator', 'training')} />
-                                    <label for="operator-bonus-training">Обучение (6000 тг)</label>
-                                  </div>
-                                  <div className="bonus-checkbox">
-                                    <input type="checkbox" id="operator-bonus-refer" onChange={() => toggleBonusQuantity('operator', 'refer')} />
-                                    <label for="operator-bonus-refer">Приведи друга (5000 тг за друга)</label>
-                                    <input type="number" id="operator-bonus-refer-quantity" min="1" step="1" placeholder="Количество" />
-                                  </div>
-                                  <div className="bonus-checkbox">
-                                    <input type="checkbox" id="operator-bonus-filming" onChange={() => toggleBonusQuantity('operator', 'filming')} />
-                                    <label for="operator-bonus-filming">Съемки (5000 тг за съемку)</label>
-                                    <input type="number" id="operator-bonus-filming-quantity" min="1" step="1" placeholder="Количество" />
-                                  </div>
+                                {salaryResult && (
+                                    <div className="mt-6 p-6 bg-gray-50 rounded-lg">
+                                        <h3 className="text-xl font-semibold mb-4">Calculation Result</h3>
+                                        <div className="space-y-2">
+                                            <div className="flex justify-between">
+                                                <span className="font-medium">Direction:</span>
+                                                <span>Operator</span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span className="font-medium">Points:</span>
+                                                <span>{salaryResult.points}</span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span className="font-medium">Premium Coefficient:</span>
+                                                <span>{salaryResult.premiumCoefficient}</span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span className="font-medium">Monthly Hours Norm:</span>
+                                                <span>{salaryResult.hoursNorm.toFixed(2)}</span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span className="font-medium">Hours Percentage:</span>
+                                                <span>{salaryResult.hoursPercentage.toFixed(2)}%</span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span className="font-medium">Base Salary:</span>
+                                                <span>{salaryResult.baseSalary.toFixed(2)} KZT</span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span className="font-medium">Premium Part:</span>
+                                                <span>{salaryResult.premiumPart.toFixed(2)} KZT</span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span className="font-medium">Bonuses:</span>
+                                                <span>{salaryResult.bonuses} KZT</span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span className="font-medium">Total Salary:</span>
+                                                <span className="text-green-600 font-semibold">{salaryResult.finalSalary.toFixed(2)} KZT</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                                <div id="points-table" className="mt-6 hidden">
+                                    {salaryResult && generatePointsTable()}
                                 </div>
-                              </div>
                             </div>
-                            <div className="button-group active" id="button-group">
-                              <button className="calculate-button" id="calculate-btn" onClick={calculateSalary} disabled>Рассчитать</button>
-                              <button className="toggle-table-button" id="toggle-table-btn" onClick={togglePointsTable} disabled>Показать таблицу баллов</button>
-                              <button className="clear-button" id="clear-btn" onClick={() => clearForm(calculatorDirection)} disabled>Очистить</button>
-                            </div>
-                            <div id="result"></div>
-                            <div id="points-table"></div>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-            
-                    {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                    {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                  </div>
+                        )}
+                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                    </div>
                 );
-              }
+            }
 
             return (
                 <div className="min-h-screen flex items-center justify-center bg-gray-100">
