@@ -120,6 +120,9 @@
                 new_login: '',
                 confirm_login: ''
             });
+            const [showDisputeModal, setShowDisputeModal] = useState(false);
+            const [selectedEvaluation, setSelectedEvaluation] = useState(null);
+            const [disputeText, setDisputeText] = useState('');
             const [salaryData, setSalaryData] = useState({
                 experience: '',
                 quality: '',
@@ -169,6 +172,78 @@
                 return googleSheetsRegex.test(url);
             };
 
+            const handleSubmitDispute = async () => {
+                if (!selectedEvaluation || !disputeText.trim()) {
+                    setError('Please enter dispute text');
+                    return;
+                }
+                
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/call_evaluation/dispute`,
+                        {
+                            operator_id: user.id,
+                            call_number: selectedEvaluation.call_number,
+                            month: selectedEvaluation.month,
+                            dispute_text: disputeText
+                        },
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        }
+                    );
+                    
+                    if (response.data.status === 'success') {
+                        setSuccess('Dispute submitted successfully');
+                        setShowDisputeModal(false);
+                        setDisputeText('');
+                    } else {
+                        setError(response.data.error || 'Failed to submit dispute');
+                    }
+                } catch (err) {
+                    console.error('Submit dispute error:', err);
+                    setError(err.response?.data?.error || 'Failed to submit dispute');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            const DisputeModal = () => (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                        <h2 className="text-xl font-semibold mb-4">Dispute Evaluation</h2>
+                        <p className="mb-2">Call #{selectedEvaluation?.call_number} - Score: {selectedEvaluation?.score}</p>
+                        <textarea
+                            value={disputeText}
+                            onChange={(e) => setDisputeText(e.target.value)}
+                            placeholder="Enter your dispute reason..."
+                            className="w-full p-3 border rounded-lg mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            rows={5}
+                        />
+                        <div className="flex justify-between">
+                            <button
+                                onClick={handleSubmitDispute}
+                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                disabled={isLoading}
+                            >
+                                {isLoading ? 'Submitting...' : 'Submit Dispute'}
+                            </button>
+                            <button
+                                onClick={() => setShowDisputeModal(false)}
+                                className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );            
+        
             const calculateSalary = () => {
                 let points = 0;
                 let premiumCoefficient = 1;
@@ -1700,7 +1775,7 @@
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Comment</th>
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Month</th>
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Evaluation Date</th>
-                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Correction</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Actions</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
@@ -1732,7 +1807,17 @@
                                                             </td>
                                                             <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
                                                             <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
-                                                            <td className="p-4 border-b text-sm">{eval1.is_correction ? 'Yes' : 'No'}</td>
+                                                            <td className="p-4 border-b text-sm">
+                                                                <button
+                                                                    onClick={() => {
+                                                                        setSelectedEvaluation(eval1);
+                                                                        setShowDisputeModal(true);
+                                                                    }}
+                                                                    className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
+                                                                >
+                                                                    Dispute
+                                                                </button>
+                                                            </td>
                                                         </tr>
                                                     ))}
                                                 </tbody>
@@ -1994,6 +2079,7 @@
                         )}
                         {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
                         {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                        {showDisputeModal && <DisputeModal />}
                     </div>
                 );
             }
