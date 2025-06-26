@@ -1595,9 +1595,9 @@
 
             if (user.role === 'operator') {
                 const averageScore = operatorData?.evaluations?.length > 0
-                    ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
+                    ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0, 0) / operatorData.evaluations.length
                     : 0;
-
+            
                 return (
                     <div className="min-h-screen bg-gray-100 p-6 max-w-[1152px] mx-auto">
                         <div className="flex justify-between items-center mb-6">
@@ -1639,7 +1639,7 @@
                                 </button>
                             </div>
                         </div>
-
+            
                         <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
                             <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
                             {isLoading ? (
@@ -1701,7 +1701,7 @@
                                 <p className="text-center text-gray-600">No profile data available. Please try refreshing or contact support.</p>
                             )}
                         </div>
-
+            
                         <div className="flex justify-center space-x-4 mb-6">
                             <button
                                 type="button"
@@ -1724,17 +1724,17 @@
                                 Call Evaluations
                             </button>
                             <button
-                            type="button"
-                            onClick={() => setView('salary')}
-                            className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
-                                view === 'salary' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
-                            }`} 
-                            disabled={isLoading}
-                        >
-                            Salary Calculator
-                        </button>
+                                type="button"
+                                onClick={() => setView('salary')}
+                                className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
+                                    view === 'salary' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
+                                }`} 
+                                disabled={isLoading}
+                            >
+                                Salary Calculator
+                            </button>
                         </div>
-
+            
                         {view === 'hours' && (
                             <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
                                 <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
@@ -1770,7 +1770,7 @@
                                         </div>
                                         <div className="col-span-1 flex justify-center items-center">
                                             <SemiCircleProgress
-                                                percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
+                                                percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100, 100)}
                                                 label="Выполнение нормы"
                                             />
                                         </div>
@@ -1780,7 +1780,7 @@
                                 )}
                             </div>
                         )}
-
+            
                         {view === 'evaluation' && (
                             <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
                                 <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
@@ -2118,29 +2118,27 @@
                                 </div>
                             </div>
                         )}
-                                        
-                                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                                    </div>
-                                </div>
-                            );
-                        };
                         
-                        // В основном рендере оператора, заменяем старый DisputeModal на:
                         {showDisputeModal && (
-                          <DisputeModal
-                            selectedEvaluation={selectedEvaluation}
-                            disputeText={disputeText}
-                            setDisputeText={setDisputeText}
-                            handleSubmitDispute={handleSubmitDispute}
-                            isLoading={isLoading}
-                            error={error}
-                            success={success}
-                            setShowDisputeModal={setShowDisputeModal}
-                          />
+                            <DisputeModal
+                                selectedEvaluation={selectedEvaluation}
+                                disputeText={disputeText}
+                                setDisputeText={setDisputeText}
+                                handleSubmitDispute={handleSubmitDispute}
+                                isLoading={isLoading}
+                                error={error}
+                                success={success}
+                                setShowDisputeModal={setShowDisputeModal}
+                            />
                         )}
+                        
+                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                    </div>
+                );
+            }            
 
-            return (
+        return (
                 <div className="min-h-screen flex items-center justify-center bg-gray-100">
                     <p className="text-center">Invalid role. Please contact support.</p>
                 </div>
