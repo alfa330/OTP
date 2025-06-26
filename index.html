@@ -504,6 +504,20 @@
                     setShowLogoutConfirm(false);
                     setSelectedSvId('');
                     setSelectedSvData(null);
+                    // Добавьте очистку salary данных
+                    setSalaryData({
+                        experience: '',
+                        quality: '',
+                        callsPerHour: '',
+                        hoursNorm: '',
+                        totalHours: '',
+                        bonusTraining: false,
+                        bonusRefer: false,
+                        bonusReferQuantity: '',
+                        bonusFilming: false,
+                        bonusFilmingQuantity: ''
+                    });
+                    setSalaryResult(null);
                     clearMessages();
                 }
             };
@@ -1055,7 +1069,7 @@
 
             if (user.role === 'admin') {
                 return (
-                    <div className="min-h-screen bg-gray-100 p-6">
+                    <div className="min-h-screen bg-gray-100 p-6 max-w-screen-lg mx-auto">
                         <div className="flex justify-between items-center mb-6">
                             <h1 className="text-3xl font-bold">Admin Dashboard</h1>
                             <div className="relative flex space-x-4">
@@ -1299,7 +1313,7 @@
 
             if (user.role === 'sv') {
                 return (
-                    <div className="min-h-screen bg-gray-100 p-6">
+                    <div className="min-h-screen bg-gray-100 p-6 max-w-screen-lg mx-auto">
                         <div className="flex justify-between items-center mb-6">
                             <h1 className="text-3xl font-bold">Supervisor Dashboard</h1>
                             <div className="relative flex space-x-4">
@@ -1471,7 +1485,7 @@
                     : 0;
 
                 return (
-                    <div className="min-h-screen bg-gray-100 p-6">
+                    <div className="min-h-screen bg-gray-100 p-6 max-w-screen-lg mx-auto">
                         <div className="flex justify-between items-center mb-6">
                             <h1 className="text-3xl font-bold">Operator Dashboard</h1>
                             <div className="relative flex space-x-4">
