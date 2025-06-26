@@ -429,8 +429,8 @@ def dispute_call_evaluation():
         if not call:
             return jsonify({"error": "Call evaluation not found"}), 404
 
-        # Send dispute message to supervisor
-        dispute_message = (
+        # Сообщение для супервайзера
+        supervisor_message = (
             f"⚠️ <b>Запрос на пересмотр оценки</b>\n\n"
             f"👤 Оператор: <b>{operator[2]}</b>\n"
             f"📞 Звонок №{call['call_number']}\n"
@@ -441,43 +441,46 @@ def dispute_call_evaluation():
             f"{data['dispute_text']}"
         )
 
+        # Сообщение для админа
+        admin_message = (
+            f"⚠️ <b>Запрос на пересмотр оценки</b>\n\n"
+            f"💬 Супервайзер: <b>{supervisor[2]}</b>\n"
+            f"👤 Оператор: <b>{operator[2]}</b>\n"
+            f"📞 Звонок №{call['call_number']}\n"
+            f"📱 Номер: {call['phone_number']}\n"
+            f"💯 Оценка: {call['score']}\n"
+            f"📅 Месяц: {call['month']}\n\n"
+            f"📝 <b>Сообщение от оператора:</b>\n"
+            f"{data['dispute_text']}"
+        )
+
         telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-        payload = {
+        
+        # Отправка супервайзеру
+        supervisor_payload = {
             "chat_id": supervisor[1],
-            "text": dispute_message,
+            "text": supervisor_message,
             "parse_mode": "HTML"
         }
-        response = requests.post(telegram_url, json=payload, timeout=10)
+        supervisor_response = requests.post(telegram_url, json=supervisor_payload, timeout=10)
         
-        if response.status_code != 200:
-            error_detail = response.json().get('description', 'Unknown error')
-            logging.error(f"Telegram API error: {error_detail}")
-            return jsonify({"error": f"Failed to send dispute message: {error_detail}"}), 500
+        if supervisor_response.status_code != 200:
+            error_detail = supervisor_response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error (supervisor): {error_detail}")
+            return jsonify({"error": f"Failed to send dispute message to supervisor: {error_detail}"}), 500
 
-        dispute_message = (
-            f"⚠️ <b>Запрос на пересмотр оценки</b>\n\n"
-            f"💬 Супервайзеру: <b>{supervisor[2]}</b>\n"
-            f"👤 Оператор: <b>{operator[2]}</b>\n"
-            f"📞 Звонок №{call['call_number']}\n"
-            f"📱 Номер: {call['phone_number']}\n"
-            f"💯 Оценка: {call['score']}\n"
-            f"📅 Месяц: {call['month']}\n\n"
-            f"📝 <b>Сообщение от оператора:</b>\n"
-            f"{data['dispute_text']}"
-        )
-        
-        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-        payload = {
+        # Отправка админу
+        admin_payload = {
             "chat_id": admin,
-            "text": dispute_message,
+            "text": admin_message,
             "parse_mode": "HTML"
         }
-        response = requests.post(telegram_url, json=payload, timeout=10)
+        admin_response = requests.post(telegram_url, json=admin_payload, timeout=10)
         
-        if response.status_code != 200:
-            error_detail = response.json().get('description', 'Unknown error')
-            logging.error(f"Telegram API error: {error_detail}")
-            return jsonify({"error": f"Failed to send dispute message: {error_detail}"}), 500
+        if admin_response.status_code != 200:
+            error_detail = admin_response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error (admin): {error_detail}")
+            return jsonify({"error": f"Failed to send dispute message to admin: {error_detail}"}), 500
             
         return jsonify({"status": "success", "message": "Dispute sent to supervisor and admin"})
     except Exception as e:
