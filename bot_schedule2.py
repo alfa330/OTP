@@ -221,6 +221,68 @@ def change_password():
         logging.error(f"Error changing password: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/user/change_login', methods=['POST'])
+@require_api_key
+def change_login():
+    try:
+        data = request.get_json()
+        required_fields = ['user_id', 'new_login']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields (user_id, new_login)"}), 400
+
+        user_id = int(data['user_id'])
+        new_login = data['new_login']
+        requester_id = int(request.headers.get('X-User-Id', user_id))
+
+        if not new_login or len(new_login) < 4:
+            return jsonify({"error": "New login must be at least 4 characters long"}), 400
+
+        # Check if new login is already taken
+        if db.get_user_by_login(new_login):
+            return jsonify({"error": "Login is already in use"}), 400
+
+        # Fetch requester and target user
+        requester = db.get_user(id=requester_id)
+        target_user = db.get_user(id=user_id)
+
+        if not requester or not target_user:
+            return jsonify({"error": "User not found"}), 404
+
+        # Authorization checks
+        if requester[3] == 'operator' and requester_id != user_id:
+            return jsonify({"error": "Operators can only change their own login"}), 403
+
+        if requester[3] == 'sv' and (target_user[3] != 'operator' or target_user[6] != requester_id):
+            return jsonify({"error": "Supervisors can only change logins for their operators"}), 403
+
+        # Admins can change any login
+        if requester[3] != 'admin' and requester_id != user_id and not (requester[3] == 'sv' and target_user[6] == requester_id):
+            return jsonify({"error": "Unauthorized to change this user's login"}), 403
+
+        # Update login
+        success = db.update_operator_login(user_id, requester_id if requester[3] == 'sv' else None, new_login)
+        if not success:
+            return jsonify({"error": "Failed to update login"}), 500
+
+        # Notify user via Telegram
+        if target_user[1]:
+            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": target_user[1],
+                "text": f"Ваш логин был успешно изменён. Новый логин: <b>{new_login}</b>",
+                "parse_mode": "HTML"
+            }
+            response = requests.post(telegram_url, json=payload, timeout=10)
+            if response.status_code != 200:
+                error_detail = response.json().get('description', 'Unknown error')
+                logging.error(f"Telegram API error: {error_detail}")
+
+        return jsonify({"status": "success", "message": f"Login updated for user {target_user[2]}"})
+
+    except Exception as e:
+        logging.error(f"Error changing login: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/user/hours', methods=['GET'])
 @require_api_key
 def get_user_hours():
@@ -404,7 +466,15 @@ def get_sv_data():
             sheet_name, operators, error = extract_fio_and_links(table_url)
             if error:
                 return jsonify({"error": error}), 400
-                
+        
+        # Fetch operator IDs from the database
+        db_operators = db.get_operators_by_supervisor(user_id) if user[3] == 'sv' else []
+        operator_id_map = {op[1]: op[0] for op in db_operators}  # Map operator name to ID
+        
+        # Add IDs to operators list
+        for operator in operators:
+            operator['id'] = operator_id_map.get(operator.get('name', ''), None)
+        
         return jsonify({
             "status": "success",
             "name": user[2],
