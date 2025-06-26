@@ -61,17 +61,14 @@
                 const startAngle = Math.PI;
                 const maxAngle = 2 * Math.PI;
 
-                // Clear canvas
                 ctx.clearRect(0, 0, width, height);
 
-                // Draw background arc (gray)
                 ctx.beginPath();
                 ctx.arc(centerX, centerY, radius, startAngle, maxAngle);
                 ctx.strokeStyle = '#e5e7eb';
                 ctx.lineWidth = 10;
                 ctx.stroke();
 
-                // Draw progress arc (colored based on percentage)
                 const progressAngle = startAngle + (percentage / 100) * Math.PI;
                 ctx.beginPath();
                 ctx.arc(centerX, centerY, radius, startAngle, progressAngle);
@@ -79,7 +76,6 @@
                 ctx.lineWidth = 10;
                 ctx.stroke();
 
-                // Draw percentage text
                 ctx.font = '20px Arial';
                 ctx.fillStyle = '#1f2937';
                 ctx.textAlign = 'center';
@@ -127,7 +123,13 @@
             const [showEvaluationForm, setShowEvaluationForm] = useState(false);
             const [showChangeTableForm, setShowChangeTableForm] = useState(false);
             const [currentSvForTableChange, setCurrentSvForTableChange] = useState(null);
-            const [showPasswordForm, setShowPasswordForm] = useState(false);
+            const [showAccountMenu, setShowAccountMenu] = useState(false);
+            const [showChangeLoginForm, setShowChangeLoginForm] = useState(false);
+            const [showChangePasswordForm, setShowChangePasswordForm] = useState(false);
+            const [loginData, setLoginData] = useState({
+                new_login: '',
+                confirm_login: ''
+            });
             const [passwordData, setPasswordData] = useState({
                 user_id: '',
                 new_password: '',
@@ -194,6 +196,55 @@
                 return weekNumber * 5;
             };
 
+            const handleChangeLogin = async () => {
+                if (!loginData.new_login || !loginData.confirm_login) {
+                    setError('Please fill in both login fields');
+                    return;
+                }
+                if (loginData.new_login !== loginData.confirm_login) {
+                    setError('Logins do not match');
+                    return;
+                }
+                if (loginData.new_login.length < 4) {
+                    setError('Login must be at least 4 characters long');
+                    return;
+                }
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/user/change_login`,
+                        {
+                            user_id: user.id,
+                            new_login: loginData.new_login
+                        },
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        }
+                    );
+                    const data = response.data;
+                    if (data.status === 'success' && isMounted.current) {
+                        setSuccess(data.message || 'Login updated successfully');
+                        setLoginData({
+                            new_login: '',
+                            confirm_login: ''
+                        });
+                        setShowChangeLoginForm(false);
+                    } else {
+                        setError(data.error || 'Failed to update login');
+                    }
+                } catch (err) {
+                    console.error('Change login error:', err);
+                    setError(err.response?.data?.error || 'Failed to update login');
+                } finally {
+                    if (isMounted.current) setIsLoading(false);
+                }
+            };
+
             const handleChangePassword = async () => {
                 if (!passwordData.new_password || !passwordData.confirm_password) {
                     setError('Please fill in both password fields');
@@ -232,7 +283,7 @@
                             new_password: '',
                             confirm_password: ''
                         });
-                        setShowPasswordForm(false);
+                        setShowChangePasswordForm(false);
                     } else {
                         setError(data.error || 'Failed to update password');
                     }
@@ -243,7 +294,7 @@
                     if (isMounted.current) setIsLoading(false);
                 }
             };
-            
+
             const handleLogin = async () => {
                 if (!login.trim() || !password.trim()) {
                     setError('Please enter both login and password');
@@ -683,28 +734,28 @@
                     fetchSvList();
                 }
             }, [user]);
-            
+
             useEffect(() => {
                 if (user && user.role === 'sv') {
                     console.log('Fetching supervisor data...');
                     fetchSvData();
                 }
             }, [user]);
-            
+
             useEffect(() => {
                 if (user && user.role === 'operator') {
                     console.log('Fetching profile data...');
                     fetchProfileData();
                 }
             }, [user]);
-            
+
             useEffect(() => {
                 if (user && user.role === 'operator') {
                     console.log('Fetching operator data...');
                     fetchOperatorData();
                 }
             }, [user]);
-            
+
             useEffect(() => {
                 if (user && user.role === 'operator') {
                     console.log('Fetching hours data...');
@@ -780,18 +831,157 @@
                 );
             }
 
+            if (showChangeLoginForm) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-gray-100">
+                        <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
+                            <h2 className="text-xl font-semibold mb-4 text-center">Change Login</h2>
+                            <input
+                                type="text"
+                                placeholder="New Login"
+                                value={loginData.new_login}
+                                onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <input
+                                type="text"
+                                placeholder="Confirm New Login"
+                                value={loginData.confirm_login}
+                                onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <div className="flex justify-between">
+                                <button
+                                    onClick={handleChangeLogin}
+                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                    disabled={isLoading}
+                                >
+                                    {isLoading ? 'Updating...' : 'Update Login'}
+                                </button>
+                                <button
+                                    onClick={() => setShowChangeLoginForm(false)}
+                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                        </div>
+                    </div>
+                );
+            }
+
+            if (showChangePasswordForm) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-gray-100">
+                        <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
+                            <h2 className="text-xl font-semibold mb-4 text-center">Change Password</h2>
+                            {user.role !== 'operator' && (
+                                <select
+                                    value={passwordData.user_id}
+                                    onChange={(e) => setPasswordData({ ...passwordData, user_id: e.target.value })}
+                                    className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    disabled={isLoading}
+                                >
+                                    <option value="">Select User</option>
+                                    {user.role === 'admin' && svList.map(sv => (
+                                        <option key={sv.id} value={sv.id}>{sv.name} (Supervisor, ID: {sv.id})</option>
+                                    ))}
+                                    {user.role === 'admin' && selectedSvData?.operators?.map(op => (
+                                        <option key={op.id} value={op.id}>{op.name} (Operator, ID: {op.id})</option>
+                                    ))}
+                                    {user.role === 'sv' && (
+                                        <option value={user.id}>{user.name} (Self)</option>
+                                    )}
+                                    {user.role === 'sv' && svData?.operators?.map(op => (
+                                        <option key={op.id} value={op.id}>{op.name} (Operator, ID: {op.id})</option>
+                                    ))}
+                                    {user.role === 'operator' && (
+                                        <option value={user.id}>{user.name} (Self)</option>
+                                    )}
+                                </select>
+                            )}
+                            <input
+                                type="password"
+                                placeholder="New Password"
+                                value={passwordData.new_password}
+                                onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <input
+                                type="password"
+                                placeholder="Confirm New Password"
+                                value={passwordData.confirm_password}
+                                onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <div className="flex justify-between">
+                                <button
+                                    onClick={handleChangePassword}
+                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                    disabled={isLoading}
+                                >
+                                    {isLoading ? 'Updating...' : 'Update Password'}
+                                </button>
+                                <button
+                                    onClick={() => setShowChangePasswordForm(false)}
+                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                        </div>
+                    </div>
+                );
+            }
+
             if (user.role === 'admin') {
                 return (
                     <div className="min-h-screen bg-gray-100 p-6">
                         <div className="flex justify-between items-center mb-6">
                             <h1 className="text-3xl font-bold">Admin Dashboard</h1>
-                            <div className="flex space-x-4">
+                            <div className="relative flex space-x-4">
                                 <button
                                     onClick={() => setShowEvaluationForm(!showEvaluationForm)}
                                     className="bg-purple-500 text-white px-4 py-2 rounded hover:bg-purple-600"
                                 >
                                     {showEvaluationForm ? 'Hide Evaluation Form' : 'Add Call Evaluation'}
                                 </button>
+                                <button
+                                    onClick={() => setShowAccountMenu(!showAccountMenu)}
+                                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                                >
+                                    Account
+                                </button>
+                                {showAccountMenu && (
+                                    <div className="absolute right-0 top-12 bg-white shadow-lg rounded-lg p-4 w-48 z-10">
+                                        <button
+                                            onClick={() => {
+                                                setShowChangeLoginForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                                        >
+                                            Change Login
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setShowChangePasswordForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                                        >
+                                            Change Password
+                                        </button>
+                                    </div>
+                                )}
                                 <button
                                     onClick={handleLogout}
                                     className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
@@ -984,68 +1174,7 @@
                                 </div>
                             )}
                         </div>
-                        
-                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                            <div className="flex justify-between items-center mb-4">
-                                <h2 className="text-xl font-semibold">Change User Password</h2>
-                                <button
-                                    onClick={() => setShowPasswordForm(!showPasswordForm)}
-                                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-                                >
-                                    {showPasswordForm ? 'Hide Password Form' : 'Change Password'}
-                                </button>
-                            </div>
-                            {showPasswordForm && (
-                                <div className="mt-4">
-                                    <select
-                                        value={passwordData.user_id}
-                                        onChange={(e) => setPasswordData({ ...passwordData, user_id: e.target.value })}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    >
-                                        <option value="">Select User</option>
-                                        {svList.map(sv => (
-                                            <option key={sv.id} value={sv.id}>{sv.name} (Supervisor, ID: {sv.id})</option>
-                                        ))}
-                                        {selectedSvData?.operators?.map(op => (
-                                            <option key={op.id} value={op.id}>{op.name} (Operator, ID: {op.id})</option>
-                                        ))}
-                                    </select>
-                                    <input
-                                        type="password"
-                                        placeholder="New Password"
-                                        value={passwordData.new_password}
-                                        onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    />
-                                    <input
-                                        type="password"
-                                        placeholder="Confirm New Password"
-                                        value={passwordData.confirm_password}
-                                        onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    />
-                                    <div className="flex justify-between">
-                                        <button
-                                            onClick={handleChangePassword}
-                                            className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                            disabled={isLoading}
-                                        >
-                                            {isLoading ? 'Updating...' : 'Update Password'}
-                                        </button>
-                                        <button
-                                            onClick={() => setShowPasswordForm(false)}
-                                            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                        >
-                                            Cancel
-                                        </button>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                        
+
                         {showChangeTableForm && currentSvForTableChange && (
                             <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                                 <h2 className="text-xl font-semibold mb-4">Change Table for {currentSvForTableChange.name}</h2>
@@ -1162,12 +1291,42 @@
                     <div className="min-h-screen bg-gray-100 p-6">
                         <div className="flex justify-between items-center mb-6">
                             <h1 className="text-3xl font-bold">Supervisor Dashboard</h1>
-                            <button
-                                onClick={handleLogout}
-                                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700"
-                            >
-                                Logout
-                            </button>
+                            <div className="relative flex space-x-4">
+                                <button
+                                    onClick={() => setShowAccountMenu(!showAccountMenu)}
+                                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                                >
+                                    Account
+                                </button>
+                                {showAccountMenu && (
+                                    <div className="absolute right-0 top-12 bg-white shadow-lg rounded-lg p-4 w-48 z-10">
+                                        <button
+                                            onClick={() => {
+                                                setShowChangeLoginForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                                        >
+                                            Change Login
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setShowChangePasswordForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                                        >
+                                            Change Password
+                                        </button>
+                                    </div>
+                                )}
+                                <button
+                                    onClick={handleLogout}
+                                    className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700"
+                                >
+                                    Logout
+                                </button>
+                            </div>
                         </div>
                         <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                             <h2 className="text-xl font-semibold mb-4">Update Table</h2>
@@ -1187,7 +1346,7 @@
                                 {isLoading ? 'Updating...' : 'Update Table'}
                             </button>
                         </div>
-                        <div className="bg-white p-6 rounded-lg shadow-lg">
+                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                             <h2 className="text-xl font-semibold mb-4">Your Operators</h2>
                             {isLoading ? (
                                 <p className="text-center">Loading...</p>
@@ -1230,18 +1389,20 @@
                             ) : (
                                 <p className="text-center">No operators found.</p>
                             )}
-
+                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                        </div>
                         <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                             <div className="flex justify-between items-center mb-4">
                                 <h2 className="text-xl font-semibold">Change Password</h2>
                                 <button
-                                    onClick={() => setShowPasswordForm(!showPasswordForm)}
+                                    onClick={() => setShowChangePasswordForm(!showChangePasswordForm)}
                                     className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
                                 >
-                                    {showPasswordForm ? 'Hide Password Form' : 'Change Password'}
+                                    {showChangePasswordForm ? 'Hide Password Form' : 'Change Password'}
                                 </button>
                             </div>
-                            {showPasswordForm && (
+                            {showChangePasswordForm && (
                                 <div className="mt-4">
                                     <select
                                         value={passwordData.user_id}
@@ -1280,7 +1441,7 @@
                                             {isLoading ? 'Updating...' : 'Update Password'}
                                         </button>
                                         <button
-                                            onClick={() => setShowPasswordForm(false)}
+                                            onClick={() => setShowChangePasswordForm(false)}
                                             className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
                                         >
                                             Cancel
@@ -1288,11 +1449,6 @@
                                     </div>
                                 </div>
                             )}
-                        </div>
-        
-                            
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                         </div>
                     </div>
                 );
@@ -1307,15 +1463,44 @@
                     <div className="min-h-screen bg-gray-100 p-6">
                         <div className="flex justify-between items-center mb-6">
                             <h1 className="text-3xl font-bold">Operator Dashboard</h1>
-                            <button
-                                onClick={handleLogout}
-                                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors duration-200"
-                            >
-                                Logout
-                            </button>
+                            <div className="relative flex space-x-4">
+                                <button
+                                    onClick={() => setShowAccountMenu(!showAccountMenu)}
+                                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                                >
+                                    Account
+                                </button>
+                                {showAccountMenu && (
+                                    <div className="absolute right-0 top-12 bg-white shadow-lg rounded-lg p-4 w-48 z-10">
+                                        <button
+                                            onClick={() => {
+                                                setShowChangeLoginForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                                        >
+                                            Change Login
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setShowChangePasswordForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                                        >
+                                            Change Password
+                                        </button>
+                                    </div>
+                                )}
+                                <button
+                                    onClick={handleLogout}
+                                    className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors duration-200"
+                                >
+                                    Logout
+                                </button>
+                            </div>
                         </div>
 
-                        {/* Enhanced Profile Section */}
                         <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
                             <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
                             {isLoading ? (
@@ -1378,7 +1563,6 @@
                             )}
                         </div>
 
-                        {/* View Toggle Buttons */}
                         <div className="flex justify-center space-x-4 mb-6">
                             <button
                                 type="button"
@@ -1402,7 +1586,6 @@
                             </button>
                         </div>
 
-                        {/* Hours Section */}
                         {view === 'hours' && (
                             <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
                                 <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
@@ -1449,7 +1632,6 @@
                             </div>
                         )}
 
-                        {/* Evaluations Section */}
                         {view === 'evaluation' && (
                             <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
                                 <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
@@ -1527,53 +1709,7 @@
                                 )}
                             </div>
                         )}
-                        
-                        <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
-                            <h2 className="text-2xl font-semibold mb-6 text-gray-800">Change Password</h2>
-                            {showPasswordForm ? (
-                                <div className="mt-4">
-                                    <input
-                                        type="password"
-                                        placeholder="New Password"
-                                        value={passwordData.new_password}
-                                        onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    />
-                                    <input
-                                        type="password"
-                                        placeholder="Confirm New Password"
-                                        value={passwordData.confirm_password}
-                                        onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    />
-                                    <div className="flex justify-between">
-                                        <button
-                                            onClick={handleChangePassword}
-                                            className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                            disabled={isLoading}
-                                        >
-                                            {isLoading ? 'Updating...' : 'Update Password'}
-                                        </button>
-                                        <button
-                                            onClick={() => setShowPasswordForm(false)}
-                                            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                        >
-                                            Cancel
-                                        </button>
-                                    </div>
-                                </div>
-                            ) : (
-                                <button
-                                    onClick={() => setShowPasswordForm(true)}
-                                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-                                >
-                                    Change Password
-                                </button>
-                            )}
-                        </div>
-                        
+
                         {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
                         {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                     </div>
