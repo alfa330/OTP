@@ -314,6 +314,8 @@ class Database:
         password_hash = pbkdf2_sha256.hash(password)
 
         with self._get_cursor() as cursor:
+            # Создаем savepoint для возможности отката
+            cursor.execute("SAVEPOINT before_insert")
             try:
                 cursor.execute("""
                     INSERT INTO users (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash, scores_table_url)
@@ -322,7 +324,9 @@ class Database:
                 """, (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash, scores_table_url))
                 return cursor.fetchone()[0]
             except psycopg2.IntegrityError as e:
-                # Проверяем, что ошибка связана с нарушением unique_name_role
+                # Откатываем к savepoint перед обработкой ошибки
+                cursor.execute("ROLLBACK TO SAVEPOINT before_insert")
+                
                 if 'unique_name_role' in str(e):
                     # Обновляем только нужные поля для существующего пользователя
                     cursor.execute("""
@@ -333,7 +337,11 @@ class Database:
                         WHERE name = %s AND role = %s
                         RETURNING id
                     """, (direction, supervisor_id, scores_table_url, name, role))
-                    return cursor.fetchone()[0]
+                    result = cursor.fetchone()
+                    if result:
+                        return result[0]
+                    else:
+                        raise ValueError("User with this name and role not found")
                 elif 'telegram_id' in str(e):
                     # Если конфликт по telegram_id, обновляем как раньше
                     cursor.execute("""
