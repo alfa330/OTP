@@ -50,11 +50,21 @@ executor_pool = ThreadPoolExecutor(max_workers=4)
 
 # === Flask-сервер ================================================================================================
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["https://alfa330.github.io", "http://localhost:3000"]}})
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["https://alfa330.github.io", "http://localhost:*"],
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "X-API-Key", "X-User-Id"],
+        "supports_credentials": False,
+        "max_age": 86400
+    }
+})
 
 def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
         api_key = request.headers.get('X-API-Key')
         if api_key and api_key == FLASK_API_KEY:
             return f(*args, **kwargs)
@@ -66,6 +76,13 @@ def require_api_key(f):
 @app.route('/')
 def index():
     return "Bot is alive!", 200
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', 'https://alfa330.github.io')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, X-User-Id')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    return response
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -329,7 +346,21 @@ def get_call_evaluations():
             return jsonify({"error": "Missing operator_id parameter"}), 400
         operator_id = int(operator_id)
         evaluations = db.get_call_evaluations(operator_id)
-        return jsonify({"status": "success", "evaluations": evaluations})
+        
+        # Get supervisor info for dispute button
+        operator = db.get_user(id=operator_id)
+        supervisor = None
+        if operator and operator[6]:  # supervisor_id
+            supervisor = db.get_user(id=operator[6])
+        
+        return jsonify({
+            "status": "success", 
+            "evaluations": evaluations,
+            "supervisor": {
+                "id": supervisor[0] if supervisor else None,
+                "name": supervisor[2] if supervisor else None
+            }
+        })
     except Exception as e:
         logging.error(f"Error fetching evaluations: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
@@ -370,6 +401,62 @@ def change_sv_table():
         })
     except Exception as e:
         logging.error(f"Error updating SV table: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/call_evaluation/dispute', methods=['POST'])
+@require_api_key
+def dispute_call_evaluation():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        data = request.get_json()
+        required_fields = ['operator_id', 'call_number', 'month', 'dispute_text']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        operator_id = int(data['operator_id'])
+        operator = db.get_user(id=operator_id)
+        if not operator:
+            return jsonify({"error": "Operator not found"}), 404
+
+        supervisor = db.get_user(id=operator[6]) if operator[6] else None
+        if not supervisor:
+            return jsonify({"error": "Supervisor not found for this operator"}), 404
+
+        # Get call details
+        evaluations = db.get_call_evaluations(operator_id, data['month'])
+        call = next((e for e in evaluations if e['call_number'] == data['call_number']), None)
+        if not call:
+            return jsonify({"error": "Call evaluation not found"}), 404
+
+        # Send dispute message to supervisor
+        dispute_message = (
+            f"⚠️ <b>Запрос на пересмотр оценки</b>\n\n"
+            f"👤 Оператор: <b>{operator[2]}</b>\n"
+            f"📞 Звонок №{call['call_number']}\n"
+            f"📱 Номер: {call['phone_number']}\n"
+            f"💯 Оценка: {call['score']}\n"
+            f"📅 Месяц: {call['month']}\n\n"
+            f"📝 <b>Сообщение от оператора:</b>\n"
+            f"{data['dispute_text']}"
+        )
+
+        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": supervisor[1],
+            "text": dispute_message,
+            "parse_mode": "HTML"
+        }
+        response = requests.post(telegram_url, json=payload, timeout=10)
+        
+        if response.status_code != 200:
+            error_detail = response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error: {error_detail}")
+            return jsonify({"error": f"Failed to send dispute message: {error_detail}"}), 500
+
+        return jsonify({"status": "success", "message": "Dispute sent to supervisor"})
+    except Exception as e:
+        logging.error(f"Error processing dispute: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/admin/add_sv', methods=['POST'])
@@ -784,6 +871,13 @@ def get_access_keyboard():
     kb.add(KeyboardButton('Выход🚪')) 
     kb.add(KeyboardButton('Отмена ❌'))
     return kb
+
+def _build_cors_preflight_response():
+    response = jsonify({"status": "ok"})
+    response.headers.add("Access-Control-Allow-Origin", "https://alfa330.github.io")
+    response.headers.add("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-User-Id")
+    response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+    return response
 
 def get_current_week_of_month():
     today = datetime.now()
