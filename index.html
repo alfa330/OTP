@@ -1595,7 +1595,7 @@
 
             if (user.role === 'operator') {
                 const averageScore = operatorData?.evaluations?.length > 0
-                    ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0, 0) / operatorData.evaluations.length
+                    ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
                     : 0;
             
                 return (
