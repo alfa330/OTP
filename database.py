@@ -314,21 +314,44 @@ class Database:
         password_hash = pbkdf2_sha256.hash(password)
 
         with self._get_cursor() as cursor:
-            cursor.execute("""
-                INSERT INTO users (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash, scores_table_url)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (telegram_id) DO UPDATE
-                SET name = EXCLUDED.name,
-                    role = EXCLUDED.role,
-                    direction = EXCLUDED.direction,
-                    hire_date = EXCLUDED.hire_date,
-                    supervisor_id = EXCLUDED.supervisor_id,
-                    login = EXCLUDED.login,
-                    password_hash = EXCLUDED.password_hash,
-                    scores_table_url = EXCLUDED.scores_table_url
-                RETURNING id
-            """, (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash, scores_table_url))
-            return cursor.fetchone()[0]
+            try:
+                cursor.execute("""
+                    INSERT INTO users (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash, scores_table_url)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash, scores_table_url))
+                return cursor.fetchone()[0]
+            except psycopg2.IntegrityError as e:
+                # Проверяем, что ошибка связана с нарушением unique_name_role
+                if 'unique_name_role' in str(e):
+                    # Обновляем только нужные поля для существующего пользователя
+                    cursor.execute("""
+                        UPDATE users
+                        SET direction = COALESCE(%s, direction),
+                            supervisor_id = COALESCE(%s, supervisor_id),
+                            scores_table_url = COALESCE(%s, scores_table_url)
+                        WHERE name = %s AND role = %s
+                        RETURNING id
+                    """, (direction, supervisor_id, scores_table_url, name, role))
+                    return cursor.fetchone()[0]
+                elif 'telegram_id' in str(e):
+                    # Если конфликт по telegram_id, обновляем как раньше
+                    cursor.execute("""
+                        UPDATE users
+                        SET name = %s,
+                            role = %s,
+                            direction = COALESCE(%s, direction),
+                            hire_date = COALESCE(%s, hire_date),
+                            supervisor_id = COALESCE(%s, supervisor_id),
+                            login = %s,
+                            password_hash = %s,
+                            scores_table_url = COALESCE(%s, scores_table_url)
+                        WHERE telegram_id = %s
+                        RETURNING id
+                    """, (name, role, direction, hire_date, supervisor_id, login, password_hash, scores_table_url, telegram_id))
+                    return cursor.fetchone()[0]
+                else:
+                    raise  # Повторно вызываем другие ошибки целостности
 
     def update_telegram_id(self, user_id, telegram_id):
         with self._get_cursor() as cursor:
