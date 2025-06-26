@@ -865,7 +865,21 @@
                     debouncedFetch(() => fetchSelectedSvData(selectedSvId));
                 }
             }, [selectedSvId, user, debouncedFetch]);
-
+            
+            useEffect(() => {
+                            if (user && user.role === 'operator' && hoursData && operatorData) {
+                                const averageScore = operatorData.evaluations?.length > 0
+                                    ? (operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length).toFixed(2)
+                                    : '';
+                                setSalaryData(prev => ({
+                                    ...prev,
+                                    totalHours: hoursData ? hoursData.regular_hours.toFixed(2) : '',
+                                    hoursNorm: hoursData ? hoursData.norm_hours.toFixed(2) : '',
+                                    quality: averageScore
+                                }));
+                            }
+                        }, [hoursData, operatorData, user]);
+            
             if (!user) {
                 return (
                     <div className="min-h-screen flex items-center justify-center bg-gray-100">
