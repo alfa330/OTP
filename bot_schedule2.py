@@ -163,6 +163,64 @@ def get_user_profile():
         logging.error(f"Error fetching user profile for user_id {user_id}: {str(e)}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/user/change_password', methods=['POST'])
+@require_api_key
+def change_password():
+    try:
+        data = request.get_json()
+        required_fields = ['user_id', 'new_password']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields (user_id, new_password)"}), 400
+
+        user_id = int(data['user_id'])
+        new_password = data['new_password']
+        requester_id = int(request.headers.get('X-User-Id', user_id))  # Assume user ID is passed in headers for authentication
+
+        if not new_password or len(new_password) < 6:
+            return jsonify({"error": "New password must be at least 6 characters long"}), 400
+
+        # Fetch requester and target user
+        requester = db.get_user(id=requester_id)
+        target_user = db.get_user(id=user_id)
+
+        if not requester or not target_user:
+            return jsonify({"error": "User not found"}), 404
+
+        # Authorization checks
+        if requester[3] == 'operator' and requester_id != user_id:
+            return jsonify({"error": "Operators can only change their own password"}), 403
+
+        if requester[3] == 'sv' and (target_user[3] != 'operator' or target_user[6] != requester_id):
+            return jsonify({"error": "Supervisors can only change passwords for their operators"}), 403
+
+        # Admins can change any password
+        if requester[3] != 'admin' and requester_id != user_id and not (requester[3] == 'sv' and target_user[6] == requester_id):
+            return jsonify({"error": "Unauthorized to change this user's password"}), 403
+
+        # Update password
+        success = db.update_user_password(user_id, new_password)
+        if not success:
+            return jsonify({"error": "Failed to update password"}), 500
+
+        # Notify user via Telegram
+        if target_user[1]:  # Check if telegram_id exists
+            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": target_user[1],
+                "text": f"Ваш пароль был успешно изменён. Новый пароль: <b>{new_password}</b>",
+                "parse_mode": "HTML"
+            }
+            response = requests.post(telegram_url, json=payload, timeout=10)
+            if response.status_code != 200:
+                error_detail = response.json().get('description', 'Unknown error')
+                logging.error(f"Telegram API error: {error_detail}")
+
+        return jsonify({"status": "success", "message": f"Password updated for user {target_user[2]}"})
+
+    except Exception as e:
+        logging.error(f"Error changing password: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/user/hours', methods=['GET'])
 @require_api_key
 def get_user_hours():
