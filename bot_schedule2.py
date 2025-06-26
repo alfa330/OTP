@@ -454,7 +454,32 @@ def dispute_call_evaluation():
             logging.error(f"Telegram API error: {error_detail}")
             return jsonify({"error": f"Failed to send dispute message: {error_detail}"}), 500
 
-        return jsonify({"status": "success", "message": "Dispute sent to supervisor"})
+        dispute_message = (
+            f"⚠️ <b>Запрос на пересмотр оценки</b>\n\n"
+            f"💬 Супервайзеру: <b>{supervisor[2]}</b>\n"
+            f"👤 Оператор: <b>{operator[2]}</b>\n"
+            f"📞 Звонок №{call['call_number']}\n"
+            f"📱 Номер: {call['phone_number']}\n"
+            f"💯 Оценка: {call['score']}\n"
+            f"📅 Месяц: {call['month']}\n\n"
+            f"📝 <b>Сообщение от оператора:</b>\n"
+            f"{data['dispute_text']}"
+        )
+        
+        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": admin,
+            "text": dispute_message,
+            "parse_mode": "HTML"
+        }
+        response = requests.post(telegram_url, json=payload, timeout=10)
+        
+        if response.status_code != 200:
+            error_detail = response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error: {error_detail}")
+            return jsonify({"error": f"Failed to send dispute message: {error_detail}"}), 500
+            
+        return jsonify({"status": "success", "message": "Dispute sent to supervisor and admin"})
     except Exception as e:
         logging.error(f"Error processing dispute: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
