@@ -1297,7 +1297,305 @@
                 const averageScore = operatorData?.evaluations?.length > 0
                     ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
                     : 0;
-
+            
+                const toggleBonusQuantity = (direction, bonusType) => {
+                    const quantityInput = document.getElementById(`${direction}-bonus-${bonusType}-quantity`);
+                    const checkbox = document.getElementById(`${direction}-bonus-${bonusType}`);
+                    if (quantityInput) {
+                        quantityInput.classList.toggle('visible', checkbox.checked);
+                        quantityInput.required = checkbox.checked;
+                        if (!checkbox.checked) {
+                            quantityInput.value = '';
+                        }
+                    }
+                    validateForm(direction);
+                };
+            
+                const showForm = (direction) => {
+                    const chatForm = document.getElementById('chat-form');
+                    const operatorForm = document.getElementById('operator-form');
+                    const resultDiv = document.getElementById('result');
+                    const pointsTable = document.getElementById('points-table');
+                    const buttonGroup = document.getElementById('button-group');
+                    const calculateBtn = document.getElementById('calculate-btn');
+                    const toggleTableBtn = document.getElementById('toggle-table-btn');
+                    chatForm.classList.remove('active');
+                    operatorForm.classList.remove('active');
+                    resultDiv.style.display = 'none';
+                    resultDiv.classList.remove('active');
+                    pointsTable.style.display = 'none';
+                    pointsTable.classList.remove('active');
+                    buttonGroup.classList.remove('active');
+                    calculateBtn.disabled = true;
+                    toggleTableBtn.disabled = true;
+                    const selectedForm = document.getElementById(`${direction}-form`);
+                    selectedForm.classList.add('active');
+                    buttonGroup.classList.add('active');
+                    clearForm(direction);
+                };
+            
+                const validateForm = (direction) => {
+                    const form = document.getElementById(`${direction}-form`);
+                    const calculateBtn = document.getElementById('calculate-btn');
+                    const clearBtn = document.getElementById('clear-btn');
+                    const inputs = form.querySelectorAll('input[required], select[required]');
+                    const allInputs = form.querySelectorAll('input, select');
+                    
+                    let isValid = true;
+                    inputs.forEach(input => {
+                        if (input.tagName === 'SELECT' && input.value === '') {
+                            isValid = false;
+                        } else if (input.type === 'number') {
+                            const value = input.value;
+                            if (value === '' || isNaN(value)) {
+                                isValid = false;
+                            } else {
+                                const min = parseFloat(input.min);
+                                const max = parseFloat(input.max);
+                                const numValue = parseFloat(value);
+                                if (numValue < min || numValue > max) {
+                                    isValid = false;
+                                }
+                            }
+                        }
+                    });
+                    ['refer', 'filming'].forEach(bonusType => {
+                        const checkbox = document.getElementById(`${direction}-bonus-${bonusType}`);
+                        const quantityInput = document.getElementById(`${direction}-bonus-${bonusType}-quantity`);
+                        if (checkbox.checked && (!quantityInput.value || parseFloat(quantityInput.value) < 1)) {
+                            isValid = false;
+                        }
+                    });
+                    calculateBtn.disabled = !isValid;
+            
+                    let hasInput = false;
+                    allInputs.forEach(input => {
+                        if (input.type === 'checkbox' && input.checked) {
+                            hasInput = true;
+                        } else if (input.tagName === 'SELECT' && input.value !== '') {
+                            hasInput = true;
+                        } else if (input.type === 'number' && input.value !== '') {
+                            hasInput = true;
+                        }
+                    });
+                    clearBtn.disabled = !hasInput;
+                };
+            
+                const clearForm = (direction) => {
+                    const form = document.getElementById(`${direction ? direction + '-form' : (document.getElementById('chat-form').classList.contains('active') ? 'chat-form' : 'operator-form')}`);
+                    const resultDiv = document.getElementById('result');
+                    const pointsTable = document.getElementById('points-table');
+                    const calculateBtn = document.getElementById('calculate-btn');
+                    const toggleTableBtn = document.getElementById('toggle-table-btn');
+                    const clearBtn = document.getElementById('clear-btn');
+                    
+                    form.querySelectorAll('input, select').forEach(input => {
+                        if (input.type === 'checkbox') {
+                            input.checked = false;
+                        } else if (input.tagName === 'SELECT') {
+                            input.value = '';
+                        } else {
+                            input.value = '';
+                        }
+                        input.dispatchEvent(new Event('input'));
+                    });
+                    ['training', 'refer', 'filming'].forEach(bonusType => toggleBonusQuantity(form.id.split('-')[0], bonusType));
+                    resultDiv.style.display = 'none';
+                    resultDiv.classList.remove('active');
+                    pointsTable.style.display = 'none';
+                    pointsTable.classList.remove('active');
+                    calculateBtn.disabled = true;
+                    toggleTableBtn.disabled = true;
+                    toggleTableBtn.textContent = 'Показать таблицу баллов';
+                };
+            
+                const togglePointsTable = () => {
+                    const pointsTable = document.getElementById('points-table');
+                    const toggleButton = document.getElementById('toggle-table-btn');
+                    const isActive = pointsTable.classList.contains('active');
+                    if (isActive) {
+                        pointsTable.classList.remove('active');
+                        pointsTable.style.display = 'none';
+                        toggleButton.textContent = 'Показать таблицу баллов';
+                    } else {
+                        pointsTable.classList.add('active');
+                        pointsTable.style.display = 'block';
+                        toggleButton.textContent = 'Скрыть таблицу баллов';
+                    }
+                };
+            
+                const generatePointsTable = (direction, data) => {
+                    let tableHtml = `
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Категория</th>
+                                    <th>Условие</th>
+                                    <th>Баллы</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+                    if (direction === 'operator') {
+                        const { experience, quality, callsPerHour } = data;
+                        tableHtml += `
+                            <tr class="category-header">
+                                <td colspan="3">Стаж</td>
+                            </tr>
+                        `;
+                        const experienceRanges = [
+                            { range: '0-3 месяца', points: 15, selected: experience === '0-3', tooltip: 'Начальный стаж' },
+                            { range: '4-9 месяцев', points: 25, selected: experience === '4-9', tooltip: 'Ранний опыт' },
+                            { range: '10-15 месяцев', points: 35, selected: experience === '10-15', tooltip: 'Продвинутый стаж' },
+                            { range: '≥16 месяцев', points: 50, selected: experience === '16+', tooltip: 'Экспертный уровень' }
+                        ];
+                        tableHtml += experienceRanges.map(row => `
+                            <tr ${row.selected ? 'class="selected"' : ''}>
+                                <td></td>
+                                <td class="tooltip" data-tooltip="${row.tooltip}">${row.range}</td>
+                                <td>${row.points}</td>
+                            </tr>
+                        `).join('');
+                        tableHtml += `
+                            <tr class="category-header">
+                                <td colspan="3">Качество</td>
+                            </tr>
+                        `;
+                        const qualityRanges = [
+                            { range: '85-89%', points: 20, selected: quality >= 85 && quality < 90, tooltip: 'Хорошее качество' },
+                            { range: '90-94%', points: 25, selected: quality >= 90 && quality < 95, tooltip: 'Высокое качество' },
+                            { range: '95-98%', points: 30, selected: quality >= 95 && quality < 99, tooltip: 'Отличное качество' },
+                            { range: '99-100%', points: 50, selected: quality >= 99 && quality <= 100, tooltip: 'Идеальное качество' }
+                        ];
+                        tableHtml += qualityRanges.map(row => `
+                            <tr ${row.selected ? 'class="selected"' : ''}>
+                                <td></td>
+                                <td class="tooltip" data-tooltip="${row.tooltip}">${row.range}</td>
+                                <td>${row.points}</td>
+                            </tr>
+                        `).join('');
+                        tableHtml += `
+                            <tr class="category-header">
+                                <td colspan="3">Количество звонков в час</td>
+                            </tr>
+                        `;
+                        const callsPerHourRanges = [
+                            { range: '≥5', points: 20, selected: callsPerHour >= 5 && callsPerHour < 10, tooltip: 'Базовая производительность' },
+                            { range: '≥10', points: 25, selected: callsPerHour >= 10 && callsPerHour < 15, tooltip: 'Хорошая производительность' },
+                            { range: '≥15', points: 30, selected: callsPerHour >= 15 && callsPerHour < 20, tooltip: 'Высокая производительность' },
+                            { range: '≥20', points: 50, selected: callsPerHour >= 20, tooltip: 'Исключительная производительность' }
+                        ];
+                        tableHtml += callsPerHourRanges.map(row => `
+                            <tr ${row.selected ? 'class="selected"' : ''}>
+                                <td></td>
+                                <td class="tooltip" data-tooltip="${row.tooltip}">${row.range}</td>
+                                <td>${row.points}</td>
+                            </tr>
+                        `).join('');
+                    }
+                    tableHtml += `
+                            </tbody>
+                        </table>
+                    `;
+                    return tableHtml;
+                };
+            
+                const calculateSalary = () => {
+                    const operatorForm = document.getElementById('operator-form');
+                    const toggleTableBtn = document.getElementById('toggle-table-btn');
+                    let points = 0;
+                    let premiumCoefficient = 1;
+                    let totalHours = 0;
+                    let hoursNorm = 0;
+                    let hoursPercentage = 0;
+                    let bonuses = 0;
+                    let resultText = '';
+                    let pointsTableData = {};
+                    if (operatorForm.classList.contains('active')) {
+                        const experience = document.getElementById('operator-experience').value;
+                        const quality = parseFloat(document.getElementById('operator-quality').value);
+                        const callsPerHour = parseFloat(document.getElementById('operator-calls-per-hour').value);
+                        hoursNorm = parseFloat(document.getElementById('operator-hours-norm').value);
+                        totalHours = parseFloat(document.getElementById('operator-total-hours').value);
+                        pointsTableData = { experience, quality, callsPerHour };
+                        if (experience === '16+') points += 50;
+                        else if (experience === '10-15') points += 35;
+                        else if (experience === '4-9') points += 25;
+                        else if (experience === '0-3') points += 15;
+                        if (quality >= 99 && quality <= 100) points += 50;
+                        else if (quality >= 95 && quality < 99) points += 30;
+                        else if (quality >= 90 && quality < 95) points += 25;
+                        else if (quality >= 85 && quality < 90) points += 20;
+                        if (callsPerHour >= 20) points += 50;
+                        else if (callsPerHour >= 15) points += 30;
+                        else if (callsPerHour >= 10) points += 25;
+                        else if (callsPerHour >= 5) points += 20;
+                        let bonusDetails = [];
+                        if (document.getElementById('operator-bonus-training').checked) {
+                            bonuses += 6000;
+                            bonusDetails.push('Обучение: 6000 тг');
+                        }
+                        if (document.getElementById('operator-bonus-refer').checked) {
+                            const quantity = parseInt(document.getElementById('operator-bonus-refer-quantity').value) || 0;
+                            const referBonus = 5000 * quantity;
+                            bonuses += referBonus;
+                            bonusDetails.push(`Приведи друга: ${referBonus} тг (${quantity} чел.)`);
+                        }
+                        if (document.getElementById('operator-bonus-filming').checked) {
+                            const quantity = parseInt(document.getElementById('operator-bonus-filming-quantity').value) || 0;
+                            const filmingBonus = 5000 * quantity;
+                            bonuses += filmingBonus;
+                            bonusDetails.push(`Съемки: ${filmingBonus} тг (${quantity} съемок)`);
+                        }
+                        hoursPercentage = hoursNorm > 0 ? (totalHours / hoursNorm * 100) : 0;
+                        premiumCoefficient = hoursPercentage >= 90 ? 1 : 0.75;
+                        const pointsCoefficient = points / 100;
+                        const baseSalary = 700 * totalHours;
+                        const premiumPart = baseSalary * pointsCoefficient * premiumCoefficient;
+                        const finalSalary = baseSalary + premiumPart + bonuses;
+                        resultText = `
+                            <div class="result-title">Результат расчета (Оператор)</div>
+                            <div class="result-item"><span class="label">Направление:</span><span class="value">Оператор</span></div>
+                            <div class="result-item"><span class="label">Баллы:</span><span class="value">${points}</span></div>
+                            <div class="result-item"><span class="label">Коэффициент премии:</span><span class="value">${premiumCoefficient}</span></div>
+                            <div class="result-item"><span class="label">Норма часов в этом месяце:</span><span class="value">${hoursNorm.toFixed(2)}</span></div>
+                            <div class="result-item"><span class="label">Процент выработки часов:</span><span class="value">${hoursPercentage.toFixed(2)}%</span></div>
+                            <div class="result-item"><span class="label">Оклад:</span><span class="value">${baseSalary.toFixed(2)} тг.</span></div>
+                            <div class="result-item"><span class="label">Премиальная часть:</span><span class="value">${premiumPart.toFixed(2)} тг.</span></div>
+                            <div class="result-item"><span class="label">Бонусы:</span><span class="value">${bonuses} тг ${bonusDetails.join(', ')}</span></div>
+                            <div class="result-item"><span class="label">Итоговая сумма:</span><span class="value highlight">${finalSalary.toFixed(2)} тг.</span></div>
+                        `;
+                        const pointsTable = document.getElementById('points-table');
+                        pointsTable.innerHTML = generatePointsTable('operator', pointsTableData);
+                    }
+                    const resultDiv = document.getElementById('result');
+                    resultDiv.innerHTML = resultText;
+                    resultDiv.style.display = 'block';
+                    resultDiv.classList.add('active');
+                    toggleTableBtn.disabled = false;
+                };
+            
+                useEffect(() => {
+                    const forms = document.querySelectorAll('.form-section');
+                    forms.forEach(form => {
+                        const inputs = form.querySelectorAll('input, select');
+                        inputs.forEach(input => {
+                            input.addEventListener('input', () => {
+                                const direction = form.id.split('-')[0];
+                                validateForm(direction);
+                            });
+                        });
+                    });
+                    return () => {
+                        forms.forEach(form => {
+                            const inputs = form.querySelectorAll('input, select');
+                            inputs.forEach(input => {
+                                input.removeEventListener('input', () => {});
+                            });
+                        });
+                    };
+                }, []);
+            
                 return (
                     <div className="min-h-screen bg-gray-100 p-6">
                         <div className="flex justify-between items-center mb-6">
@@ -1339,7 +1637,7 @@
                                 </button>
                             </div>
                         </div>
-
+            
                         <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
                             <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
                             {isLoading ? (
@@ -1401,7 +1699,7 @@
                                 <p className="text-center text-gray-600">No profile data available. Please try refreshing or contact support.</p>
                             )}
                         </div>
-
+            
                         <div className="flex justify-center space-x-4 mb-6">
                             <button
                                 type="button"
@@ -1423,8 +1721,18 @@
                             >
                                 Call Evaluations
                             </button>
+                            <button
+                                type="button"
+                                onClick={() => setView('salary')}
+                                className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
+                                    view === 'salary' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
+                                }`} 
+                                disabled={isLoading}
+                            >
+                                Salary Calculator
+                            </button>
                         </div>
-
+            
                         {view === 'hours' && (
                             <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
                                 <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
@@ -1470,7 +1778,7 @@
                                 )}
                             </div>
                         )}
-
+            
                         {view === 'evaluation' && (
                             <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
                                 <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
@@ -1548,13 +1856,74 @@
                                 )}
                             </div>
                         )}
-
+            
+                        {view === 'salary' && (
+                            <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                <h2 className="text-2xl font-semibold mb-6 text-gray-800">Калькулятор зарплаты</h2>
+                                <div className="container">
+                                    <div id="operator-form" className="form-section active">
+                                        <div className="form-group">
+                                            <label htmlFor="operator-experience">Стаж сотрудника (месяцев):</label>
+                                            <select id="operator-experience" required>
+                                                <option value="">Выберите стаж</option>
+                                                <option value="0-3">0-3 месяца</option>
+                                                <option value="4-9">4-9 месяцев</option>
+                                                <option value="10-15">10-15 месяцев</option>
+                                                <option value="16+">≥16 месяцев</option>
+                                            </select>
+                                        </div>
+                                        <div className="form-group">
+                                            <label htmlFor="operator-quality">Качество (%):</label>
+                                            <input type="number" id="operator-quality" min="0" max="100" step="0.01" required defaultValue={averageScore.toFixed(2)} />
+                                        </div>
+                                        <div className="form-group">
+                                            <label htmlFor="operator-calls-per-hour">Количество звонков в час:</label>
+                                            <input type="number" id="operator-calls-per-hour" min="0" max="100" step="0.01" required />
+                                        </div>
+                                        <div className="form-group">
+                                            <label htmlFor="operator-hours-norm">Норма часов в этом месяце:</label>
+                                            <input type="number" id="operator-hours-norm" min="0" max="744" step="0.01" required defaultValue={hoursData?.norm_hours?.toFixed(2) || ''} />
+                                        </div>
+                                        <div className="form-group">
+                                            <label htmlFor="operator-total-hours">Выработано часов в этом месяце:</label>
+                                            <input type="number" id="operator-total-hours" min="0" max="744" step="0.01" required defaultValue={hoursData?.regular_hours?.toFixed(2) || ''} />
+                                        </div>
+                                        <div className="form-group">
+                                            <label>Бонусы:</label>
+                                            <div className="bonus-group">
+                                                <div className="bonus-checkbox">
+                                                    <input type="checkbox" id="operator-bonus-training" onChange={() => toggleBonusQuantity('operator', 'training')} />
+                                                    <label htmlFor="operator-bonus-training">Обучение (6000 тг)</label>
+                                                </div>
+                                                <div className="bonus-checkbox">
+                                                    <input type="checkbox" id="operator-bonus-refer" onChange={() => toggleBonusQuantity('operator', 'refer')} />
+                                                    <label htmlFor="operator-bonus-refer">Приведи друга (5000 тг за друга)</label>
+                                                    <input type="number" id="operator-bonus-refer-quantity" min="1" step="1" placeholder="Количество" />
+                                                </div>
+                                                <div className="bonus-checkbox">
+                                                    <input type="checkbox" id="operator-bonus-filming" onChange={() => toggleBonusQuantity('operator', 'filming')} />
+                                                    <label htmlFor="operator-bonus-filming">Съемки (5000 тг за съемку)</label>
+                                                    <input type="number" id="operator-bonus-filming-quantity" min="1" step="1" placeholder="Количество" />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="button-group active" id="button-group">
+                                        <button className="calculate-button" id="calculate-btn" onClick={calculateSalary} disabled>Рассчитать</button>
+                                        <button className="toggle-table-button" id="toggle-table-btn" onClick={togglePointsTable} disabled>Показать таблицу баллов</button>
+                                        <button className="clear-button" id="clear-btn" onClick={() => clearForm('operator')} disabled>Очистить</button>
+                                    </div>
+                                    <div id="result"></div>
+                                    <div id="points-table"></div>
+                                </div>
+                            </div>
+                        )}
+            
                         {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
                         {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                     </div>
                 );
             }
-
             return (
                 <div className="min-h-screen flex items-center justify-center bg-gray-100">
                     <p className="text-center">Invalid role. Please contact support.</p>
