@@ -336,7 +336,7 @@
                 const finalSalary = baseSalary + premiumPart + bonuses;
             
                 // Обновляем состояние с новым объектом
-                setSalaryResult({
+                setSalaryResult({ ...{
                     points,
                     premiumCoefficient,
                     hoursNorm,
@@ -345,7 +345,7 @@
                     premiumPart,
                     bonuses,
                     finalSalary,
-                });
+                } });
                 
                 // Сбрасываем таблицу очков
                 setShowPointsTable(false);
