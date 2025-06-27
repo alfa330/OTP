@@ -207,6 +207,7 @@
                 bonusFilmingQuantity: ''
             });
             const [salaryResult, setSalaryResult] = useState(null);
+            const [showPointsTable, setShowPointsTable] = useState(false);
             const [passwordData, setPasswordData] = useState({
                 user_id: '',
                 new_password: '',
@@ -283,35 +284,40 @@
                     setIsLoading(false);
                 }
             };        
+            
             const calculateSalary = () => {
-                let points = 0;
-                let premiumCoefficient = 1;
-                let bonuses = 0;
                 const hoursNorm = parseFloat(salaryData.hoursNorm) || 0;
                 const totalHours = parseFloat(salaryData.totalHours) || 0;
                 const quality = parseFloat(salaryData.quality) || 0;
                 const callsPerHour = parseFloat(salaryData.callsPerHour) || 0;
                 const experience = salaryData.experience;
             
-                // Experience points
+                // Сбрасываем таблицу очков
+                setShowPointsTable(false);
+            
+                // Рассчитываем очки
+                let points = 0;
+            
+                // Очки за опыт
                 if (experience === '16+') points += 50;
                 else if (experience === '10-15') points += 35;
                 else if (experience === '4-9') points += 25;
                 else if (experience === '0-3') points += 15;
             
-                // Quality points
+                // Очки за качество
                 if (quality >= 99 && quality <= 100) points += 50;
                 else if (quality >= 95 && quality < 99) points += 30;
                 else if (quality >= 90 && quality < 95) points += 25;
                 else if (quality >= 85 && quality < 90) points += 20;
             
-                // Calls per hour points
+                // Очки за звонки в час
                 if (callsPerHour >= 20) points += 50;
                 else if (callsPerHour >= 15) points += 30;
                 else if (callsPerHour >= 10) points += 25;
                 else if (callsPerHour >= 5) points += 20;
             
-                // Bonuses
+                // Бонусы
+                let bonuses = 0;
                 if (salaryData.bonusTraining) bonuses += 6000;
                 if (salaryData.bonusRefer) {
                     const quantity = parseInt(salaryData.bonusReferQuantity) || 0;
@@ -322,13 +328,17 @@
                     bonuses += 5000 * quantity;
                 }
             
-                const hoursPercentage = hoursNorm > 0 ? (totalHours / hoursNorm * 100) : 0;
-                premiumCoefficient = hoursPercentage >= 90 ? 1 : 0.75;
-                const pointsCoefficient = points / 100;
+                // Коэффициент премии
+                const hoursPercentage = hoursNorm > 0 ? (totalHours / hoursNorm) * 100 : 0;
+                const premiumCoefficient = hoursPercentage >= 90 ? 1 : 0.75;
+            
+                // Расчет зарплаты
                 const baseSalary = 700 * totalHours;
+                const pointsCoefficient = points / 100;
                 const premiumPart = baseSalary * pointsCoefficient * premiumCoefficient;
                 const finalSalary = baseSalary + premiumPart + bonuses;
             
+                // Обновляем состояние
                 setSalaryResult({
                     points,
                     premiumCoefficient,
@@ -337,7 +347,7 @@
                     baseSalary,
                     premiumPart,
                     bonuses,
-                    finalSalary
+                    finalSalary,
                 });
             };
             
@@ -2031,16 +2041,13 @@
                                         Calculate
                                     </button>
                                     <button
-                                        onClick={() => {
-                                            document.getElementById('points-table').classList.toggle('hidden');
-                                            document.getElementById('points-table').classList.toggle('block');
-                                        }}
+                                        onClick={() => setShowPointsTable(!showPointsTable)}
                                         className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
                                             !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
                                         }`}
                                         disabled={!salaryResult}
                                     >
-                                        {document.getElementById('points-table')?.classList.contains('block') ? 'Hide Points Table' : 'Show Points Table'}
+                                        {showPointsTable ? 'Hide Points Table' : 'Show Points Table'}
                                     </button>
                                     <button
                                         onClick={clearSalaryForm}
@@ -2113,7 +2120,7 @@
                                         </div>
                                     </div>
                                 )}
-                                <div id="points-table" className="mt-6 hidden">
+                                <div id="points-table" className={`mt-6 ${showPointsTable ? 'block' : 'hidden'}`}>
                                     {salaryResult && generatePointsTable()}
                                 </div>
                             </div>
