@@ -230,7 +230,23 @@ class Database:
 
     def _init_db(self):
         with self._get_cursor() as cursor:
-            # Users table
+            # Users table (без direction_id на этом этапе)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    telegram_id BIGINT UNIQUE,
+                    name VARCHAR(255) NOT NULL,
+                    role VARCHAR(20) NOT NULL CHECK(role IN ('admin', 'sv', 'operator')),
+                    hire_date DATE,
+                    login VARCHAR(255) UNIQUE,
+                    password_hash VARCHAR(255),
+                    supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    hours_table_url TEXT,
+                    scores_table_url TEXT,
+                    CONSTRAINT unique_name_role UNIQUE (name, role)
+                );
+            """)
+            # Directions table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS directions (
                     id SERIAL PRIMARY KEY,
@@ -241,21 +257,17 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Добавляем direction_id в users после создания directions
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    id SERIAL PRIMARY KEY,
-                    telegram_id BIGINT UNIQUE,
-                    name VARCHAR(255) NOT NULL,
-                    role VARCHAR(20) NOT NULL CHECK(role IN ('admin', 'sv', 'operator')),
-                    direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
-                    hire_date DATE,
-                    login VARCHAR(255) UNIQUE,
-                    password_hash VARCHAR(255),
-                    supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    hours_table_url TEXT,
-                    scores_table_url TEXT,
-                    CONSTRAINT unique_name_role UNIQUE (name, role)
-                );
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns 
+                        WHERE table_name = 'users' AND column_name = 'direction_id'
+                    ) THEN
+                        ALTER TABLE users ADD COLUMN direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL;
+                    END IF;
+                END $$;
             """)
             # Calls table
             cursor.execute("""
