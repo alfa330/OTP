@@ -764,7 +764,7 @@ class Database:
     def get_operators_by_supervisor(self, supervisor_id):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name, direction, hire_date, hours_table_url, scores_table_url 
+                SELECT id, name, direction_id, hire_date, hours_table_url, scores_table_url 
                 FROM users 
                 WHERE supervisor_id = %s AND role = 'operator'
             """, (supervisor_id,))
@@ -775,7 +775,7 @@ class Database:
             SELECT 
                 u.id AS operator_id,
                 u.name AS operator_name,
-                u.direction,
+                u.direction_id,
                 wh.regular_hours,
                 wh.training_hours,
                 wh.fines,
@@ -794,7 +794,7 @@ class Database:
         
         # Добавить группировку, если operator_id не указан
         if not operator_id:
-            query += " GROUP BY u.id, u.name, u.direction, wh.regular_hours, wh.training_hours, wh.fines, wh.norm_hours"
+            query += " GROUP BY u.id, u.name, u.direction_id, wh.regular_hours, wh.training_hours, wh.fines, wh.norm_hours"
         
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
@@ -882,7 +882,7 @@ class Database:
     def get_all_operators(self):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name, direction, hire_date, supervisor_id, scores_table_url, hours_table_url
+                SELECT id, name, direction_id, hire_date, supervisor_id, scores_table_url, hours_table_url
                 FROM users 
                 WHERE role = 'operator'
             """)
