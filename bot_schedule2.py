@@ -2176,7 +2176,7 @@ async def select_direction(callback: types.CallbackQuery, state: FSMContext):
     # Отправляем сообщение об успехе
     await bot.send_message(
         chat_id=callback.from_user.id,
-        text=f'<b>Таблица оценок сохранена, операторы добавлены/обновлены с направлением "{direction['name']}"✅</b>',
+        text=f"""<b>Таблица оценок сохранена, операторы добавлены/обновлены с направлением "{direction['name']}"✅</b>""",
         parse_mode='HTML',
         reply_markup=get_sv_keyboard()
     )
