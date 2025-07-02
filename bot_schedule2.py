@@ -126,7 +126,7 @@ def login():
 @require_api_key
 def get_user_profile():
     try:
-        user_id = request.args.get('user_id')  # Changed to 'user_id' for consistency
+        user_id = request.args.get('user_id')
         if not user_id:
             logging.warning("Missing user_id parameter in profile request")
             return jsonify({"error": "Missing user_id parameter"}), 400
@@ -137,7 +137,6 @@ def get_user_profile():
             logging.error(f"Invalid user_id format: {user_id}")
             return jsonify({"error": "Invalid user_id format"}), 400
 
-        # Test database connectivity
         try:
             with db._get_cursor() as cursor:
                 cursor.execute("SELECT 1")
@@ -145,27 +144,23 @@ def get_user_profile():
             logging.error(f"Database connectivity check failed: {str(e)}")
             return jsonify({"error": "Database connectivity issue"}), 500
 
-        # Fetch user data
         user = db.get_user(id=user_id)
         if not user:
             logging.warning(f"User not found with ID: {user_id}")
             return jsonify({"error": "User not found"}), 404
 
-        # Fetch supervisor name if supervisor_id exists
         supervisor_name = None
-        if user[6]:  # supervisor_id is at index 6
+        if user[6]:
             supervisor = db.get_user(id=user[6])
             supervisor_name = supervisor[2] if supervisor else None
 
-        # Format hire_date if it exists
         hire_date = user[5].strftime('%Y-%m-%d') if user[5] else None
 
-        # Construct profile data with fallback values
         profile_data = {
             "id": user[0],
             "name": user[2] or "Unknown",
             "role": user[3] or "Unknown",
-            "direction": user[4] or None,
+            "direction": user[4],  # Now returns direction name from joined directions table
             "hire_date": hire_date,
             "supervisor_name": supervisor_name,
             "telegram_id": user[1] or None,
@@ -175,9 +170,8 @@ def get_user_profile():
 
         logging.info(f"Profile data fetched successfully for user_id: {user_id}")
         return jsonify({"status": "success", "profile": profile_data}), 200
-
     except Exception as e:
-        logging.error(f"Error fetching user profile for user_id {user_id}: {str(e)}", exc_info=True)
+        logging.error(f"Error fetching user profile for user_id {user_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/user/change_password', methods=['POST'])
@@ -524,6 +518,68 @@ def add_sv():
         return jsonify({"status": "success", "message": f"SV {name} added", "id": sv_id})
     except Exception as e:
         logging.error(f"Error adding SV: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/admin/directions', methods=['GET'])
+@require_api_key
+def get_directions():
+    try:
+        requester_id = int(request.headers.get('X-User-Id'))
+        requester = db.get_user(id=requester_id)
+        if not requester or requester[3] != 'admin':
+            return jsonify({"error": "Only admins can access directions"}), 403
+
+        directions = db.get_directions()
+        return jsonify({"status": "success", "directions": directions}), 200
+    except Exception as e:
+        logging.error(f"Error fetching directions: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/admin/save_directions', methods=['POST'])
+@require_api_key
+def save_directions():
+    try:
+        requester_id = int(request.headers.get('X-User-Id'))
+        requester = db.get_user(id=requester_id)
+        if not requester or requester[3] != 'admin':
+            return jsonify({"error": "Only admins can save directions"}), 403
+
+        data = request.get_json()
+        if not data or 'directions' not in data:
+            return jsonify({"error": "Missing directions data"}), 400
+
+        directions = data['directions']
+        db.save_directions(directions, requester_id)
+
+        # Получаем обновлённый список направлений с id
+        updated_directions = db.get_directions()
+
+        # Notify all operators with updated directions
+        operators = db.get_all_operators()
+        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+        for operator in operators:
+            if operator[4] and operator[1]:  # supervisor_id and telegram_id
+                supervisor = db.get_user(id=operator[4])
+                direction_name = next((d['name'] for d in updated_directions if d['id'] == operator[2]), None)
+                if direction_name:
+                    message = (
+                        f"ℹ️ <b>Обновление направления</b>\n\n"
+                        f"Ваше направление: <b>{direction_name}</b>\n"
+                        f"Обновлено администратором. Пожалуйста, проверьте настройки в дашборде."
+                    )
+                    payload = {
+                        "chat_id": operator[1],
+                        "text": message,
+                        "parse_mode": "HTML"
+                    }
+                    response = requests.post(telegram_url, json=payload, timeout=10)
+                    if response.status_code != 200:
+                        error_detail = response.json().get('description', 'Unknown error')
+                        logging.error(f"Telegram API error for operator {operator[2]}: {error_detail}")
+
+        return jsonify({"status": "success", "message": "Directions saved successfully", "directions": updated_directions}), 200
+    except Exception as e:
+        logging.error(f"Error saving directions: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/admin/remove_sv', methods=['POST'])
@@ -958,12 +1014,18 @@ def get_verify_keyboard():
     return ikb
 
 def get_direction_keyboard():
-    keyboard = types.InlineKeyboardMarkup()
-    keyboard.add(
-        types.InlineKeyboardButton("Чат 📱", callback_data="dir_chat"),
-        types.InlineKeyboardButton("Модератор 🛡️", callback_data="dir_moderator"),
-        types.InlineKeyboardButton("Линия 📞", callback_data="dir_line")
-    )
+    keyboard = types.InlineKeyboardMarkup(row_width=3)
+    directions = db.get_directions()  # Запрашиваем направления из базы данных
+    if not directions:
+        return None  # Если направлений нет, возвращаем None
+    buttons = [
+        types.InlineKeyboardButton(
+            f"{direction['name']} {'📄' if direction['hasFileUpload'] else '📝'}",
+            callback_data=f"dir_{direction['id']}"
+        )
+        for direction in directions
+    ]
+    keyboard.add(*buttons)
     return keyboard
 
 def get_editor_keyboard():
@@ -2074,43 +2136,53 @@ async def select_direction(callback: types.CallbackQuery, state: FSMContext):
         sv_id = data.get('sv_id')
         operators = data.get('operators')
     
-    direction_map = {
-        "dir_chat": "chat",
-        "dir_moderator": "moderator",
-        "dir_line": "line"
-    }
-    direction = direction_map.get(callback.data)
+    # Извлекаем direction_id из callback_data
+    direction_id = None
+    if callback.data.startswith("dir_"):
+        try:
+            direction_id = int(callback.data.replace("dir_", ""))
+        except ValueError:
+            await bot.answer_callback_query(callback.id, text="Ошибка: Неверный формат направления")
+            return
     
+    # Проверяем, существует ли направление
+    direction = next((d for d in db.get_directions() if d['id'] == direction_id), None)
     if not direction:
-        await bot.answer_callback_query(callback.id, text="Ошибка: Неверное направление")
+        await bot.answer_callback_query(callback.id, text="Ошибка: Направление не найдено")
+        await state.finish()
         return
     
+    # Проверяем существование супервайзера
     user = db.get_user(telegram_id=sv_id)
     if not user:
         await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
         await state.finish()
         return
     
+    # Обновляем таблицу оценок супервайзера
     db.update_user_table(user[0], scores_table_url=table_url)
     
+    # Создаём/обновляем операторов с direction_id
     for op in operators:
         db.create_user(
             telegram_id=None,
             name=op['name'],
             role='operator',
-            direction=direction,
+            direction_id=direction_id,  # Используем direction_id вместо direction
             supervisor_id=user[0],
             scores_table_url=op['link'] if op['link'] else None
         )
     
+    # Отправляем сообщение об успехе
     await bot.send_message(
         chat_id=callback.from_user.id,
-        text=f'<b>Таблица оценок сохранена, операторы добавлены/обновлены с направлением "{direction}"✅</b>',
+        text=f'<b>Таблица оценок сохранена, операторы добавлены/обновлены с направлением "{direction['name']}"✅</b>',
         parse_mode='HTML',
         reply_markup=get_sv_keyboard()
     )
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await state.finish()
+
 
 
 @dp.message_handler(regexp='Добавить таблицу часов📊')
