@@ -232,6 +232,16 @@ class Database:
         with self._get_cursor() as cursor:
             # Users table
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS directions (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL UNIQUE,
+                    has_file_upload BOOLEAN NOT NULL DEFAULT TRUE,
+                    criteria JSONB NOT NULL DEFAULT '[]',
+                    created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
                     telegram_id BIGINT UNIQUE,
@@ -289,16 +299,6 @@ class Database:
                 );
             """)
 
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS directions (
-                    id SERIAL PRIMARY KEY,
-                    name VARCHAR(255) NOT NULL UNIQUE,
-                    has_file_upload BOOLEAN NOT NULL DEFAULT TRUE,
-                    criteria JSONB NOT NULL DEFAULT '[]',
-                    created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
             # Indexes
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
