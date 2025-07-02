@@ -237,7 +237,7 @@ class Database:
                     telegram_id BIGINT UNIQUE,
                     name VARCHAR(255) NOT NULL,
                     role VARCHAR(20) NOT NULL CHECK(role IN ('admin', 'sv', 'operator')),
-                    direction VARCHAR(20) CHECK(direction IN ('chat', 'moderator', 'line', NULL)),
+                    direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
                     hire_date DATE,
                     login VARCHAR(255) UNIQUE,
                     password_hash VARCHAR(255),
@@ -288,6 +288,17 @@ class Database:
                     PRIMARY KEY (supervisor_id, processed_month)
                 );
             """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS directions (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL UNIQUE,
+                    has_file_upload BOOLEAN NOT NULL DEFAULT TRUE,
+                    criteria JSONB NOT NULL DEFAULT '[]',
+                    created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             # Indexes
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
@@ -295,9 +306,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_hours_operator_id ON work_hours(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_work_hours_month ON work_hours(month);
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_month_call ON calls(operator_id, month, call_number);
+                CREATE INDEX IF NOT EXISTS idx_directions_name ON directions(name);           
             """)
 
-    def create_user(self, telegram_id, name, role, direction=None, hire_date=None, supervisor_id=None, login=None, password=None, scores_table_url=None):
+    def create_user(self, telegram_id, name, role, direction_id=None, hire_date=None, supervisor_id=None, login=None, password=None, scores_table_url=None):
         if login is None:
             base_login = f"user_{str(uuid.uuid4())[:8]}"
             with self._get_cursor() as cursor:
@@ -314,41 +326,36 @@ class Database:
         password_hash = pbkdf2_sha256.hash(password)
 
         with self._get_cursor() as cursor:
-            # Создаем savepoint для возможности отката
             cursor.execute("SAVEPOINT before_insert")
             try:
                 cursor.execute("""
-                    INSERT INTO users (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash, scores_table_url)
+                    INSERT INTO users (telegram_id, name, role, direction_id, hire_date, supervisor_id, login, password_hash, scores_table_url)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
-                """, (telegram_id, name, role, direction, hire_date, supervisor_id, login, password_hash, scores_table_url))
+                """, (telegram_id, name, role, direction_id, hire_date, supervisor_id, login, password_hash, scores_table_url))
                 return cursor.fetchone()[0]
             except psycopg2.IntegrityError as e:
-                # Откатываем к savepoint перед обработкой ошибки
                 cursor.execute("ROLLBACK TO SAVEPOINT before_insert")
-                
                 if 'unique_name_role' in str(e):
-                    # Обновляем только нужные поля для существующего пользователя
                     cursor.execute("""
                         UPDATE users
-                        SET direction = COALESCE(%s, direction),
+                        SET direction_id = COALESCE(%s, direction_id),
                             supervisor_id = COALESCE(%s, supervisor_id),
                             scores_table_url = COALESCE(%s, scores_table_url)
                         WHERE name = %s AND role = %s
                         RETURNING id
-                    """, (direction, supervisor_id, scores_table_url, name, role))
+                    """, (direction_id, supervisor_id, scores_table_url, name, role))
                     result = cursor.fetchone()
                     if result:
                         return result[0]
                     else:
                         raise ValueError("User with this name and role not found")
                 elif 'telegram_id' in str(e):
-                    # Если конфликт по telegram_id, обновляем как раньше
                     cursor.execute("""
                         UPDATE users
                         SET name = %s,
                             role = %s,
-                            direction = COALESCE(%s, direction),
+                            direction_id = COALESCE(%s, direction_id),
                             hire_date = COALESCE(%s, hire_date),
                             supervisor_id = COALESCE(%s, supervisor_id),
                             login = %s,
@@ -356,10 +363,10 @@ class Database:
                             scores_table_url = COALESCE(%s, scores_table_url)
                         WHERE telegram_id = %s
                         RETURNING id
-                    """, (name, role, direction, hire_date, supervisor_id, login, password_hash, scores_table_url, telegram_id))
+                    """, (name, role, direction_id, hire_date, supervisor_id, login, password_hash, scores_table_url, telegram_id))
                     return cursor.fetchone()[0]
                 else:
-                    raise  # Повторно вызываем другие ошибки целостности
+                    raise
 
     def update_telegram_id(self, user_id, telegram_id):
         with self._get_cursor() as cursor:
@@ -374,6 +381,71 @@ class Database:
                 return result[0]
             return None
             
+    def get_directions(self):
+        """Получить все направления из таблицы directions."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, name, has_file_upload, criteria
+                FROM directions
+                ORDER BY name
+            """)
+            return [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "hasFileUpload": row[2],
+                    "criteria": row[3]
+                } for row in cursor.fetchall()
+            ]
+
+    def save_directions(self, directions, admin_id):
+        """Сохранить направления в таблицу directions, обновляя существующие по имени."""
+        with self._get_cursor() as cursor:
+            # Получаем текущие направления, созданные этим администратором
+            cursor.execute("""
+                SELECT id, name, has_file_upload, criteria
+                FROM directions
+                WHERE created_by = %s
+            """, (admin_id,))
+            existing_directions = {row[1]: {"id": row[0], "has_file_upload": row[2], "criteria": row[3]} for row in cursor.fetchall()}
+            
+            # Новые имена направлений из запроса
+            new_direction_names = {d['name'] for d in directions}
+            
+            # Обновляем существующие направления и добавляем новые
+            for direction in directions:
+                name = direction['name']
+                has_file_upload = direction['hasFileUpload']
+                criteria = json.dumps(direction['criteria'])
+                
+                if name in existing_directions:
+                    # Обновляем существующее направление
+                    cursor.execute("""
+                        UPDATE directions
+                        SET has_file_upload = %s, criteria = %s, created_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """, (has_file_upload, criteria, existing_directions[name]['id']))
+                else:
+                    # Добавляем новое направление
+                    cursor.execute("""
+                        INSERT INTO directions (name, has_file_upload, criteria, created_by)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING id
+                    """, (name, has_file_upload, criteria, admin_id))
+            
+            # Удаляем направления, которых нет в новом списке
+            cursor.execute("""
+                DELETE FROM directions
+                WHERE created_by = %s AND name NOT IN %s
+            """, (admin_id, tuple(new_direction_names) if new_direction_names else ('',)))
+            
+            # Обновляем direction_id в users для удалённых направлений
+            cursor.execute("""
+                UPDATE users
+                SET direction_id = NULL
+                WHERE direction_id NOT IN (SELECT id FROM directions)
+            """)
+
     def get_operator_credentials(self, operator_id, supervisor_id):
         """Получить логин и хеш пароля оператора с проверкой принадлежности супервайзеру"""
         with self._get_cursor() as cursor:
@@ -419,10 +491,19 @@ class Database:
         conditions = []
         params = []
         for key, value in kwargs.items():
-            conditions.append(f"{key} = %s")
-            params.append(value)
+            if key == 'direction':
+                conditions.append("d.name = %s")
+                params.append(value)
+            else:
+                conditions.append(f"u.{key} = %s")
+                params.append(value)
         
-        query = f"SELECT id, telegram_id, name, role, direction, hire_date, supervisor_id, login, hours_table_url, scores_table_url FROM users WHERE {' AND '.join(conditions)}"
+        query = f"""
+            SELECT u.id, u.telegram_id, u.name, u.role, d.name, u.hire_date, u.supervisor_id, u.login, u.hours_table_url, u.scores_table_url
+            FROM users u
+            LEFT JOIN directions d ON u.direction_id = d.id
+            WHERE {' AND '.join(conditions)}
+        """
         
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
