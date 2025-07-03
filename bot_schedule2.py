@@ -524,7 +524,17 @@ def add_sv():
 @require_api_key
 def get_directions():
     try:
-        requester_id = int(request.headers.get('X-User-Id'))
+        user_id = request.headers.get('X-User-Id')
+        if not user_id:
+            logging.warning("Missing X-User-Id header in /api/admin/directions request")
+            return jsonify({"error": "Missing X-User-Id header"}), 400
+
+        try:
+            requester_id = int(user_id)
+        except (ValueError, TypeError):
+            logging.error(f"Invalid X-User-Id format: {user_id}")
+            return jsonify({"error": "Invalid X-User-Id format"}), 400
+
         requester = db.get_user(id=requester_id)
         if not requester or requester[3] != 'admin':
             return jsonify({"error": "Only admins can access directions"}), 403
@@ -532,7 +542,7 @@ def get_directions():
         directions = db.get_directions()
         return jsonify({"status": "success", "directions": directions}), 200
     except Exception as e:
-        logging.error(f"Error fetching directions: {e}")
+        logging.error(f"Error fetching directions: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/admin/save_directions', methods=['POST'])
