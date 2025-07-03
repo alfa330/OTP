@@ -537,7 +537,7 @@ def get_directions():
 
         requester = db.get_user(id=requester_id)
         if not requester or requester[3] != 'admin' or requester[3] != 'sv':
-            return jsonify({"error": "Only admins can access directions"}), 403
+            return jsonify({"error": f"Only admins can access directions {requester[3]}"}), 403
 
         directions = db.get_directions()
         return jsonify({"status": "success", "directions": directions}), 200
@@ -654,7 +654,7 @@ def get_sv_data():
             current_month = datetime.now().strftime('%Y-%m')
             
             for operator in operators:
-                operator_id, operator_name, direction, hire_date, hours_table_url, scores_table_url, supervisor_name = operator
+                operator_id, operator_name, direction, hire_date, hours_table_url, scores_table_url, supervisor_name =[operator[kkk] for kkk in operator]
                 # Get direction name from direction_id
                 
                 # Get call evaluations for the operator
