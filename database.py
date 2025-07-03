@@ -764,11 +764,23 @@ class Database:
     def get_operators_by_supervisor(self, supervisor_id):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name, direction_id, hire_date, hours_table_url, scores_table_url 
-                FROM users 
-                WHERE supervisor_id = %s AND role = 'operator'
+                SELECT u.id, u.name, d.name as direction, u.hire_date, u.hours_table_url, u.scores_table_url, s.name as supervisor_name
+                FROM users u
+                LEFT JOIN directions d ON u.direction_id = d.id
+                LEFT JOIN users s ON u.supervisor_id = s.id
+                WHERE u.supervisor_id = %s AND u.role = 'operator'
             """, (supervisor_id,))
-            return cursor.fetchall()
+            return [
+                {
+                    'id': row[0],
+                    'name': row[1],
+                    'direction': row[2],
+                    'hire_date': row[3],
+                    'hours_table_url': row[4],
+                    'scores_table_url': row[5],
+                    'supervisor_name': row[6]
+                } for row in cursor.fetchall()
+            ]
 
     def get_hours_summary(self, operator_id=None, month=None):
         query = """
