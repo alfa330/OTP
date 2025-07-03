@@ -536,7 +536,7 @@ def get_directions():
             return jsonify({"error": "Invalid X-User-Id format"}), 400
 
         requester = db.get_user(id=requester_id)
-        if not requester or requester[3] != 'admin':
+        if not requester or requester[3] != 'admin' requester[3] != 'sv':
             return jsonify({"error": "Only admins can access directions"}), 403
 
         directions = db.get_directions()
@@ -654,14 +654,8 @@ def get_sv_data():
             current_month = datetime.now().strftime('%Y-%m')
             
             for operator in operators:
-                operator_id, operator_name, direction_id, hire_date, hours_table_url, scores_table_url = operator
+                operator_id, operator_name, direction, hire_date, hours_table_url, scores_table_url, supervisor_name = operator
                 # Get direction name from direction_id
-                direction = None
-                if direction_id:
-                    with db._get_cursor() as cursor:
-                        cursor.execute("SELECT name FROM directions WHERE id = %s", (direction_id,))
-                        direction_result = cursor.fetchone()
-                        direction = direction_result[0] if direction_result else None
                 
                 # Get call evaluations for the operator
                 evaluations = db.get_call_evaluations(operator_id, month=current_month)
