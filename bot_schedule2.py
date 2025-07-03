@@ -831,12 +831,12 @@ def update_sv_table():
 def receive_call_evaluation():
     try:
         data = request.get_json()
-        required_fields = ['evaluator', 'operator', 'call_number', 'phone_number', 'score', 'comment']
+        required_fields = ['evaluator', 'operator', 'call_number', 'phone_number', 'score', 'comment', 'month']
         if not data or not all(field in data for field in required_fields):
             return jsonify({"error": "Missing or invalid required fields"}), 400
 
         # Set month to current YYYY-MM if not provided
-        month = datetime.now().strftime('%Y-%m')
+        month =data['month'] if data['month'] else datetime.now().strftime('%Y-%m')
 
         # Find evaluator and operator by name
         evaluator = db.get_user(name=data['evaluator'])
