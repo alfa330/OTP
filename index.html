@@ -709,11 +709,18 @@
             const [directions, setDirections] = useState([]);
             
             const fetchDirections = async () => {
+                if (!user || !user.id) {
+                    setError('User not authenticated. Please log in again.');
+                    return;
+                }
                 setIsLoading(true);
                 clearMessages();
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/admin/directions`, {
-                        headers: { 'X-API-Key': user.apiKey }
+                        headers: { 
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
