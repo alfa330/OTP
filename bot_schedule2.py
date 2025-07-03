@@ -638,30 +638,46 @@ def get_sv_data():
         
         user = db.get_user(id=user_id)
         if not user or user[3] not in ['sv', 'operator']:
-            return jsonify({"error": "User not found"}), 404
+            return jsonify({"error": "User not found or invalid role"}), 404
         
-        table_url = user[9]
-        operators = []
-        error = None
-        if table_url:
-            sheet_name, operators, error = extract_fio_and_links(table_url)
-            if error:
-                return jsonify({"error": error}), 400
-        
-        # Fetch operator IDs from the database
-        db_operators = db.get_operators_by_supervisor(user_id) if user[3] == 'sv' else []
-        operator_id_map = {op[1]: op[0] for op in db_operators}  # Map operator name to ID
-        
-        # Add IDs to operators list
-        for operator in operators:
-            operator['id'] = operator_id_map.get(operator.get('name', ''), None)
-        
-        return jsonify({
+        # Initialize response data
+        response_data = {
             "status": "success",
             "name": user[2],
-            "table": table_url,
-            "operators": operators
-        })
+            "table": user[9],  # scores_table_url
+            "operators": []
+        }
+
+        # If user is a supervisor, fetch their operators and call statistics
+        if user[3] == 'sv':
+            operators = db.get_operators_by_supervisor(user_id)
+            current_month = datetime.now().strftime('%Y-%m')
+            
+            for operator in operators:
+                operator_id, operator_name, direction_id, hire_date, hours_table_url, scores_table_url = operator
+                # Get direction name from direction_id
+                direction = None
+                if direction_id:
+                    with db._get_cursor() as cursor:
+                        cursor.execute("SELECT name FROM directions WHERE id = %s", (direction_id,))
+                        direction_result = cursor.fetchone()
+                        direction = direction_result[0] if direction_result else None
+                
+                # Get call evaluations for the operator
+                evaluations = db.get_call_evaluations(operator_id, month=current_month)
+                call_count = len(evaluations)
+                avg_score = sum(float(e['score']) for e in evaluations) / call_count if call_count > 0 else 0
+                
+                response_data["operators"].append({
+                    "id": operator_id,
+                    "name": operator_name,
+                    "direction": direction,
+                    "call_count": call_count,
+                    "avg_score": round(avg_score, 2) if call_count > 0 else None,
+                    "scores_table_url": scores_table_url
+                })
+        
+        return jsonify(response_data), 200
     except Exception as e:
         logging.error(f"Error fetching SV data: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
