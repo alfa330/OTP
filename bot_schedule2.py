@@ -536,7 +536,7 @@ def get_directions():
             return jsonify({"error": "Invalid X-User-Id format"}), 400
 
         requester = db.get_user(id=requester_id)
-        if not requester or requester[3] != 'admin' or requester[3] != 'sv':
+        if not requester or not (requester[3] == 'admin' or requester[3] == 'sv'):
             return jsonify({"error": f"Only admins can access directions {requester[3]}"}), 403
 
         directions = db.get_directions()
