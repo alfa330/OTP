@@ -964,9 +964,9 @@ def stream_audio(evaluation_id):
                         'Content-Length': str(blob.size),  # Provide file size for better client handling
                     }
                 )
-            except Exception as e:
-                logging.error(f"Error streaming audio file: {e}")
-                return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    except Exception as e:
+        logging.error(f"Error streaming audio file: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/call_evaluation', methods=['POST'])
 def receive_call_evaluation():
