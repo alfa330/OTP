@@ -24,7 +24,7 @@ from database import db
 import uuid
 from passlib.hash import pbkdf2_sha256
 from werkzeug.utils import secure_filename
-from google.cloud import storage
+from google.cloud import storage as gcs_storage
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -71,7 +71,7 @@ def get_gcs_client():
         credentials_info = json.loads(credentials_content)
         credentials = service_account.Credentials.from_service_account_info(credentials_info)
         return storage.Client(credentials=credentials)
-    return storage.Client()
+    return gcs_storage.Client()
 
 def require_api_key(f):
     @wraps(f)
