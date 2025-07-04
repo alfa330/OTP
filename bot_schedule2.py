@@ -354,15 +354,42 @@ def get_call_evaluations():
         operator_id = int(operator_id)
         evaluations = db.get_call_evaluations(operator_id)
         
-        # Get supervisor info for dispute button
+        # Get operator's direction to fetch criteria
         operator = db.get_user(id=operator_id)
-        supervisor = None
-        if operator and operator[6]:  # supervisor_id
-            supervisor = db.get_user(id=operator[6])
+        if not operator:
+            return jsonify({"error": "Operator not found"}), 404
+        direction = db.get_directions()
+        direction_criteria = next((d['criteria'] for d in direction if d['id'] == operator[4]), [])
+
+        # Parse comments to extract scores and criterion comments
+        enhanced_evaluations = []
+        for eval in evaluations:
+            criterion_comments = []
+            scores = []
+            if eval['comment']:
+                comment_parts = eval['comment'].split('; ')
+                criterion_comments = [''] * len(direction_criteria)
+                scores = ['Correct'] * len(direction_criteria)
+                for part in comment_parts:
+                    if ': ' in part:
+                        crit_name, comment = part.split(': ', 1)
+                        for idx, crit in enumerate(direction_criteria):
+                            if crit['name'] == crit_name:
+                                criterion_comments[idx] = comment
+                                scores[idx] = 'Error'
+                                break
+            enhanced_evaluations.append({
+                **eval,
+                'scores': scores,
+                'criterion_comments': criterion_comments
+            })
+
+        # Get supervisor info for dispute button
+        supervisor = db.get_user(id=operator[6]) if operator[6] else None
         
         return jsonify({
             "status": "success", 
-            "evaluations": evaluations,
+            "evaluations": enhanced_evaluations,
             "supervisor": {
                 "id": supervisor[0] if supervisor else None,
                 "name": supervisor[2] if supervisor else None
@@ -902,25 +929,30 @@ def receive_call_evaluation():
         if not evaluator or not operator:
             return jsonify({"error": "Evaluator or operator not found"}), 404
 
-        # Загрузка аудиофайла в GCS
+        # Handle audio file upload to GCS
         audio_path = None
         if 'audio_file' in request.files:
             file = request.files['audio_file']
             if file and file.filename:
-                # Генерация уникального имени файла
-                filename = secure_filename(str(uuid.uuid4()) + '.mp3')
+                # Generate a unique filename
+                filename = secure_filename(f"{uuid.uuid4()}.mp3")
                 bucket_name = os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
-                upload_folder = os.getenv('UPLOAD_FOLDER', 'uploads/')
+                upload_folder = os.getenv('UPLOAD_FOLDER', 'Uploads/')
                 blob_path = f"{upload_folder}{filename}"
 
-                # Загрузка в GCS
-                client = get_gcs_client()
-                bucket = client.bucket(bucket_name)
-                blob = bucket.blob(blob_path)
-                blob.upload_from_file(file, content_type='audio/mpeg')
-                
-                # Получение публичного URL
-                audio_path = blob.public_url
+                try:
+                    # Upload to Google Cloud Storage
+                    client = get_gcs_client()
+                    bucket = client.bucket(bucket_name)
+                    blob = bucket.blob(blob_path)
+                    blob.upload_from_file(file.stream, content_type='audio/mpeg')
+                    
+                    # Make the blob publicly accessible and get the public URL
+                    blob.make_public()
+                    audio_path = blob.public_url
+                except Exception as e:
+                    logging.error(f"Error uploading file to GCS: {e}")
+                    return jsonify({"error": f"Failed to upload audio file: {str(e)}"}), 500
 
         evaluation_id = db.add_call_evaluation(
             evaluator_id=evaluator[0],
@@ -933,7 +965,7 @@ def receive_call_evaluation():
             is_draft=is_draft
         )
 
-        # Логика для отправки уведомлений в Telegram (без изменений)
+        # Send Telegram notification for non-draft evaluations
         if not is_draft:
             message = (
                 f"📞 <b>Оценка звонка</b>\n"
