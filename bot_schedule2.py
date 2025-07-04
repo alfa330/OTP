@@ -905,6 +905,63 @@ def delete_draft_evaluation(evaluation_id):
         logging.error(f"Error deleting draft evaluation: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+from flask import Response, stream_with_context
+
+@app.route('/api/audio/<int:evaluation_id>', methods=['GET'])
+@require_api_key
+def stream_audio(evaluation_id):
+    try:
+        user_id = int(request.headers.get('X-User-Id'))
+        user = db.get_user(id=user_id)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        # Fetch evaluation details
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT audio_path, operator_id, evaluator_id 
+                FROM calls 
+                WHERE id = %s
+            """, (evaluation_id,))
+            evaluation = cursor.fetchone()
+            if not evaluation:
+                return jsonify({"error": "Evaluation not found"}), 404
+
+        audio_path, operator_id, evaluator_id = evaluation
+
+        # Authorization check: User must be the operator, evaluator, supervisor, or admin
+        if user[3] == 'operator' and user[0] != operator_id:
+            return jsonify({"error": "Unauthorized: Operators can only access their own evaluations"}), 403
+        if user[3] == 'sv' and user[0] != db.get_user(id=operator_id)[6]:
+            return jsonify({"error": "Unauthorized: Supervisors can only access their operators' evaluations"}), 403
+        if user[3] not in ['admin', 'sv'] and user[0] not in [operator_id, evaluator_id]:
+            return jsonify({"error": "Unauthorized to access this audio file"}), 403
+
+        if not audio_path:
+            return jsonify({"error": "No audio file associated with this evaluation"}), 404
+
+        # Stream the file from GCS
+        client = get_gcs_client()
+        bucket_name = os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
+        bucket = client.bucket(bucket_name)
+        blob = bucket.get_blob(audio_path)
+        if not blob:
+            return jsonify({"error": "Audio file not found in storage"}), 404
+
+        def generate():
+            with blob.open("rb") as f:
+                while True:
+                    chunk = f.read(8192)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        return Response(
+            stream_with_context(generate()),
+            content_type='audio/mpeg',
+            headers={
+                'Content-Disposition)
+
 @app.route('/api/call_evaluation', methods=['POST'])
 def receive_call_evaluation():
     try:
@@ -946,10 +1003,7 @@ def receive_call_evaluation():
                     bucket = client.bucket(bucket_name)
                     blob = bucket.blob(blob_path)
                     blob.upload_from_file(file.stream, content_type='audio/mpeg')
-                    
-                    # Make the blob publicly accessible and get the public URL
-                    blob.make_public()
-                    audio_path = blob.public_url
+                    audio_path = blob_path  # Store the object path, not a public URL
                 except Exception as e:
                     logging.error(f"Error uploading file to GCS: {e}")
                     return jsonify({"error": f"Failed to upload audio file: {str(e)}"}), 500
