@@ -70,7 +70,7 @@ def get_gcs_client():
         from google.oauth2 import service_account
         credentials_info = json.loads(credentials_content)
         credentials = service_account.Credentials.from_service_account_info(credentials_info)
-        return storage.Client(credentials=credentials)
+        return gcs_storage.Client(credentials=credentials)
     return gcs_storage.Client()
 
 def require_api_key(f):
