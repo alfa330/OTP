@@ -320,7 +320,6 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_hours_operator_id ON work_hours(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_work_hours_month ON work_hours(month);
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_month ON calls(operator_id, month);
-                CREATE INDEX IF NOT EXISTS idx_calls_operator_month_call ON calls(operator_id, month, call_number);
                 CREATE INDEX IF NOT EXISTS idx_directions_name ON directions(name);           
             """)
 
