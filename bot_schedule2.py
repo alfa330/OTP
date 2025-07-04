@@ -957,10 +957,16 @@ def stream_audio(evaluation_id):
                     yield chunk
 
         return Response(
-            stream_with_context(generate()),
-            content_type='audio/mpeg',
-            headers={
-                'Content-Disposition)
+                    stream_with_context(generate()),
+                    content_type='audio/mpeg',
+                    headers={
+                        'Accept-Ranges': 'bytes',  # Support seeking in audio playback
+                        'Content-Length': str(blob.size),  # Provide file size for better client handling
+                    }
+                )
+            except Exception as e:
+                logging.error(f"Error streaming audio file: {e}")
+                return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/call_evaluation', methods=['POST'])
 def receive_call_evaluation():
