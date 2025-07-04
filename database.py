@@ -276,14 +276,15 @@ class Database:
                     evaluator_id INTEGER NOT NULL REFERENCES users(id),
                     operator_id INTEGER NOT NULL REFERENCES users(id),
                     month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
-                    call_number INTEGER NOT NULL,
                     phone_number VARCHAR(255) NOT NULL,
                     score FLOAT NOT NULL,
                     comment TEXT,
+                    audio_path TEXT,
+                    is_draft BOOLEAN NOT NULL DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     is_correction BOOLEAN DEFAULT FALSE,
                     previous_version_id INTEGER REFERENCES calls(id),
-                    UNIQUE(evaluator_id, operator_id, month, call_number, phone_number, score, comment)
+                    UNIQUE(evaluator_id, operator_id, month, phone_number, score, comment, is_draft)
                 );
             """)
             # Work hours table with fines column
@@ -317,6 +318,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_id ON calls(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_work_hours_operator_id ON work_hours(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_work_hours_month ON work_hours(month);
+                CREATE INDEX IF NOT EXISTS idx_calls_operator_month ON calls(operator_id, month);
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_month_call ON calls(operator_id, month, call_number);
                 CREATE INDEX IF NOT EXISTS idx_directions_name ON directions(name);           
             """)
@@ -530,65 +532,81 @@ class Database:
                 WHERE id = %s
             """, (hours_table_url, scores_table_url, user_id))
 
-    def add_call_evaluation(self, evaluator_id, operator_id, call_number, phone_number, score, comment=None, month=None):
+    def add_call_evaluation(self, evaluator_id, operator_id, phone_number, score, comment=None, month=None, audio_path=None, is_draft=False):
         month = month or datetime.now().strftime('%Y-%m')
         with self._get_cursor() as cursor:
-            # Проверяем, существует ли уже такая же запись (полный дубль)
-            cursor.execute("""
-                SELECT id FROM calls 
-                WHERE evaluator_id = %s 
-                AND operator_id = %s 
-                AND month = %s 
-                AND call_number = %s 
-                AND phone_number = %s 
-                AND score = %s 
-                AND comment IS NOT DISTINCT FROM %s
-            """, (evaluator_id, operator_id, month, call_number, phone_number, score, comment))
-            
-            if cursor.fetchone():
-                # Полный дубль - игнорируем
-                return False
-            
-            # Проверяем, есть ли уже оценка для этого звонка в этом месяце
+            # Check for existing draft for this evaluator, operator, and month
+            if is_draft:
+                cursor.execute("""
+                    SELECT id, audio_path FROM calls 
+                    WHERE evaluator_id = %s 
+                    AND operator_id = %s 
+                    AND month = %s 
+                    AND is_draft = TRUE
+                """, (evaluator_id, operator_id, month))
+                existing_draft = cursor.fetchone()
+                if existing_draft:
+                    # Update existing draft
+                    old_audio_path = existing_draft[1]
+                    cursor.execute("""
+                        UPDATE calls
+                        SET phone_number = %s,
+                            score = %s,
+                            comment = %s,
+                            audio_path = COALESCE(%s, audio_path),
+                            created_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING id
+                    """, (phone_number, score, comment, audio_path, existing_draft[0]))
+                    # Remove old audio file if it exists and was updated
+                    if old_audio_path and audio_path and old_audio_path != audio_path and os.path.exists(old_audio_path):
+                        os.remove(old_audio_path)
+                    return cursor.fetchone()[0]
+    
+            # Check for existing non-draft evaluation with same phone_number and month
             cursor.execute("""
                 SELECT id FROM calls 
                 WHERE operator_id = %s 
                 AND month = %s 
-                AND call_number = %s
+                AND phone_number = %s 
+                AND is_draft = FALSE
                 ORDER BY created_at DESC
                 LIMIT 1
-            """, (operator_id, month, call_number))
+            """, (operator_id, month, phone_number))
             
             existing_call = cursor.fetchone()
-            is_correction = existing_call is not None
-            
-            # Добавляем запись
+            is_correction = existing_call is not None and not is_draft
+    
+            # Insert new evaluation
             cursor.execute("""
                 INSERT INTO calls (
                     evaluator_id, 
                     operator_id, 
                     month, 
-                    call_number, 
                     phone_number, 
                     score, 
                     comment,
+                    audio_path,
+                    is_draft,
                     is_correction,
                     previous_version_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
             """, (
                 evaluator_id, 
                 operator_id, 
                 month, 
-                call_number, 
                 phone_number, 
                 score, 
                 comment,
+                audio_path,
+                is_draft,
                 is_correction,
                 existing_call[0] if is_correction else None
             ))
             
-            return True
+            return cursor.fetchone()[0]
 
     def add_work_hours(self, operator_id, regular_hours, training_hours, fines=0.0, norm_hours=0.0, month=None):
         month = month or datetime.now().strftime('%Y-%m')
@@ -853,41 +871,45 @@ class Database:
         query = """
             WITH latest_calls AS (
                 SELECT 
-                    call_number, 
+                    id,
                     MAX(created_at) as latest_date
                 FROM calls
                 WHERE operator_id = %s
-                GROUP BY call_number
+                GROUP BY id
             )
             SELECT 
-                c.call_number, 
+                c.id,
                 c.month, 
                 c.phone_number, 
                 c.score, 
                 c.comment,
+                c.audio_path,
+                c.is_draft,
                 c.is_correction,
                 TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI')
             FROM calls c
-            JOIN latest_calls lc ON c.call_number = lc.call_number AND c.created_at = lc.latest_date
+            JOIN latest_calls lc ON c.id = lc.id AND c.created_at = lc.latest_date
             WHERE c.operator_id = %s
         """
         params = [operator_id, operator_id]
         if month:
             query += " AND c.month = %s"
             params.append(month)
-        query += " ORDER BY c.call_number"
+        query += " ORDER BY c.created_at DESC"
         
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
             return [
                 {
-                    "call_number": row[0],
+                    "id": row[0],
                     "month": row[1],
                     "phone_number": row[2],
                     "score": float(row[3]),
                     "comment": row[4],
-                    "is_correction": row[5],
-                    "evaluation_date": row[6]
+                    "audio_path": row[5],
+                    "is_draft": row[6],
+                    "is_correction": row[7],
+                    "evaluation_date": row[8]
                 } for row in cursor.fetchall()
             ]
 
