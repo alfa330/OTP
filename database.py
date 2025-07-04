@@ -271,7 +271,6 @@ class Database:
             """)
             # Calls table
             cursor.execute("""
-                DROP TABLE IF EXISTS calls CASCADE;
                 CREATE TABLE IF NOT EXISTS calls (
                     id SERIAL PRIMARY KEY,
                     evaluator_id INTEGER NOT NULL REFERENCES users(id),
