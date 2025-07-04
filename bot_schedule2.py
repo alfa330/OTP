@@ -839,6 +839,45 @@ def update_sv_table():
         logging.error(f"Error updating table: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/call_evaluation/<int:evaluation_id>', methods=['DELETE'])
+def delete_draft_evaluation(evaluation_id):
+    try:
+        requester_id = int(request.headers.get('X-User-Id'))
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT is_draft, evaluator_id, audio_path FROM calls 
+                WHERE id = %s
+            """, (evaluation_id,))
+            result = cursor.fetchone()
+            if not result:
+                return jsonify({"error": "Evaluation not found"}), 404
+            is_draft, evaluator_id, audio_path = result
+            if not is_draft:
+                return jsonify({"error": "Can only delete draft evaluations"}), 400
+            if evaluator_id != requester_id:
+                return jsonify({"error": "Unauthorized to delete this draft"}), 403
+
+            # Удаление файла из GCS
+            if audio_path:
+                try:
+                    bucket_name = os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
+                    client = get_gcs_client()
+                    bucket = client.bucket(bucket_name)
+                    blob_path = audio_path.replace(f"https://storage.googleapis.com/{bucket_name}/", "")
+                    blob = bucket.blob(blob_path)
+                    blob.delete()
+                except Exception as e:
+                    logging.error(f"Error deleting file from GCS: {e}")
+
+            cursor.execute("""
+                DELETE FROM calls WHERE id = %s
+            """, (evaluation_id,))
+            
+        return jsonify({"status": "success", "message": "Draft deleted"}), 200
+    except Exception as e:
+        logging.error(f"Error deleting draft evaluation: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/call_evaluation', methods=['POST'])
 def receive_call_evaluation():
     try:
