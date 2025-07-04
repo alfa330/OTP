@@ -23,6 +23,8 @@ from concurrent.futures import ThreadPoolExecutor
 from database import db
 import uuid
 from passlib.hash import pbkdf2_sha256
+from werkzeug.utils import secure_filename
+from google.cloud import storage
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -59,6 +61,17 @@ CORS(app, resources={
         "max_age": 86400
     }
 })
+
+def get_gcs_client():
+    # Если используется JSON из переменной окружения
+    credentials_content = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_CONTENT')
+    if credentials_content:
+        import json
+        from google.oauth2 import service_account
+        credentials_info = json.loads(credentials_content)
+        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        return storage.Client(credentials=credentials)
+    return storage.Client()
 
 def require_api_key(f):
     @wraps(f)
@@ -827,67 +840,87 @@ def update_sv_table():
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/call_evaluation', methods=['POST'])
-@require_api_key
 def receive_call_evaluation():
     try:
-        data = request.get_json()
-        required_fields = ['evaluator', 'operator', 'call_number', 'phone_number', 'score', 'comment', 'month']
-        if not data or not all(field in data for field in required_fields):
-            return jsonify({"error": "Missing or invalid required fields"}), 400
+        if not request.form:
+            return jsonify({"error": "Missing form data"}), 400
 
-        # Set month to current YYYY-MM if not provided
-        month =data['month'] if data['month'] else datetime.now().strftime('%Y-%m')
+        required_fields = ['evaluator', 'operator', 'phone_number', 'score', 'comment', 'month', 'is_draft']
+        for field in required_fields:
+            if field not in request.form:
+                return jsonify({"error": f"Missing required field: {field}"}), 400
 
-        # Find evaluator and operator by name
-        evaluator = db.get_user(name=data['evaluator'])
-        operator = db.get_user(name=data['operator'])
+        evaluator_name = request.form['evaluator']
+        operator_name = request.form['operator']
+        phone_number = request.form['phone_number']
+        score = float(request.form['score'])
+        comment = request.form['comment']
+        month = request.form['month'] or datetime.now().strftime('%Y-%m')
+        is_draft = request.form['is_draft'].lower() == 'true'
 
+        evaluator = db.get_user(name=evaluator_name)
+        operator = db.get_user(name=operator_name)
         if not evaluator or not operator:
             return jsonify({"error": "Evaluator or operator not found"}), 404
 
-        # Check for existing call evaluation with same call_number and month
-        existing_calls = db.get_call_evaluations(operator_id=operator[0], month=month)
-        is_correction = any(call['call_number'] == data['call_number'] for call in existing_calls)
+        # Загрузка аудиофайла в GCS
+        audio_path = None
+        if 'audio_file' in request.files:
+            file = request.files['audio_file']
+            if file and file.filename:
+                # Генерация уникального имени файла
+                filename = secure_filename(str(uuid.uuid4()) + '.mp3')
+                bucket_name = os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
+                upload_folder = os.getenv('UPLOAD_FOLDER', 'uploads/')
+                blob_path = f"{upload_folder}{filename}"
 
-        # Add call evaluation (history is preserved as new entry)
-        db.add_call_evaluation(
+                # Загрузка в GCS
+                client = get_gcs_client()
+                bucket = client.bucket(bucket_name)
+                blob = bucket.blob(blob_path)
+                blob.upload_from_file(file, content_type='audio/mpeg')
+                
+                # Получение публичного URL
+                audio_path = blob.public_url
+
+        evaluation_id = db.add_call_evaluation(
             evaluator_id=evaluator[0],
             operator_id=operator[0],
+            phone_number=phone_number,
+            score=score,
+            comment=comment,
             month=month,
-            call_number=data['call_number'],
-            phone_number=data['phone_number'],
-            score=data['score'],
-            comment=data['comment']
+            audio_path=audio_path,
+            is_draft=is_draft
         )
 
-        # Construct Telegram message
-        message = (
-            f"📞 <b>Оценка звонка{' (корректировка)' if is_correction else ''}</b>\n"
-            f"👤 Оценивающий: <b>{evaluator[2]}</b>\n"
-            f"📋 Оператор: <b>{operator[2]}</b>\n"
-            f"📄 За месяц: <b>{month}</b>\n"
-            f"📞 Звонок: <b>№{data['call_number']}</b>\n"
-            f"📱 Номер телефона: <b>{data['phone_number']}</b>\n"
-            f"💯 Оценка: <b>{data['score']}</b>\n"
-        )
-        if data['score'] < 100 and data['comment']:
-            message += f"\n💬 Комментарий: \n{data['comment']}\n"
+        # Логика для отправки уведомлений в Telegram (без изменений)
+        if not is_draft:
+            message = (
+                f"📞 <b>Оценка звонка</b>\n"
+                f"👤 Оценивающий: <b>{evaluator[2]}</b>\n"
+                f"📋 Оператор: <b>{operator[2]}</b>\n"
+                f"📄 За месяц: <b>{month}</b>\n"
+                f"📱 Номер телефона: <b>{phone_number}</b>\n"
+                f"💯 Оценка: <b>{score}</b>\n"
+            )
+            if score < 100 and comment:
+                message += f"\n💬 Комментарий: \n{comment}\n"
 
-        # Send notification to admin
-        admin = db.get_user(role='admin')
-        if admin:
-            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": admin[1],
-                "text": message,
-                "parse_mode": "HTML"
-            }
-            response = requests.post(telegram_url, json=payload, timeout=10)
-            if response.status_code != 200:
-                error_detail = response.json().get('description', 'Unknown error')
-                logging.error(f"Telegram API error: {error_detail}")
+            admin = db.get_user(role='admin')
+            if admin:
+                telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+                payload = {
+                    "chat_id": admin[1],
+                    "text": message,
+                    "parse_mode": "HTML"
+                }
+                response = requests.post(telegram_url, json=payload, timeout=10)
+                if response.status_code != 200:
+                    error_detail = response.json().get('description', 'Unknown error')
+                    logging.error(f"Telegram API error: {error_detail}")
 
-        return jsonify({"status": "success"}), 200
+        return jsonify({"status": "success", "evaluation_id": evaluation_id}), 200
     except Exception as e:
         logging.error(f"Error processing call evaluation: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
