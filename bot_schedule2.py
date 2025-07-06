@@ -12,7 +12,7 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.dispatcher import FSMContext
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from functools import wraps
 from openpyxl import load_workbook
@@ -25,6 +25,7 @@ import uuid
 from passlib.hash import pbkdf2_sha256
 from werkzeug.utils import secure_filename
 from google.cloud import storage as gcs_storage
+import tempfile
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -909,64 +910,36 @@ from flask import Response, stream_with_context
 
 @app.route('/api/audio/<int:evaluation_id>', methods=['GET'])
 @require_api_key
-def stream_audio(evaluation_id):
+def get_audio_file(evaluation_id):
     try:
-        user_id = int(request.headers.get('X-User-Id'))
-        user = db.get_user(id=user_id)
-        if not user:
-            return jsonify({"error": "User not found"}), 404
+        call = db.get_call_by_id(evaluation_id)
+        if not call or not call['audio_path']:
+            return jsonify({"error": "Audio file not found"}), 404
 
-        # Fetch evaluation details
-        with db._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT audio_path, operator_id, evaluator_id 
-                FROM calls 
-                WHERE id = %s
-            """, (evaluation_id,))
-            evaluation = cursor.fetchone()
-            if not evaluation:
-                return jsonify({"error": "Evaluation not found"}), 404
+        gcs_client = get_gcs_client()
 
-        audio_path, operator_id, evaluator_id = evaluation
+        # Разбиваем путь: 'bucket_name/folder/file.mp3'
+        path_parts = call['audio_path'].split('/', 1)
+        if len(path_parts) != 2:
+            return jsonify({"error": "Invalid GCS path format"}), 400
 
-        # Authorization check: User must be the operator, evaluator, supervisor, or admin
-        if user[3] == 'operator' and user[0] != operator_id:
-            return jsonify({"error": "Unauthorized: Operators can only access their own evaluations"}), 403
-        if user[3] == 'sv' and user[0] != db.get_user(id=operator_id)[6]:
-            return jsonify({"error": "Unauthorized: Supervisors can only access their operators' evaluations"}), 403
-        if user[3] not in ['admin', 'sv'] and user[0] not in [operator_id, evaluator_id]:
-            return jsonify({"error": "Unauthorized to access this audio file"}), 403
+        bucket_name, blob_path = path_parts
+        bucket = gcs_client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
 
-        if not audio_path:
-            return jsonify({"error": "No audio file associated with this evaluation"}), 404
+        if not blob.exists():
+            return jsonify({"error": "Audio file not found in GCS"}), 404
 
-        # Stream the file from GCS
-        client = get_gcs_client()
-        bucket_name = os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
-        bucket = client.bucket(bucket_name)
-        blob = bucket.get_blob(audio_path)
-        if not blob:
-            return jsonify({"error": "Audio file not found in storage"}), 404
+        # Скачиваем во временный файл
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        blob.download_to_filename(temp_file.name)
 
-        def generate():
-            with blob.open("rb") as f:
-                while True:
-                    chunk = f.read(8192)
-                    if not chunk:
-                        break
-                    yield chunk
-
-        return Response(
-                    stream_with_context(generate()),
-                    content_type='audio/mpeg',
-                    headers={
-                        'Accept-Ranges': 'bytes',  # Support seeking in audio playback
-                        'Content-Length': str(blob.size),  # Provide file size for better client handling
-                    }
-                )
+        # Возвращаем файл
+        return send_file(temp_file.name, mimetype='audio/mpeg')
     except Exception as e:
-        logging.error(f"Error streaming audio file: {e}")
+        logging.error(f"Error serving audio: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 
 @app.route('/api/call_evaluation', methods=['POST'])
 def receive_call_evaluation():
