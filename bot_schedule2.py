@@ -924,6 +924,7 @@ def get_audio_file(evaluation_id):
             return jsonify({"error": "Invalid GCS path format"}), 400
 
         bucket_name, blob_path = path_parts
+        logging.info(bucket_name+" "+blob_path)
         bucket = gcs_client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
 
