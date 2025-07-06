@@ -917,7 +917,7 @@ def get_audio_file(evaluation_id):
             return jsonify({"error": "Audio file not found"}), 404
 
         gcs_client = get_gcs_client()
-
+        logging.info(call['audio_path'])
         # Разбиваем путь: 'bucket_name/folder/file.mp3'
         path_parts = call['audio_path'].split('/', 1)
         if len(path_parts) != 2:
