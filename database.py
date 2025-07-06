@@ -522,6 +522,19 @@ class Database:
             cursor.execute(query, params)
             return cursor.fetchone()
 
+    def get_call_by_id(self, call_id):
+    with self._get_cursor() as cursor:
+        cursor.execute("""
+            SELECT id, audio_path FROM calls WHERE id = %s
+        """, (call_id,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                "id": row[0],
+                "audio_path": row[1]
+            }
+        return None
+        
     def update_user_table(self, user_id, hours_table_url=None, scores_table_url=None):
         with self._get_cursor() as cursor:
             cursor.execute("""
