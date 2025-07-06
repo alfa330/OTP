@@ -919,10 +919,10 @@ def get_audio_file(evaluation_id):
         gcs_client = get_gcs_client()
         logging.info(call['audio_path'])
         # Разбиваем путь: 'bucket_name/folder/file.mp3'
-        path_parts = "https://storage.googleapis.com/my-app-audio-uploads/uploads/92ddbf58-60bf-4fc7-9cf9-af0d4e5ab806.mp3".split('/', 1)
+        path_parts = "my-app-audio-uploads/uploads/92ddbf58-60bf-4fc7-9cf9-af0d4e5ab806.mp3".split('/', 1)
         if len(path_parts) != 2:
             return jsonify({"error": "Invalid GCS path format"}), 400
-
+        logging.info(path_parts)
         bucket_name, blob_path = path_parts
         logging.info(bucket_name+" "+blob_path)
         bucket = gcs_client.bucket(bucket_name)
