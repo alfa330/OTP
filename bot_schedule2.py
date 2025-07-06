@@ -983,7 +983,7 @@ def receive_call_evaluation():
                     bucket = client.bucket(bucket_name)
                     blob = bucket.blob(blob_path)
                     blob.upload_from_file(file.stream, content_type='audio/mpeg')
-                    audio_path = blob_path  # Store the object path, not a public URL
+                    audio_path = "my-app-audio-uploads/"+blob_path  # Store the object path, not a public URL
                 except Exception as e:
                     logging.error(f"Error uploading file to GCS: {e}")
                     return jsonify({"error": f"Failed to upload audio file: {str(e)}"}), 500
