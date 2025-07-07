@@ -29,7 +29,25 @@
             const [editingCriterionIndex, setEditingCriterionIndex] = useState(null);
             const [isEditingCriterion, setIsEditingCriterion] = useState(false);
             const [activeTab, setActiveTab] = useState('directions');
-        
+            const [selectedEvaluation, setSelectedEvaluation] = useState(null);
+            const [audioUrl, setAudioUrl] = useState(null);
+            const [loadingAudioId, setLoadingAudioId] = useState(null);
+
+            const handleEvaluationClick = async (evaluation) => {
+                if (selectedEvaluation?.id === evaluation.id) {
+                    // Повторное нажатие — закрываем
+                    setSelectedEvaluation(null);
+                    setAudioUrl(null);
+                    return;
+                }
+            
+                setSelectedEvaluation(evaluation);
+                setLoadingAudioId(evaluation.id);
+                const url = await getAudioUrlWithAuth(evaluation.id, apiKey, userId);
+                setAudioUrl(url);
+                setLoadingAudioId(null);
+            };
+            
             const totalWeight = (directionIndex) => {
                 return directions[directionIndex]?.criteria
                     .filter(criterion => !criterion.isCritical)
@@ -2441,7 +2459,9 @@
                                         <div className="overflow-x-auto rounded-lg shadow-sm">
                                             <table className="min-w-full bg-white border-collapse">
                                                 <thead>
-                                                    <tr className="bg-blue-50">
+                                                    <tr key={index}
+                                                        className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${selectedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''}`}
+                                                        onClick={() => handleEvaluationClick(eval1)}">
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call ID</th>
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Score</th>
@@ -2450,6 +2470,19 @@
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Evaluation Date</th>
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Actions</th>
                                                     </tr>
+                                                    {selectedEvaluation?.id === eval1.id && (
+                                                      <tr>
+                                                        <td colSpan={7} className="p-4 bg-gray-50 border-t text-sm">
+                                                          {loadingAudioId === eval1.id ? (
+                                                            <p className="text-gray-500 italic">Loading audio...</p>
+                                                          ) : audioUrl ? (
+                                                            <audio controls src={audioUrl} className="w-full" />
+                                                          ) : (
+                                                            <p className="text-red-500">Audio not available</p>
+                                                          )}
+                                                        </td>
+                                                      </tr>
+                                                    )}
                                                 </thead>
                                                 <tbody>
                                                     {operatorData.evaluations.map((eval1, index) => (
