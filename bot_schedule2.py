@@ -1038,12 +1038,11 @@ def receive_call_evaluation():
             )
             if score < 100 and comment:
                 message += f"\n💬 Комментарий: \n{comment}\n"
-
-            admin = db.get_user(role='admin')
+                
             if admin:
-                telegram_url = f"https://api.telegram.org/bot{os.getenv('API_TOKEN')}/sendAudio" if audio_signed_url else f"https://api.telegram.org/bot{os.getenv('API_TOKEN')}/sendMessage"
+                telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendAudio" if audio_signed_url else f"https://api.telegram.org/bot{API_TOKEN)}/sendMessage"
                 payload = {
-                    "chat_id": admin[1],
+                    "chat_id": admin,
                     "parse_mode": "HTML"
                 }
                 if audio_signed_url:
