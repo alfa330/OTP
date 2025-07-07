@@ -986,6 +986,7 @@ def receive_call_evaluation():
 
         # Handle audio file upload to GCS
         audio_path = None
+        audio_public_url = None
         if 'audio_file' in request.files:
             file = request.files['audio_file']
             if file and file.filename:
@@ -1001,7 +1002,10 @@ def receive_call_evaluation():
                     bucket = client.bucket(bucket_name)
                     blob = bucket.blob(blob_path)
                     blob.upload_from_file(file.stream, content_type='audio/mpeg')
-                    audio_path = "my-app-audio-uploads/"+blob_path  # Store the object path, not a public URL
+                    audio_path = "my-app-audio-uploads/"+blob_path  # Store the object path
+                    # Generate a public URL for Telegram
+                    blob.make_public()
+                    audio_public_url = blob.public_url
                 except Exception as e:
                     logging.error(f"Error uploading file to GCS: {e}")
                     return jsonify({"error": f"Failed to upload audio file: {str(e)}"}), 500
@@ -1032,12 +1036,17 @@ def receive_call_evaluation():
 
             admin = db.get_user(role='admin')
             if admin:
-                telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+                telegram_url = f"https://api.telegram.org/bot{os.getenv('TELEGRAM_API_TOKEN')}/sendAudio" if audio_public_url else f"https://api.telegram.org/bot{os.getenv('TELEGRAM_API_TOKEN')}/sendMessage"
                 payload = {
                     "chat_id": admin[1],
-                    "text": message,
                     "parse_mode": "HTML"
                 }
+                if audio_public_url:
+                    payload["audio"] = audio_public_url
+                    payload["caption"] = message
+                else:
+                    payload["text"] = message
+
                 response = requests.post(telegram_url, json=payload, timeout=10)
                 if response.status_code != 200:
                     error_detail = response.json().get('description', 'Unknown error')
