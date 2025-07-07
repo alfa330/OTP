@@ -936,28 +936,30 @@ def get_audio_file(evaluation_id):
             return jsonify({"error": "Audio file not found"}), 404
 
         gcs_client = get_gcs_client()
-        logging.info(call['audio_path'])
+
         # Разбиваем путь: 'bucket_name/folder/file.mp3'
         path_parts = call['audio_path'].split('/', 1)
         if len(path_parts) != 2:
             return jsonify({"error": "Invalid GCS path format"}), 400
-        logging.info(path_parts)
+
         bucket_name, blob_path = path_parts
-        logging.info(bucket_name+" "+blob_path)
         bucket = gcs_client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
 
         if not blob.exists():
             return jsonify({"error": "Audio file not found in GCS"}), 404
 
-        # Скачиваем во временный файл
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        blob.download_to_filename(temp_file.name)
+        # Генерируем временный Signed URL
+        signed_url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=15),
+            method="GET",
+            response_type='audio/mpeg'
+        )
 
-        # Возвращаем файл
-        return send_file(temp_file.name, mimetype='audio/mpeg')
+        return jsonify({"status": "success", "url": signed_url})
     except Exception as e:
-        logging.error(f"Error serving audio: {e}")
+        logging.error(f"Error generating signed audio URL: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
