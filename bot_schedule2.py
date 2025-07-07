@@ -361,32 +361,48 @@ def get_call_evaluations():
             return jsonify({"error": "Operator not found"}), 404
         direction = db.get_directions()
         direction_criteria = next((d['criteria'] for d in direction if d['id'] == operator[4]), [])
+        
+        # Log direction_criteria for debugging
+        logging.info(f"Direction criteria: {direction_criteria}")
 
         # Parse comments to extract scores and criterion comments
         enhanced_evaluations = []
         for eval in evaluations:
-            criterion_comments = []
-            scores = []
+            criterion_comments = [''] * len(direction_criteria)  # Initialize with empty strings
+            scores = ['Correct'] * len(direction_criteria)  # Initialize with 'Correct'
             if eval['comment']:
                 comment_parts = eval['comment'].split('; ')
-                criterion_comments = [''] * len(direction_criteria)
-                scores = ['Correct'] * len(direction_criteria)
                 for part in comment_parts:
                     if ': ' in part:
-                        crit_name, comment = part.split(': ', 1)
-                        for idx, crit in enumerate(direction_criteria):
-                            if crit['name'] == crit_name:
-                                criterion_comments[idx] = comment
-                                scores[idx] = 'Error'
-                                break
+                        try:
+                            crit_name, comment = part.split(': ', 1)
+                            # Normalize criterion name for comparison (e.g., strip whitespace, case-insensitive)
+                            crit_name = crit_name.strip()
+                            for idx, crit in enumerate(direction_criteria):
+                                crit_name_db = crit['name'].strip()
+                                if crit_name.lower() == crit_name_db.lower():  # Case-insensitive comparison
+                                    criterion_comments[idx] = comment
+                                    scores[idx] = 'Error'
+                                    break
+                            else:
+                                logging.warning(f"Criterion '{crit_name}' not found in direction_criteria")
+                        except ValueError as e:
+                            logging.warning(f"Skipping malformed comment part: {part}, Error: {e}")
+                            continue
+                    else:
+                        logging.warning(f"Skipping invalid comment part: {part}")
+
             enhanced_evaluations.append({
                 **eval,
                 'scores': scores,
                 'criterion_comments': criterion_comments
             })
-        logging.info(f"Enhanced evaluations: {enhanced_evaluations}")
+
         # Get supervisor info for dispute button
         supervisor = db.get_user(id=operator[6]) if operator[6] else None
+        
+        # Log the final enhanced_evaluations for debugging
+        logging.info(f"Enhanced evaluations: {enhanced_evaluations}")
         
         return jsonify({
             "status": "success", 
