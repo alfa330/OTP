@@ -1040,7 +1040,7 @@ def receive_call_evaluation():
                 message += f"\n💬 Комментарий: \n{comment}\n"
                 
             if admin:
-                telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendAudio" if audio_signed_url else f"https://api.telegram.org/bot{API_TOKEN)}/sendMessage"
+                telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendAudio" if audio_signed_url else f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
                 payload = {
                     "chat_id": admin,
                     "parse_mode": "HTML"
