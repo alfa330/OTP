@@ -384,7 +384,7 @@ def get_call_evaluations():
                 'scores': scores,
                 'criterion_comments': criterion_comments
             })
-
+        logging.info(f"Enhanced evaluations: {enhanced_evaluations}")
         # Get supervisor info for dispute button
         supervisor = db.get_user(id=operator[6]) if operator[6] else None
         
