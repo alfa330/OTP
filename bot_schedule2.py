@@ -464,7 +464,7 @@ def dispute_call_evaluation():
         return _build_cors_preflight_response()
     try:
         data = request.get_json()
-        required_fields = ['operator_id', 'call_number', 'month', 'dispute_text']
+        required_fields = ['operator_id', 'id', 'month', 'dispute_text']
         if not data or not all(field in data for field in required_fields):
             return jsonify({"error": "Missing required fields"}), 400
 
@@ -479,7 +479,7 @@ def dispute_call_evaluation():
 
         # Get call details
         evaluations = db.get_call_evaluations(operator_id, data['month'])
-        call = next((e for e in evaluations if e['call_number'] == data['call_number']), None)
+        call = next((e for e in evaluations if e['id'] == data['id']), None)
         if not call:
             return jsonify({"error": "Call evaluation not found"}), 404
 
@@ -487,7 +487,7 @@ def dispute_call_evaluation():
         supervisor_message = (
             f"⚠️ <b>Запрос на пересмотр оценки</b>\n\n"
             f"👤 Оператор: <b>{operator[2]}</b>\n"
-            f"📞 Звонок №{call['call_number']}\n"
+            f"📞 Звонок ID: {call['id']}\n"
             f"📱 Номер: {call['phone_number']}\n"
             f"💯 Оценка: {call['score']}\n"
             f"📅 Месяц: {call['month']}\n\n"
@@ -500,7 +500,7 @@ def dispute_call_evaluation():
             f"⚠️ <b>Запрос на пересмотр оценки</b>\n\n"
             f"💬 Супервайзер: <b>{supervisor[2]}</b>\n"
             f"👤 Оператор: <b>{operator[2]}</b>\n"
-            f"📞 Звонок №{call['call_number']}\n"
+            f"📞 Звонок ID: {call['id']}\n"
             f"📱 Номер: {call['phone_number']}\n"
             f"💯 Оценка: {call['score']}\n"
             f"📅 Месяц: {call['month']}\n\n"
