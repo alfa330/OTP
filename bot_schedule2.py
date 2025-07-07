@@ -2103,7 +2103,7 @@ async def manage_operators_credentials(message: types.Message):
             return
 
         ikb = InlineKeyboardMarkup(row_width=1)
-        for op_id, op_name, _, _, _, _ in operators:
+        for op_id, op_name, _, _, _, _, _ in operators:
             ikb.insert(InlineKeyboardButton(text=op_name, callback_data=f"cred_{op_id}"))
         
         await bot.send_message(
