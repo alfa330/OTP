@@ -362,7 +362,7 @@ def get_call_evaluations():
         direction = db.get_directions()
         logging.info(f"Directions: {direction}")
         logging.info(f"Oper direction id: {operator[4]}")
-        direction_criteria = next((d['criteria'] for d in direction if d['id'] == operator[4]), [])
+        direction_criteria = next((d['criteria'] for d in direction if d['name'] == operator[4]), [])
         
         # Log direction_criteria for debugging
         logging.info(f"Direction criteria: {direction_criteria}")
