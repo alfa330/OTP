@@ -608,7 +608,7 @@
                 <div className="mb-4 space-y-2">
                   <p className="font-medium">Информация об оценке:</p>
                   <div className="pl-4">
-                    <p>• Номер звонка: <span className="font-semibold">{selectedEvaluation?.call_number}</span></p>
+                    <p>• ID звонка: <span className="font-semibold">{selectedEvaluation?.id}</span></p>
                     <p>• Телефон: <span className="font-semibold">{selectedEvaluation?.phone_number}</span></p>
                     <p>• Оценка: <span className={`font-semibold ${getScoreColor(selectedEvaluation?.score)}`}>
                       {selectedEvaluation?.score?.toFixed(2)}
@@ -2442,7 +2442,7 @@
                                             <table className="min-w-full bg-white border-collapse">
                                                 <thead>
                                                     <tr className="bg-blue-50">
-                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call Number</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call ID</th>
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Score</th>
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Comment</th>
@@ -2454,7 +2454,7 @@
                                                 <tbody>
                                                     {operatorData.evaluations.map((eval1, index) => (
                                                         <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
-                                                            <td className="p-4 border-b text-sm">{eval1.call_number || '-'}</td>
+                                                            <td className="p-4 border-b text-sm">{eval1.id || '-'}</td>
                                                             <td className="p-4 border-b text-sm">{eval1.phone_number || '-'}</td>
                                                             <td className={`p-4 border-b text-sm font-medium ${getScoreColor(eval1.score)}`}>
                                                                 {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
