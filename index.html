@@ -1044,13 +1044,13 @@
                 setSalaryResult(null);
             };
             
-            const getAudioUrlWithAuth = async (evaluationId, apiKey, userId) => {
+            const getAudioUrlWithAuth = async (evaluationId, user) => {
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/audio/${evaluationId}`, {
                         method: 'GET',
                         headers: {
-                            'X-API-Key': apiKey,
-                            'X-User-Id': userId
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
                         }
                     });
 
@@ -1078,7 +1078,7 @@
 
                 setExpandedEvaluation(evaluation);
                 setLoadingAudioId(evaluation.id);
-                const url = await getAudioUrlWithAuth(evaluation.id, apiKey, userId);
+                const url = await getAudioUrlWithAuth(evaluation.id, user);
                 setAudioUrl(url);
                 setLoadingAudioId(null);
             };
