@@ -2751,27 +2751,25 @@ def extract_fio_and_links(spreadsheet_url):
         fio_column = None
         for col in ws.iter_cols(min_row=1, max_row=1):
             for cell in col:
-                if cell.value is not None:
-                    value = str(cell.value).strip()
-                    if "ФИО" in value:
-                        fio_column = cell.column
-                        break
-            if fio_column:
-                break
+                if cell.value is not None and "ФИО" in str(cell.value).strip():
+                    fio_column = cell.column
 
         if not fio_column:
             os.remove(temp_file)
             return None, None, "Колонка ФИО не найдена."
 
-        fio_list = []
+        operators = []
         for row in ws.iter_rows(min_row=2):
             fio_cell = row[fio_column - 1]
             if not fio_cell.value:
                 break
-            fio_list.append(str(fio_cell.value).strip())
+            operator_info = {
+                "name": str(fio_cell.value)
+            }
+            operators.append(operator_info)
 
         os.remove(temp_file)
-        return sheet_name, fio_list, None
+        return sheet_name, operators, None
     except Exception as e:
         if 'temp_file' in locals() and os.path.exists(temp_file):
             os.remove(temp_file)
