@@ -29,25 +29,7 @@
             const [editingCriterionIndex, setEditingCriterionIndex] = useState(null);
             const [isEditingCriterion, setIsEditingCriterion] = useState(false);
             const [activeTab, setActiveTab] = useState('directions');
-            const [selectedEvaluation, setSelectedEvaluation] = useState(null);
-            const [audioUrl, setAudioUrl] = useState(null);
-            const [loadingAudioId, setLoadingAudioId] = useState(null);
-
-            const handleEvaluationClick = async (evaluation) => {
-                if (selectedEvaluation?.id === evaluation.id) {
-                    // Повторное нажатие — закрываем
-                    setSelectedEvaluation(null);
-                    setAudioUrl(null);
-                    return;
-                }
-            
-                setSelectedEvaluation(evaluation);
-                setLoadingAudioId(evaluation.id);
-                const url = await getAudioUrlWithAuth(evaluation.id, apiKey, userId);
-                setAudioUrl(url);
-                setLoadingAudioId(null);
-            };
-            
+        
             const totalWeight = (directionIndex) => {
                 return directions[directionIndex]?.criteria
                     .filter(criterion => !criterion.isCritical)
@@ -701,6 +683,9 @@
                 new_login: '',
                 confirm_login: ''
             });
+            const [expandedEvaluation, setExpandedEvaluation] = useState(null);  
+            const [audioUrl, setAudioUrl] = useState(null);
+            const [loadingAudioId, setLoadingAudioId] = useState(null);
             const [showDisputeModal, setShowDisputeModal] = useState(false);
             const [selectedEvaluation, setSelectedEvaluation] = useState(null);
             const [disputeText, setDisputeText] = useState('');
@@ -1059,6 +1044,46 @@
                 setSalaryResult(null);
             };
             
+            const getAudioUrlWithAuth = async (evaluationId, apiKey, userId) => {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/audio/${evaluationId}`, {
+                        method: 'GET',
+                        headers: {
+                            'X-API-Key': apiKey,
+                            'X-User-Id': userId
+                        }
+                    });
+
+                    if (!response.ok) throw new Error(`Failed to fetch audio: ${response.status}`);
+
+                    const data = await response.json();
+                    if (data && data.url) {
+                        return data.url; // Прямая ссылка на аудио
+                    } else {
+                        console.error("No signed URL returned in response:", data);
+                        return null;
+                    }
+                } catch (error) {
+                    console.error('Audio fetch error:', error);
+                    return null;
+                }
+            };
+
+            const handleEvaluationClick = async (evaluation) => {
+                if (expandedEvaluation?.id === evaluation.id) {
+                    setExpandedEvaluation(null);
+                    setAudioUrl(null);
+                    return;
+                }
+
+                setExpandedEvaluation(evaluation);
+                setLoadingAudioId(evaluation.id);
+                const url = await getAudioUrlWithAuth(evaluation.id, apiKey, userId);
+                setAudioUrl(url);
+                setLoadingAudioId(null);
+            };
+
+
             const getScoreColor = (score) => {
                 if (!score) return 'text-gray-500';
                 if (score >= 90) return 'text-green-600';
@@ -2459,9 +2484,7 @@
                                         <div className="overflow-x-auto rounded-lg shadow-sm">
                                             <table className="min-w-full bg-white border-collapse">
                                                 <thead>
-                                                    <tr key={index}
-                                                        className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${selectedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''}`}
-                                                        onClick={() => handleEvaluationClick(eval1)}">
+                                                    <tr className="bg-blue-50">
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call ID</th>
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Score</th>
@@ -2470,64 +2493,73 @@
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Evaluation Date</th>
                                                         <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Actions</th>
                                                     </tr>
-                                                    {selectedEvaluation?.id === eval1.id && (
-                                                      <tr>
-                                                        <td colSpan={7} className="p-4 bg-gray-50 border-t text-sm">
-                                                          {loadingAudioId === eval1.id ? (
-                                                            <p className="text-gray-500 italic">Loading audio...</p>
-                                                          ) : audioUrl ? (
-                                                            <audio controls src={audioUrl} className="w-full" />
-                                                          ) : (
-                                                            <p className="text-red-500">Audio not available</p>
-                                                          )}
-                                                        </td>
-                                                      </tr>
-                                                    )}
                                                 </thead>
                                                 <tbody>
-                                                    {operatorData.evaluations.map((eval1, index) => (
-                                                        <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
-                                                            <td className="p-4 border-b text-sm">{eval1.id || '-'}</td>
-                                                            <td className="p-4 border-b text-sm">{eval1.phone_number || '-'}</td>
-                                                            <td className={`p-4 border-b text-sm font-medium ${getScoreColor(eval1.score)}`}>
-                                                                {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
-                                                            </td>
-                                                            <td className="p-4 border-b text-sm">
-                                                                {eval1.comment ? (
-                                                                    <div className="space-y-1">
-                                                                        {eval1.comment.split('\n').map((line, i) => {
-                                                                            const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
-                                                                            const match = cleanLine.match(/^(.*?):\s*(.*)$/);
-                                                                            if (match) {
-                                                                                return (
-                                                                                    <p key={i} className="text-sm">
-                                                                                        <span className="font-semibold">{match[1]}:</span>{' '}
-                                                                                        <span className="italic">{match[2]}</span>
-                                                                                    </p>
-                                                                                );
-                                                                            }
-                                                                            return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
-                                                                        })}
-                                                                    </div>
-                                                                ) : '-'}
-                                                            </td>
-                                                            <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
-                                                            <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
-                                                            <td className="p-4 border-b text-sm">
-                                                                {eval1.score < 100 && (
-                                                                    <button
-                                                                        onClick={() => {
-                                                                            setSelectedEvaluation(eval1);
-                                                                            setShowDisputeModal(true);
-                                                                        }}
-                                                                        className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
-                                                                    >
-                                                                        Dispute
-                                                                    </button>
-                                                                )}
-                                                            </td>
+                                                {operatorData.evaluations.map((eval1, index) => (
+                                                    <React.Fragment key={index}>
+                                                    <tr
+                                                        className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${
+                                                        expandedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''
+                                                        }`}
+                                                        onClick={() => handleEvaluationClick(eval1)}
+                                                    >
+                                                        <td className="p-4 border-b text-sm">{eval1.id || '-'}</td>
+                                                        <td className="p-4 border-b text-sm">{eval1.phone_number || '-'}</td>
+                                                        <td className={`p-4 border-b text-sm font-medium ${getScoreColor(eval1.score)}`}>
+                                                        {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
+                                                        </td>
+                                                        <td className="p-4 border-b text-sm">
+                                                        {eval1.comment ? (
+                                                            <div className="space-y-1">
+                                                            {eval1.comment.split('\n').map((line, i) => {
+                                                                const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
+                                                                const match = cleanLine.match(/^(.*?):\s*(.*)$/);
+                                                                if (match) {
+                                                                return (
+                                                                    <p key={i} className="text-sm">
+                                                                    <span className="font-semibold">{match[1]}:</span>{' '}
+                                                                    <span className="italic">{match[2]}</span>
+                                                                    </p>
+                                                                );
+                                                                }
+                                                                return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
+                                                            })}
+                                                            </div>
+                                                        ) : '-'}
+                                                        </td>
+                                                        <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
+                                                        <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
+                                                        <td className="p-4 border-b text-sm">
+                                                        {eval1.score < 100 && (
+                                                            <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                setSelectedEvaluation(eval1);
+                                                                setShowDisputeModal(true);
+                                                            }}
+                                                            className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
+                                                            >
+                                                            Dispute
+                                                            </button>
+                                                        )}
+                                                        </td>
+                                                    </tr>
+
+                                                    {selectedEvaluation?.id === eval1.id && (
+                                                        <tr>
+                                                        <td colSpan={7} className="p-4 bg-gray-50 border-t text-sm">
+                                                            {loadingAudioId === eval1.id ? (
+                                                            <p className="text-gray-500 italic">Loading audio...</p>
+                                                            ) : audioUrl ? (
+                                                            <audio controls src={audioUrl} className="w-full" />
+                                                            ) : (
+                                                            <p className="text-red-500">Audio not available</p>
+                                                            )}
+                                                        </td>
                                                         </tr>
-                                                    ))}
+                                                    )}
+                                                    </React.Fragment>
+                                                ))}
                                                 </tbody>
                                             </table>
                                         </div>
