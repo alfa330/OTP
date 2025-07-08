@@ -2749,54 +2749,29 @@ def extract_fio_and_links(spreadsheet_url):
         sheet_name = ws.title
 
         fio_column = None
-        score_columns = []
         for col in ws.iter_cols(min_row=1, max_row=1):
             for cell in col:
                 if cell.value is not None:
                     value = str(cell.value).strip()
                     if "ФИО" in value:
                         fio_column = cell.column
-                    else:
-                        try:
-                            num = float(value)
-                            if 1 <= int(num) <= 20:
-                                score_columns.append(cell.column)
-                        except (ValueError, TypeError):
-                            continue
+                        break
+            if fio_column:
+                break
 
         if not fio_column:
             os.remove(temp_file)
             return None, None, "Колонка ФИО не найдена."
-        if not score_columns:
-            os.remove(temp_file)
-            return None, None, "Столбцы с оценками (1-20) не найдены."
 
-        operators = []
+        fio_list = []
         for row in ws.iter_rows(min_row=2):
             fio_cell = row[fio_column - 1]
             if not fio_cell.value:
                 break
-            scores = []
-            for col_idx in score_columns:
-                score_cell = row[col_idx - 1]
-                try:
-                    score = float(score_cell.value) if float(score_cell.value)>=0 else None
-                    if score is not None:
-                        scores.append(score)
-                except (ValueError, TypeError):
-                    continue
-            call_count = len(scores)
-            avg_score = sum(scores) / call_count if scores else None
-            operator_info = {
-                "name": str(fio_cell.value),
-                "link": fio_cell.hyperlink.target if fio_cell.hyperlink else None,
-                "call_count": call_count,
-                "avg_score": avg_score
-            }
-            operators.append(operator_info)
+            fio_list.append(str(fio_cell.value).strip())
 
         os.remove(temp_file)
-        return sheet_name, operators, None
+        return sheet_name, fio_list, None
     except Exception as e:
         if 'temp_file' in locals() and os.path.exists(temp_file):
             os.remove(temp_file)
