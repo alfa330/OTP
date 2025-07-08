@@ -1807,10 +1807,7 @@ async def save_hours_table_admin(message: types.Message, state: FSMContext):
 
             message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
             for op in operators:
-                if op['link']:
-                    message_text += f"👤 {op['name']} → <a href='{op['link']}'>Ссылка</a>\n"
-                else:
-                    message_text += f"👤 {op['name']} → Ссылка отсутствует\n"
+                    message_text += f"👤 {op['name']}\n"
             message_text += "\n<b>Это все операторы для этого СВ?</b>"
 
             await bot.send_message(
@@ -1899,8 +1896,7 @@ async def select_hours_direction_admin(callback: types.CallbackQuery, state: FSM
             name=op['name'],
             role='operator',
             direction_id=direction_id,
-            supervisor_id=user[0],
-            hours_table_url=op['link'] if op['link'] else None
+            supervisor_id=user[0]
         )
 
     await bot.send_message(
@@ -2404,10 +2400,7 @@ async def save_hours_table(message: types.Message, state: FSMContext):
 
             message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
             for op in operators:
-                if op['link']:
-                    message_text += f"👤 {op['name']} → <a href='{op['link']}'>Ссылка</a>\n"
-                else:
-                    message_text += f"👤 {op['name']} → Ссылка отсутствует\n"
+                message_text += f"👤 {op['name']}\n"
             message_text += "\n<b>Это все ваши операторы?</b>"
 
             await bot.send_message(
@@ -2497,8 +2490,7 @@ async def select_hours_direction(callback: types.CallbackQuery, state: FSMContex
             name=op['name'],
             role='operator',
             direction_id=direction_id,
-            supervisor_id=user[0],
-            hours_table_url=op['link'] if op['link'] else None
+            supervisor_id=user[0]
         )
 
     await bot.send_message(
