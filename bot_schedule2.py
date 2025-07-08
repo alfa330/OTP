@@ -1148,11 +1148,8 @@ class new_operator(StatesGroup):
     svselect = State()
 
 class sv(StatesGroup):
-    crtable = State()
     delete = State()
     delete_operator = State()  # Новое состояние
-    verify_table = State()
-    select_direction= State()
     view_evaluations = State()
     change_table = State()
 
@@ -1220,7 +1217,6 @@ def get_evaluations_keyboard():
 
 def get_sv_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton('Добавить таблицу оценок📑'))
     kb.add(KeyboardButton('Добавить таблицу часов📊'))
     kb.add(KeyboardButton('Управление операторами🔑'))
     kb.add(KeyboardButton('Доступ🔑'))
@@ -1748,11 +1744,11 @@ async def change_sv_table(message: types.Message):
 
         ikb = InlineKeyboardMarkup(row_width=1)
         for sv_id, sv_name, _, _ in supervisors:
-            ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"change_table_{sv_id}"))
+            ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"change_hours_table_{sv_id}"))
         
         await bot.send_message(
             chat_id=message.from_user.id,
-            text="<b>Выберите супервайзера для изменения таблицы</b>",
+            text="<b>Выберите супервайзера для изменения таблицы часов</b>",
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
@@ -1767,24 +1763,154 @@ async def change_sv_table(message: types.Message):
         await sv.change_table.set()
     await message.delete()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('change_table_'), state=sv.change_table)
-async def select_sv_for_table_change(callback: types.CallbackQuery, state: FSMContext):
-    sv_id = int(callback.data.split('_')[2])
+@dp.callback_query_handler(lambda c: c.data.startswith('change_hours_table_'), state=sv.change_table)
+async def select_sv_for_hours_table_change(callback: types.CallbackQuery, state: FSMContext):
+    sv_id = int(callback.data.split('_')[-1])
     async with state.proxy() as data:
         data['sv_id'] = sv_id
     user = db.get_user(id=sv_id)
     if user:
         await bot.send_message(
             chat_id=callback.from_user.id,
-            text=f'<b>Отправьте новую таблицу ОКК для {user[2]}🖊</b>',
+            text=f'<b>Отправьте новую таблицу часов для {user[2]}🖊</b>',
             parse_mode='HTML',
             reply_markup=get_cancel_keyboard()
         )
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-        await sv.crtable.set()
+        await state.set_state("waiting_for_hours_table_admin")
     else:
         await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
         await state.finish()
+
+@dp.message_handler(state="waiting_for_hours_table_admin")
+async def save_hours_table_admin(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        sv_id = data.get('sv_id')
+    user = db.get_user(id=sv_id)
+    if user and user[3] == 'sv':
+        try:
+            sheet_name, operators, error = extract_fio_and_links(message.text)
+            if error:
+                await bot.send_message(
+                    chat_id=message.from_user.id,
+                    text=f"{error}\n\n<b>Пожалуйста, отправьте корректную ссылку на таблицу.</b>",
+                    parse_mode="HTML",
+                    reply_markup=get_cancel_keyboard()
+                )
+                return
+
+            async with state.proxy() as data:
+                data['hours_table_url'] = message.text
+                data['operators'] = operators
+                data['sheet_name'] = sheet_name
+                data['sv_id'] = user[0]
+
+            message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
+            for op in operators:
+                if op['link']:
+                    message_text += f"👤 {op['name']} → <a href='{op['link']}'>Ссылка</a>\n"
+                else:
+                    message_text += f"👤 {op['name']} → Ссылка отсутствует\n"
+            message_text += "\n<b>Это все операторы для этого СВ?</b>"
+
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text=message_text,
+                parse_mode="HTML",
+                reply_markup=get_verify_keyboard(),
+                disable_web_page_preview=True
+            )
+            await state.set_state("verify_hours_table_admin")
+            await message.delete()
+        except Exception as e:
+            await bot.send_message(
+                chat_id=message.from_user.id,
+                text=f"<b>Ошибка при обработке таблицы: {str(e)}</b>",
+                parse_mode='HTML'
+            )
+            await state.finish()
+
+@dp.callback_query_handler(state="verify_hours_table_admin")
+async def verify_hours_table_admin(callback: types.CallbackQuery, state: FSMContext):
+    async with state.proxy() as data:
+        hours_table_url = data.get('hours_table_url')
+        sv_id = data.get('sv_id')
+        operators = data.get('operators')
+        sheet_name = data.get('sheet_name')
+
+    user = db.get_user(id=sv_id)
+    if not user:
+        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
+        await state.finish()
+        return
+
+    if callback.data == "verify_yes":
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text="Выберите направление для операторов:",
+            reply_markup=get_direction_keyboard()
+        )
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+        await state.set_state("select_hours_direction_admin")
+    elif callback.data == "verify_no":
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text=f'<b>Отправьте корректную таблицу часов для {user[2]}🖊</b>',
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+        await state.set_state("waiting_for_hours_table_admin")
+
+@dp.callback_query_handler(state="select_hours_direction_admin")
+async def select_hours_direction_admin(callback: types.CallbackQuery, state: FSMContext):
+    async with state.proxy() as data:
+        hours_table_url = data.get('hours_table_url')
+        sv_id = data.get('sv_id')
+        operators = data.get('operators')
+
+    direction_id = None
+    if callback.data.startswith("dir_"):
+        try:
+            direction_id = int(callback.data.replace("dir_", ""))
+        except ValueError:
+            await bot.answer_callback_query(callback.id, text="Ошибка: Неверный формат направления")
+            return
+
+    direction = next((d for d in db.get_directions() if d['id'] == direction_id), None)
+    if not direction:
+        await bot.answer_callback_query(callback.id, text="Ошибка: Направление не найдено")
+        await state.finish()
+        return
+
+    user = db.get_user(id=sv_id)
+    if not user:
+        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
+        await state.finish()
+        return
+
+    # Обновляем таблицу часов супервайзера
+    db.update_user_table(user[0], hours_table_url=hours_table_url)
+
+    # Создаём/обновляем операторов с direction_id
+    for op in operators:
+        db.create_user(
+            telegram_id=None,
+            name=op['name'],
+            role='operator',
+            direction_id=direction_id,
+            supervisor_id=user[0],
+            hours_table_url=op['link'] if op['link'] else None
+        )
+
+    await bot.send_message(
+        chat_id=callback.from_user.id,
+        text=f"""<b>Таблица часов для {user[2]} сохранена, операторы добавлены/обновлены с направлением "{direction['name']}"✅</b>""",
+        parse_mode='HTML',
+        reply_markup=get_editor_keyboard()
+    )
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+    await state.finish()
 
 @dp.message_handler(regexp='Данные📈')
 async def view_data_menu(message: types.Message):
@@ -2242,170 +2368,6 @@ async def credentials_back(callback: types.CallbackQuery, state: FSMContext):
     await manage_operators_credentials(callback.message)
 
 
-@dp.message_handler(regexp='Добавить таблицу оценок📑')
-async def crtablee(message: types.Message):
-    user = db.get_user(telegram_id=message.from_user.id)
-    if user and user[3] == 'sv':
-        await bot.send_message(
-            text='<b>Отправьте вашу таблицу ОКК🖊</b>',
-            chat_id=message.from_user.id,
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-        await sv.crtable.set()
-    await message.delete()
-
-@dp.message_handler(state=sv.crtable)
-async def tableName(message: types.Message, state: FSMContext):
-    try:
-        user_id = message.from_user.id
-        user = db.get_user(telegram_id=user_id)
-        is_admin_changing = await state.get_state() == sv.crtable.state and user and user[3] == 'admin'
-        
-        if not is_admin_changing and (not user or user[3] != 'sv'):
-            await bot.send_message(
-                chat_id=user_id,
-                text="Ошибка: Вы не зарегистрированы как супервайзер! Пожалуйста, добавьтесь через администратора.",
-                parse_mode="HTML",
-                reply_markup=types.ReplyKeyboardRemove()
-            )
-            await state.finish()
-            return
-
-        sheet_name, operators, error = extract_fio_and_links(message.text)
-        
-        if error:
-            await bot.send_message(
-                chat_id=user_id,
-                text=f"{error}\n\n<b>Пожалуйста, отправьте корректную ссылку на таблицу.</b>",
-                parse_mode="HTML",
-                reply_markup=get_cancel_keyboard()
-            )
-            return
-
-        async with state.proxy() as data:
-            data['table_url'] = message.text
-            data['operators'] = operators
-            data['sheet_name'] = sheet_name
-            if is_admin_changing or user[3] == 'sv':
-                data.setdefault('sv_id', user_id)
-
-        message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
-        for op in operators:
-            if op['link']:
-                message_text += f"👤 {op['name']} → <a href='{op['link']}'>Ссылка</a>\n"
-            else:
-                message_text += f"👤 {op['name']} → Ссылка отсутствует\n"
-        message_text += "\n<b>Это все ваши операторы?</b>"
-
-        await bot.send_message(
-            chat_id=user_id,
-            text=message_text,
-            parse_mode="HTML",
-            reply_markup=get_verify_keyboard(),
-            disable_web_page_preview=True
-        )
-        await sv.verify_table.set()
-        await message.delete()
-    except Exception as e:
-        logging.error(f"Ошибка в tableName: {e}")
-        await bot.send_message(
-            chat_id=message.from_user.id,
-            text="Произошла ошибка при обработке таблицы. Попробуйте снова или свяжитесь с администратором.",
-            parse_mode="HTML",
-            reply_markup=get_cancel_keyboard()
-        )
-
-@dp.callback_query_handler(state=sv.verify_table)
-async def verify_table(callback: types.CallbackQuery, state: FSMContext):
-    async with state.proxy() as data:
-        table_url = data.get('table_url')
-        sv_id = data.get('sv_id')
-        operators = data.get('operators')
-        sheet_name = data.get('sheet_name')
-    
-    user = db.get_user(telegram_id=sv_id)
-    if not user:
-        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
-        await state.finish()
-        return
-    
-    if callback.data == "verify_yes":
-        async with state.proxy() as data:
-            data['operators'] = operators
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text="Выберите направление для операторов:",
-            reply_markup=get_direction_keyboard()
-        )
-        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-        await sv.select_direction.set()
-    elif callback.data == "verify_no":
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text=f'<b>Отправьте корректную таблицу ОКК для {user[2]}🖊</b>',
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-        await sv.crtable.set()
-
-@dp.callback_query_handler(state=sv.select_direction)
-async def select_direction(callback: types.CallbackQuery, state: FSMContext):
-    async with state.proxy() as data:
-        table_url = data.get('table_url')
-        sv_id = data.get('sv_id')
-        operators = data.get('operators')
-    
-    # Извлекаем direction_id из callback_data
-    direction_id = None
-    if callback.data.startswith("dir_"):
-        try:
-            direction_id = int(callback.data.replace("dir_", ""))
-        except ValueError:
-            await bot.answer_callback_query(callback.id, text="Ошибка: Неверный формат направления")
-            return
-    
-    # Проверяем, существует ли направление
-    direction = next((d for d in db.get_directions() if d['id'] == direction_id), None)
-    if not direction:
-        await bot.answer_callback_query(callback.id, text="Ошибка: Направление не найдено")
-        await state.finish()
-        return
-    
-    # Проверяем существование супервайзера
-    user = db.get_user(telegram_id=sv_id)
-    if not user:
-        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
-        await state.finish()
-        return
-    
-    # Обновляем таблицу оценок супервайзера
-    db.update_user_table(user[0], scores_table_url=table_url)
-    
-    # Создаём/обновляем операторов с direction_id
-    for op in operators:
-        db.create_user(
-            telegram_id=None,
-            name=op['name'],
-            role='operator',
-            direction_id=direction_id,  # Используем direction_id вместо direction
-            supervisor_id=user[0],
-            scores_table_url=op['link'] if op['link'] else None
-        )
-    
-    # Отправляем сообщение об успехе
-    await bot.send_message(
-        chat_id=callback.from_user.id,
-        text=f"""<b>Таблица оценок сохранена, операторы добавлены/обновлены с направлением "{direction['name']}"✅</b>""",
-        parse_mode='HTML',
-        reply_markup=get_sv_keyboard()
-    )
-    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-    await state.finish()
-
-
-
 @dp.message_handler(regexp='Добавить таблицу часов📊')
 async def add_hours_table(message: types.Message, state: FSMContext):
     user = db.get_user(telegram_id=message.from_user.id)
@@ -2424,20 +2386,129 @@ async def save_hours_table(message: types.Message, state: FSMContext):
     user = db.get_user(telegram_id=message.from_user.id)
     if user and user[3] == 'sv':
         try:
-            db.update_user_table(user[0], hours_table_url=message.text)
+            sheet_name, operators, error = extract_fio_and_links(message.text)
+            if error:
+                await bot.send_message(
+                    chat_id=message.from_user.id,
+                    text=f"{error}\n\n<b>Пожалуйста, отправьте корректную ссылку на таблицу.</b>",
+                    parse_mode="HTML",
+                    reply_markup=get_cancel_keyboard()
+                )
+                return
+
+            async with state.proxy() as data:
+                data['hours_table_url'] = message.text
+                data['operators'] = operators
+                data['sheet_name'] = sheet_name
+                data['sv_id'] = user[0]
+
+            message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
+            for op in operators:
+                if op['link']:
+                    message_text += f"👤 {op['name']} → <a href='{op['link']}'>Ссылка</a>\n"
+                else:
+                    message_text += f"👤 {op['name']} → Ссылка отсутствует\n"
+            message_text += "\n<b>Это все ваши операторы?</b>"
+
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text="<b>Таблица часов успешно сохранена!</b>",
-                parse_mode='HTML',
-                reply_markup=get_sv_keyboard()
+                text=message_text,
+                parse_mode="HTML",
+                reply_markup=get_verify_keyboard(),
+                disable_web_page_preview=True
             )
+            await state.set_state("verify_hours_table")
+            await message.delete()
         except Exception as e:
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text=f"<b>Ошибка при сохранении таблицы: {str(e)}</b>",
+                text=f"<b>Ошибка при обработке таблицы: {str(e)}</b>",
                 parse_mode='HTML'
             )
+            await state.finish()
+
+@dp.callback_query_handler(state="verify_hours_table")
+async def verify_hours_table(callback: types.CallbackQuery, state: FSMContext):
+    async with state.proxy() as data:
+        hours_table_url = data.get('hours_table_url')
+        sv_id = data.get('sv_id')
+        operators = data.get('operators')
+        sheet_name = data.get('sheet_name')
+
+    user = db.get_user(id=sv_id)
+    if not user:
+        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
         await state.finish()
+        return
+
+    if callback.data == "verify_yes":
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text="Выберите направление для операторов:",
+            reply_markup=get_direction_keyboard()
+        )
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+        await state.set_state("select_hours_direction")
+    elif callback.data == "verify_no":
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text=f'<b>Отправьте корректную таблицу часов для {user[2]}🖊</b>',
+            parse_mode='HTML',
+            reply_markup=get_cancel_keyboard()
+        )
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+        await state.set_state("waiting_for_hours_table")
+
+@dp.callback_query_handler(state="select_hours_direction")
+async def select_hours_direction(callback: types.CallbackQuery, state: FSMContext):
+    async with state.proxy() as data:
+        hours_table_url = data.get('hours_table_url')
+        sv_id = data.get('sv_id')
+        operators = data.get('operators')
+
+    # Извлекаем direction_id из callback_data
+    direction_id = None
+    if callback.data.startswith("dir_"):
+        try:
+            direction_id = int(callback.data.replace("dir_", ""))
+        except ValueError:
+            await bot.answer_callback_query(callback.id, text="Ошибка: Неверный формат направления")
+            return
+
+    direction = next((d for d in db.get_directions() if d['id'] == direction_id), None)
+    if not direction:
+        await bot.answer_callback_query(callback.id, text="Ошибка: Направление не найдено")
+        await state.finish()
+        return
+
+    user = db.get_user(id=sv_id)
+    if not user:
+        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
+        await state.finish()
+        return
+
+    # Обновляем таблицу часов супервайзера
+    db.update_user_table(user[0], hours_table_url=hours_table_url)
+
+    # Создаём/обновляем операторов с direction_id
+    for op in operators:
+        db.create_user(
+            telegram_id=None,
+            name=op['name'],
+            role='operator',
+            direction_id=direction_id,
+            supervisor_id=user[0],
+            hours_table_url=op['link'] if op['link'] else None
+        )
+
+    await bot.send_message(
+        chat_id=callback.from_user.id,
+        text=f"""<b>Таблица часов сохранена, операторы добавлены/обновлены с направлением "{direction['name']}"✅</b>""",
+        parse_mode='HTML',
+        reply_markup=get_sv_keyboard()
+    )
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+    await state.finish()
 
 
 @dp.message_handler(regexp='Доступ🔑')
