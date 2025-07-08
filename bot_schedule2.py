@@ -483,6 +483,27 @@ def dispute_call_evaluation():
         if not call:
             return jsonify({"error": "Call evaluation not found"}), 404
 
+        # --- NEW: Try to get audio signed URL ---
+        audio_url = None
+        if call.get('audio_path'):
+            try:
+                gcs_client = get_gcs_client()
+                path_parts = call['audio_path'].split('/', 1)
+                if len(path_parts) == 2:
+                    bucket_name, blob_path = path_parts
+                    bucket = gcs_client.bucket(bucket_name)
+                    blob = bucket.blob(blob_path)
+                    if blob.exists():
+                        audio_url = blob.generate_signed_url(
+                            version="v4",
+                            expiration=timedelta(minutes=15),
+                            method="GET",
+                            response_type='audio/mpeg'
+                        )
+            except Exception as e:
+                logging.error(f"Error generating signed audio URL for dispute: {e}")
+        # --- END NEW ---
+
         # Сообщение для супервайзера
         supervisor_message = (
             f"⚠️ <b>Запрос на пересмотр оценки</b>\n\n"
@@ -509,33 +530,42 @@ def dispute_call_evaluation():
         )
 
         telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-        
+        telegram_audio_url = f"https://api.telegram.org/bot{API_TOKEN}/sendAudio"
+
+        # --- NEW: Send audio if available ---
+        def send_telegram_message(chat_id, text, audio_url=None):
+            if audio_url:
+                payload = {
+                    "chat_id": chat_id,
+                    "audio": audio_url,
+                    "caption": text,
+                    "parse_mode": "HTML"
+                }
+                resp = requests.post(telegram_audio_url, json=payload, timeout=10)
+            else:
+                payload = {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": "HTML"
+                }
+                resp = requests.post(telegram_url, json=payload, timeout=10)
+            return resp
+
         # Отправка супервайзеру
-        supervisor_payload = {
-            "chat_id": supervisor[1],
-            "text": supervisor_message,
-            "parse_mode": "HTML"
-        }
-        supervisor_response = requests.post(telegram_url, json=supervisor_payload, timeout=10)
-        
+        supervisor_response = send_telegram_message(supervisor[1], supervisor_message, audio_url)
         if supervisor_response.status_code != 200:
             error_detail = supervisor_response.json().get('description', 'Unknown error')
             logging.error(f"Telegram API error (supervisor): {error_detail}")
             return jsonify({"error": f"Failed to send dispute message to supervisor: {error_detail}"}), 500
 
         # Отправка админу
-        admin_payload = {
-            "chat_id": admin,
-            "text": admin_message,
-            "parse_mode": "HTML"
-        }
-        admin_response = requests.post(telegram_url, json=admin_payload, timeout=10)
-        
+        admin_response = send_telegram_message(admin, admin_message, audio_url)
         if admin_response.status_code != 200:
             error_detail = admin_response.json().get('description', 'Unknown error')
             logging.error(f"Telegram API error (admin): {error_detail}")
             return jsonify({"error": f"Failed to send dispute message to admin: {error_detail}"}), 500
-            
+        # --- END NEW ---
+
         return jsonify({"status": "success", "message": "Dispute sent to supervisor and admin"})
     except Exception as e:
         logging.error(f"Error processing dispute: {e}")
