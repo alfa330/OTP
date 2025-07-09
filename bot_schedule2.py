@@ -323,7 +323,7 @@ def get_user_hours():
         hours_summary = db.get_hours_summary(operator_id=operator_id, month=month)
         
         if not hours_summary:
-            return jsonify({"error": "No hours data found for this operator"}), 404
+            return jsonify({"status": "success", "hours": None}), 200
 
         # Assuming get_hours_summary returns a list, take the first item
         hours_data = hours_summary[0]
