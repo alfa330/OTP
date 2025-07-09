@@ -891,6 +891,8 @@ class Database:
                 c.is_draft,
                 c.is_correction,
                 TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI')
+                c.scores,
+                c.criterion_comments
             FROM calls c
             JOIN latest_calls lc ON c.id = lc.id AND c.created_at = lc.latest_date
             WHERE c.operator_id = %s
