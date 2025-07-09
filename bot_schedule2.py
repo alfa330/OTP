@@ -608,30 +608,12 @@ def save_directions():
         # Получаем обновлённый список направлений с id
         updated_directions = db.get_directions()
 
-        # Notify all operators with updated directions
-        operators = db.get_all_operators()
-        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-        for operator in operators:
-            if operator[4] and operator[1]:  # supervisor_id and telegram_id
-                supervisor = db.get_user(id=operator[4])
-                direction_name = next((d['name'] for d in updated_directions if d['id'] == operator[2]), None)
-                if direction_name:
-                    message = (
-                        f"ℹ️ <b>Обновление направления</b>\n\n"
-                        f"Ваше направление: <b>{direction_name}</b>\n"
-                        f"Обновлено администратором. Пожалуйста, проверьте настройки в дашборде."
-                    )
-                    payload = {
-                        "chat_id": operator[1],
-                        "text": message,
-                        "parse_mode": "HTML"
-                    }
-                    response = requests.post(telegram_url, json=payload, timeout=10)
-                    if response.status_code != 200:
-                        error_detail = response.json().get('description', 'Unknown error')
-                        logging.error(f"Telegram API error for operator {operator[2]}: {error_detail}")
+        return jsonify({
+            "status": "success",
+            "message": "Directions saved successfully",
+            "directions": updated_directions
+        }), 200
 
-        return jsonify({"status": "success", "message": "Directions saved successfully", "directions": updated_directions}), 200
     except Exception as e:
         logging.error(f"Error saving directions: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
