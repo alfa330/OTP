@@ -1186,6 +1186,12 @@
                 }
             };
 
+            const safeBtoa = (str) => {
+            return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (match, p1) => {
+                return String.fromCharCode('0x' + p1);
+            }));
+            };
+
             const handleChangePassword = async () => {
                 if (!passwordData.new_password || !passwordData.confirm_password) {
                     setError('Please fill in both password fields');
@@ -2241,9 +2247,9 @@
                                                     operatorName: op.name,
                                                     timestamp: Date.now()
                                                     };
-                                                    const token = btoa(JSON.stringify(tokenData));
+                                                    const token = safeBtoa(JSON.stringify(tokenData));
                                                     sessionStorage.setItem('callEvalAuth', token);
-                                                    window.open('https://alfa330.github.io/call_evalution/', '_blank');
+                                                    window.open('https://alfa330.github.io/call_evalution/', '_blank',  'noopener,noreferrer');
                                                 }}
                                                 className="bg-blue-500 text-white px-3 py-1 rounded text-sm hover:bg-blue-600"
                                                 title="Listen to operator calls"
