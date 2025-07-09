@@ -681,6 +681,7 @@ def get_sv_data():
         user_id = int(user_id)
         
         user = db.get_user(id=user_id)
+        logging.info(f"Fetching SV data for user_id: {user_id}, user: {user}")
         if not user or (isinstance(user, dict) and user.get('role', user[3]) not in ['sv', 'operator']):
             return jsonify({"error": "User not found or invalid role"}), 404
         
@@ -702,7 +703,7 @@ def get_sv_data():
             
             for operator in operators:
                 # Для словаря
-                logging.debug(f"Processing operator: {operator}")
+                logging.info(f"Processing operator: {operator}")
                 operator_id = operator['id'] if isinstance(operator, dict) else operator[0]
                 operator_name = operator['name'] if isinstance(operator, dict) else operator[1]
                 direction = operator['direction'] if isinstance(operator, dict) else operator[2]
