@@ -646,7 +646,7 @@
             const [isLoading, setIsLoading] = useState(false);
             const [loadingCallId, setLoadingCallId] = useState(null);
             const MAX_EVALUATIONS = 20;
-
+            
             const getLast12Months = () => {
                 const months = [];
                 const currentDate = new Date();
@@ -662,6 +662,37 @@
             };
 
             const monthOptions = getLast12Months();
+
+            useEffect(() => {
+                // Проверяем токен из URL при загрузке
+                const params = new URLSearchParams(window.location.search);
+                const token = params.get('token');
+                
+                if (token) {
+                try {
+                    const decodedToken = decodeURIComponent(token);
+                    const tokenData = JSON.parse(safeAtob(decodedToken));
+                    
+                    // Проверяем срок действия токена (5 минут)
+                    if (Date.now() - tokenData.timestamp < 300000) {
+                    setApiKey(tokenData.apiKey);
+                    setUserId(tokenData.userId);
+                    setUserRole('sv');
+                    setUserName('Supervisor');
+                    setSelectedOperator({
+                        id: tokenData.operatorId,
+                        name: tokenData.operatorName
+                    });
+                    setShowLoginModal(false);
+                    
+                    // Удаляем токен из URL
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                    }
+                } catch (e) {
+                    console.error('Token decoding error:', e);
+                }
+                }
+            }, []);
 
             useEffect(() => {
                 if (!apiKey || !userId) return;
