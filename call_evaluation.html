@@ -29,10 +29,14 @@
 <body class="bg-gray-100">
     <div id="root"></div>
     <script type="text/babel">
-        const { useState, useEffect } = React;
+        const { useState, useEffect, useRef } = React;
         const API_BASE_URL = 'https://otp-wif3.onrender.com';
-
+        const audioUrlCache = {};
         const getAudioUrlWithAuth = async (evaluationId, apiKey, userId) => {
+            if (audioUrlCache[evaluationId]) {
+                return audioUrlCache[evaluationId];
+            }
+        
             try {
                 const response = await fetch(`${API_BASE_URL}/api/audio/${evaluationId}`, {
                     method: 'GET',
@@ -46,6 +50,7 @@
         
                 const data = await response.json();
                 if (data && data.url) {
+                    audioUrlCache[evaluationId] = data.url;
                     return data.url;
                 } else {
                     console.error("No signed URL returned in response:", data);
@@ -57,10 +62,96 @@
             }
         };
 
+        const SemicircleProgress = ({ value, max, label, color }) => {
+            const canvasRef = useRef(null);
+        
+            useEffect(() => {
+                const canvas = canvasRef.current;
+                const ctx = canvas.getContext('2d');
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height;
+                const radius = canvas.width / 2 - 10;
+                const startAngle = Math.PI;
+                const progress = value / max;
+                const endAngle = startAngle + (progress * Math.PI);
+        
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+                // Background arc
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, radius, startAngle, startAngle + Math.PI);
+                ctx.lineWidth = 20;
+                ctx.strokeStyle = '#e5e7eb';
+                ctx.stroke();
+        
+                // Progress arc
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, radius, startAngle, endAngle);
+                ctx.strokeStyle = color;
+                ctx.stroke();
+        
+                // Text
+                ctx.font = '16px Arial';
+                ctx.fillStyle = '#1f2937';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                // Format value to 2 decimal places for average score
+                const displayValue = label === 'Avg Score' ? value.toFixed(2) : value;
+                ctx.fillText(`${displayValue}/${max}`, centerX, centerY - 20);
+                ctx.fillText(label, centerX, centerY + 20);
+            }, [value, max, label, color]);
+        
+            return (
+                <canvas ref={canvasRef} width={150} height={100} className="inline-block" />
+            );
+        };
+
         const LoginModal = ({ isOpen, onClose, onLogin }) => {
             const [login, setLogin] = useState('');
             const [password, setPassword] = useState('');
             const [error, setError] = useState('');
+            const [isCheckingToken, setIsCheckingToken] = useState(true);
+
+            useEffect(() => {
+                // Проверяем токен при монтировании компонента
+                const checkAuthToken = async () => {
+                    const token = sessionStorage.getItem('callEvalAuth');
+                    if (token) {
+                        try {
+                            const tokenData = JSON.parse(atob(token));
+                            
+                            // Проверяем срок действия токена (5 минут)
+                            if (Date.now() - tokenData.timestamp < 300000) {
+                                // Автоматически логиним пользователя
+                                onLogin(tokenData.apiKey, tokenData.userId, 'sv', 'Supervisor');
+                                
+                                // Если есть данные оператора, передаем их
+                                if (tokenData.operatorId) {
+                                    // Можно сохранить в контекст или передать выше
+                                    console.log('Operator data:', {
+                                        id: tokenData.operatorId,
+                                        name: tokenData.operatorName
+                                    });
+                                }
+                                
+                                // Удаляем токен после использования
+                                sessionStorage.removeItem('callEvalAuth');
+                                onClose();
+                                return;
+                            }
+                        } catch (e) {
+                            console.error('Token decoding error:', e);
+                        } finally {
+                            setIsCheckingToken(false);
+                        }
+                    }
+                    setIsCheckingToken(false);
+                };
+
+                if (isOpen) {
+                    checkAuthToken();
+                }
+            }, [isOpen, onLogin, onClose]);
 
             const handleSubmit = async (e) => {
                 e.preventDefault();
@@ -84,6 +175,19 @@
             };
 
             if (!isOpen) return null;
+
+            if (isCheckingToken) {
+                return (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md text-center">
+                            <h2 className="text-xl font-semibold mb-4">Checking authorization...</h2>
+                            <div className="flex justify-center">
+                                <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
 
             return (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -554,72 +658,105 @@
             const monthOptions = getLast12Months();
 
             useEffect(() => {
-                const fetchData = async () => {
-                    if (!apiKey || !userId) return;
-                    setIsLoading(true);
+                if (!apiKey || !userId) return;
+                setIsLoading(true);
+                const fetchDirections = async () => {
                     try {
-                        const directionsResponse = await fetch(`${API_BASE_URL}/api/admin/directions`, {
+                        const response = await fetch(`${API_BASE_URL}/api/admin/directions`, {
                             headers: {
                                 'X-API-Key': apiKey,
                                 'X-User-Id': userId
                             }
                         });
-                        const directionsData = await directionsResponse.json();
-                        if (directionsData.status === 'success') {
-                            setDirections(directionsData.directions);
-                        }
-
-                        const operatorsResponse = await fetch(`${API_BASE_URL}/api/sv/data?id=${userId}`, {
-                            headers: {
-                                'X-API-Key': apiKey,
-                                'X-User-Id': userId
-                            }
-                        });
-                        const operatorsData = await operatorsResponse.json();
-                        if (operatorsData.status === 'success') {
-                            setOperators(operatorsData.operators);
-                        }
-
-                        if (selectedOperator) {
-                            const evaluationsResponse = await fetch(`${API_BASE_URL}/api/call_evaluations?operator_id=${selectedOperator.id}`, {
-                                headers: {
-                                    'X-API-Key': apiKey,
-                                    'X-User-Id': userId
-                                }
-                            });
-                            const evaluationsData = await evaluationsResponse.json();
-                            if (evaluationsData.status === 'success') {
-                                const updatedCalls = await Promise.all(evaluationsData.evaluations.map(async (evaluation) => {
-                                    let audioUrl = null;
-                                    return {
-                                        id: evaluation.id,
-                                        fileName: `Call ${evaluation.phone_number}`,
-                                        totalScore: evaluation.score.toFixed(2),
-                                        date: evaluation.evaluation_date,
-                                        phoneNumber: evaluation.phone_number,
-                                        combinedComment: evaluation.comment,
-                                        selectedDirection: selectedOperator.direction,
-                                        directions: directionsData.directions.filter(d => d.name === selectedOperator.direction),
-                                        scores: evaluation.scores || [],
-                                        criterionComments: evaluation.criterion_comments || [],
-                                        audioUrl,
-                                        isDraft: evaluation.is_draft,
-                                        assignedMonth: evaluation.month
-                                    };
-                                }));
-                                setCalls(updatedCalls);
-                            }
-                        } else {
-                            setCalls([]);
+                        const data = await response.json();
+                        if (data.status === 'success') {
+                            setDirections(data.directions);
                         }
                     } catch (err) {
-                        console.error('Error fetching data:', err);
+                        console.error('Error fetching directions:', err);
+                    }
+                };
+        
+                const fetchOperators = async () => {
+                    try {
+                        const response = await fetch(`${API_BASE_URL}/api/sv/data?id=${userId}`, {
+                            headers: {
+                                'X-API-Key': apiKey,
+                                'X-User-Id': userId
+                            }
+                        });
+                        const data = await response.json();
+                        if (data.status === 'success') {
+                            setOperators(data.operators);
+                        }
+                    } catch (err) {
+                        console.error('Error fetching operators:', err);
+                    }
+                };
+        
+                // Выполняем оба запроса параллельно
+                Promise.all([fetchDirections(), fetchOperators()])
+                    .finally(() => setIsLoading(false));
+            }, [apiKey, userId]);
+        
+            useEffect(() => {
+                if (!apiKey || !userId || !selectedOperator) {
+                    setCalls([]);
+                    return;
+                }
+        
+                const controller = new AbortController();
+                const signal = controller.signal;
+        
+                const fetchEvaluations = async () => {
+                    setIsLoading(true);
+                    try {
+                        const response = await fetch(`${API_BASE_URL}/api/call_evaluations?operator_id=${selectedOperator.id}`, {
+                            headers: {
+                                'X-API-Key': apiKey,
+                                'X-User-Id': userId
+                            },
+                            signal
+                        });
+                        const data = await response.json();
+                        if (data.status === 'success') {
+                            // Загружаем аудио только для первых нескольких элементов для оптимизации
+                            const limitedEvaluations = data.evaluations.slice(0, 20);
+                            const updatedCalls = await Promise.all(limitedEvaluations.map(async (evaluation) => {
+                                let audioUrl = null;
+                                return {
+                                    id: evaluation.id,
+                                    fileName: `Call ${evaluation.phone_number}`,
+                                    totalScore: evaluation.score.toFixed(2),
+                                    date: evaluation.evaluation_date,
+                                    phoneNumber: evaluation.phone_number,
+                                    combinedComment: evaluation.comment,
+                                    selectedDirection: selectedOperator.direction,
+                                    directions: directions.filter(d => d.name === selectedOperator.direction),
+                                    scores: evaluation.scores || [],
+                                    criterionComments: evaluation.criterion_comments || [],
+                                    audioUrl,
+                                    isDraft: evaluation.is_draft,
+                                    assignedMonth: evaluation.month
+                                };
+                            }));
+                            setCalls(updatedCalls);
+                        }
+                    } catch (err) {
+                        if (err.name !== 'AbortError') {
+                            console.error('Error fetching evaluations:', err);
+                        }
                     } finally {
                         setIsLoading(false);
                     }
                 };
-                fetchData();
-            }, [apiKey, userId, selectedOperator]);
+        
+                fetchEvaluations();
+        
+                return () => {
+                    controller.abort();
+                };
+            }, [apiKey, userId, selectedOperator, directions]);
 
             const handleLogin = (key, id, role, name) => {
                 setApiKey(key);
@@ -728,11 +865,17 @@
 
             const callsByMonth = calls.filter(call => call.assignedMonth === selectedMonth);
             const isMaxEvaluationsReached = callsByMonth.filter(c => !c.isDraft).length >= MAX_EVALUATIONS;
+            const evaluationCount = callsByMonth.filter(c => !c.isDraft).length;
+            const averageScore = callsByMonth.length > 0 
+                ? callsByMonth
+                    .filter(c => !c.isDraft)
+                    .reduce((sum, call) => sum + parseFloat(call.totalScore), 0) / evaluationCount || 0
+                : 0;
 
             return (
                 <div className="min-h-screen bg-gray-100 p-6 max-w-[1152px] mx-auto">
                     <div className="flex justify-between items-center mb-6">
-                        <h1 className="text-3xl font-bold">Supervisor Call earthly Evaluation</h1>
+                        <h1 className="text-3xl font-bold">Supervisor Call Evaluation</h1>
                         <div className="flex space-x-2">
                             {userRole === 'admin' && (
                                 <button
@@ -784,6 +927,22 @@
                                 </div>
                             </div>
                         </div>
+                        {selectedOperator && (
+                            <div className="flex justify-center space-x-8 mb-6">
+                                <SemicircleProgress
+                                    value={evaluationCount}
+                                    max={MAX_EVALUATIONS}
+                                    label="Evaluations"
+                                    color="#3b82f6"
+                                />
+                                <SemicircleProgress
+                                    value={parseFloat(averageScore.toFixed(2))}
+                                    max={100}
+                                    label="Avg Score"
+                                    color="#10b981"
+                                />
+                            </div>
+                        )}
                         {callsByMonth.length === 0 ? isLoading ? (
                             <div className="text-center py-4">
                                 <div className="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
