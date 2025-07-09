@@ -12,7 +12,7 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.dispatcher import FSMContext
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from functools import wraps
 from openpyxl import load_workbook
@@ -356,60 +356,14 @@ def get_call_evaluations():
         operator_id = int(operator_id)
         evaluations = db.get_call_evaluations(operator_id)
         
-        # Get operator's direction to fetch criteria
+        # Получаем информацию о супервайзере для dispute button
         operator = db.get_user(id=operator_id)
-        if not operator:
-            return jsonify({"error": "Operator not found"}), 404
-        direction = db.get_directions()
-        logging.info(f"Directions: {direction}")
-        logging.info(f"Oper direction id: {operator[4]}")
-        direction_criteria = next((d['criteria'] for d in direction if d['name'] == operator[4]), [])
-        
-        # Log direction_criteria for debugging
-        logging.info(f"Direction criteria: {direction_criteria}")
+        supervisor = db.get_user(id=operator[6]) if operator and operator[6] else None
 
-        # Parse comments to extract scores and criterion comments
-        enhanced_evaluations = []
-        for eval in evaluations:
-            criterion_comments = [''] * len(direction_criteria)  # Initialize with empty strings
-            scores = ['Correct'] * len(direction_criteria)  # Initialize with 'Correct'
-            if eval['comment']:
-                comment_parts = eval['comment'].split('; ')
-                for part in comment_parts:
-                    if ': ' in part:
-                        try:
-                            crit_name, comment = part.split(': ', 1)
-                            # Normalize criterion name for comparison (e.g., strip whitespace, case-insensitive)
-                            crit_name = crit_name.strip()
-                            for idx, crit in enumerate(direction_criteria):
-                                crit_name_db = crit['name'].strip()
-                                if crit_name.lower() == crit_name_db.lower():  # Case-insensitive comparison
-                                    criterion_comments[idx] = comment
-                                    scores[idx] = 'Error'
-                                    break
-                            else:
-                                logging.warning(f"Criterion '{crit_name}' not found in direction_criteria")
-                        except ValueError as e:
-                            logging.warning(f"Skipping malformed comment part: {part}, Error: {e}")
-                            continue
-                    else:
-                        logging.warning(f"Skipping invalid comment part: {part}")
-
-            enhanced_evaluations.append({
-                **eval,
-                'scores': scores,
-                'criterion_comments': criterion_comments
-            })
-
-        # Get supervisor info for dispute button
-        supervisor = db.get_user(id=operator[6]) if operator[6] else None
-        
-        # Log the final enhanced_evaluations for debugging
-        logging.info(f"Enhanced evaluations: {enhanced_evaluations}")
-        
+        # Просто возвращаем массивы из базы, не пересоздаём их из комментариев
         return jsonify({
             "status": "success", 
-            "evaluations": enhanced_evaluations,
+            "evaluations": evaluations,
             "supervisor": {
                 "id": supervisor[0] if supervisor else None,
                 "name": supervisor[2] if supervisor else None
@@ -1011,7 +965,8 @@ def receive_call_evaluation():
         comment = request.form['comment']
         month = request.form['month'] or datetime.now().strftime('%Y-%m')
         is_draft = request.form['is_draft'].lower() == 'true'
-
+        scores = json.loads(request.form.get('scores', '[]'))
+        criterion_comments = json.loads(request.form.get('criterion_comments', '[]'))
         evaluator = db.get_user(name=evaluator_name)
         operator = db.get_user(name=operator_name)
         if not evaluator or not operator:
@@ -1055,7 +1010,9 @@ def receive_call_evaluation():
             comment=comment,
             month=month,
             audio_path=audio_path,
-            is_draft=is_draft
+            is_draft=is_draft,
+            scores=scores,
+            criterion_comments=criterion_comments
         )
 
         # Send Telegram notification for non-draft evaluations

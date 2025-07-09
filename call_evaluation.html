@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Call Evaluation Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.6/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    keyframes: {
+                        'fade-in': {
+                            '0%': { opacity: '0', transform: 'translateY(10px)' },
+                            '100%': { opacity: '1', transform: 'translateY(0)' }
+                        }
+                    },
+                    animation: {
+                        'fade-in': 'fade-in 0.3s ease-out'
+                    }
+                }
+            }
+        };
+    </script>
+</head>
+<body class="bg-gray-100">
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        const API_BASE_URL = 'https://otp-wif3.onrender.com';
+
+        const getAudioUrlWithAuth = async (evaluationId, apiKey, userId) => {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/audio/${evaluationId}`, {
+                    method: 'GET',
+                    headers: {
+                        'X-API-Key': apiKey,
+                        'X-User-Id': userId
+                    }
+                });
+        
+                if (!response.ok) throw new Error(`Failed to fetch audio: ${response.status}`);
+        
+                const data = await response.json();
+                if (data && data.url) {
+                    return data.url;
+                } else {
+                    console.error("No signed URL returned in response:", data);
+                    return null;
+                }
+            } catch (error) {
+                console.error('Audio fetch error:', error);
+                return null;
+            }
+        };
+
+        const LoginModal = ({ isOpen, onClose, onLogin }) => {
+            const [login, setLogin] = useState('');
+            const [password, setPassword] = useState('');
+            const [error, setError] = useState('');
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/login`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ login, password })
+                    });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        onLogin(data.apiKey, data.id, data.role, data.name);
+                        setError('');
+                        onClose();
+                    } else {
+                        setError(data.error || 'Invalid credentials');
+                    }
+                } catch (err) {
+                    setError('Failed to login: ' + err.message);
+                }
+            };
+
+            if (!isOpen) return null;
+
+            return (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                        <h2 className="text-xl font-semibold mb-4">Login</h2>
+                        {error && <p className="text-red-500 mb-4">{error}</p>}
+                        <div className="space-y-4">
+                            <input
+                                type="text"
+                                value={login}
+                                onChange={(e) => setLogin(e.target.value)}
+                                placeholder="Login"
+                                className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            />
+                            <input
+                                type="password"
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                placeholder="Password"
+                                className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            />
+                            <div className="flex justify-between">
+                                <button
+                                    onClick={handleSubmit}
+                                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                                >
+                                    Login
+                                </button>
+                                <button
+                                    onClick={onClose}
+                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, selectedMonth, apiKey, userId, userName, existingEvaluation }) => {
+            const [callFile, setCallFile] = useState(null);
+            const [audioUrl, setAudioUrl] = useState(null);
+            const [audioError, setAudioError] = useState(null);
+            const [scores, setScores] = useState([]);
+            const [criterionComments, setCriterionComments] = useState([]);
+            const [phoneNumber, setPhoneNumber] = useState('7');
+            const [phoneError, setPhoneError] = useState('');
+            const [shownCriterionIndex, setShownCriterionIndex] = useState(null);
+            const [assignedMonth, setAssignedMonth] = useState(selectedMonth);
+            const [isDraft, setIsDraft] = useState(false);
+            const [isSubmitting, setIsSubmitting] = useState(false);
+
+            useEffect(() => {
+                if (isOpen) {
+                    if (existingEvaluation) {
+                        setScores(existingEvaluation.scores || []);
+                        setCriterionComments(existingEvaluation.criterionComments || []);
+                        setPhoneNumber(existingEvaluation.phoneNumber || '7');
+                        setAssignedMonth(existingEvaluation.assignedMonth || selectedMonth);
+                        setIsDraft(existingEvaluation.isDraft || false);
+                        setAudioUrl(existingEvaluation.audioUrl || null);
+                        setPhoneError('');
+                    } else {
+                        setScores(directions[0]?.criteria.map(() => 'Correct') || []);
+                        setCriterionComments(directions[0]?.criteria.map(() => '') || []);
+                        setCallFile(null);
+                        setAudioUrl(null);
+                        setPhoneNumber('7');
+                        setAssignedMonth(selectedMonth);
+                        setIsDraft(false);
+                        setPhoneError('');
+                    }
+                }
+            }, [isOpen, existingEvaluation, directions, selectedMonth]);
+
+            useEffect(() => {
+                const loadAudio = async () => {
+                    if (existingEvaluation?.id && directions[0]?.hasFileUpload && apiKey && userId) {
+                        setAudioError(null);
+                        const url = await getAudioUrlWithAuth(existingEvaluation.id, apiKey, userId);
+                        if (url) {
+                            setAudioUrl(url);
+                        } else {
+                            setAudioError('Failed to load audio');
+                        }
+                    }
+                };
+                loadAudio();
+            }, [existingEvaluation, apiKey, userId, directions]);
+
+            const handleFileChange = (e) => {
+                const file = e.target.files[0];
+                setCallFile(file);
+                const newAudioUrl = file ? URL.createObjectURL(file) : null;
+                setAudioUrl(newAudioUrl);
+                setAudioError(null);
+            };
+
+            const handleScoreChange = (index, value) => {
+                const newScores = [...scores];
+                newScores[index] = value;
+                setScores(newScores);
+                if (value !== 'Error') {
+                    const newComments = [...criterionComments];
+                    newComments[index] = '';
+                    setCriterionComments(newComments);
+                }
+            };
+
+            const handleCommentChange = (index, value) => {
+                const newComments = [...criterionComments];
+                newComments[index] = value;
+                setCriterionComments(newComments);
+            };
+
+            const handlePhoneChange = (e) => {
+                let value = e.target.value;
+                if (!value.startsWith('7')) {
+                    value = '7' + value.replace(/^7/, '');
+                }
+                value = value.replace(/[^0-9]/g, '');
+                if (value.length > 11) {
+                    value = value.slice(0, 11);
+                }
+                setPhoneNumber(value);
+
+                if (value.length === 11 && value.startsWith('7')) {
+                    setPhoneError('');
+                } else if (value.length < 11) {
+                    setPhoneError('Phone number must be exactly 11 digits');
+                } else if (!value.startsWith('7')) {
+                    setPhoneError('Phone number must start with 7');
+                }
+            };
+
+            const showCriterionValue = (index) => {
+                setShownCriterionIndex(shownCriterionIndex === index ? null : index);
+            };
+
+            const isSubmitDisabled = directions.length === 0 ||
+                directions[0]?.criteria.length === 0 ||
+                phoneNumber.length !== 11 ||
+                !phoneNumber.startsWith('7') ||
+                (directions[0]?.hasFileUpload && !callFile && !audioUrl) ||
+                scores.some((score, index) => score === 'Error' && !criterionComments[index].trim());
+
+            const handleSubmit = async (saveAsDraft = false) => {
+                setIsSubmitting(true);
+                if (isSubmitDisabled && !saveAsDraft) return;
+                const criteria = directions[0]?.criteria || [];
+                const hasCriticalError = criteria.some((criterion, index) => 
+                    criterion.isCritical && scores[index] === 'Error'
+                );
+                const totalScore = hasCriticalError ? 0 : criteria.reduce((sum, criterion, index) => {
+                    return sum + (!criterion.isCritical && (scores[index] === 'Correct' || scores[index] === 'N/A') ? criterion.weight : 0);
+                }, 0);
+                const combinedComment = criterionComments
+                    .map((comment, index) => comment ? `${criteria[index].name}: ${comment}` : '')
+                    .filter(comment => comment)
+                    .join('; ');
+
+                const formData = new FormData();
+                formData.append('evaluator', userName);
+                formData.append('operator', operator.name);
+                formData.append('phone_number', phoneNumber);
+                formData.append('score', totalScore);
+                formData.append('comment', combinedComment);
+                formData.append('month', assignedMonth);
+                formData.append('is_draft', saveAsDraft);
+                formData.append('scores', JSON.stringify(scores));
+                formData.append('criterion_comments', JSON.stringify(criterionComments));
+                if (callFile) {
+                    formData.append('audio_file', callFile);
+                }
+
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/call_evaluation`, {
+                        method: 'POST',
+                        headers: {
+                            'X-API-Key': apiKey,
+                            'X-User-Id': userId
+                        },
+                        body: formData
+                    });
+                    const result = await response.json();
+                    if (result.status === 'success') {
+                        onSubmit({
+                            id: result.evaluation_id,
+                            evaluator: userName,
+                            operator: operator.name,
+                            phoneNumber: phoneNumber,
+                            totalScore: totalScore.toFixed(2),
+                            comment: combinedComment,
+                            selectedDirection: directions[0]?.name,
+                            directions: [{ 
+                                name: directions[0]?.name, 
+                                hasFileUpload: directions[0]?.hasFileUpload, 
+                                criteria 
+                            }],
+                            scores,
+                            criterionComments,
+                            audioUrl: directions[0]?.hasFileUpload ? audioUrl : null,
+                            isDraft: saveAsDraft,
+                            assignedMonth
+                        });
+                        onClose();
+                    } else {
+                        alert('Failed to submit evaluation: ' + result.error);
+                    }
+                } catch (err) {
+                    alert('Failed to submit evaluation: ' + err.message);
+                } finally {
+                    setIsSubmitting(false);
+                }
+            };
+
+            const handleDeleteDraft = async () => {
+                if (!existingEvaluation?.isDraft) return;
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/call_evaluation/${existingEvaluation.id}`, {
+                        method: 'DELETE',
+                        headers: {
+                            'X-API-Key': apiKey,
+                            'X-User-Id': userId
+                        }
+                    });
+                    const result = await response.json();
+                    if (result.status === 'success') {
+                        onSubmit(null);
+                        onClose();
+                    } else {
+                        alert('Failed to delete draft: ' + result.error);
+                    }
+                } catch (err) {
+                    alert('Failed to delete draft: ' + err.message);
+                }
+            };
+
+            if (!isOpen) return null;
+
+            return (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+                        <h2 className="text-xl font-semibold mb-4">
+                            {existingEvaluation?.isDraft ? 'Edit Draft Evaluation' : 'Evaluate Call'} - Operator: {operator?.name}
+                        </h2>
+                        {directions[0]?.hasFileUpload && (
+                            <div className="mb-4">
+                                <label className="block mb-2 font-medium">Upload Call (Required)</label>
+                                <input
+                                    type="file"
+                                    accept="audio/*"
+                                    onChange={handleFileChange}
+                                    className="w-full p-2 border rounded-lg"
+                                />
+                                {audioUrl && (
+                                    <div className="sticky top-0 z-10 bg-white p-2 border-b border-gray-200 mt-4">
+                                        <label className="block mb-2 font-medium">Listen to Call</label>
+                                        <audio controls className="w-full max-w-[400px]">
+                                            <source src={audioUrl} type="audio/mpeg" />
+                                            Your browser does not support the audio element.
+                                        </audio>
+                                    </div>
+                                )}
+                                {audioError && <p className="text-red-500 mt-2">{audioError}</p>}
+                            </div>
+                        )}
+                        <label className="block mb-2 font-medium mt-4">Phone Number</label>
+                        <input
+                            type="text"
+                            value={phoneNumber}
+                            onChange={handlePhoneChange}
+                            placeholder="Enter phone number (starts with 7, 11 digits)"
+                            className={`w-full p-2 border rounded-lg focus:outline-none focus:ring-2 ${
+                                phoneNumber.length === 11 && phoneNumber.startsWith('7') ? 'focus:ring-blue-500 border-gray-300' : 'focus:ring-red-500 border-red-300'
+                            }`}
+                        />
+                        {phoneError && <p className="text-red-500 mt-1 text-sm">{phoneError}</p>}
+                        <label className="block mb-2 font-medium mt-4">Criteria Evaluation</label>
+                        {directions.length === 0 || directions[0]?.criteria.length === 0 ? (
+                            <p className="text-red-500">No criteria defined for this direction. Please set up criteria in the Monitoring Scale.</p>
+                        ) : (
+                            <div className="max-h-80 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100">
+                                <div className="space-y-2">
+                                    {directions[0].criteria.map((criterion, index) => (
+                                        <div key={index} className="bg-white p-3 rounded-md shadow-sm border border-gray-200 animate-fade-in">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <div className="flex items-center space-x-2">
+                                                    <svg
+                                                        className={`w-5 h-5 ${criterion.isCritical ? 'text-red-500' : 'text-green-500'}`}
+                                                        fill="none"
+                                                        stroke="currentColor"
+                                                        viewBox="0 0 24 24"
+                                                        xmlns="http://www.w3.org/2000/svg"
+                                                    >
+                                                        <path
+                                                            strokeLinecap="round"
+                                                            strokeLinejoin="round"
+                                                            strokeWidth="2"
+                                                            d={criterion.isCritical ? 'M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' : 'M5 13l4 4L19 7'}
+                                                        />
+                                                    </svg>
+                                                    <label className="text-sm font-medium text-gray-800">
+                                                        {criterion.name} {criterion.isCritical ? '(Critical)' : `(${criterion.weight}%)`}
+                                                    </label>
+                                                </div>
+                                                <button
+                                                    onClick={() => showCriterionValue(index)}
+                                                    className="text-blue-500 hover:text-blue-700 p-1"
+                                                    title="Show criterion description"
+                                                >
+                                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                    </svg>
+                                                </button>
+                                            </div>
+                                            <div className="flex items-center space-x-2">
+                                                <select
+                                                    value={scores[index] || 'Correct'}
+                                                    onChange={(e) => handleScoreChange(index, e.target.value)}
+                                                    className={`w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                                                        scores[index] === 'Error' ? 'bg-red-100' : 'bg-green-100'
+                                                    }`}
+                                                >
+                                                    <option value="Correct" className="bg-green-100">Correct</option>
+                                                    <option value="N/A" className="bg-green-100">N/A</option>
+                                                    <option value="Error" className="bg-red-100">Error</option>
+                                                </select>
+                                                <svg
+                                                    className={`w-5 h-5 ${scores[index] === 'Error' ? 'text-red-500' : 'text-green-500'}`}
+                                                    fill="none"
+                                                    stroke="currentColor"
+                                                    viewBox="0 0 24 24"
+                                                    xmlns="http://www.w3.org/2000/svg"
+                                                >
+                                                    <path
+                                                        strokeLinecap="round"
+                                                        strokeLinejoin="round"
+                                                        strokeWidth="2"
+                                                        d={scores[index] === 'Error' ? 'M6 18L18 6M6 6l12 12' : 'M5 13l4 4L19 7'}
+                                                    />
+                                                </svg>
+                                            </div>
+                                            {scores[index] === 'Error' && (
+                                                <textarea
+                                                    value={criterionComments[index] || ''}
+                                                    onChange={(e) => handleCommentChange(index, e.target.value)}
+                                                    placeholder={`Comment for ${criterion.name} (required)`}
+                                                    className={`w-full p-2 border rounded-lg mt-2 focus:outline-none focus:ring-2 ${
+                                                        criterionComments[index]?.trim() ? 'border-gray-300 focus:ring-blue-500' : 'border-red-300 focus:ring-red-500'
+                                                    } animate-fade-in`}
+                                                    rows={3}
+                                                />
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                        <p className="mt-4 text-sm font-medium">
+                            Total Score: {
+                                directions[0]?.criteria.some((criterion, index) => 
+                                    criterion.isCritical && scores[index] === 'Error'
+                                ) ? '0/100' : 
+                                `${directions[0]?.criteria.reduce((sum, criterion, index) => {
+                                    return sum + (!criterion.isCritical && (scores[index] === 'Correct' || scores[index] === 'N/A') ? criterion.weight : 0);
+                                }, 0)}/100`
+                            }
+                        </p>
+                        {shownCriterionIndex !== null && (
+                            <div className="fixed top-0 right-0 w-80 h-full bg-white shadow-lg border-l border-gray-200 z-50 p-4 animate-fade-in">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h3 className="text-lg font-semibold">{directions[0]?.criteria[shownCriterionIndex]?.name}</h3>
+                                    <button
+                                        onClick={() => setShownCriterionIndex(null)}
+                                        className="text-red-500 hover:text-red-700 p-1"
+                                        title="Close description"
+                                    >
+                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                                        </svg>
+                                    </button>
+                                </div>
+                                <p className="text-sm text-gray-600 bg-gray-100 p-2 rounded-md">
+                                    {directions[0]?.criteria[shownCriterionIndex]?.value || 'No description provided'}
+                                </p>
+                            </div>
+                        )}
+                        <div className="flex justify-end mt-4 space-x-2">
+                            {existingEvaluation?.isDraft && (
+                                <button
+                                    onClick={handleDeleteDraft}
+                                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                                >
+                                    Delete Draft
+                                </button>
+                            )}
+                            <button
+                                onClick={() => handleSubmit(true)}
+                                className="bg-yellow-500 text-white px-4 py-2 rounded hover:bg-yellow-600"
+                            >
+                                Save as Draft
+                            </button>
+                            <button
+                                onClick={() => handleSubmit(false)}
+                                className={`px-4 py-2 rounded text-white transition-colors duration-200 ${
+                                    isSubmitDisabled ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-500 hover:bg-blue-600'
+                                }`}
+                                disabled={isSubmitDisabled || isSubmitting}
+                            >
+                                {isSubmitting ? (
+                                    <span className="flex items-center justify-center">
+                                        <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                        Processing...
+                                    </span>
+                                ) : 'Submit'}
+                            </button>
+                            <button
+                                onClick={onClose}
+                                className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [userName, setUserName] = useState(null);
+            const [calls, setCalls] = useState([]);
+            const [showEvaluationModal, setShowEvaluationModal] = useState(false);
+            const [showMonitoringScaleModal, setShowMonitoringScaleModal] = useState(false);
+            const [showLoginModal, setShowLoginModal] = useState(true);
+            const [apiKey, setApiKey] = useState(null);
+            const [userId, setUserId] = useState(null);
+            const [userRole, setUserRole] = useState(null);
+            const [directions, setDirections] = useState([]);
+            const [operators, setOperators] = useState([]);
+            const [selectedOperator, setSelectedOperator] = useState(null);
+            const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
+            const [expandedDetails, setExpandedDetails] = useState(null);
+            const [editingEvaluation, setEditingEvaluation] = useState(null);
+            const [isLoading, setIsLoading] = useState(false);
+            const [loadingCallId, setLoadingCallId] = useState(null);
+            const MAX_EVALUATIONS = 20;
+
+            const getLast12Months = () => {
+                const months = [];
+                const currentDate = new Date();
+                for (let i = 0; i < 12; i++) {
+                    const date = new Date(currentDate.getFullYear(), currentDate.getMonth() - i, 1);
+                    const year = date.getFullYear();
+                    const month = String(date.getMonth() + 1).padStart(2, '0');
+                    const monthStr = `${year}-${month}`;
+                    const displayStr = date.toLocaleString('default', { month: 'long', year: 'numeric' });
+                    months.push({ value: monthStr, label: displayStr });
+                }
+                return months;
+            };
+
+            const monthOptions = getLast12Months();
+
+            useEffect(() => {
+                const fetchData = async () => {
+                    if (!apiKey || !userId) return;
+                    setIsLoading(true);
+                    try {
+                        const directionsResponse = await fetch(`${API_BASE_URL}/api/admin/directions`, {
+                            headers: {
+                                'X-API-Key': apiKey,
+                                'X-User-Id': userId
+                            }
+                        });
+                        const directionsData = await directionsResponse.json();
+                        if (directionsData.status === 'success') {
+                            setDirections(directionsData.directions);
+                        }
+
+                        const operatorsResponse = await fetch(`${API_BASE_URL}/api/sv/data?id=${userId}`, {
+                            headers: {
+                                'X-API-Key': apiKey,
+                                'X-User-Id': userId
+                            }
+                        });
+                        const operatorsData = await operatorsResponse.json();
+                        if (operatorsData.status === 'success') {
+                            setOperators(operatorsData.operators);
+                        }
+
+                        if (selectedOperator) {
+                            const evaluationsResponse = await fetch(`${API_BASE_URL}/api/call_evaluations?operator_id=${selectedOperator.id}`, {
+                                headers: {
+                                    'X-API-Key': apiKey,
+                                    'X-User-Id': userId
+                                }
+                            });
+                            const evaluationsData = await evaluationsResponse.json();
+                            if (evaluationsData.status === 'success') {
+                                const updatedCalls = await Promise.all(evaluationsData.evaluations.map(async (evaluation) => {
+                                    let audioUrl = null;
+                                    return {
+                                        id: evaluation.id,
+                                        fileName: `Call ${evaluation.phone_number}`,
+                                        totalScore: evaluation.score.toFixed(2),
+                                        date: evaluation.evaluation_date,
+                                        phoneNumber: evaluation.phone_number,
+                                        combinedComment: evaluation.comment,
+                                        selectedDirection: selectedOperator.direction,
+                                        directions: directionsData.directions.filter(d => d.name === selectedOperator.direction),
+                                        scores: evaluation.scores || [],
+                                        criterionComments: evaluation.criterion_comments || [],
+                                        audioUrl,
+                                        isDraft: evaluation.is_draft,
+                                        assignedMonth: evaluation.month
+                                    };
+                                }));
+                                setCalls(updatedCalls);
+                            }
+                        } else {
+                            setCalls([]);
+                        }
+                    } catch (err) {
+                        console.error('Error fetching data:', err);
+                    } finally {
+                        setIsLoading(false);
+                    }
+                };
+                fetchData();
+            }, [apiKey, userId, selectedOperator]);
+
+            const handleLogin = (key, id, role, name) => {
+                setApiKey(key);
+                setUserId(id);
+                setUserRole(role);
+                setUserName(name);
+                setShowLoginModal(false);
+            };
+
+            const handleEvaluateCall = (evaluationData) => {
+                setCalls(prevCalls => {
+                    if (!evaluationData) {
+                        return prevCalls.filter(c => c.id !== editingEvaluation?.id);
+                    }
+                    const newCall = {
+                        id: evaluationData.id,
+                        fileName: `Call ${evaluationData.phoneNumber}`,
+                        scores: evaluationData.scores,
+                        criterionComments: evaluationData.criterionComments,
+                        combinedComment: evaluationData.comment,
+                        totalScore: evaluationData.totalScore,
+                        date: new Date().toLocaleDateString(),
+                        audioUrl: evaluationData.audioUrl,
+                        isDraft: evaluationData.isDraft,
+                        selectedDirection: evaluationData.selectedDirection,
+                        directions: evaluationData.directions,
+                        phoneNumber: evaluationData.phoneNumber,
+                        assignedMonth: evaluationData.assignedMonth
+                    };
+                    return [...prevCalls.filter(c => c.id !== newCall.id), newCall];
+                });
+                setEditingEvaluation(null);
+            };
+
+            const handleSelectCall = async (callId) => {
+                const call = calls.find(c => c.id === callId);
+                if (!call) return;
+
+                if (call.isDraft) {
+                    handleEditDraft(call);
+                    return;
+                }
+
+                if (expandedDetails !== callId) {
+                    setLoadingCallId(callId);
+                    try {
+                        if (!call.audioUrl && call.directions?.[0]?.hasFileUpload) {
+                            const url = await getAudioUrlWithAuth(call.id, apiKey, userId);
+                            if (url) {
+                                setCalls(prev =>
+                                    prev.map(c => c.id === call.id ? { ...c, audioUrl: url } : c)
+                                );
+                            }
+                        }
+                        setExpandedDetails(callId);
+                    } catch (err) {
+                        console.error('Error loading audio:', err);
+                    } finally {
+                        setLoadingCallId(null);
+                    }
+                } else {
+                    setExpandedDetails(null);
+                }
+            };
+
+            const handleEditDraft = (call) => {
+                if (!call.isDraft) return;
+                setEditingEvaluation(call);
+                setShowEvaluationModal(true);
+            };
+
+            const handleSaveDirections = async (newDirections) => {
+                if (userRole !== 'admin') {
+                    alert('Only admins can save directions');
+                    return;
+                }
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/admin/save_directions`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-API-Key': apiKey,
+                            'X-User-Id': userId
+                        },
+                        body: JSON.stringify({ directions: newDirections })
+                    });
+                    const result = await response.json();
+                    if (result.status === 'success') {
+                        setDirections(result.directions);
+                    } else {
+                        alert('Failed to save directions: ' + result.error);
+                    }
+                } catch (err) {
+                    alert('Failed to save directions: ' + err.message);
+                }
+            };
+
+            const handleOperatorChange = (e) => {
+                const operatorId = parseInt(e.target.value);
+                const newOperator = operators.find(op => op.id === operatorId) || null;
+                setSelectedOperator(newOperator);
+                setCalls([]);
+                setExpandedDetails(null);
+                setIsLoading(true);
+            };
+
+            const callsByMonth = calls.filter(call => call.assignedMonth === selectedMonth);
+            const isMaxEvaluationsReached = callsByMonth.filter(c => !c.isDraft).length >= MAX_EVALUATIONS;
+
+            return (
+                <div className="min-h-screen bg-gray-100 p-6 max-w-[1152px] mx-auto">
+                    <div className="flex justify-between items-center mb-6">
+                        <h1 className="text-3xl font-bold">Supervisor Call earthly Evaluation</h1>
+                        <div className="flex space-x-2">
+                            {userRole === 'admin' && (
+                                <button
+                                    onClick={() => setShowMonitoringScaleModal(true)}
+                                    className="bg-purple-600 text-white px-6 py-3 rounded-lg hover:bg-purple-700 transition-colors duration-200"
+                                >
+                                    Monitoring Scale
+                                </button>
+                            )}
+                            <button
+                                onClick={() => setShowLoginModal(true)}
+                                className="bg-red-600 text-white px-6 py-3 rounded-lg hover:bg-red-700 transition-colors duration-200"
+                            >
+                                Logout
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-2xl font-semibold text-gray-800">Call Evaluations</h2>
+                            <div className="flex space-x-4">
+                                <div>
+                                    <label className="mr-2 font-medium">Operator:</label>
+                                    <select
+                                        value={selectedOperator?.id || ''}
+                                        onChange={handleOperatorChange}
+                                        className="p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    >
+                                        <option value="">Select Operator</option>
+                                        {operators.map(op => (
+                                            <option key={op.id} value={op.id}>{op.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="mr-2 font-medium">Month:</label>
+                                    <select
+                                        value={selectedMonth}
+                                        onChange={(e) => setSelectedMonth(e.target.value)}
+                                        className="p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    >
+                                        {monthOptions.map(option => (
+                                            <option key={option.value} value={option.value}>
+                                                {option.label}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        {callsByMonth.length === 0 ? isLoading ? (
+                            <div className="text-center py-4">
+                                <div className="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
+                                <p className="mt-2 text-gray-600">Loading evaluations...</p>
+                            </div>
+                        ) : (
+                            <p className="text-center text-gray-600">No calls evaluated for {monthOptions.find(m => m.value === selectedMonth)?.label || selectedMonth}.</p>
+                        ) : (
+                            <div className="overflow-x-auto">
+                                <table className="min-w-full bg-white border-collapse">
+                                    <thead>
+                                        <tr className="bg-blue-50">
+                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Status</th>
+                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Direction</th>
+                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
+                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Total Score</th>
+                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Date</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {callsByMonth.map((call) => (
+                                            <React.Fragment key={call.id}>
+                                                <tr 
+                                                    className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${
+                                                        call.isDraft ? 'bg-yellow-100' : 'bg-green-50'
+                                                    } ${expandedDetails === call.id ? 'bg-blue-100' : ''}`}
+                                                    onClick={() => handleSelectCall(call.id)}
+                                                >
+                                                    <td className="p-4 border-b text-sm">
+                                                        {loadingCallId === call.id ? (
+                                                            <div className="flex items-center">
+                                                                <div className="animate-spin rounded-full h-4 w-4 border-t-2 border-b-2 border-blue-500 mr-2"></div>
+                                                                <span>Loading...</span>
+                                                            </div>
+                                                        ) : (
+                                                            call.isDraft ? 'Draft' : 'Submitted'
+                                                        )}
+                                                    </td>
+                                                    <td className="p-4 border-b text-sm">{call.selectedDirection || '-'}</td>
+                                                    <td className="p-4 border-b text-sm">{call.phoneNumber || '-'}</td>
+                                                    <td className="p-4 border-b text-sm">{call.totalScore}</td>
+                                                    <td className="p-4 border-b text-sm">{call.date}</td>
+                                                </tr>
+                                                {expandedDetails === call.id && (
+                                                    <tr>
+                                                        <td colSpan="5" className="p-4 border-b bg-gray-50">
+                                                            <div className="text-sm">
+                                                                <h4 className="font-semibold mb-2">Evaluation Details:</h4>
+                                                                {call.directions && call.directions.length > 0 ? (
+                                                                    <div>
+                                                                        <h5 className="text-sm font-semibold text-gray-800 mb-2">{call.selectedDirection}</h5>
+                                                                        <table className="w-full border-collapse">
+                                                                            <thead>
+                                                                                <tr className="bg-gray-100">
+                                                                                    <th className="p-2 border-b text-left text-sm font-semibold text-gray-700">Criterion</th>
+                                                                                    <th className="p-2 border-b text-left text-sm font-semibold text-gray-700">Weight</th>
+                                                                                    <th className="p-2 border-b text-left text-sm font-semibold text-gray-700">Score</th>
+                                                                                    <th className="p-2 border-b text-left text-sm font-semibold text-gray-700">Comment</th>
+                                                                                </tr>
+                                                                            </thead>
+                                                                            <tbody>
+                                                                                {call.directions[0].criteria.map((criterion, critIndex) => (
+                                                                                    <tr key={critIndex}>
+                                                                                        <td className="p-2 border-b text-sm">{criterion.name}</td>
+                                                                                        <td className="p-2 border-b text-sm">{criterion.isCritical ? '(Critical)' : `${criterion.weight}%`}</td>
+                                                                                        <td className="p-2 border-b text-sm">
+                                                                                            <span className={`${call.scores[critIndex] === 'Error' ? 'text-red-500' : 'text-green-500'}`}>
+                                                                                                {call.scores[critIndex] || 'Correct'}
+                                                                                            </span>
+                                                                                        </td>
+                                                                                        <td className="p-2 border-b text-sm">{call.criterionComments[critIndex] || '-'}</td>
+                                                                                    </tr>
+                                                                                ))}
+                                                                            </tbody>
+                                                                        </table>
+                                                                        {call.audioUrl && call.directions[0]?.hasFileUpload && (
+                                                                            <audio controls className="w-full max-w-[400px] mt-2">
+                                                                                <source src={call.audioUrl} type="audio/mpeg" />
+                                                                                Your browser does not support the audio element.
+                                                                            </audio>
+                                                                        )}
+                                                                        {loadingCallId === call.id && (
+                                                                            <div className="flex items-center mt-2">
+                                                                                <div className="animate-spin rounded-full h-4 w-4 border-t-2 border-b-2 border-blue-500 mr-2"></div>
+                                                                                <span className="text-sm text-gray-600">Loading audio...</span>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                ) : (
+                                                                    <p>No criteria evaluated.</p>
+                                                                )}
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                )}
+                                            </React.Fragment>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                        <div className="mt-4 flex justify-end">
+                            <button
+                                onClick={() => {
+                                    setEditingEvaluation(null);
+                                    setShowEvaluationModal(true);
+                                }}
+                                className={`bg-green-500 text-white px-4 py-2 rounded-full hover:bg-green-600 text-sm font-semibold transition-colors duration-200 ${
+                                    !selectedOperator || isMaxEvaluationsReached ? 'opacity-50 cursor-not-allowed' : ''
+                                }`}
+                                disabled={!selectedOperator || isMaxEvaluationsReached}
+                            >
+                                +
+                            </button>
+                        </div>
+                    </div>
+
+                    <LoginModal
+                        isOpen={showLoginModal}
+                        onClose={() => setShowLoginModal(false)}
+                        onLogin={(key, id, role, name) => handleLogin(key, id, role, name)}
+                    />
+                    <EvaluationModal
+                        isOpen={showEvaluationModal}
+                        onClose={() => {
+                            setShowEvaluationModal(false);
+                            setEditingEvaluation(null);
+                        }}
+                        onSubmit={handleEvaluateCall}
+                        directions={directions.filter(d => d.name === selectedOperator?.direction)}
+                        operator={selectedOperator}
+                        selectedMonth={selectedMonth}
+                        apiKey={apiKey}
+                        userId={userId}
+                        userName={userName}
+                        existingEvaluation={editingEvaluation}
+                    />
+                    {userRole === 'admin' && (
+                        <MonitoringScaleModal
+                            isOpen={showMonitoringScaleModal}
+                            onClose={() => setShowMonitoringScaleModal(false)}
+                            onSave={handleSaveDirections}
+                            initialDirections={directions}
+                        />
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

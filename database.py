@@ -287,6 +287,11 @@ class Database:
                     UNIQUE(evaluator_id, operator_id, month, phone_number, score, comment, is_draft)
                 );
             """)
+            cursor.execute("""
+                ALTER TABLE calls
+                ADD COLUMN IF NOT EXISTS scores JSONB,
+                ADD COLUMN IF NOT EXISTS criterion_comments JSONB;
+            """)
             # Work hours table with fines column
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS work_hours (
@@ -544,7 +549,7 @@ class Database:
                 WHERE id = %s
             """, (hours_table_url, scores_table_url, user_id))
 
-    def add_call_evaluation(self, evaluator_id, operator_id, phone_number, score, comment=None, month=None, audio_path=None, is_draft=False):
+    def add_call_evaluation(self, evaluator_id, operator_id, phone_number, score, comment=None, month=None, audio_path=None, is_draft=False, scores=None, criterion_comments=None):
         month = month or datetime.now().strftime('%Y-%m')
         with self._get_cursor() as cursor:
             # Check for existing draft for this evaluator, operator, and month
@@ -592,30 +597,17 @@ class Database:
             # Insert new evaluation
             cursor.execute("""
                 INSERT INTO calls (
-                    evaluator_id, 
-                    operator_id, 
-                    month, 
-                    phone_number, 
-                    score, 
-                    comment,
-                    audio_path,
-                    is_draft,
-                    is_correction,
-                    previous_version_id
+                    evaluator_id, operator_id, month, phone_number, score, comment,
+                    audio_path, is_draft, is_correction, previous_version_id,
+                    scores, criterion_comments
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
-                evaluator_id, 
-                operator_id, 
-                month, 
-                phone_number, 
-                score, 
-                comment,
-                audio_path,
-                is_draft,
-                is_correction,
-                existing_call[0] if is_correction else None
+                evaluator_id, operator_id, month, phone_number, score, comment,
+                audio_path, is_draft, is_correction, existing_call[0] if is_correction else None,
+                json.dumps(scores) if scores else None,
+                json.dumps(criterion_comments) if criterion_comments else None
             ))
             
             return cursor.fetchone()[0]
@@ -921,7 +913,9 @@ class Database:
                     "audio_path": row[5],
                     "is_draft": row[6],
                     "is_correction": row[7],
-                    "evaluation_date": row[8]
+                    "evaluation_date": row[8],
+                    "scores": row[9] if row[9] else [],
+                    "criterion_comments": row[10] if row[10] else []
                 } for row in cursor.fetchall()
             ]
 
