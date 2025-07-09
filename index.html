@@ -710,7 +710,23 @@
             });
             const [showMonitoringScaleModal, setShowMonitoringScaleModal] = useState(false);
             const [directions, setDirections] = useState([]);
-            
+            const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
+
+            const getMonthOptions = () => {
+                const options = [];
+                const today = new Date();
+                for (let i = 0; i < 12; i++) {
+                    const date = new Date(today.getFullYear(), today.getMonth() - i, 1);
+                    const monthStr = date.toISOString().slice(0, 7);
+                    options.push(
+                        <option key={monthStr} value={monthStr}>
+                            {date.toLocaleString('default', { month: 'long', year: 'numeric' })}
+                        </option>
+                    );
+                }
+                return options;
+            };
+
             const fetchDirections = async () => {
                 if (!user || !user.id) {
                     setError('User not authenticated. Please log in again.');
@@ -1336,9 +1352,12 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}`, {
-                        headers: { 'X-API-Key': user.apiKey }
-                    });
+                    const response = await axios.get(
+                        `${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}&month=${selectedMonth}`,
+                        {
+                            headers: { 'X-API-Key': user.apiKey },
+                        }
+                    );
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
                         setOperatorData(data);
@@ -1378,9 +1397,12 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/user/hours?operator_id=${user.id}`, {
-                        headers: { 'X-API-Key': user.apiKey }
-                    });
+                    const response = await axios.get(
+                        `${API_BASE_URL}/api/user/hours?operator_id=${user.id}&month=${selectedMonth}`,
+                        {
+                            headers: { 'X-API-Key': user.apiKey },
+                        }
+                    );
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
                         setHoursData(data.hours);
@@ -2410,7 +2432,21 @@
                                 Salary Calculator
                             </button>
                         </div>
-            
+
+                        {(view === 'hours' || view === 'evaluation') && (
+                            <div className="mb-6">
+                                <label className="block mb-2 font-semibold text-gray-700">Select Month:</label>
+                                <select
+                                    value={selectedMonth}
+                                    onChange={(e) => setSelectedMonth(e.target.value)}
+                                    className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    disabled={isLoading}
+                                >
+                                    {getMonthOptions()}
+                                </select>
+                            </div>
+                        )}
+                        
                         {view === 'hours' && (
                             <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
                                 <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
