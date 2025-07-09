@@ -1101,7 +1101,7 @@
 
                 setExpandedEvaluation(evaluation);
                 setLoadingAudioId(evaluation.id);
-                const url = await getAudioUrlWithAuth(evaluation.id, user);
+                const url = await getAudioUrlWithAuth(evaluation.id, user.apiKey, user.id);
                 setAudioUrl(url);
                 setLoadingAudioId(null);
             };
