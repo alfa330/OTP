@@ -681,31 +681,32 @@ def get_sv_data():
         user_id = int(user_id)
         
         user = db.get_user(id=user_id)
-        if not user or user[3] not in ['sv', 'operator']:
+        if not user or (isinstance(user, dict) and user.get('role', user[3]) not in ['sv', 'operator']):
             return jsonify({"error": "User not found or invalid role"}), 404
         
-        # Initialize response data
+        # Для совместимости с кортежем и словарём
+        name = user['name'] if isinstance(user, dict) else user[2]
+        table = user.get('scores_table_url') if isinstance(user, dict) else (user[9] if len(user) > 9 else None)
+
         response_data = {
             "status": "success",
-            "name": user[2],
-            "table": user[9],  # scores_table_url
+            "name": name,
+            "table": table,
             "operators": []
         }
 
         # If user is a supervisor, fetch their operators and call statistics
-        if user[3] == 'sv':
+        if (user['role'] if isinstance(user, dict) else user[3]) == 'sv':
             operators = db.get_operators_by_supervisor(user_id)
             current_month = datetime.now().strftime('%Y-%m')
             
             for operator in operators:
-                # Unpack only the fields you need, based on the actual tuple length
-                # Example: (id, name, direction, scores_table_url)
-                operator_id = operator[0]
-                operator_name = operator[1]
-                direction = operator[2]
-                scores_table_url = operator[5] if len(operator) > 5 else None
+                # Для словаря
+                operator_id = operator['id'] if isinstance(operator, dict) else operator[0]
+                operator_name = operator['name'] if isinstance(operator, dict) else operator[1]
+                direction = operator['direction'] if isinstance(operator, dict) else operator[2]
+                scores_table_url = operator.get('scores_table_url') if isinstance(operator, dict) else (operator[5] if len(operator) > 5 else None)
 
-                # Get call evaluations for the operator
                 evaluations = db.get_call_evaluations(operator_id, month=current_month)
                 call_count = len(evaluations)
                 avg_score = sum(float(e['score']) for e in evaluations) / call_count if call_count > 0 else 0
