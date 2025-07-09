@@ -314,15 +314,17 @@ def change_login():
 def get_user_hours():
     try:
         operator_id = request.args.get('operator_id')
+        month = request.args.get('month')  # Get month parameter from request
         if not operator_id:
             return jsonify({"error": "Missing operator_id parameter"}), 400
+        if not month:
+            month = datetime.now().strftime('%Y-%m')  # Default to current month if not provided
 
         operator_id = int(operator_id)
-        month = datetime.now().strftime('%Y-%m')  # Default to current month
         hours_summary = db.get_hours_summary(operator_id=operator_id, month=month)
         
         if not hours_summary:
-            return jsonify({"error": "No hours data found for this operator"}), 404
+            return jsonify({"error": f"No hours data found for this operator in {month}"}), 404
 
         # Assuming get_hours_summary returns a list, take the first item
         hours_data = hours_summary[0]
@@ -353,8 +355,10 @@ def get_call_evaluations():
         operator_id = request.args.get('operator_id')
         if not operator_id:
             return jsonify({"error": "Missing operator_id parameter"}), 400
+        if not month:
+            month = None
         operator_id = int(operator_id)
-        evaluations = db.get_call_evaluations(operator_id)
+        evaluations = db.get_call_evaluations(operator_id, month=month)
         
         # Получаем информацию о супервайзере для dispute button
         operator = db.get_user(id=operator_id)
