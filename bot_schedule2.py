@@ -314,11 +314,12 @@ def change_login():
 def get_user_hours():
     try:
         operator_id = request.args.get('operator_id')
+        month = request.args.get('month')
         if not operator_id:
             return jsonify({"error": "Missing operator_id parameter"}), 400
-
+        if not month:
+            month = datetime.now().strftime('%Y-%m')
         operator_id = int(operator_id)
-        month = datetime.now().strftime('%Y-%m')  # Default to current month
         hours_summary = db.get_hours_summary(operator_id=operator_id, month=month)
         
         if not hours_summary:
@@ -351,11 +352,14 @@ def get_sv_list():
 def get_call_evaluations():
     try:
         operator_id = request.args.get('operator_id')
+        month = request.args.get('month')
         if not operator_id:
             return jsonify({"error": "Missing operator_id parameter"}), 400
+        if not month:
+            month = None
         operator_id = int(operator_id)
-        evaluations = db.get_call_evaluations(operator_id)
-        
+        evaluations = db.get_call_evaluations(operator_id, month=month)
+
         # Получаем информацию о супервайзере для dispute button
         operator = db.get_user(id=operator_id)
         supervisor = db.get_user(id=operator[6]) if operator and operator[6] else None
