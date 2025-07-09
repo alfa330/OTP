@@ -710,23 +710,7 @@
             });
             const [showMonitoringScaleModal, setShowMonitoringScaleModal] = useState(false);
             const [directions, setDirections] = useState([]);
-            const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
-
-            const getMonthOptions = () => {
-                const options = [];
-                const today = new Date();
-                for (let i = 0; i < 12; i++) {
-                    const date = new Date(today.getFullYear(), today.getMonth() - i, 1);
-                    const monthStr = date.toISOString().slice(0, 7);
-                    options.push(
-                        <option key={monthStr} value={monthStr}>
-                            {date.toLocaleString('default', { month: 'long', year: 'numeric' })}
-                        </option>
-                    );
-                }
-                return options;
-            };
-
+            
             const fetchDirections = async () => {
                 if (!user || !user.id) {
                     setError('User not authenticated. Please log in again.');
@@ -1352,12 +1336,9 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(
-                        `${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}&month=${selectedMonth}`,
-                        {
-                            headers: { 'X-API-Key': user.apiKey },
-                        }
-                    );
+                    const response = await axios.get(`${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}`, {
+                        headers: { 'X-API-Key': user.apiKey }
+                    });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
                         setOperatorData(data);
@@ -1397,12 +1378,9 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(
-                        `${API_BASE_URL}/api/user/hours?operator_id=${user.id}&month=${selectedMonth}`,
-                        {
-                            headers: { 'X-API-Key': user.apiKey },
-                        }
-                    );
+                    const response = await axios.get(`${API_BASE_URL}/api/user/hours?operator_id=${user.id}`, {
+                        headers: { 'X-API-Key': user.apiKey }
+                    });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
                         setHoursData(data.hours);
@@ -1685,18 +1663,6 @@
                                 }));
                             }
                         }, [hoursData, operatorData, user]);
-            
-            useEffect(() => {
-                isMounted.current = true;
-                if (view === 'hours') {
-                    fetchHoursData();
-                } else if (view === 'evaluation') {
-                    fetchOperatorData();
-                }
-                return () => {
-                    isMounted.current = false;
-                };
-            }, [view, selectedMonth]);
             
             if (!user) {
                 return (
@@ -2302,540 +2268,524 @@
             }
 
             if (user.role === 'operator') {
-                    const averageScore =
-                        operatorData?.evaluations?.length > 0
-                            ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) /
-                            operatorData.evaluations.length
-                            : 0;
-
-                    return (
-                        <div className="min-h-screen bg-gray-100 p-6 max-w-[1152px] mx-auto">
-                            <div className="flex justify-between items-center mb-6">
-                                <h1 className="text-3xl font-bold">Operator Dashboard</h1>
-                                <div className="relative flex space-x-4">
-                                    <button
-                                        onClick={() => setShowAccountMenu(!showAccountMenu)}
-                                        className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-                                    >
-                                        Account
-                                    </button>
-                                    {showAccountMenu && (
-                                        <div className="absolute right-0 top-12 bg-white shadow-lg rounded-lg p-4 w-48 z-10">
-                                            <button
-                                                onClick={() => {
-                                                    setShowChangeLoginForm(true);
-                                                    setShowAccountMenu(false);
-                                                }}
-                                                className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
-                                            >
-                                                Change Login
-                                            </button>
-                                            <button
-                                                onClick={() => {
-                                                    setShowChangePasswordForm(true);
-                                                    setShowAccountMenu(false);
-                                                }}
-                                                className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
-                                            >
-                                                Change Password
-                                            </button>
-                                        </div>
-                                    )}
-                                    <button
-                                        onClick={handleLogout}
-                                        className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors duration-200"
-                                    >
-                                        Logout
-                                    </button>
-                                </div>
+                const averageScore = operatorData?.evaluations?.length > 0
+                    ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
+                    : 0;
+            
+                return (
+                    <div className="min-h-screen bg-gray-100 p-6 max-w-[1152px] mx-auto">
+                        <div className="flex justify-between items-center mb-6">
+                            <h1 className="text-3xl font-bold">Operator Dashboard</h1>
+                            <div className="relative flex space-x-4">
+                                <button
+                                    onClick={() => setShowAccountMenu(!showAccountMenu)}
+                                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                                >
+                                    Account
+                                </button>
+                                {showAccountMenu && (
+                                    <div className="absolute right-0 top-12 bg-white shadow-lg rounded-lg p-4 w-48 z-10">
+                                        <button
+                                            onClick={() => {
+                                                setShowChangeLoginForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                                        >
+                                            Change Login
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setShowChangePasswordForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded"
+                                        >
+                                            Change Password
+                                        </button>
+                                    </div>
+                                )}
+                                <button
+                                    onClick={handleLogout}
+                                    className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors duration-200"
+                                >
+                                    Logout
+                                </button>
                             </div>
-
-                            <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
-                                <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
+                        </div>
+            
+                        <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
+                            <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
+                            {isLoading ? (
+                                <p className="text-center text-gray-600">Loading...</p>
+                            ) : profileData ? (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Name</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.name || '-'}</p>
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Role</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.role || '-'}</p>
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Direction</p>
+                                        <p className="text-lg font-medium text-gray-900">
+                                            {profileData.direction ? profileData.direction : '-'}
+                                        </p>
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Hire Date</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.hire_date || '-'}</p>
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Supervisor</p>
+                                        <p className="text-lg font-medium text-gray-900">{profileData.supervisor_name || '-'}</p>
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Scores Table</p>
+                                        {profileData.scores_table_url ? (
+                                            <a
+                                                href={profileData.scores_table_url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
+                                            >
+                                                View Scores Table
+                                            </a>
+                                        ) : (
+                                            <p className="text-lg text-gray-900">-</p>
+                                        )}
+                                    </div>
+                                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                        <p className="text-sm font-medium text-gray-500 mb-1">Hours Table</p>
+                                        {profileData.hours_table_url ? (
+                                            <a
+                                                href={profileData.hours_table_url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
+                                            >
+                                                View Hours Table
+                                            </a>
+                                        ) : (
+                                            <p className="text-lg text-gray-900">-</p>
+                                        )}
+                                    </div>
+                                </div>
+                            ) : (
+                                <p className="text-center text-gray-600">No profile data available. Please try refreshing or contact support.</p>
+                            )}
+                        </div>
+            
+                        <div className="flex justify-center space-x-4 mb-6">
+                            <button
+                                type="button"
+                                onClick={() => setView('hours')}
+                                className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
+                                    view === 'hours' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
+                                }`} 
+                                disabled={isLoading}
+                            >
+                                My Hours
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setView('evaluation')}
+                                className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
+                                    view === 'evaluation' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
+                                }`} 
+                                disabled={isLoading}
+                            >
+                                Call Evaluations
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setView('salary')}
+                                className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
+                                    view === 'salary' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
+                                }`} 
+                                disabled={isLoading}
+                            >
+                                Salary Calculator
+                            </button>
+                        </div>
+            
+                        {view === 'hours' && (
+                            <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
                                 {isLoading ? (
                                     <p className="text-center text-gray-600">Loading...</p>
-                                ) : profileData ? (
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                        <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                            <p className="text-sm font-medium text-gray-500 mb-1">Name</p>
-                                            <p className="text-lg font-medium text-gray-900">{profileData.name || '-'}</p>
+                                ) : hoursData ? (
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                        <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Regular Hours</p>
+                                                <p className={`text-lg font-semibold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
+                                                    {hoursData.regular_hours.toFixed(2)} hours
+                                                </p>
+                                            </div>
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Training Hours</p>
+                                                <p className="text-lg font-semibold">{hoursData.training_hours.toFixed(2)} hours</p>
+                                            </div>
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Fines</p>
+                                                <p className="text-lg font-semibold text-red-600">{hoursData.fines.toFixed(2)}</p>
+                                            </div>
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Norm Hours</p>
+                                                <p className="text-lg font-semibold">{hoursData.norm_hours.toFixed(2)} hours</p>
+                                            </div>
+                                            <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-1">Performance</p>
+                                                <p className={`text-lg font-semibold ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
+                                                    {((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%
+                                                </p>
+                                            </div>
                                         </div>
-                                        <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                            <p className="text-sm font-medium text-gray-500 mb-1">Role</p>
-                                            <p className="text-lg font-medium text-gray-900">{profileData.role || '-'}</p>
-                                        </div>
-                                        <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                            <p className="text-sm font-medium text-gray-500 mb-1">Direction</p>
-                                            <p className="text-lg font-medium text-gray-900">
-                                                {profileData.direction ? profileData.direction : '-'}
-                                            </p>
-                                        </div>
-                                        <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                            <p className="text-sm font-medium text-gray-500 mb-1">Hire Date</p>
-                                            <p className="text-lg font-medium text-gray-900">{profileData.hire_date || '-'}</p>
-                                        </div>
-                                        <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                            <p className="text-sm font-medium text-gray-500 mb-1">Supervisor</p>
-                                            <p className="text-lg font-medium text-gray-900">{profileData.supervisor_name || '-'}</p>
-                                        </div>
-                                        <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                            <p className="text-sm font-medium text-gray-500 mb-1">Scores Table</p>
-                                            {profileData.scores_table_url ? (
-                                                <a
-                                                    href={profileData.scores_table_url}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
-                                                >
-                                                    View Scores Table
-                                                </a>
-                                            ) : (
-                                                <p className="text-lg text-gray-900">-</p>
-                                            )}
-                                        </div>
-                                        <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                            <p className="text-sm font-medium text-gray-500 mb-1">Hours Table</p>
-                                            {profileData.hours_table_url ? (
-                                                <a
-                                                    href={profileData.hours_table_url}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
-                                                >
-                                                    View Hours Table
-                                                </a>
-                                            ) : (
-                                                <p className="text-lg text-gray-900">-</p>
-                                            )}
+                                        <div className="col-span-1 flex justify-center items-center">
+                                            <SemiCircleProgress
+                                                percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
+                                                label="Выполнение нормы"
+                                            />
                                         </div>
                                     </div>
                                 ) : (
-                                    <p className="text-center text-gray-600">No profile data available. Please try refreshing or contact support.</p>
+                                    <p className="text-center text-gray-600">No hours data available.</p>
                                 )}
                             </div>
-
-                            <div className="flex justify-center space-x-4 mb-6">
-                                <button
-                                    type="button"
-                                    onClick={() => setView('hours')}
-                                    className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
-                                        view === 'hours' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
-                                    }`}
-                                    disabled={isLoading}
-                                >
-                                    My Hours
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setView('evaluation')}
-                                    className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
-                                        view === 'evaluation' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
-                                    }`}
-                                    disabled={isLoading}
-                                >
-                                    Call Evaluations
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setView('salary')}
-                                    className={`px-6 py-3 rounded-lg font-semibold text-lg transition-all duration-200 ${
-                                        view === 'salary' ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white hover:bg-blue-700'
-                                    }`}
-                                    disabled={isLoading}
-                                >
-                                    Salary Calculator
-                                </button>
-                            </div>
-
-                            {(view === 'hours' || view === 'evaluation') && (
-                                <div className="mb-6">
-                                    <label className="block mb-2 font-semibold text-gray-700">Select Month:</label>
-                                    <select
-                                        value={selectedMonth}
-                                        onChange={(e) => setSelectedMonth(e.target.value)}
-                                        className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    >
-                                        {getMonthOptions()}
-                                    </select>
-                                </div>
-                            )}
-
-                            {view === 'hours' && (
-                                <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
-                                    <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
-                                    {isLoading ? (
-                                        <p className="text-center text-gray-600">Loading...</p>
-                                    ) : hoursData ? (
-                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                            <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
+                        )}
+            
+                        {view === 'evaluation' && (
+                            <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
+                                {isLoading ? (
+                                    <p className="text-center text-gray-600">Loading...</p>
+                                ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
+                                    <div>
+                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                                            <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-2">
                                                 <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Regular Hours</p>
-                                                    <p className={`text-lg font-semibold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
-                                                        {hoursData.regular_hours.toFixed(2)} hours
-                                                    </p>
-                                                </div>
-                                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Training Hours</p>
-                                                    <p className="text-lg font-semibold">{hoursData.training_hours.toFixed(2)} hours</p>
-                                                </div>
-                                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Fines</p>
-                                                    <p className="text-lg font-semibold text-red-600">{hoursData.fines.toFixed(2)}</p>
-                                                </div>
-                                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Norm Hours</p>
-                                                    <p className="text-lg font-semibold">{hoursData.norm_hours.toFixed(2)} hours</p>
-                                                </div>
-                                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Performance</p>
-                                                    <p className={`text-lg font-semibold ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
-                                                        {((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%
+                                                    <p className="text-sm font-medium text-gray-500 mb-2">Total Evaluated Calls</p>
+                                                    <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
+                                                    <p className={`text-lg font-medium mt-2 ${
+                                                        (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
+                                                    }`}>
+                                                        {20 - operatorData.evaluations.length} calls remaining out of 20
                                                     </p>
                                                 </div>
                                             </div>
                                             <div className="col-span-1 flex justify-center items-center">
-                                                <SemiCircleProgress
-                                                    percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
-                                                    label="Выполнение нормы"
-                                                />
+                                                <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
                                             </div>
                                         </div>
-                                    ) : (
-                                        <p className="text-center text-gray-600">No hours data available for {new Date(selectedMonth).toLocaleString('default', { month: 'long', year: 'numeric' })}.</p>
-                                    )}
-                                </div>
-                            )}
+                                        <div className="overflow-x-auto rounded-lg shadow-sm">
+                                            <table className="min-w-full bg-white border-collapse">
+                                                <thead>
+                                                    <tr className="bg-blue-50">
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call ID</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Score</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Comment</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Month</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Evaluation Date</th>
+                                                        <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Actions</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                {operatorData.evaluations.map((eval1, index) => (
+                                                    <React.Fragment key={index}>
+                                                    <tr
+                                                        className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${
+                                                        expandedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''
+                                                        }`}
+                                                        onClick={() => handleEvaluationClick(eval1)}
+                                                    >
+                                                        <td className="p-4 border-b text-sm">{eval1.id || '-'}</td>
+                                                        <td className="p-4 border-b text-sm">{eval1.phone_number || '-'}</td>
+                                                        <td className={`p-4 border-b text-sm font-medium ${getScoreColor(eval1.score)}`}>
+                                                        {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
+                                                        </td>
+                                                        <td className="p-4 border-b text-sm">
+                                                        {eval1.comment ? (
+                                                            <div className="space-y-1">
+                                                            {eval1.comment.split('\n').map((line, i) => {
+                                                                const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
+                                                                const match = cleanLine.match(/^(.*?):\s*(.*)$/);
+                                                                if (match) {
+                                                                return (
+                                                                    <p key={i} className="text-sm">
+                                                                    <span className="font-semibold">{match[1]}:</span>{' '}
+                                                                    <span className="italic">{match[2]}</span>
+                                                                    </p>
+                                                                );
+                                                                }
+                                                                return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
+                                                            })}
+                                                            </div>
+                                                        ) : '-'}
+                                                        </td>
+                                                        <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
+                                                        <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
+                                                        <td className="p-4 border-b text-sm">
+                                                        {eval1.score < 100 && (
+                                                            <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                setSelectedEvaluation(eval1);
+                                                                setShowDisputeModal(true);
+                                                            }}
+                                                            className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
+                                                            >
+                                                            Dispute
+                                                            </button>
+                                                        )}
+                                                        </td>
+                                                    </tr>
 
-                            {view === 'evaluation' && (
-                                <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
-                                    <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
-                                    {isLoading ? (
-                                        <p className="text-center text-gray-600">Loading...</p>
-                                    ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
-                                        <div>
-                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                                                <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-2">
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-2">Total Evaluated Calls</p>
-                                                        <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
-                                                        <p className={`text-lg font-medium mt-2 ${
-                                                            (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
-                                                        }`}>
-                                                            {20 - operatorData.evaluations.length} calls remaining out of 20
-                                                        </p>
-                                                    </div>
-                                                </div>
-                                                <div className="col-span-1 flex justify-center items-center">
-                                                    <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
-                                                </div>
-                                            </div>
-                                            <div className="overflow-x-auto rounded-lg shadow-sm">
-                                                <table className="min-w-full bg-white border-collapse">
-                                                    <thead>
-                                                        <tr className="bg-blue-50">
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call ID</th>
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Score</th>
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Comment</th>
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Month</th>
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Evaluation Date</th>
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Actions</th>
+                                                    {expandedEvaluation?.id === eval1.id && (
+                                                        <tr>
+                                                        <td colSpan={7} className="p-4 bg-gray-50 border-t text-sm">
+                                                            {loadingAudioId === eval1.id ? (
+                                                            <p className="text-gray-500 italic">Loading audio...</p>
+                                                            ) : audioUrl ? (
+                                                            <audio controls src={audioUrl} className="w-full" />
+                                                            ) : (
+                                                            <p className="text-red-500">Audio not available</p>
+                                                            )}
+                                                        </td>
                                                         </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        {operatorData.evaluations.map((eval1, index) => (
-                                                            <React.Fragment key={index}>
-                                                                <tr
-                                                                    className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${
-                                                                        expandedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''
-                                                                    }`}
-                                                                    onClick={() => handleEvaluationClick(eval1)}
-                                                                >
-                                                                    <td className="p-4 border-b text-sm">{eval1.id || '-'}</td>
-                                                                    <td className="p-4 border-b text-sm">{eval1.phone_number || '-'}</td>
-                                                                    <td className={`p-4 border-b text-sm font-medium ${getScoreColor(eval1.score)}`}>
-                                                                        {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
-                                                                    </td>
-                                                                    <td className="p-4 border-b text-sm">
-                                                                        {eval1.comment ? (
-                                                                            <div className="space-y-1">
-                                                                                {eval1.comment.split('\n').map((line, i) => {
-                                                                                    const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
-                                                                                    const match = cleanLine.match(/^(.*?):\s*(.*)$/);
-                                                                                    if (match) {
-                                                                                        return (
-                                                                                            <p key={i} className="text-sm">
-                                                                                                <span className="font-semibold">{match[1]}:</span>{' '}
-                                                                                                <span className="italic">{match[2]}</span>
-                                                                                            </p>
-                                                                                        );
-                                                                                    }
-                                                                                    return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
-                                                                                })}
-                                                                            </div>
-                                                                        ) : '-'}
-                                                                    </td>
-                                                                    <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
-                                                                    <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
-                                                                    <td className="p-4 border-b text-sm">
-                                                                        {eval1.score < 100 && (
-                                                                            <button
-                                                                                onClick={(e) => {
-                                                                                    e.stopPropagation();
-                                                                                    setSelectedEvaluation(eval1);
-                                                                                    setShowDisputeModal(true);
-                                                                                }}
-                                                                                className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
-                                                                            >
-                                                                                Dispute
-                                                                            </button>
-                                                                        )}
-                                                                    </td>
-                                                                </tr>
-
-                                                                {expandedEvaluation?.id === eval1.id && (
-                                                                    <tr>
-                                                                        <td colSpan={7} className="p-4 bg-gray-50 border-t text-sm">
-                                                                            {loadingAudioId === eval1.id ? (
-                                                                                <p className="text-gray-500 italic">Loading audio...</p>
-                                                                            ) : audioUrl ? (
-                                                                                <audio controls src={audioUrl} className="w-full" />
-                                                                            ) : (
-                                                                                <p className="text-red-500">Audio not available</p>
-                                                                            )}
-                                                                        </td>
-                                                                    </tr>
-                                                                )}
-                                                            </React.Fragment>
-                                                        ))}
-                                                    </tbody>
-                                                </table>
+                                                    )}
+                                                    </React.Fragment>
+                                                ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <p className="text-center text-gray-600">No evaluations found for this period.</p>
+                                )}
+                            </div>
+                        )}
+                        
+                        {view === 'salary' && (
+                            <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
+                                <div className="grid grid-cols-1 gap-6">
+                                    <div className="form-group">
+                                        <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
+                                        <select
+                                            value={salaryData.experience}
+                                            onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
+                                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        >
+                                            <option value="">Select Experience</option>
+                                            <option value="0-3">0-3 months</option>
+                                            <option value="4-9">4-9 months</option>
+                                            <option value="10-15">10-15 months</option>
+                                            <option value="16+">≥16 months</option>
+                                        </select>
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
+                                        <input
+                                            type="number"
+                                            value={salaryData.quality}
+                                            onChange={(e) => setSalaryData({ ...salaryData, quality: e.target.value })}
+                                            min="0"
+                                            max="100"
+                                            step="0.01"
+                                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="block mb-2 font-semibold text-gray-700">Calls per Hour:</label>
+                                        <input
+                                            type="number"
+                                            value={salaryData.callsPerHour}
+                                            onChange={(e) => setSalaryData({ ...salaryData, callsPerHour: e.target.value })}
+                                            min="0"
+                                            max="100"
+                                            step="0.01"
+                                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
+                                        <input
+                                            type="number"
+                                            value={salaryData.hoursNorm}
+                                            onChange={(e) => setSalaryData({ ...salaryData, hoursNorm: e.target.value })}
+                                            min="0"
+                                            max="744"
+                                            step="0.01"
+                                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
+                                        <input
+                                            type="number"
+                                            value={salaryData.totalHours}
+                                            onChange={(e) => setSalaryData({ ...salaryData, totalHours: e.target.value })}
+                                            min="0"
+                                            max="744"
+                                            step="0.01"
+                                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
+                                        <div className="space-y-4">
+                                            <div className="flex items-center gap-4">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={salaryData.bonusTraining}
+                                                    onChange={(e) => setSalaryData({ ...salaryData, bonusTraining: e.target.checked })}
+                                                    className="w-5 h-5"
+                                                    disabled={isLoading}
+                                                />
+                                                <label className="text-sm">Training (6000 KZT)</label>
                                             </div>
-                                        </div>
-                                    ) : (
-                                        <p className="text-center text-gray-600">No evaluations found for {new Date(selectedMonth).toLocaleString('default', { month: 'long', year: 'numeric' })}.</p>
-                                    )}
-                                </div>
-                            )}
-
-                            {view === 'salary' && (
-                                <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
-                                    <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
-                                    <div className="grid grid-cols-1 gap-6">
-                                        <div className="form-group">
-                                            <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
-                                            <select
-                                                value={salaryData.experience}
-                                                onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
-                                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading}
-                                            >
-                                                <option value="">Select Experience</option>
-                                                <option value="0-3">0-3 months</option>
-                                                <option value="4-9">4-9 months</option>
-                                                <option value="10-15">10-15 months</option>
-                                                <option value="16+">≥16 months</option>
-                                            </select>
-                                        </div>
-                                        <div className="form-group">
-                                            <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
-                                            <input
-                                                type="number"
-                                                value={salaryData.quality}
-                                                onChange={(e) => setSalaryData({ ...salaryData, quality: e.target.value })}
-                                                min="0"
-                                                max="100"
-                                                step="0.01"
-                                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading}
-                                            />
-                                        </div>
-                                        <div className="form-group">
-                                            <label className="block mb-2 font-semibold text-gray-700">Calls per Hour:</label>
-                                            <input
-                                                type="number"
-                                                value={salaryData.callsPerHour}
-                                                onChange={(e) => setSalaryData({ ...salaryData, callsPerHour: e.target.value })}
-                                                min="0"
-                                                max="100"
-                                                step="0.01"
-                                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading}
-                                            />
-                                        </div>
-                                        <div className="form-group">
-                                            <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
-                                            <input
-                                                type="number"
-                                                value={salaryData.hoursNorm}
-                                                onChange={(e) => setSalaryData({ ...salaryData, hoursNorm: e.target.value })}
-                                                min="0"
-                                                max="744"
-                                                step="0.01"
-                                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading}
-                                            />
-                                        </div>
-                                        <div className="form-group">
-                                            <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
-                                            <input
-                                                type="number"
-                                                value={salaryData.totalHours}
-                                                onChange={(e) => setSalaryData({ ...salaryData, totalHours: e.target.value })}
-                                                min="0"
-                                                max="744"
-                                                step="0.01"
-                                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading}
-                                            />
-                                        </div>
-                                        <div className="form-group">
-                                            <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
-                                            <div className="space-y-4">
-                                                <div className="flex items-center gap-4">
+                                            <div className="flex items-center gap-4">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={salaryData.bonusRefer}
+                                                    onChange={(e) => setSalaryData({ ...salaryData, bonusRefer: e.target.checked })}
+                                                    className="w-5 h-5"
+                                                    disabled={isLoading}
+                                                />
+                                                <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
+                                                {salaryData.bonusRefer && (
                                                     <input
-                                                        type="checkbox"
-                                                        checked={salaryData.bonusTraining}
-                                                        onChange={(e) => setSalaryData({ ...salaryData, bonusTraining: e.target.checked })}
-                                                        className="w-5 h-5"
+                                                        type="number"
+                                                        value={salaryData.bonusReferQuantity}
+                                                        onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
+                                                        min="1"
+                                                        step="1"
+                                                        placeholder="Quantity"
+                                                        className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                         disabled={isLoading}
                                                     />
-                                                    <label className="text-sm">Training (6000 KZT)</label>
-                                                </div>
-                                                <div className="flex items-center gap-4">
+                                                )}
+                                            </div>
+                                            <div className="flex items-center gap-4">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={salaryData.bonusFilming}
+                                                    onChange={(e) => setSalaryData({ ...salaryData, bonusFilming: e.target.checked })}
+                                                    className="w-5 h-5"
+                                                    disabled={isLoading}
+                                                />
+                                                <label className="text-sm">Filming (5000 KZT per session)</label>
+                                                {salaryData.bonusFilming && (
                                                     <input
-                                                        type="checkbox"
-                                                        checked={salaryData.bonusRefer}
-                                                        onChange={(e) => setSalaryData({ ...salaryData, bonusRefer: e.target.checked })}
-                                                        className="w-5 h-5"
+                                                        type="number"
+                                                        value={salaryData.bonusFilmingQuantity}
+                                                        onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
+                                                        min="1"
+                                                        step="1"
+                                                        placeholder="Quantity"
+                                                        className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                         disabled={isLoading}
                                                     />
-                                                    <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
-                                                    {salaryData.bonusRefer && (
-                                                        <input
-                                                            type="number"
-                                                            value={salaryData.bonusReferQuantity}
-                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
-                                                            min="1"
-                                                            step="1"
-                                                            placeholder="Quantity"
-                                                            className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                            disabled={isLoading}
-                                                        />
-                                                    )}
-                                                </div>
-                                                <div className="flex items-center gap-4">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={salaryData.bonusFilming}
-                                                        onChange={(e) => setSalaryData({ ...salaryData, bonusFilming: e.target.checked })}
-                                                        className="w-5 h-5"
-                                                        disabled={isLoading}
-                                                    />
-                                                    <label className="text-sm">Filming (5000 KZT per session)</label>
-                                                    {salaryData.bonusFilming && (
-                                                        <input
-                                                            type="number"
-                                                            value={salaryData.bonusFilmingQuantity}
-                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
-                                                            min="1"
-                                                            step="1"
-                                                            placeholder="Quantity"
-                                                            className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                            disabled={isLoading}
-                                                        />
-                                                    )}
-                                                </div>
+                                                )}
                                             </div>
                                         </div>
                                     </div>
-                                    <div className="flex justify-center gap-4 mt-6">
-                                        <button
-                                            onClick={calculateSalary}
-                                            className={`px-6 py-3 rounded-lg font-semibold text-lg bg-green-500 text-white hover:bg-green-600 transition-all duration-200 ${
-                                                isLoading ||
-                                                !salaryData.experience ||
-                                                !salaryData.quality ||
-                                                !salaryData.callsPerHour ||
-                                                !salaryData.hoursNorm ||
-                                                !salaryData.totalHours ||
-                                                (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
-                                                (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
-                                                    ? 'opacity-50 cursor-not-allowed'
-                                                    : ''
-                                            }`}
-                                            disabled={
-                                                isLoading ||
-                                                !salaryData.experience ||
-                                                !salaryData.quality ||
-                                                !salaryData.callsPerHour ||
-                                                !salaryData.hoursNorm ||
-                                                !salaryData.totalHours ||
-                                                (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
-                                                (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
-                                            }
-                                        >
-                                            Calculate
-                                        </button>
-                                        <button
-                                            onClick={() => setShowPointsTable(!showPointsTable)}
-                                            className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
-                                                !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
-                                            }`}
-                                            disabled={!salaryResult}
-                                        >
-                                            {showPointsTable ? 'Hide Points Table' : 'Show Points Table'}
-                                        </button>
-                                        <button
-                                            onClick={clearSalaryForm}
-                                            className={`px-6 py-3 rounded-lg font-semibold text-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200 ${
-                                                !salaryData.experience &&
-                                                !salaryData.quality &&
-                                                !salaryData.callsPerHour &&
-                                                !salaryData.hoursNorm &&
-                                                !salaryData.totalHours &&
-                                                !salaryData.bonusTraining &&
-                                                !salaryData.bonusRefer &&
-                                                !salaryData.bonusFilming
-                                                    ? 'opacity-50 cursor-not-allowed'
-                                                    : ''
-                                            }`}
-                                            disabled={
-                                                !salaryData.experience &&
-                                                !salaryData.quality &&
-                                                !salaryData.callsPerHour &&
-                                                !salaryData.hoursNorm &&
-                                                !salaryData.totalHours &&
-                                                !salaryData.bonusTraining &&
-                                                !salaryData.bonusRefer &&
-                                                !salaryData.bonusFilming
-                                            }
-                                        >
-                                            Clear
-                                        </button>
-                                    </div>
-
-                                    <SalaryCalculationResult salaryResult={salaryResult} />
-
-                                    <div id="points-table" className={`mt-6 ${showPointsTable ? 'block' : 'hidden'}`}>
-                                        {salaryResult && generatePointsTable()}
-                                    </div>
                                 </div>
-                            )}
+                                <div className="flex justify-center gap-4 mt-6">
+                                    <button
+                                        onClick={calculateSalary}
+                                        className={`px-6 py-3 rounded-lg font-semibold text-lg bg-green-500 text-white hover:bg-green-600 transition-all duration-200 ${
+                                            isLoading ||
+                                            !salaryData.experience ||
+                                            !salaryData.quality ||
+                                            !salaryData.callsPerHour ||
+                                            !salaryData.hoursNorm ||
+                                            !salaryData.totalHours ||
+                                            (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
+                                            (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
+                                                ? 'opacity-50 cursor-not-allowed'
+                                                : ''
+                                        }`}
+                                        disabled={
+                                            isLoading ||
+                                            !salaryData.experience ||
+                                            !salaryData.quality ||
+                                            !salaryData.callsPerHour ||
+                                            !salaryData.hoursNorm ||
+                                            !salaryData.totalHours ||
+                                            (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
+                                            (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
+                                        }
+                                    >
+                                        Calculate
+                                    </button>
+                                    <button
+                                        onClick={() => setShowPointsTable(!showPointsTable)}
+                                        className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
+                                            !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
+                                        }`}
+                                        disabled={!salaryResult}
+                                    >
+                                        {showPointsTable ? 'Hide Points Table' : 'Show Points Table'}
+                                    </button>
+                                    <button
+                                        onClick={clearSalaryForm}
+                                        className={`px-6 py-3 rounded-lg font-semibold text-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200 ${
+                                            !salaryData.experience &&
+                                            !salaryData.quality &&
+                                            !salaryData.callsPerHour &&
+                                            !salaryData.hoursNorm &&
+                                            !salaryData.totalHours &&
+                                            !salaryData.bonusTraining &&
+                                            !salaryData.bonusRefer &&
+                                            !salaryData.bonusFilming
+                                                ? 'opacity-50 cursor-not-allowed'
+                                                : ''
+                                        }`}
+                                        disabled={
+                                            !salaryData.experience &&
+                                            !salaryData.quality &&
+                                            !salaryData.callsPerHour &&
+                                            !salaryData.hoursNorm &&
+                                            !salaryData.totalHours &&
+                                            !salaryData.bonusTraining &&
+                                            !salaryData.bonusRefer &&
+                                            !salaryData.bonusFilming
+                                        }
+                                    >
+                                        Clear
+                                    </button>
+                                </div>
 
-                            {showDisputeModal && (
-                                <DisputeModal
-                                    selectedEvaluation={selectedEvaluation}
-                                    disputeText={disputeText}
-                                    setDisputeText={setDisputeText}
-                                    handleSubmitDispute={handleSubmitDispute}
-                                    isLoading={isLoading}
-                                    error={error}
-                                    success={success}
-                                    setShowDisputeModal={setShowDisputeModal}
-                                />
-                            )}
+                                <SalaryCalculationResult salaryResult={salaryResult} />
+                                
+                                <div id="points-table" className={`mt-6 ${showPointsTable ? 'block' : 'hidden'}`}>
+                                    {salaryResult && generatePointsTable()}
+                                </div>
+                            </div>
+                        )}
+                        
+                        {showDisputeModal && (
+                            <DisputeModal
+                                selectedEvaluation={selectedEvaluation}
+                                disputeText={disputeText}
+                                setDisputeText={setDisputeText}
+                                handleSubmitDispute={handleSubmitDispute}
+                                isLoading={isLoading}
+                                error={error}
+                                success={success}
+                                setShowDisputeModal={setShowDisputeModal}
+                            />
+                        )}
                         
                         {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
                         {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
