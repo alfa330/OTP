@@ -2202,37 +2202,59 @@
                             ) : svData && svData.operators && svData.operators.length > 0 ? (
                                 <div className="overflow-x-auto">
                                     <table className="min-w-full bg-white border-collapse">
-                                        <thead>
-                                            <tr className="bg-gray-100">
-                                                <th className="p-3 border-b text-left">Name</th>
-                                                <th className="p-3 border-b text-left">Calls</th>
-                                                <th className="p-3 border-b text-left">Avg Score</th>
-                                                <th className="p-3 border-b text-left">Link</th>
+                                    <thead>
+                                        <tr className="bg-gray-200">
+                                        <th className="p-3 border-b text-left">Name</th>
+                                        <th className="p-3 border-b text-left">Calls</th>
+                                        <th className="p-3 border-b text-left">Avg Score</th>
+                                        <th className="p-3 border-b text-left">Link</th>
+                                        <th className="p-3 border-b text-left">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {svData.operators.map((op, index) => {
+                                        const callCount = parseInt(op.call_count) || 0;
+                                        return (
+                                            <tr key={index} className="hover:bg-gray-50">
+                                            <td className="p-3 border-b">{op.name}</td>
+                                            <td className={`p-3 border-b ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
+                                                {callCount}
+                                            </td>
+                                            <td className="p-3 border-b">
+                                                <span className={getScoreColor(op.avg_score)}>
+                                                {op.avg_score ? op.avg_score.toFixed(2) : '-'}
+                                                </span>
+                                            </td>
+                                            <td className="p-3 border-b">
+                                                {op.link ? (
+                                                <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
+                                                ) : '-'}
+                                            </td>
+                                            <td className="p-3 border-b space-x-2">
+                                                <button
+                                                onClick={() => {
+                                                    // Генерируем токен с данными оператора
+                                                    const tokenData = {
+                                                    apiKey: user.apiKey,
+                                                    userId: user.id,
+                                                    operatorId: op.id,
+                                                    operatorName: op.name,
+                                                    timestamp: Date.now()
+                                                    };
+                                                    const token = btoa(JSON.stringify(tokenData));
+                                                    sessionStorage.setItem('callEvalAuth', token);
+                                                    window.open('https://alfa330.github.io/call_evalution/', '_blank');
+                                                }}
+                                                className="bg-blue-500 text-white px-3 py-1 rounded text-sm hover:bg-blue-600"
+                                                title="Listen to operator calls"
+                                                >
+                                                Listen Calls
+                                                </button>
+                                            </td>
                                             </tr>
-                                        </thead>
-                                        <tbody>
-                                            {svData.operators.map((op, index) => {
-                                                const callCount = parseInt(op.call_count) || 0;
-                                                return (
-                                                    <tr key={index} className="hover:bg-gray-50">
-                                                        <td className="p-3 border-b">{op.name}</td>
-                                                        <td className={`p-3 border-b ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
-                                                            {callCount}
-                                                        </td>
-                                                        <td className="p-3 border-b">
-                                                            <span className={getScoreColor(op.avg_score)}>
-                                                                {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                            </span>
-                                                        </td>
-                                                        <td className="p-3 border-b">
-                                                            {op.link ? (
-                                                                <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                            ) : '-'}
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            })}
-                                        </tbody>
+                                        );
+                                        })}
+                                    </tbody>
                                     </table>
                                 </div>
                             ) : (
