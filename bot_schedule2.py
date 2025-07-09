@@ -1764,10 +1764,7 @@ async def save_hours_table_admin(message: types.Message, state: FSMContext):
 
             message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
             for op in operators:
-                if op['link']:
-                    message_text += f"👤 {op['name']} → <a href='{op['link']}'>Ссылка</a>\n"
-                else:
-                    message_text += f"👤 {op['name']} → Ссылка отсутствует\n"
+                    message_text += f"👤 {op['name']}\n"
             message_text += "\n<b>Это все операторы для этого СВ?</b>"
 
             await bot.send_message(
@@ -1856,8 +1853,7 @@ async def select_hours_direction_admin(callback: types.CallbackQuery, state: FSM
             name=op['name'],
             role='operator',
             direction_id=direction_id,
-            supervisor_id=user[0],
-            hours_table_url=op['link'] if op['link'] else None
+            supervisor_id=user[0]
         )
 
     await bot.send_message(
@@ -2361,10 +2357,7 @@ async def save_hours_table(message: types.Message, state: FSMContext):
 
             message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
             for op in operators:
-                if op['link']:
-                    message_text += f"👤 {op['name']} → <a href='{op['link']}'>Ссылка</a>\n"
-                else:
-                    message_text += f"👤 {op['name']} → Ссылка отсутствует\n"
+                message_text += f"👤 {op['name']}\n"
             message_text += "\n<b>Это все ваши операторы?</b>"
 
             await bot.send_message(
@@ -2454,8 +2447,7 @@ async def select_hours_direction(callback: types.CallbackQuery, state: FSMContex
             name=op['name'],
             role='operator',
             direction_id=direction_id,
-            supervisor_id=user[0],
-            hours_table_url=op['link'] if op['link'] else None
+            supervisor_id=user[0]
         )
 
     await bot.send_message(
@@ -2706,49 +2698,22 @@ def extract_fio_and_links(spreadsheet_url):
         sheet_name = ws.title
 
         fio_column = None
-        score_columns = []
         for col in ws.iter_cols(min_row=1, max_row=1):
             for cell in col:
-                if cell.value is not None:
-                    value = str(cell.value).strip()
-                    if "ФИО" in value:
-                        fio_column = cell.column
-                    else:
-                        try:
-                            num = float(value)
-                            if 1 <= int(num) <= 20:
-                                score_columns.append(cell.column)
-                        except (ValueError, TypeError):
-                            continue
+                if cell.value is not None and "ФИО" in str(cell.value).strip():
+                    fio_column = cell.column
 
         if not fio_column:
             os.remove(temp_file)
             return None, None, "Колонка ФИО не найдена."
-        if not score_columns:
-            os.remove(temp_file)
-            return None, None, "Столбцы с оценками (1-20) не найдены."
 
         operators = []
         for row in ws.iter_rows(min_row=2):
             fio_cell = row[fio_column - 1]
             if not fio_cell.value:
                 break
-            scores = []
-            for col_idx in score_columns:
-                score_cell = row[col_idx - 1]
-                try:
-                    score = float(score_cell.value) if float(score_cell.value)>=0 else None
-                    if score is not None:
-                        scores.append(score)
-                except (ValueError, TypeError):
-                    continue
-            call_count = len(scores)
-            avg_score = sum(scores) / call_count if scores else None
             operator_info = {
-                "name": str(fio_cell.value),
-                "link": fio_cell.hyperlink.target if fio_cell.hyperlink else None,
-                "call_count": call_count,
-                "avg_score": avg_score
+                "name": str(fio_cell.value)
             }
             operators.append(operator_info)
 
