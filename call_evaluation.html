@@ -106,6 +106,12 @@
             );
         };
 
+        const safeAtob = (str) => {
+        return decodeURIComponent(Array.prototype.map.call(atob(str), (c) => {
+            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+        }).join(''));
+        };
+
         const LoginModal = ({ isOpen, onClose, onLogin }) => {
             const [login, setLogin] = useState('');
             const [password, setPassword] = useState('');
@@ -118,7 +124,7 @@
                     const token = sessionStorage.getItem('callEvalAuth');
                     if (token) {
                         try {
-                            const tokenData = JSON.parse(atob(token));
+                            const tokenData = JSON.parse(safeAtob(token));
                             
                             // Проверяем срок действия токена (5 минут)
                             if (Date.now() - tokenData.timestamp < 300000) {
