@@ -698,14 +698,18 @@ def get_sv_data():
             current_month = datetime.now().strftime('%Y-%m')
             
             for operator in operators:
-                operator_id, operator_name, direction, hire_date, hours_table_url, scores_table_url, supervisor_name =[operator[kkk] for kkk in operator]
-                # Get direction name from direction_id
-                
+                # Unpack only the fields you need, based on the actual tuple length
+                # Example: (id, name, direction, scores_table_url)
+                operator_id = operator[0]
+                operator_name = operator[1]
+                direction = operator[2]
+                scores_table_url = operator[5] if len(operator) > 5 else None
+
                 # Get call evaluations for the operator
                 evaluations = db.get_call_evaluations(operator_id, month=current_month)
                 call_count = len(evaluations)
                 avg_score = sum(float(e['score']) for e in evaluations) / call_count if call_count > 0 else 0
-                
+
                 response_data["operators"].append({
                     "id": operator_id,
                     "name": operator_name,
@@ -908,8 +912,6 @@ def delete_draft_evaluation(evaluation_id):
     except Exception as e:
         logging.error(f"Error deleting draft evaluation: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-from flask import Response, stream_with_context
 
 @app.route('/api/audio/<int:evaluation_id>', methods=['GET'])
 @require_api_key
