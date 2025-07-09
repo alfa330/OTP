@@ -890,7 +890,7 @@ class Database:
                 c.audio_path,
                 c.is_draft,
                 c.is_correction,
-                TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI')
+                TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI'),
                 c.scores,
                 c.criterion_comments
             FROM calls c
