@@ -1061,22 +1061,27 @@
                 });
                 setSalaryResult(null);
             };
+            const audioUrlCache = {};
+            const getAudioUrlWithAuth = async (evaluationId, apiKey, userId) => {
+                if (audioUrlCache[evaluationId]) {
+                    return audioUrlCache[evaluationId];
+                }
             
-            const getAudioUrlWithAuth = async (evaluationId, user) => {
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/audio/${evaluationId}`, {
                         method: 'GET',
                         headers: {
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
+                            'X-API-Key': apiKey,
+                            'X-User-Id': userId
                         }
                     });
-
+            
                     if (!response.ok) throw new Error(`Failed to fetch audio: ${response.status}`);
-
+            
                     const data = await response.json();
                     if (data && data.url) {
-                        return data.url; // Прямая ссылка на аудио
+                        audioUrlCache[evaluationId] = data.url;
+                        return data.url;
                     } else {
                         console.error("No signed URL returned in response:", data);
                         return null;
