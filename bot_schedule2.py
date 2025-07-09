@@ -702,6 +702,7 @@ def get_sv_data():
             
             for operator in operators:
                 # Для словаря
+                logging.debug(f"Processing operator: {operator}")
                 operator_id = operator['id'] if isinstance(operator, dict) else operator[0]
                 operator_name = operator['name'] if isinstance(operator, dict) else operator[1]
                 direction = operator['direction'] if isinstance(operator, dict) else operator[2]
