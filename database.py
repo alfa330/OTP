@@ -606,8 +606,8 @@ class Database:
             """, (hours_table_url, scores_table_url, user_id))
 
     def add_call_evaluation(self, evaluator_id, operator_id, phone_number, score, 
-                        comment=None, month=None, audio_path=None, is_draft=False, 
-                        scores=None, criterion_comments=None, direction_id=None):
+                            comment=None, month=None, audio_path=None, is_draft=False, 
+                            scores=None, criterion_comments=None, direction_id=None):
         month = month or datetime.now().strftime('%Y-%m')
         
         # Подготовка JSON данных один раз
@@ -625,7 +625,7 @@ class Database:
             cursor.execute("""
                 WITH existing_data AS (
                     -- Проверка на существующий черновик
-                    SELECT id, audio_path, FALSE AS is_existing_eval
+                    SELECT id, audio_path, FALSE AS is_existing_eval, created_at
                     FROM calls 
                     WHERE evaluator_id = %s 
                     AND operator_id = %s 
@@ -635,16 +635,16 @@ class Database:
                     UNION ALL
                     
                     -- Проверка на существующую оценку (не черновик)
-                    SELECT id, NULL AS audio_path, TRUE AS is_existing_eval
+                    SELECT id, NULL AS audio_path, TRUE AS is_existing_eval, created_at
                     FROM calls 
                     WHERE operator_id = %s 
                     AND month = %s 
                     AND phone_number = %s 
                     AND is_draft = FALSE
-                    ORDER BY created_at DESC
-                    LIMIT 1
                 )
-                SELECT * FROM existing_data
+                SELECT id, audio_path, is_existing_eval 
+                FROM existing_data
+                ORDER BY created_at DESC
                 LIMIT 1
             """, (evaluator_id, operator_id, month, operator_id, month, phone_number))
             

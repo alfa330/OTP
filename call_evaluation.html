@@ -681,7 +681,11 @@
                         });
                         const data = await response.json();
                         if (data.status === 'success') {
-                            setOperators(data.operators);
+                        const operatorsWithDirection = data.operators.map(op => ({
+                            ...op,
+                            direction_id: op.direction_id // Используем direction_id вместо направления
+                        }));
+                        setOperators(operatorsWithDirection);
                         }
                     } catch (err) {
                         console.error('Error fetching operators:', err);
@@ -780,7 +784,8 @@
                         selectedDirection: evaluationData.selectedDirection,
                         directions: evaluationData.directions,
                         phoneNumber: evaluationData.phoneNumber,
-                        assignedMonth: evaluationData.assignedMonth
+                        assignedMonth: evaluationData.assignedMonth,
+                        direction_id: selectedOperator.direction_id
                     };
                     return [...prevCalls.filter(c => c.id !== newCall.id), newCall];
                 });
@@ -1069,7 +1074,7 @@
                             setEditingEvaluation(null);
                         }}
                         onSubmit={handleEvaluateCall}
-                        directions={directions.filter(d => d.name === selectedOperator?.direction)}
+                        directions={directions.filter(d => d.id === selectedOperator?.direction_id)}
                         operator={selectedOperator}
                         selectedMonth={selectedMonth}
                         apiKey={apiKey}
