@@ -416,7 +416,7 @@ class Database:
         """Получить все направления из таблицы directions."""
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name, has_file_upload, criteria
+                SELECT id, name, has_file_upload, criteria, is_active
                 FROM directions
                 ORDER BY name
             """)
@@ -425,7 +425,8 @@ class Database:
                     "id": row[0],
                     "name": row[1],
                     "hasFileUpload": row[2],
-                    "criteria": row[3]
+                    "criteria": row[3],
+                    "isActive": row[4]
                 } for row in cursor.fetchall()
             ]
 
