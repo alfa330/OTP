@@ -727,15 +727,13 @@
                                     directions: [{
                                         name: evaluation.direction?.name || selectedOperator.direction,
                                         hasFileUpload: evaluation.direction?.hasFileUpload || true,
-                                        criteria: evaluation.direction?.criteria || [],
-                                        version: evaluation.direction?.version || 1
+                                        criteria: evaluation.direction?.criteria || []
                                     }],
                                     scores: evaluation.scores || [],
                                     criterionComments: evaluation.criterion_comments || [],
                                     audioUrl,
                                     isDraft: evaluation.is_draft,
-                                    assignedMonth: evaluation.month,
-                                    directionVersion: evaluation.direction?.version || 1 // Добавлено
+                                    assignedMonth: evaluation.month
                                 };
                             }));
                             setCalls(updatedCalls);
@@ -782,8 +780,7 @@
                         selectedDirection: evaluationData.selectedDirection,
                         directions: evaluationData.directions,
                         phoneNumber: evaluationData.phoneNumber,
-                        assignedMonth: evaluationData.assignedMonth,
-                        directionVersion: evaluationData.directionVersion // Добавлено
+                        assignedMonth: evaluationData.assignedMonth
                     };
                     return [...prevCalls.filter(c => c.id !== newCall.id), newCall];
                 });

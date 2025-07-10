@@ -265,7 +265,8 @@ class Database:
                 CREATE TABLE IF NOT EXISTS call_directions (
                     call_id INTEGER NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
                     direction_id INTEGER NOT NULL REFERENCES directions(id) ON DELETE RESTRICT,
-                    PRIMARY KEY (call_id)
+                    PRIMARY KEY (call_id, direction_id)
+                );
             """)
 
             # Добавляем direction_id в users после создания directions
