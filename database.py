@@ -1003,12 +1003,15 @@ class Database:
                 TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI'),
                 c.scores,
                 c.criterion_comments,
+                d.id as direction_id,
                 d.name as direction_name,
                 d.criteria as direction_criteria,
-                d.has_file_upload as direction_has_file_upload
+                d.has_file_upload as direction_has_file_upload,
+                u.name as evaluator_name
             FROM calls c
             JOIN latest_calls lc ON c.id = lc.id AND c.created_at = lc.latest_date
             LEFT JOIN directions d ON c.direction_id = d.id
+            LEFT JOIN users u ON c.evaluator_id = u.id
             WHERE c.operator_id = %s
         """
         params = [operator_id, operator_id]
@@ -1033,10 +1036,12 @@ class Database:
                     "scores": row[9] if row[9] else [],
                     "criterion_comments": row[10] if row[10] else [],
                     "direction": {
-                        "name": row[11],
-                        "criteria": row[12] if row[12] else [],
-                        "hasFileUpload": row[13] if row[13] is not None else True
-                    } if row[11] else None
+                        "id": row[11],
+                        "name": row[12],
+                        "criteria": row[13] if row[13] else [],
+                        "hasFileUpload": row[14] if row[14] is not None else True
+                    } if row[12] else None,
+                    "evaluator": row[15] if row[15] else None
                 } for row in cursor.fetchall()
             ]
 
