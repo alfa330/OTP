@@ -766,7 +766,8 @@
                                     criterionComments: evaluation.criterion_comments || [],
                                     audioUrl,
                                     isDraft: evaluation.is_draft,
-                                    assignedMonth: evaluation.month
+                                    assignedMonth: evaluation.month,
+                                    isCorrection: evaluation.is_correction || false
                                 };
                             }));
                             setCalls(updatedCalls);
@@ -1021,30 +1022,32 @@
                                                                 >
                                                                     Re-evaluate
                                                                 </button>
-                                                                <button
-                                                                    onClick={async (e) => {
-                                                                        e.stopPropagation();
-                                                                        try {
-                                                                            const response = await fetch(`${API_BASE_URL}/api/call_versions/${call.id}`, {
-                                                                                headers: {
-                                                                                    'X-API-Key': apiKey,
-                                                                                    'X-User-Id': userId
+                                                                {call.isCorrection && (
+                                                                    <button
+                                                                        onClick={async (e) => {
+                                                                            e.stopPropagation();
+                                                                            try {
+                                                                                const response = await fetch(`${API_BASE_URL}/api/call_versions/${call.id}`, {
+                                                                                    headers: {
+                                                                                        'X-API-Key': apiKey,
+                                                                                        'X-User-Id': userId
+                                                                                    }
+                                                                                });
+                                                                                const data = await response.json();
+                                                                                if (data.status === 'success') {
+                                                                                    setVersionHistory(data.versions);
+                                                                                    setShowVersionsModal(true);
                                                                                 }
-                                                                            });
-                                                                            const data = await response.json();
-                                                                            if (data.status === 'success') {
-                                                                                setVersionHistory(data.versions);
-                                                                                setShowVersionsModal(true);
+                                                                            } catch (err) {
+                                                                                console.error('Error fetching versions:', err);
                                                                             }
-                                                                        } catch (err) {
-                                                                            console.error('Error fetching versions:', err);
-                                                                        }
-                                                                    }}
-                                                                    className="bg-purple-500 text-white px-2 py-1 rounded hover:bg-purple-600 text-xs ml-1"
-                                                                    title="View version history"
-                                                                >
-                                                                    V
-                                                                </button>
+                                                                        }}
+                                                                        className="bg-purple-500 text-white px-2 py-1 rounded hover:bg-purple-600 text-xs ml-1"
+                                                                        title="View version history"
+                                                                    >
+                                                                        V
+                                                                    </button>
+                                                                )}
                                                             </>
                                                         )}
                                                     </td>
