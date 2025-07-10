@@ -871,7 +871,7 @@ def get_call_versions(call_id):
                         c.id, c.score, c.comment, c.phone_number, c.month, 
                         c.audio_path, c.created_at, c.is_correction,
                         u.name as evaluator_name,
-                        c.previous_version_id  # Добавляем это поле
+                        c.previous_version_id  
                     FROM calls c
                     JOIN users u ON c.evaluator_id = u.id
                     WHERE c.id = %s
