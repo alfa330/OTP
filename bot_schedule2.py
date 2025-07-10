@@ -951,10 +951,25 @@ def receive_call_evaluation():
         is_draft = request.form['is_draft'].lower() == 'true'
         scores = json.loads(request.form.get('scores', '[]'))
         criterion_comments = json.loads(request.form.get('criterion_comments', '[]'))
+        direction_name = request.form.get('direction')  # Новое поле - имя направления
+        
         evaluator = db.get_user(name=evaluator_name)
         operator = db.get_user(name=operator_name)
         if not evaluator or not operator:
             return jsonify({"error": "Evaluator or operator not found"}), 404
+
+        # Получаем ID направления, если оно указано
+        direction_id = None
+        if direction_name:
+            with db._get_cursor() as cursor:
+                cursor.execute("""
+                    SELECT id FROM directions 
+                    WHERE name = %s AND is_active = TRUE
+                    ORDER BY version DESC LIMIT 1
+                """, (direction_name,))
+                result = cursor.fetchone()
+                if result:
+                    direction_id = result[0]
 
         # Handle audio file upload to GCS
         audio_path = None
@@ -996,7 +1011,8 @@ def receive_call_evaluation():
             audio_path=audio_path,
             is_draft=is_draft,
             scores=scores,
-            criterion_comments=criterion_comments
+            criterion_comments=criterion_comments,
+            direction_id=direction_id  # Передаем ID направления
         )
 
         # Send Telegram notification for non-draft evaluations
