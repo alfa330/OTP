@@ -312,6 +312,10 @@
                 formData.append('scores', JSON.stringify(scores));
                 formData.append('criterion_comments', JSON.stringify(criterionComments));
                 formData.append('direction', operator.direction_id);
+                if (existingEvaluation?.isReevaluation) {
+                    formData.append('previous_version_id', existingEvaluation.id);
+                    formData.append('is_correction', true);
+                }
                 if (callFile) {
                     formData.append('audio_file', callFile);
                 }
@@ -344,7 +348,8 @@
                             criterionComments,
                             audioUrl: directions[0]?.hasFileUpload ? audioUrl : null,
                             isDraft: saveAsDraft,
-                            assignedMonth
+                            assignedMonth,
+                            isCorrection: existingEvaluation?.isReevaluation || false
                         });
                         onClose();
                     } else {
@@ -356,7 +361,6 @@
                     setIsSubmitting(false);
                 }
             };
-
             const handleDeleteDraft = async () => {
                 if (!existingEvaluation?.isDraft) return;
                 try {
@@ -385,7 +389,7 @@
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
                     <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-3xl max-h-[90vh] overflow-y-auto">
                         <h2 className="text-xl font-semibold mb-4">
-                            {existingEvaluation?.isDraft ? 'Edit Draft Evaluation' : 'Evaluate Call'} - Operator: {operator?.name}
+                            {existingEvaluation?.isReevaluation ? 'Re-evaluate Call' : existingEvaluation?.isDraft ? 'Edit Draft Evaluation' : 'Evaluate Call'} - Operator: {operator?.name}
                         </h2>
                         {directions[0]?.hasFileUpload && (
                             <div className="mb-4">
@@ -1000,7 +1004,22 @@
                                                     <td className="p-4 border-b text-sm">{call.selectedDirection || '-'}</td>
                                                     <td className="p-4 border-b text-sm">{call.phoneNumber || '-'}</td>
                                                     <td className="p-4 border-b text-sm">{call.totalScore}</td>
-                                                    <td className="p-4 border-b text-sm">{call.date}</td>
+                                                    <td className="p-4 border-b text-sm flex items-center space-x-2">
+                                                        {call.date}
+                                                        {userRole === 'admin' && !call.isDraft && (
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    setEditingEvaluation({ ...call, isReevaluation: true });
+                                                                    setShowEvaluationModal(true);
+                                                                }}
+                                                                className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-xs"
+                                                                title="Re-evaluate this call"
+                                                            >
+                                                                Re-evaluate
+                                                            </button>
+                                                        )}
+                                                    </td>
                                                 </tr>
                                                 {expandedDetails === call.id && (
                                                     <tr>
