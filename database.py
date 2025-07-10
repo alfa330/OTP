@@ -250,13 +250,24 @@ class Database:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS directions (
                     id SERIAL PRIMARY KEY,
-                    name VARCHAR(255) NOT NULL UNIQUE,
+                    name VARCHAR(255) NOT NULL,
                     has_file_upload BOOLEAN NOT NULL DEFAULT TRUE,
                     criteria JSONB NOT NULL DEFAULT '[]',
                     created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    previous_version_id INTEGER REFERENCES directions(id)
                 );
             """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS call_directions (
+                    call_id INTEGER NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+                    direction_id INTEGER NOT NULL REFERENCES directions(id) ON DELETE RESTRICT,
+                    PRIMARY KEY (call_id)
+            """)
+
             # Добавляем direction_id в users после создания directions
             cursor.execute("""
                 DO $$
@@ -417,51 +428,74 @@ class Database:
             ]
 
     def save_directions(self, directions, admin_id):
-        """Сохранить направления в таблицу directions, обновляя существующие по имени."""
+        """Сохранить направления в таблицу directions, создавая новые версии при изменениях."""
         with self._get_cursor() as cursor:
-            # Получаем текущие направления, созданные этим администратором
+            # Получаем текущие активные направления
             cursor.execute("""
-                SELECT id, name, has_file_upload, criteria
+                SELECT id, name, has_file_upload, criteria, version
                 FROM directions
-                WHERE created_by = %s
+                WHERE created_by = %s AND is_active = TRUE
             """, (admin_id,))
-            existing_directions = {row[1]: {"id": row[0], "has_file_upload": row[2], "criteria": row[3]} for row in cursor.fetchall()}
+            existing_directions = {row[1]: {"id": row[0], "has_file_upload": row[2], "criteria": row[3], "version": row[4]} 
+                                for row in cursor.fetchall()}
             
-            # Новые имена направлений из запроса
             new_direction_names = {d['name'] for d in directions}
             
-            # Обновляем существующие направления и добавляем новые
             for direction in directions:
                 name = direction['name']
                 has_file_upload = direction['hasFileUpload']
                 criteria = json.dumps(direction['criteria'])
                 
                 if name in existing_directions:
-                    # Обновляем существующее направление
+                    # Проверяем, изменились ли критерии или настройки
+                    existing = existing_directions[name]
+                    if (existing['has_file_upload'] == has_file_upload and 
+                        existing['criteria'] == criteria):
+                        continue  # Ничего не изменилось, пропускаем
+                    
+                    # Деактивируем старую версию
                     cursor.execute("""
                         UPDATE directions
-                        SET has_file_upload = %s, criteria = %s, created_at = CURRENT_TIMESTAMP
+                        SET is_active = FALSE
                         WHERE id = %s
-                    """, (has_file_upload, criteria, existing_directions[name]['id']))
+                    """, (existing['id'],))
+                    
+                    # Создаем новую версию
+                    cursor.execute("""
+                        INSERT INTO directions (
+                            name, has_file_upload, criteria, created_by, 
+                            version, previous_version_id
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                    """, (
+                        name, has_file_upload, criteria, admin_id,
+                        existing['version'] + 1, existing['id']
+                    ))
                 else:
                     # Добавляем новое направление
                     cursor.execute("""
-                        INSERT INTO directions (name, has_file_upload, criteria, created_by)
+                        INSERT INTO directions (
+                            name, has_file_upload, criteria, created_by
+                        )
                         VALUES (%s, %s, %s, %s)
                         RETURNING id
                     """, (name, has_file_upload, criteria, admin_id))
             
-            # Удаляем направления, которых нет в новом списке
+            # Деактивируем направления, которых нет в новом списке
             cursor.execute("""
-                DELETE FROM directions
-                WHERE created_by = %s AND name NOT IN %s
+                UPDATE directions
+                SET is_active = FALSE
+                WHERE created_by = %s AND is_active = TRUE AND name NOT IN %s
             """, (admin_id, tuple(new_direction_names) if new_direction_names else ('',)))
             
             # Обновляем direction_id в users для удалённых направлений
             cursor.execute("""
                 UPDATE users
                 SET direction_id = NULL
-                WHERE direction_id NOT IN (SELECT id FROM directions)
+                WHERE direction_id NOT IN (
+                    SELECT id FROM directions WHERE is_active = TRUE
+                )
             """)
 
     def get_operator_credentials(self, operator_id, supervisor_id):
@@ -549,10 +583,27 @@ class Database:
                 WHERE id = %s
             """, (hours_table_url, scores_table_url, user_id))
 
-    def add_call_evaluation(self, evaluator_id, operator_id, phone_number, score, comment=None, month=None, audio_path=None, is_draft=False, scores=None, criterion_comments=None):
+    def add_call_evaluation(self, evaluator_id, operator_id, phone_number, score, 
+                        comment=None, month=None, audio_path=None, is_draft=False, 
+                        scores=None, criterion_comments=None, direction_id=None):
         month = month or datetime.now().strftime('%Y-%m')
         with self._get_cursor() as cursor:
-            # Check for existing draft for this evaluator, operator, and month
+            # Если direction_id не указан, получаем текущий direction оператора
+            if not direction_id:
+                cursor.execute("""
+                    SELECT direction_id FROM users WHERE id = %s
+                """, (operator_id,))
+                direction_id = cursor.fetchone()[0]
+            
+            # Проверяем существование direction_id
+            if direction_id:
+                cursor.execute("""
+                    SELECT 1 FROM directions WHERE id = %s
+                """, (direction_id,))
+                if not cursor.fetchone():
+                    direction_id = None
+            
+            # Проверка на существующий черновик
             if is_draft:
                 cursor.execute("""
                     SELECT id, audio_path FROM calls 
@@ -563,7 +614,6 @@ class Database:
                 """, (evaluator_id, operator_id, month))
                 existing_draft = cursor.fetchone()
                 if existing_draft:
-                    # Update existing draft
                     old_audio_path = existing_draft[1]
                     cursor.execute("""
                         UPDATE calls
@@ -571,16 +621,32 @@ class Database:
                             score = %s,
                             comment = %s,
                             audio_path = COALESCE(%s, audio_path),
-                            created_at = CURRENT_TIMESTAMP
+                            created_at = CURRENT_TIMESTAMP,
+                            scores = %s,
+                            criterion_comments = %s
                         WHERE id = %s
                         RETURNING id
-                    """, (phone_number, score, comment, audio_path, existing_draft[0]))
-                    # Remove old audio file if it exists and was updated
-                    if old_audio_path and audio_path and old_audio_path != audio_path and os.path.exists(old_audio_path):
-                        os.remove(old_audio_path)
-                    return cursor.fetchone()[0]
-    
-            # Check for existing non-draft evaluation with same phone_number and month
+                    """, (phone_number, score, comment, audio_path, 
+                        json.dumps(scores) if scores else None,
+                        json.dumps(criterion_comments) if criterion_comments else None,
+                        existing_draft[0]))
+                    if old_audio_path and audio_path and old_audio_path != audio_path:
+                        if os.path.exists(old_audio_path):
+                            os.remove(old_audio_path)
+                    call_id = cursor.fetchone()[0]
+                    
+                    # Обновляем связь с направлением, если она есть
+                    if direction_id:
+                        cursor.execute("""
+                            INSERT INTO call_directions (call_id, direction_id)
+                            VALUES (%s, %s)
+                            ON CONFLICT (call_id) 
+                            DO UPDATE SET direction_id = EXCLUDED.direction_id
+                        """, (call_id, direction_id))
+                    
+                    return call_id
+        
+            # Проверка на существующую оценку
             cursor.execute("""
                 SELECT id FROM calls 
                 WHERE operator_id = %s 
@@ -593,8 +659,8 @@ class Database:
             
             existing_call = cursor.fetchone()
             is_correction = existing_call is not None and not is_draft
-    
-            # Insert new evaluation
+            
+            # Вставляем новую оценку
             cursor.execute("""
                 INSERT INTO calls (
                     evaluator_id, operator_id, month, phone_number, score, comment,
@@ -609,8 +675,16 @@ class Database:
                 json.dumps(scores) if scores else None,
                 json.dumps(criterion_comments) if criterion_comments else None
             ))
+            call_id = cursor.fetchone()[0]
             
-            return cursor.fetchone()[0]
+            # Создаем связь с направлением, если оно указано
+            if direction_id:
+                cursor.execute("""
+                    INSERT INTO call_directions (call_id, direction_id)
+                    VALUES (%s, %s)
+                """, (call_id, direction_id))
+            
+            return call_id
 
     def add_work_hours(self, operator_id, regular_hours, training_hours, fines=0.0, norm_hours=0.0, month=None):
         month = month or datetime.now().strftime('%Y-%m')
@@ -892,9 +966,14 @@ class Database:
                 c.is_correction,
                 TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI'),
                 c.scores,
-                c.criterion_comments
+                c.criterion_comments,
+                d.name as direction_name,
+                d.criteria as direction_criteria,
+                d.has_file_upload as direction_has_file_upload
             FROM calls c
             JOIN latest_calls lc ON c.id = lc.id AND c.created_at = lc.latest_date
+            LEFT JOIN call_directions cd ON c.id = cd.call_id
+            LEFT JOIN directions d ON cd.direction_id = d.id
             WHERE c.operator_id = %s
         """
         params = [operator_id, operator_id]
@@ -917,7 +996,12 @@ class Database:
                     "is_correction": row[7],
                     "evaluation_date": row[8],
                     "scores": row[9] if row[9] else [],
-                    "criterion_comments": row[10] if row[10] else []
+                    "criterion_comments": row[10] if row[10] else [],
+                    "direction": {
+                        "name": row[11],
+                        "criteria": row[12] if row[12] else [],
+                        "hasFileUpload": row[13] if row[13] is not None else True
+                    } if row[11] else None
                 } for row in cursor.fetchall()
             ]
 

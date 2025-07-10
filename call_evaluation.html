@@ -591,6 +591,7 @@
             const [editingEvaluation, setEditingEvaluation] = useState(null);
             const [isLoading, setIsLoading] = useState(false);
             const [loadingCallId, setLoadingCallId] = useState(null);
+            const [operatorFromToken, setOperatorFromToken] = useState(null);
             const MAX_EVALUATIONS = 20;
             
             const getLast12Months = () => {
@@ -610,35 +611,45 @@
             const monthOptions = getLast12Months();
 
             useEffect(() => {
-                // Проверяем токен из URL при загрузке
                 const params = new URLSearchParams(window.location.search);
                 const token = params.get('token');
                 
                 if (token) {
-                try {
-                    const decodedToken = decodeURIComponent(token);
-                    const tokenData = JSON.parse(safeAtob(decodedToken));
-                    
-                    // Проверяем срок действия токена (5 минут)
-                    if (Date.now() - tokenData.timestamp < 300000) {
-                    setApiKey(tokenData.apiKey);
-                    setUserId(tokenData.userId);
-                    setUserRole(tokenData.role);
-                    setUserName(tokenData.name);
-                    setSelectedOperator({
-                        id: tokenData.operatorId,
-                        name: tokenData.operatorName
-                    });
-                    setShowLoginModal(false);
-                    
-                    // Удаляем токен из URL
-                    window.history.replaceState({}, document.title, window.location.pathname);
+                    try {
+                        const decodedToken = decodeURIComponent(token);
+                        const tokenData = JSON.parse(safeAtob(decodedToken));
+                        
+                        if (Date.now() - tokenData.timestamp < 300000) {
+                            setApiKey(tokenData.apiKey);
+                            setUserId(tokenData.userId);
+                            setUserRole(tokenData.role);
+                            setUserName(tokenData.name);
+                            setOperatorFromToken({
+                                id: tokenData.operatorId,
+                                name: tokenData.operatorName
+                            });
+                            window.history.replaceState({}, document.title, window.location.pathname);
+                            setShowLoginModal(false);
+                        }
+                    } catch (e) {
+                        console.error('Token decoding error:', e);
                     }
-                } catch (e) {
-                    console.error('Token decoding error:', e);
-                }
                 }
             }, []);
+            
+            // Новый эффект для выбора оператора после загрузки
+            useEffect(() => {
+                if (operatorFromToken && operators.length > 0) {
+                    const foundOperator = operators.find(op => op.id === operatorFromToken.id);
+                    if (foundOperator) {
+                        setSelectedOperator(foundOperator);
+                    } else {
+                        console.warn(`Operator with ID ${operatorFromToken.id} not found`);
+                        setSelectedOperator(null);
+                    }
+                    setOperatorFromToken(null); // Очищаем временное значение
+                }
+            }, [operators, operatorFromToken]);
 
             useEffect(() => {
                 if (!apiKey || !userId) return;
@@ -687,10 +698,10 @@
                     setCalls([]);
                     return;
                 }
-        
+
                 const controller = new AbortController();
                 const signal = controller.signal;
-        
+
                 const fetchEvaluations = async () => {
                     setIsLoading(true);
                     try {
@@ -703,9 +714,7 @@
                         });
                         const data = await response.json();
                         if (data.status === 'success') {
-                            // Загружаем аудио только для первых нескольких элементов для оптимизации
-                            const limitedEvaluations = data.evaluations.slice(0, 20);
-                            const updatedCalls = await Promise.all(limitedEvaluations.map(async (evaluation) => {
+                            const updatedCalls = await Promise.all(data.evaluations.map(async (evaluation) => {
                                 let audioUrl = null;
                                 return {
                                     id: evaluation.id,
@@ -714,13 +723,19 @@
                                     date: evaluation.evaluation_date,
                                     phoneNumber: evaluation.phone_number,
                                     combinedComment: evaluation.comment,
-                                    selectedDirection: selectedOperator.direction,
-                                    directions: directions.filter(d => d.name === selectedOperator.direction),
+                                    selectedDirection: evaluation.direction?.name || selectedOperator.direction,
+                                    directions: [{
+                                        name: evaluation.direction?.name || selectedOperator.direction,
+                                        hasFileUpload: evaluation.direction?.hasFileUpload || true,
+                                        criteria: evaluation.direction?.criteria || [],
+                                        version: evaluation.direction?.version || 1
+                                    }],
                                     scores: evaluation.scores || [],
                                     criterionComments: evaluation.criterion_comments || [],
                                     audioUrl,
                                     isDraft: evaluation.is_draft,
-                                    assignedMonth: evaluation.month
+                                    assignedMonth: evaluation.month,
+                                    directionVersion: evaluation.direction?.version || 1 // Добавлено
                                 };
                             }));
                             setCalls(updatedCalls);
@@ -733,9 +748,9 @@
                         setIsLoading(false);
                     }
                 };
-        
+
                 fetchEvaluations();
-        
+
                 return () => {
                     controller.abort();
                 };
@@ -767,12 +782,14 @@
                         selectedDirection: evaluationData.selectedDirection,
                         directions: evaluationData.directions,
                         phoneNumber: evaluationData.phoneNumber,
-                        assignedMonth: evaluationData.assignedMonth
+                        assignedMonth: evaluationData.assignedMonth,
+                        directionVersion: evaluationData.directionVersion // Добавлено
                     };
                     return [...prevCalls.filter(c => c.id !== newCall.id), newCall];
                 });
                 setEditingEvaluation(null);
             };
+
 
             const handleSelectCall = async (callId) => {
                 const call = calls.find(c => c.id === callId);
