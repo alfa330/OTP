@@ -607,7 +607,8 @@ class Database:
 
     def add_call_evaluation(self, evaluator_id, operator_id, phone_number, score, 
                             comment=None, month=None, audio_path=None, is_draft=False, 
-                            scores=None, criterion_comments=None, direction_id=None):
+                            scores=None, criterion_comments=None, direction_id=None, 
+                            is_correction=False, previous_version_id=None):
         month = month or datetime.now().strftime('%Y-%m')
         
         # Подготовка JSON данных один раз
@@ -652,61 +653,48 @@ class Database:
             old_audio_path = None
             call_id = None
             
-            if existing_record:
+            if existing_record and not is_correction:
                 call_id, old_audio_path, is_existing_eval = existing_record
                 
                 # Обновление существующей записи
-                if is_draft or is_existing_eval:
+                if is_draft:
                     # Для черновика обновляем все поля
-                    if is_draft:
-                        cursor.execute("""
-                            UPDATE calls
-                            SET phone_number = %s,
-                                score = %s,
-                                comment = %s,
-                                audio_path = COALESCE(%s, audio_path),
-                                created_at = CURRENT_TIMESTAMP,
-                                scores = %s,
-                                criterion_comments = %s,
-                                is_correction = %s,
-                                direction_id = %s
-                            WHERE id = %s
-                            RETURNING id
-                        """, (
-                            phone_number, score, comment, audio_path,
-                            scores_json, criterion_comments_json,
-                            False if is_draft else is_existing_eval,
-                            direction_id,
-                            call_id
-                        ))
-                    # Для существующей оценки создаем новую запись с is_correction=True
-                    else:
-                        cursor.execute("""
-                            INSERT INTO calls (
-                                evaluator_id, operator_id, month, phone_number, score, comment,
-                                audio_path, is_draft, is_correction, previous_version_id,
-                                scores, criterion_comments, direction_id
-                            )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            RETURNING id
-                        """, (
-                            evaluator_id, operator_id, month, phone_number, score, comment,
-                            audio_path, is_draft, True, call_id,
-                            scores_json, criterion_comments_json, direction_id
-                        ))
-                        call_id = cursor.fetchone()[0]
+                    cursor.execute("""
+                        UPDATE calls
+                        SET phone_number = %s,
+                            score = %s,
+                            comment = %s,
+                            audio_path = COALESCE(%s, audio_path),
+                            created_at = CURRENT_TIMESTAMP,
+                            scores = %s,
+                            criterion_comments = %s,
+                            is_correction = %s,
+                            direction_id = %s
+                        WHERE id = %s
+                        RETURNING id
+                    """, (
+                        phone_number, score, comment, audio_path,
+                        scores_json, criterion_comments_json,
+                        False,
+                        direction_id,
+                        call_id
+                    ))
+                    call_id = cursor.fetchone()[0]
                     
                     # Удаляем старый аудиофайл если он был заменен
                     if old_audio_path and audio_path and old_audio_path != audio_path:
                         try:
-                            if os.path.exists(old_audio_path):
-                                os.remove(old_audio_path)
+                            bucket_name = os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
+                            client = get_gcs_client()
+                            bucket = client.bucket(bucket_name)
+                            blob = bucket.blob(old_audio_path.replace("my-app-audio-uploads/", ""))
+                            blob.delete()
                         except Exception as e:
                             logging.error(f"Error removing old audio file: {str(e)}")
                     
                     return call_id
             
-            # Если нет существующей записи, создаем новую
+            # Создаем новую запись (для новой оценки, переоценки или если нет черновика)
             cursor.execute("""
                 INSERT INTO calls (
                     evaluator_id, operator_id, month, phone_number, score, comment,
@@ -717,10 +705,23 @@ class Database:
                 RETURNING id
             """, (
                 evaluator_id, operator_id, month, phone_number, score, comment,
-                audio_path, is_draft, False, None,
+                audio_path, is_draft, is_correction, previous_version_id,
                 scores_json, criterion_comments_json, direction_id
             ))
-            return cursor.fetchone()[0]
+            call_id = cursor.fetchone()[0]
+            
+            # Удаляем старый аудиофайл, если он был заменен
+            if old_audio_path and audio_path and old_audio_path != audio_path:
+                try:
+                    bucket_name = os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
+                    client = get_gcs_client()
+                    bucket = client.bucket(bucket_name)
+                    blob = bucket.blob(old_audio_path.replace("my-app-audio-uploads/", ""))
+                    blob.delete()
+                except Exception as e:
+                    logging.error(f"Error removing old audio file: {str(e)}")
+            
+            return call_id
 
     def add_work_hours(self, operator_id, regular_hours, training_hours, fines=0.0, norm_hours=0.0, month=None):
         month = month or datetime.now().strftime('%Y-%m')
