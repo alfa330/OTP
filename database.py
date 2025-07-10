@@ -261,14 +261,6 @@ class Database:
                 );
             """)
 
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS call_directions (
-                    call_id INTEGER NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
-                    direction_id INTEGER NOT NULL REFERENCES directions(id) ON DELETE RESTRICT,
-                    PRIMARY KEY (call_id, direction_id)
-                );
-            """)
-
             # Добавляем direction_id в users после создания directions
             cursor.execute("""
                 DO $$
@@ -304,6 +296,15 @@ class Database:
                 ADD COLUMN IF NOT EXISTS scores JSONB,
                 ADD COLUMN IF NOT EXISTS criterion_comments JSONB;
             """)
+            # Directions for calls
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS call_directions (
+                    call_id INTEGER NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+                    direction_id INTEGER NOT NULL REFERENCES directions(id) ON DELETE RESTRICT,
+                    PRIMARY KEY (call_id, direction_id)
+                );
+            """)
+
             # Work hours table with fines column
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS work_hours (
