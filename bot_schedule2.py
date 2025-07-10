@@ -2360,7 +2360,8 @@ async def process_credential_change(message: types.Message, state: FSMContext):
             await bot.send_message(
                 chat_id=message.from_user.id,
                 text=f"✅ {msg}\n\nОператор: {operator[2]}",
-                parse_mode='HTML'
+                parse_mode='HTML',
+                reply_markup=get_sv_keyboard()
             )
         else:
             await bot.send_message(
