@@ -856,6 +856,71 @@ def update_sv_table():
         logging.error(f"Error updating table: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/call_versions/<int:call_id>', methods=['GET'])
+@require_api_key
+def get_call_versions(call_id):
+    try:
+        with db._get_cursor() as cursor:
+            # Получаем все версии оценки, начиная с текущей и идя назад по previous_version_id
+            versions = []
+            current_id = call_id
+            
+            while current_id:
+                cursor.execute("""
+                    SELECT 
+                        c.id, c.score, c.comment, c.phone_number, c.month, 
+                        c.audio_path, c.created_at, c.is_correction,
+                        u.name as evaluator_name
+                    FROM calls c
+                    JOIN users u ON c.evaluator_id = u.id
+                    WHERE c.id = %s
+                """, (current_id,))
+                version = cursor.fetchone()
+                if not version:
+                    break
+                    
+                versions.append({
+                    "id": version[0],
+                    "score": float(version[1]),
+                    "comment": version[2],
+                    "phone_number": version[3],
+                    "month": version[4],
+                    "audio_path": version[5],
+                    "evaluation_date": version[6].strftime('%Y-%m-%d %H:%M'),
+                    "is_correction": version[7],
+                    "evaluator_name": version[8],
+                    "audio_url": None  # Будет заполнено позже
+                })
+                
+                current_id = version[0]  # Идем к предыдущей версии
+                if current_id == call_id:  # Предотвращаем бесконечный цикл
+                    current_id = None
+
+            # Генерируем signed URLs для аудиофайлов
+            gcs_client = get_gcs_client()
+            for version in versions:
+                if version['audio_path']:
+                    try:
+                        path_parts = version['audio_path'].split('/', 1)
+                        if len(path_parts) == 2:
+                            bucket_name, blob_path = path_parts
+                            bucket = gcs_client.bucket(bucket_name)
+                            blob = bucket.blob(blob_path)
+                            if blob.exists():
+                                version['audio_url'] = blob.generate_signed_url(
+                                    version="v4",
+                                    expiration=timedelta(minutes=15),
+                                    method="GET",
+                                    response_type='audio/mpeg'
+                                )
+                    except Exception as e:
+                        logging.error(f"Error generating signed URL for version {version['id']}: {e}")
+
+            return jsonify({"status": "success", "versions": versions})
+    except Exception as e:
+        logging.error(f"Error fetching call versions: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/call_evaluation/<int:evaluation_id>', methods=['DELETE'])
 def delete_draft_evaluation(evaluation_id):
     try:
