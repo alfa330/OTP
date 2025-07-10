@@ -95,7 +95,6 @@
                 ctx.fillStyle = '#1f2937';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
-                // Format value to 2 decimal places for average score
                 const displayValue = label === 'Avg Score' ? value.toFixed(2) : value;
                 ctx.fillText(`${displayValue}/${max}`, centerX, centerY - 20);
                 ctx.fillText(label, centerX, centerY + 20);
@@ -107,16 +106,15 @@
         };
 
         const safeAtob = (str) => {
-        return decodeURIComponent(Array.prototype.map.call(atob(str), (c) => {
-            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
-        }).join(''));
+            return decodeURIComponent(Array.prototype.map.call(atob(str), (c) => {
+                return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+            }).join(''));
         };
 
         const LoginModal = ({ isOpen, onClose, onLogin }) => {
             const [login, setLogin] = useState('');
             const [password, setPassword] = useState('');
             const [error, setError] = useState('');
-            const [isCheckingToken, setIsCheckingToken] = useState(true);
 
             const handleSubmit = async (e) => {
                 e.preventDefault();
@@ -313,6 +311,7 @@
                 formData.append('is_draft', saveAsDraft);
                 formData.append('scores', JSON.stringify(scores));
                 formData.append('criterion_comments', JSON.stringify(criterionComments));
+                formData.append('direction', operator.direction_id);
                 if (callFile) {
                     formData.append('audio_file', callFile);
                 }
@@ -422,7 +421,7 @@
                         {phoneError && <p className="text-red-500 mt-1 text-sm">{phoneError}</p>}
                         <label className="block mb-2 font-medium mt-4">Criteria Evaluation</label>
                         {directions.length === 0 || directions[0]?.criteria.length === 0 ? (
-                            <p className="text-red-500">No criteria defined for this direction. Please set up criteria in the Monitoring Scale.</p>
+                            <p className="text-red-500">No criteria defined for this direction.</p>
                         ) : (
                             <div className="max-h-80 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100">
                                 <div className="space-y-2">
@@ -578,7 +577,6 @@
             const [userName, setUserName] = useState(null);
             const [calls, setCalls] = useState([]);
             const [showEvaluationModal, setShowEvaluationModal] = useState(false);
-            const [showMonitoringScaleModal, setShowMonitoringScaleModal] = useState(false);
             const [showLoginModal, setShowLoginModal] = useState(true);
             const [apiKey, setApiKey] = useState(null);
             const [userId, setUserId] = useState(null);
@@ -592,8 +590,10 @@
             const [isLoading, setIsLoading] = useState(false);
             const [loadingCallId, setLoadingCallId] = useState(null);
             const [operatorFromToken, setOperatorFromToken] = useState(null);
+            const [supervisors, setSupervisors] = useState([]);
+            const [selectedSupervisor, setSelectedSupervisor] = useState(null);
             const MAX_EVALUATIONS = 20;
-            
+
             const getLast12Months = () => {
                 const months = [];
                 const currentDate = new Date();
@@ -609,6 +609,28 @@
             };
 
             const monthOptions = getLast12Months();
+
+            useEffect(() => {
+                if (userRole === 'admin' && apiKey && userId) {
+                    const fetchSupervisors = async () => {
+                        try {
+                            const response = await fetch(`${API_BASE_URL}/api/admin/sv_list`, {
+                                headers: {
+                                    'X-API-Key': apiKey,
+                                    'X-User-Id': userId
+                                }
+                            });
+                            const data = await response.json();
+                            if (data.status === 'success') {
+                                setSupervisors(data.sv_list || []);
+                            }
+                        } catch (err) {
+                            console.error('Error fetching supervisors:', err);
+                        }
+                    };
+                    fetchSupervisors();
+                }
+            }, [userRole, apiKey, userId]);
 
             useEffect(() => {
                 const params = new URLSearchParams(window.location.search);
@@ -628,6 +650,9 @@
                                 id: tokenData.operatorId,
                                 name: tokenData.operatorName
                             });
+                            if (tokenData.supervisorId) {
+                                setSelectedSupervisor(tokenData.supervisorId);
+                            }
                             window.history.replaceState({}, document.title, window.location.pathname);
                             setShowLoginModal(false);
                         }
@@ -636,8 +661,7 @@
                     }
                 }
             }, []);
-            
-            // Новый эффект для выбора оператора после загрузки
+
             useEffect(() => {
                 if (operatorFromToken && operators.length > 0) {
                     const foundOperator = operators.find(op => op.id === operatorFromToken.id);
@@ -647,7 +671,7 @@
                         console.warn(`Operator with ID ${operatorFromToken.id} not found`);
                         setSelectedOperator(null);
                     }
-                    setOperatorFromToken(null); // Очищаем временное значение
+                    setOperatorFromToken(null);
                 }
             }, [operators, operatorFromToken]);
 
@@ -670,10 +694,14 @@
                         console.error('Error fetching directions:', err);
                     }
                 };
-        
+
                 const fetchOperators = async () => {
                     try {
-                        const response = await fetch(`${API_BASE_URL}/api/sv/data?id=${userId}`, {
+                        let url = `${API_BASE_URL}/api/sv/data?id=${userId}`;
+                        if (userRole === 'admin' && selectedSupervisor) {
+                            url = `${API_BASE_URL}/api/sv/data?id=${selectedSupervisor}`;
+                        }
+                        const response = await fetch(url, {
                             headers: {
                                 'X-API-Key': apiKey,
                                 'X-User-Id': userId
@@ -681,22 +709,17 @@
                         });
                         const data = await response.json();
                         if (data.status === 'success') {
-                        const operatorsWithDirection = data.operators.map(op => ({
-                            ...op,
-                            direction_id: op.direction_id // Используем direction_id вместо направления
-                        }));
-                        setOperators(operatorsWithDirection);
+                            setOperators(data.operators);
                         }
                     } catch (err) {
                         console.error('Error fetching operators:', err);
                     }
                 };
-        
-                // Выполняем оба запроса параллельно
+
                 Promise.all([fetchDirections(), fetchOperators()])
                     .finally(() => setIsLoading(false));
-            }, [apiKey, userId]);
-        
+            }, [apiKey, userId, userRole, selectedSupervisor]);
+
             useEffect(() => {
                 if (!apiKey || !userId || !selectedOperator) {
                     setCalls([]);
@@ -792,7 +815,6 @@
                 setEditingEvaluation(null);
             };
 
-
             const handleSelectCall = async (callId) => {
                 const call = calls.find(c => c.id === callId);
                 if (!call) return;
@@ -830,36 +852,21 @@
                 setShowEvaluationModal(true);
             };
 
-            const handleSaveDirections = async (newDirections) => {
-                if (userRole !== 'admin') {
-                    alert('Only admins can save directions');
-                    return;
-                }
-                try {
-                    const response = await fetch(`${API_BASE_URL}/api/admin/save_directions`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': apiKey,
-                            'X-User-Id': userId
-                        },
-                        body: JSON.stringify({ directions: newDirections })
-                    });
-                    const result = await response.json();
-                    if (result.status === 'success') {
-                        setDirections(result.directions);
-                    } else {
-                        alert('Failed to save directions: ' + result.error);
-                    }
-                } catch (err) {
-                    alert('Failed to save directions: ' + err.message);
-                }
-            };
-
             const handleOperatorChange = (e) => {
                 const operatorId = parseInt(e.target.value);
                 const newOperator = operators.find(op => op.id === operatorId) || null;
                 setSelectedOperator(newOperator);
+                setCalls([]);
+                setExpandedDetails(null);
+                setIsLoading(true);
+            };
+
+            const handleSupervisorChange = (e) => {
+                const supervisorId = parseInt(e.target.value);
+                const newSupervisor = supervisors.find(sv => sv.id === supervisorId) || null;
+                setSelectedSupervisor(newSupervisor ? newSupervisor.id : null);
+                setSelectedOperator(null);
+                setOperators([]);
                 setCalls([]);
                 setExpandedDetails(null);
                 setIsLoading(true);
@@ -879,14 +886,6 @@
                     <div className="flex justify-between items-center mb-6">
                         <h1 className="text-3xl font-bold">Supervisor Call Evaluation</h1>
                         <div className="flex space-x-2">
-                            {userRole === 'admin' && (
-                                <button
-                                    onClick={() => setShowMonitoringScaleModal(true)}
-                                    className="bg-purple-600 text-white px-6 py-3 rounded-lg hover:bg-purple-700 transition-colors duration-200"
-                                >
-                                    Monitoring Scale
-                                </button>
-                            )}
                             <button
                                 onClick={() => setShowLoginModal(true)}
                                 className="bg-red-600 text-white px-6 py-3 rounded-lg hover:bg-red-700 transition-colors duration-200"
@@ -900,6 +899,21 @@
                         <div className="flex justify-between items-center mb-6">
                             <h2 className="text-2xl font-semibold text-gray-800">Call Evaluations</h2>
                             <div className="flex space-x-4">
+                                {userRole === 'admin' && (
+                                    <div>
+                                        <label className="mr-2 font-medium">Supervisor:</label>
+                                        <select
+                                            value={selectedSupervisor || ''}
+                                            onChange={handleSupervisorChange}
+                                            className="p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        >
+                                            <option value="">Select Supervisor</option>
+                                            {supervisors.map(sv => (
+                                                <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                )}
                                 <div>
                                     <label className="mr-2 font-medium">Operator:</label>
                                     <select
@@ -1082,14 +1096,6 @@
                         userName={userName}
                         existingEvaluation={editingEvaluation}
                     />
-                    {userRole === 'admin' && (
-                        <MonitoringScaleModal
-                            isOpen={showMonitoringScaleModal}
-                            onClose={() => setShowMonitoringScaleModal(false)}
-                            onSave={handleSaveDirections}
-                            initialDirections={directions}
-                        />
-                    )}
                 </div>
             );
         };

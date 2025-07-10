@@ -2105,17 +2105,38 @@
                                                                 <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
                                                             ) : '-'}
                                                         </td>
-                                                        <td className="p-3 border-b">
-                                                            {hasIssue && (
-                                                                <button
-                                                                    onClick={() => notifySupervisor(selectedSvId, op.name)}
-                                                                    className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
-                                                                    disabled={isLoading}
-                                                                >
-                                                                    Notify
-                                                                </button>
-                                                            )}
-                                                        </td>
+                                                        <td className="p-3 border-b space-x-2">
+                                                        {hasIssue && (
+                                                            <button
+                                                                onClick={() => notifySupervisor(selectedSvId, op.name)}
+                                                                className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
+                                                                disabled={isLoading}
+                                                            >
+                                                                Notify
+                                                            </button>
+                                                        )}
+                                                        <button
+                                                            onClick={() => {
+                                                                // Generate token with operator data
+                                                                const tokenData = {
+                                                                    apiKey: user.apiKey,
+                                                                    userId: user.id,
+                                                                    role: user.role,
+                                                                    name: user.name,
+                                                                    operatorId: op.id,
+                                                                    operatorName: op.name,
+                                                                    supervisorId: selectedSvId,
+                                                                    timestamp: Date.now()
+                                                                };
+                                                                const token = safeBtoa(JSON.stringify(tokenData));
+                                                                window.open(`call_evaluation.html?token=${encodeURIComponent(token)}`, '_blank');
+                                                            }}
+                                                            className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                            title="Listen to operator calls"
+                                                        >
+                                                            Listen Calls
+                                                        </button>
+                                                    </td>
                                                     </tr>
                                                 );
                                             })}
