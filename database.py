@@ -494,11 +494,38 @@ class Database:
             
             # Обновляем direction_id в users для удалённых направлений
             cursor.execute("""
-                UPDATE users
-                SET direction_id = NULL
-                WHERE direction_id NOT IN (
-                    SELECT id FROM directions WHERE is_active = TRUE
+                WITH active_directions AS (
+                    SELECT name, id, 
+                        ROW_NUMBER() OVER (PARTITION BY name ORDER BY version DESC) as rn
+                    FROM directions 
+                    WHERE is_active = TRUE
+                ),
+                user_directions AS (
+                    SELECT u.id as user_id, d.name as direction_name
+                    FROM users u
+                    JOIN directions d ON u.direction_id = d.id
+                    WHERE u.direction_id IS NOT NULL
                 )
+                -- Обновляем direction_id на последнюю активную версию с тем же именем
+                UPDATE users u
+                SET direction_id = ad.id
+                FROM user_directions ud
+                JOIN active_directions ad ON ud.direction_name = ad.name AND ad.rn = 1
+                WHERE u.id = ud.user_id;
+                
+                -- Обнуляем direction_id где нет активных направлений
+                UPDATE users u
+                SET direction_id = NULL
+                WHERE u.direction_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM directions d 
+                    WHERE d.id = u.direction_id AND d.is_active = TRUE
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM user_directions ud
+                    JOIN active_directions ad ON ud.direction_name = ad.name
+                    WHERE u.id = ud.user_id
+                );
             """)
 
     def get_operator_credentials(self, operator_id, supervisor_id):
