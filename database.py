@@ -990,13 +990,30 @@ class Database:
 
     def get_call_evaluations(self, operator_id, month=None):
         query = """
-            WITH latest_calls AS (
+            WITH latest_versions AS (
+                -- Находим последние версии для каждого уникального вызова
+                -- Группируем по phone_number и month, чтобы найти последние оценки для каждого номера
                 SELECT 
-                    id,
+                    phone_number,
+                    month,
                     MAX(created_at) as latest_date
                 FROM calls
                 WHERE operator_id = %s
-                GROUP BY id
+                GROUP BY phone_number, month
+            ),
+            latest_calls AS (
+                -- Получаем полные данные последних версий
+                SELECT 
+                    c.id,
+                    c.phone_number,
+                    c.month,
+                    c.created_at
+                FROM calls c
+                JOIN latest_versions lv ON 
+                    c.phone_number = lv.phone_number AND 
+                    c.month = lv.month AND 
+                    c.created_at = lv.latest_date
+                WHERE c.operator_id = %s
             )
             SELECT 
                 c.id,
@@ -1016,12 +1033,12 @@ class Database:
                 d.has_file_upload as direction_has_file_upload,
                 u.name as evaluator_name
             FROM calls c
-            JOIN latest_calls lc ON c.id = lc.id AND c.created_at = lc.latest_date
+            JOIN latest_calls lc ON c.id = lc.id
             LEFT JOIN directions d ON c.direction_id = d.id
             LEFT JOIN users u ON c.evaluator_id = u.id
             WHERE c.operator_id = %s
         """
-        params = [operator_id, operator_id]
+        params = [operator_id, operator_id, operator_id]
         if month:
             query += " AND c.month = %s"
             params.append(month)
