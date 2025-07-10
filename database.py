@@ -610,11 +610,7 @@ class Database:
                             scores=None, criterion_comments=None, direction_id=None, 
                             is_correction=False, previous_version_id=None):
         month = month or datetime.now().strftime('%Y-%m')
-        if is_correction and previous_version_id and not audio_path:
-            cursor.execute("SELECT audio_path FROM calls WHERE id = %s", (previous_version_id,))
-            result = cursor.fetchone()
-            if result and result[0]:
-                audio_path = result[0]
+        
         # Подготовка JSON данных один раз
         scores_json = json.dumps(scores) if scores else None
         criterion_comments_json = json.dumps(criterion_comments) if criterion_comments else None
@@ -625,7 +621,13 @@ class Database:
                 cursor.execute("SELECT 1 FROM directions WHERE id = %s", (direction_id,))
                 if not cursor.fetchone():
                     direction_id = None
-            
+
+            if is_correction and previous_version_id and not audio_path:
+                        cursor.execute("SELECT audio_path FROM calls WHERE id = %s", (previous_version_id,))
+                        result = cursor.fetchone()
+                        if result and result[0]:
+                            audio_path = result[0]
+
             # Объединенная проверка черновика и существующей оценки
             cursor.execute("""
                 WITH existing_data AS (
