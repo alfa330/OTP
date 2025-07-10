@@ -951,13 +951,21 @@ def receive_call_evaluation():
         is_draft = request.form['is_draft'].lower() == 'true'
         scores = json.loads(request.form.get('scores', '[]'))
         criterion_comments = json.loads(request.form.get('criterion_comments', '[]'))
-        direction_id = request.form.get('direction')  # Новое поле - имя направления
-        
+        direction_id = request.form.get('direction')
+        previous_version_id = request.form.get('previous_version_id')
+        is_correction = request.form.get('is_correction', 'false').lower() == 'true'
+
         evaluator = db.get_user(name=evaluator_name)
         operator = db.get_user(name=operator_name)
         if not evaluator or not operator:
             return jsonify({"error": "Evaluator or operator not found"}), 404
 
+        # Authorization check for re-evaluation
+        if is_correction:
+            requester_id = int(request.headers.get('X-User-Id'))
+            requester = db.get_user(id=requester_id)
+            if not requester or requester[3] != 'admin':
+                return jsonify({"error": "Only admins can perform re-evaluations"}), 403
 
         # Handle audio file upload to GCS
         audio_path = None
@@ -1000,7 +1008,9 @@ def receive_call_evaluation():
             is_draft=is_draft,
             scores=scores,
             criterion_comments=criterion_comments,
-            direction_id=direction_id  # Передаем ID направления
+            direction_id=direction_id,
+            is_correction=is_correction,
+            previous_version_id=previous_version_id if previous_version_id else None
         )
 
         # Send Telegram notification for non-draft evaluations
@@ -1012,6 +1022,8 @@ def receive_call_evaluation():
                 f"📱 Номер телефона: <b>{phone_number}</b>\n"
                 f"💯 Оценка: <b>{score}</b>\n"
             )
+            if is_correction:
+                message += f"🔄 <b>Переоценка звонка (ID предыдущей версии: {previous_version_id})</b>\n"
             if score < 100 and comment:
                 message += f"\n💬 Комментарий: \n{comment}\n"
                 
@@ -1023,9 +1035,9 @@ def receive_call_evaluation():
                 }
                 if audio_signed_url:
                     payload["audio"] = audio_signed_url
-                    payload["caption"] = f"📞 <b>Оценка звонка</b>\n"+message
+                    payload["caption"] = f"📞 <b>{'Переоценка звонка' if is_correction else 'Оценка звонка'}</b>\n"+message
                 else:
-                    payload["text"] =  f"💬 <b>Оценка чата</b>\n"+message
+                    payload["text"] = f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n"+message
 
                 response = requests.post(telegram_url, json=payload, timeout=10)
                 if response.status_code != 200:
