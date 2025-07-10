@@ -684,7 +684,7 @@ def get_sv_data():
             current_month = datetime.now().strftime('%Y-%m')
             
             for operator in operators:
-                operator_id, operator_name, direction, hire_date, hours_table_url, scores_table_url, supervisor_name =[operator[kkk] for kkk in operator]
+                operator_id, operator_name, direction_id, hire_date, hours_table_url, scores_table_url, supervisor_name =[operator[kkk] for kkk in operator]
                 # Get direction name from direction_id
                 
                 # Get call evaluations for the operator
@@ -695,7 +695,7 @@ def get_sv_data():
                 response_data["operators"].append({
                     "id": operator_id,
                     "name": operator_name,
-                    "direction": direction,
+                    "direction_id": direction_id,
                     "call_count": call_count,
                     "avg_score": round(avg_score, 2) if call_count > 0 else None,
                     "scores_table_url": scores_table_url
@@ -951,25 +951,13 @@ def receive_call_evaluation():
         is_draft = request.form['is_draft'].lower() == 'true'
         scores = json.loads(request.form.get('scores', '[]'))
         criterion_comments = json.loads(request.form.get('criterion_comments', '[]'))
-        direction_name = request.form.get('direction')  # Новое поле - имя направления
+        direction_id = request.form.get('direction')  # Новое поле - имя направления
         
         evaluator = db.get_user(name=evaluator_name)
         operator = db.get_user(name=operator_name)
         if not evaluator or not operator:
             return jsonify({"error": "Evaluator or operator not found"}), 404
 
-        # Получаем ID направления, если оно указано
-        direction_id = None
-        if direction_name:
-            with db._get_cursor() as cursor:
-                cursor.execute("""
-                    SELECT id FROM directions 
-                    WHERE name = %s AND is_active = TRUE
-                    ORDER BY version DESC LIMIT 1
-                """, (direction_name,))
-                result = cursor.fetchone()
-                if result:
-                    direction_id = result[0]
 
         # Handle audio file upload to GCS
         audio_path = None
@@ -1018,7 +1006,6 @@ def receive_call_evaluation():
         # Send Telegram notification for non-draft evaluations
         if not is_draft:
             message = (
-                f"📞 <b>Оценка звонка</b>\n"
                 f"👤 Оценивающий: <b>{evaluator[2]}</b>\n"
                 f"📋 Оператор: <b>{operator[2]}</b>\n"
                 f"📄 За месяц: <b>{month}</b>\n"
@@ -1036,9 +1023,9 @@ def receive_call_evaluation():
                 }
                 if audio_signed_url:
                     payload["audio"] = audio_signed_url
-                    payload["caption"] = message
+                    payload["caption"] = f"📞 <b>Оценка звонка</b>\n"+message
                 else:
-                    payload["text"] = message
+                    payload["text"] =  f"💬 <b>Оценка чата</b>\n"+message
 
                 response = requests.post(telegram_url, json=payload, timeout=10)
                 if response.status_code != 200:

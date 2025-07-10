@@ -288,23 +288,12 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     is_correction BOOLEAN DEFAULT FALSE,
                     previous_version_id INTEGER REFERENCES calls(id),
+                    scores JSONB,
+                    criterion_comments JSONB,
+                    direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
                     UNIQUE(evaluator_id, operator_id, month, phone_number, score, comment, is_draft)
                 );
             """)
-            cursor.execute("""
-                ALTER TABLE calls
-                ADD COLUMN IF NOT EXISTS scores JSONB,
-                ADD COLUMN IF NOT EXISTS criterion_comments JSONB;
-            """)
-            # Directions for calls
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS call_directions (
-                    call_id INTEGER NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
-                    direction_id INTEGER NOT NULL REFERENCES directions(id) ON DELETE RESTRICT,
-                    PRIMARY KEY (call_id, direction_id)
-                );
-            """)
-
             # Work hours table with fines column
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS work_hours (
@@ -433,99 +422,102 @@ class Database:
     def save_directions(self, directions, admin_id):
         """Сохранить направления в таблицу directions, создавая новые версии при изменениях."""
         with self._get_cursor() as cursor:
-            # Получаем текущие активные направления
+            # 1. Получаем текущие активные направления (только нужные поля)
             cursor.execute("""
                 SELECT id, name, has_file_upload, criteria, version
                 FROM directions
                 WHERE created_by = %s AND is_active = TRUE
             """, (admin_id,))
-            existing_directions = {row[1]: {"id": row[0], "has_file_upload": row[2], "criteria": row[3], "version": row[4]} 
-                                for row in cursor.fetchall()}
+            existing_directions = {
+                row[1]: {
+                    "id": row[0], 
+                    "has_file_upload": row[2], 
+                    "criteria": row[3], 
+                    "version": row[4]
+                } for row in cursor.fetchall()
+            }
             
             new_direction_names = {d['name'] for d in directions}
+            directions_to_deactivate = []
+            insert_values = []
+            update_values = []
             
+            # 2. Подготовка данных для пакетной обработки
             for direction in directions:
                 name = direction['name']
                 has_file_upload = direction['hasFileUpload']
                 criteria = json.dumps(direction['criteria'])
                 
                 if name in existing_directions:
-                    # Проверяем, изменились ли критерии или настройки
                     existing = existing_directions[name]
                     if (existing['has_file_upload'] == has_file_upload and 
                         existing['criteria'] == criteria):
                         continue  # Ничего не изменилось, пропускаем
                     
-                    # Деактивируем старую версию
-                    cursor.execute("""
-                        UPDATE directions
-                        SET is_active = FALSE
-                        WHERE id = %s
-                    """, (existing['id'],))
-                    
-                    # Создаем новую версию
-                    cursor.execute("""
-                        INSERT INTO directions (
-                            name, has_file_upload, criteria, created_by, 
-                            version, previous_version_id
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        RETURNING id
-                    """, (
+                    directions_to_deactivate.append(existing['id'])
+                    insert_values.append((
                         name, has_file_upload, criteria, admin_id,
                         existing['version'] + 1, existing['id']
                     ))
                 else:
-                    # Добавляем новое направление
-                    cursor.execute("""
-                        INSERT INTO directions (
-                            name, has_file_upload, criteria, created_by
-                        )
-                        VALUES (%s, %s, %s, %s)
-                        RETURNING id
-                    """, (name, has_file_upload, criteria, admin_id))
+                    insert_values.append((
+                        name, has_file_upload, criteria, admin_id,
+                        1, None  # version=1, no previous version
+                    ))
             
-            # Деактивируем направления, которых нет в новом списке
-            cursor.execute("""
-                UPDATE directions
-                SET is_active = FALSE
-                WHERE created_by = %s AND is_active = TRUE AND name NOT IN %s
-            """, (admin_id, tuple(new_direction_names) if new_direction_names else ('',)))
+            # 3. Пакетное деактивирование старых версий
+            if directions_to_deactivate:
+                cursor.execute("""
+                    UPDATE directions
+                    SET is_active = FALSE
+                    WHERE id = ANY(%s)
+                """, (directions_to_deactivate,))
             
-            # Обновляем direction_id в users для удалённых направлений
+            # 4. Пакетное добавление новых версий
+            if insert_values:
+                cursor.executemany("""
+                    INSERT INTO directions (
+                        name, has_file_upload, criteria, created_by, 
+                        version, previous_version_id
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, insert_values)
+            
+            # 5. Деактивируем направления, которых нет в новом списке
+            if new_direction_names:
+                cursor.execute("""
+                    UPDATE directions
+                    SET is_active = FALSE
+                    WHERE created_by = %s AND is_active = TRUE AND name NOT IN %s
+                """, (admin_id, tuple(new_direction_names)))
+            else:
+                cursor.execute("""
+                    UPDATE directions
+                    SET is_active = FALSE
+                    WHERE created_by = %s AND is_active = TRUE
+                """, (admin_id,))
+            
+            # 6. Оптимизированное обновление direction_id в users
             cursor.execute("""
-                -- Сначала создаем временную таблицу с активными направлениями
-                CREATE TEMPORARY TABLE temp_active_directions AS
-                SELECT name, id, 
-                    ROW_NUMBER() OVER (PARTITION BY name ORDER BY version DESC) as rn
-                FROM directions 
-                WHERE is_active = TRUE;
-
-                -- Обновляем direction_id у пользователей, у которых есть направление
-                -- на последнюю активную версию с тем же именем
+                -- Обновляем direction_id на последнюю активную версию с тем же именем
                 UPDATE users u
-                SET direction_id = ad.id
-                FROM directions d
-                JOIN temp_active_directions ad ON d.name = ad.name AND ad.rn = 1
-                WHERE u.direction_id = d.id;
-
+                SET direction_id = latest.id
+                FROM directions current
+                JOIN (
+                    SELECT name, id, 
+                        ROW_NUMBER() OVER (PARTITION BY name ORDER BY version DESC) as rn
+                    FROM directions 
+                    WHERE is_active = TRUE
+                ) latest ON current.name = latest.name AND latest.rn = 1
+                WHERE u.direction_id = current.id AND current.is_active = FALSE;
+                
                 -- Обнуляем direction_id где нет активных направлений
-                -- (включая случай, когда у пользователя было направление, которое теперь неактивно)
-                UPDATE users u
+                UPDATE users
                 SET direction_id = NULL
-                WHERE u.direction_id IS NOT NULL
-                AND NOT EXISTS (
-                    SELECT 1 FROM directions d 
-                    WHERE d.id = u.direction_id AND d.is_active = TRUE
-                )
-                AND NOT EXISTS (
-                    SELECT 1 FROM directions d
-                    JOIN temp_active_directions ad ON d.name = ad.name
-                    WHERE d.id = u.direction_id
+                WHERE direction_id IS NOT NULL
+                AND direction_id NOT IN (
+                    SELECT id FROM directions WHERE is_active = TRUE
                 );
-
-                -- Удаляем временную таблицу
-                DROP TABLE temp_active_directions;
             """)
 
     def get_operator_credentials(self, operator_id, supervisor_id):
@@ -617,104 +609,118 @@ class Database:
                         comment=None, month=None, audio_path=None, is_draft=False, 
                         scores=None, criterion_comments=None, direction_id=None):
         month = month or datetime.now().strftime('%Y-%m')
+        
+        # Подготовка JSON данных один раз
+        scores_json = json.dumps(scores) if scores else None
+        criterion_comments_json = json.dumps(criterion_comments) if criterion_comments else None
+        
         with self._get_cursor() as cursor:
-            # Если direction_id не указан, получаем текущий direction оператора
-            if not direction_id:
-                cursor.execute("""
-                    SELECT direction_id FROM users WHERE id = %s
-                """, (operator_id,))
-                direction_id = cursor.fetchone()[0]
-            
-            # Проверяем существование direction_id
+            # Проверка существования direction_id одним запросом
             if direction_id:
-                cursor.execute("""
-                    SELECT 1 FROM directions WHERE id = %s
-                """, (direction_id,))
+                cursor.execute("SELECT 1 FROM directions WHERE id = %s", (direction_id,))
                 if not cursor.fetchone():
                     direction_id = None
             
-            # Проверка на существующий черновик
-            if is_draft:
-                cursor.execute("""
-                    SELECT id, audio_path FROM calls 
+            # Объединенная проверка черновика и существующей оценки
+            cursor.execute("""
+                WITH existing_data AS (
+                    -- Проверка на существующий черновик
+                    SELECT id, audio_path, FALSE AS is_existing_eval
+                    FROM calls 
                     WHERE evaluator_id = %s 
                     AND operator_id = %s 
                     AND month = %s 
                     AND is_draft = TRUE
-                """, (evaluator_id, operator_id, month))
-                existing_draft = cursor.fetchone()
-                if existing_draft:
-                    old_audio_path = existing_draft[1]
-                    cursor.execute("""
-                        UPDATE calls
-                        SET phone_number = %s,
-                            score = %s,
-                            comment = %s,
-                            audio_path = COALESCE(%s, audio_path),
-                            created_at = CURRENT_TIMESTAMP,
-                            scores = %s,
-                            criterion_comments = %s
-                        WHERE id = %s
-                        RETURNING id
-                    """, (phone_number, score, comment, audio_path, 
-                        json.dumps(scores) if scores else None,
-                        json.dumps(criterion_comments) if criterion_comments else None,
-                        existing_draft[0]))
-                    if old_audio_path and audio_path and old_audio_path != audio_path:
-                        if os.path.exists(old_audio_path):
-                            os.remove(old_audio_path)
-                    call_id = cursor.fetchone()[0]
                     
-                    # Обновляем связь с направлением, если она есть
-                    if direction_id:
+                    UNION ALL
+                    
+                    -- Проверка на существующую оценку (не черновик)
+                    SELECT id, NULL AS audio_path, TRUE AS is_existing_eval
+                    FROM calls 
+                    WHERE operator_id = %s 
+                    AND month = %s 
+                    AND phone_number = %s 
+                    AND is_draft = FALSE
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                )
+                SELECT * FROM existing_data
+                LIMIT 1
+            """, (evaluator_id, operator_id, month, operator_id, month, phone_number))
+            
+            existing_record = cursor.fetchone()
+            old_audio_path = None
+            call_id = None
+            
+            if existing_record:
+                call_id, old_audio_path, is_existing_eval = existing_record
+                
+                # Обновление существующей записи
+                if is_draft or is_existing_eval:
+                    # Для черновика обновляем все поля
+                    if is_draft:
                         cursor.execute("""
-                            INSERT INTO call_directions (call_id, direction_id)
-                            VALUES (%s, %s)
-                            ON CONFLICT (call_id) 
-                            DO UPDATE SET direction_id = EXCLUDED.direction_id
-                        """, (call_id, direction_id))
+                            UPDATE calls
+                            SET phone_number = %s,
+                                score = %s,
+                                comment = %s,
+                                audio_path = COALESCE(%s, audio_path),
+                                created_at = CURRENT_TIMESTAMP,
+                                scores = %s,
+                                criterion_comments = %s,
+                                is_correction = %s,
+                                direction_id = %s
+                            WHERE id = %s
+                            RETURNING id
+                        """, (
+                            phone_number, score, comment, audio_path,
+                            scores_json, criterion_comments_json,
+                            False if is_draft else is_existing_eval,
+                            direction_id,
+                            call_id
+                        ))
+                    # Для существующей оценки создаем новую запись с is_correction=True
+                    else:
+                        cursor.execute("""
+                            INSERT INTO calls (
+                                evaluator_id, operator_id, month, phone_number, score, comment,
+                                audio_path, is_draft, is_correction, previous_version_id,
+                                scores, criterion_comments, direction_id
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING id
+                        """, (
+                            evaluator_id, operator_id, month, phone_number, score, comment,
+                            audio_path, is_draft, True, call_id,
+                            scores_json, criterion_comments_json, direction_id
+                        ))
+                        call_id = cursor.fetchone()[0]
+                    
+                    # Удаляем старый аудиофайл если он был заменен
+                    if old_audio_path and audio_path and old_audio_path != audio_path:
+                        try:
+                            if os.path.exists(old_audio_path):
+                                os.remove(old_audio_path)
+                        except Exception as e:
+                            logging.error(f"Error removing old audio file: {str(e)}")
                     
                     return call_id
-        
-            # Проверка на существующую оценку
-            cursor.execute("""
-                SELECT id FROM calls 
-                WHERE operator_id = %s 
-                AND month = %s 
-                AND phone_number = %s 
-                AND is_draft = FALSE
-                ORDER BY created_at DESC
-                LIMIT 1
-            """, (operator_id, month, phone_number))
             
-            existing_call = cursor.fetchone()
-            is_correction = existing_call is not None and not is_draft
-            
-            # Вставляем новую оценку
+            # Если нет существующей записи, создаем новую
             cursor.execute("""
                 INSERT INTO calls (
                     evaluator_id, operator_id, month, phone_number, score, comment,
                     audio_path, is_draft, is_correction, previous_version_id,
-                    scores, criterion_comments
+                    scores, criterion_comments, direction_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 evaluator_id, operator_id, month, phone_number, score, comment,
-                audio_path, is_draft, is_correction, existing_call[0] if is_correction else None,
-                json.dumps(scores) if scores else None,
-                json.dumps(criterion_comments) if criterion_comments else None
+                audio_path, is_draft, False, None,
+                scores_json, criterion_comments_json, direction_id
             ))
-            call_id = cursor.fetchone()[0]
-            
-            # Создаем связь с направлением, если оно указано
-            if direction_id:
-                cursor.execute("""
-                    INSERT INTO call_directions (call_id, direction_id)
-                    VALUES (%s, %s)
-                """, (call_id, direction_id))
-            
-            return call_id
+            return cursor.fetchone()[0]
 
     def add_work_hours(self, operator_id, regular_hours, training_hours, fines=0.0, norm_hours=0.0, month=None):
         month = month or datetime.now().strftime('%Y-%m')
@@ -890,7 +896,7 @@ class Database:
     def get_operators_by_supervisor(self, supervisor_id):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.name, d.name as direction, u.hire_date, u.hours_table_url, u.scores_table_url, s.name as supervisor_name
+                SELECT u.id, u.name, u.direction_id, u.hire_date, u.hours_table_url, u.scores_table_url, s.name as supervisor_name
                 FROM users u
                 LEFT JOIN directions d ON u.direction_id = d.id
                 LEFT JOIN users s ON u.supervisor_id = s.id
@@ -900,7 +906,7 @@ class Database:
                 {
                     'id': row[0],
                     'name': row[1],
-                    'direction': row[2],
+                    'direction_id': row[2],
                     'hire_date': row[3],
                     'hours_table_url': row[4],
                     'scores_table_url': row[5],
@@ -1002,8 +1008,7 @@ class Database:
                 d.has_file_upload as direction_has_file_upload
             FROM calls c
             JOIN latest_calls lc ON c.id = lc.id AND c.created_at = lc.latest_date
-            LEFT JOIN call_directions cd ON c.id = cd.call_id
-            LEFT JOIN directions d ON cd.direction_id = d.id
+            LEFT JOIN directions d ON c.direction_id = d.id
             WHERE c.operator_id = %s
         """
         params = [operator_id, operator_id]
