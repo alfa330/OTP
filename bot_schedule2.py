@@ -1050,7 +1050,7 @@ def receive_call_evaluation():
                     bucket = client.bucket(bucket_name)
                     blob = bucket.blob(blob_path)
                     blob.upload_from_file(file.stream, content_type='audio/mpeg')
-                    audio_path = "my-app-audio-uploads/"+blob_path  # Store the object path
+                    audio_path = "my-app-audio-uploads/" + blob_path  # Store the object path
                     # Generate a signed URL for Telegram (valid for 15 minutes)
                     expiration = datetime.utcnow() + timedelta(minutes=15)
                     audio_signed_url = blob.generate_signed_url(
@@ -1061,6 +1061,17 @@ def receive_call_evaluation():
                 except Exception as e:
                     logging.error(f"Error uploading file to GCS: {e}")
                     return jsonify({"error": f"Failed to upload audio file: {str(e)}"}), 500
+        elif is_correction and previous_version_id:
+            # Retrieve audio_path from previous version if this is a correction and no new audio is provided
+            try:
+                with db._get_cursor() as cursor:
+                    cursor.execute("SELECT audio_path FROM calls WHERE id = %s", (previous_version_id,))
+                    result = cursor.fetchone()
+                    if result and result[0]:
+                        audio_path = result[0]
+            except Exception as e:
+                logging.error(f"Error retrieving audio_path from previous version: {e}")
+                return jsonify({"error": f"Failed to retrieve audio from previous version: {str(e)}"}), 500
 
         evaluation_id = db.add_call_evaluation(
             evaluator_id=evaluator[0],
@@ -1093,16 +1104,40 @@ def receive_call_evaluation():
                 message += f"\n💬 Комментарий: \n{comment}\n"
                 
             if admin:
-                telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendAudio" if audio_signed_url else f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+                telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendAudio" if audio_signed_url or audio_path else f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
                 payload = {
                     "chat_id": admin,
                     "parse_mode": "HTML"
                 }
                 if audio_signed_url:
                     payload["audio"] = audio_signed_url
-                    payload["caption"] = f"📞 <b>{'Переоценка звонка' if is_correction else 'Оценка звонка'}</b>\n"+message
+                    payload["caption"] = f"📞 <b>{'Переоценка звонка' if is_correction else 'Оценка звонка'}</b>\n" + message
+                elif audio_path:
+                    # Generate signed URL for existing audio_path if no new file was uploaded
+                    try:
+                        client = get_gcs_client()
+                        path_parts = audio_path.split('/', 1)
+                        if len(path_parts) == 2:
+                            bucket_name, blob_path = path_parts
+                            bucket = client.bucket(bucket_name)
+                            blob = bucket.blob(blob_path)
+                            if blob.exists():
+                                audio_signed_url = blob.generate_signed_url(
+                                    expiration=datetime.utcnow() + timedelta(minutes=15),
+                                    method='GET',
+                                    version='v4'
+                                )
+                                payload["audio"] = audio_signed_url
+                                payload["caption"] = f"📞 <b>{'Переоценка звонка' if is_correction else 'Оценка звонка'}</b>\n" + message
+                            else:
+                                payload["text"] = f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n" + message
+                        else:
+                            payload["text"] = f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n" + message
+                    except Exception as e:
+                        logging.error(f"Error generating signed URL for existing audio: {e}")
+                        payload["text"] = f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n" + message
                 else:
-                    payload["text"] = f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n"+message
+                    payload["text"] = f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n" + message
 
                 response = requests.post(telegram_url, json=payload, timeout=10)
                 if response.status_code != 200:
