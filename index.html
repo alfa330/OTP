@@ -11,7 +11,7 @@
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
 </head>
-<body class="bg-gray-50 text-gray-800 antialiased">
+<body class="bg-gray-200 font-sans antialiased">
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef } = React;
@@ -653,6 +653,74 @@
             </div>
           );
         };
+
+        const UserEditModal = ({ isOpen, onClose, userToEdit, svList, directions, onSave }) => {
+            const [editedUser, setEditedUser] = useState(userToEdit || {});
+
+            useEffect(() => {
+                setEditedUser(userToEdit);
+            }, [userToEdit]);
+
+            if (!isOpen) return null;
+
+            return (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                        <h2 className="text-xl font-semibold mb-4">Edit User</h2>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block mb-2 font-medium">Direction</label>
+                                <select
+                                    value={editedUser.direction || ''}
+                                    onChange={(e) => setEditedUser({ ...editedUser, direction: e.target.value })}
+                                    className="w-full p-2 border rounded-lg"
+                                >
+                                    <option value="">Select Direction</option>
+                                    {directions.map((dir, idx) => (
+                                        <option key={idx} value={dir.name}>{dir.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block mb-2 font-medium">Supervisor</label>
+                                <select
+                                    value={editedUser.supervisor_id || ''}
+                                    onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
+                                    className="w-full p-2 border rounded-lg"
+                                >
+                                    <option value="">Select Supervisor</option>
+                                    {svList.map(sv => (
+                                        <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block mb-2 font-medium">New Login</label>
+                                <input
+                                    type="text"
+                                    value={editedUser.new_login || ''}
+                                    onChange={(e) => setEditedUser({ ...editedUser, new_login: e.target.value })}
+                                    className="w-full p-2 border rounded-lg"
+                                />
+                            </div>
+                            <div>
+                                <label className="block mb-2 font-medium">New Password</label>
+                                <input
+                                    type="password"
+                                    value={editedUser.new_password || ''}
+                                    onChange={(e) => setEditedUser({ ...editedUser, new_password: e.target.value })}
+                                    className="w-full p-2 border rounded-lg"
+                                />
+                            </div>
+                            <div className="flex justify-end space-x-2">
+                                <button onClick={onClose} className="bg-gray-500 text-white px-4 py-2 rounded">Cancel</button>
+                                <button onClick={() => onSave(editedUser)} className="bg-blue-500 text-white px-4 py-2 rounded">Save</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
         
         const App = () => {
             const [user, setUser] = useState(null);
@@ -711,8 +779,9 @@
             const [showMonitoringScaleModal, setShowMonitoringScaleModal] = useState(false);
             const [directions, setDirections] = useState([]);
             const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
-            const [allUsers, setAllUsers] = useState([]);
-            const [editingUser, setEditingUser] = useState(null);
+            const [users, setUsers] = useState([]);
+            const [showUserEditModal, setShowUserEditModal] = useState(false);
+            const [userToEdit, setUserToEdit] = useState(null);
 
             const getMonthOptions = () => {
                 const options = [];
@@ -786,6 +855,80 @@
                     setError(err.response?.data?.error || 'Failed to save directions');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
+                }
+            };
+
+            const fetchUsers = async () => {
+                setIsAdminDataLoading(true);
+                clearMessages();
+                try {
+                    const response = await axios.get(`${API_BASE_URL}/api/admin/users`, {
+                        headers: { 'X-API-Key': user.apiKey }
+                    });
+                    const data = response.data;
+                    if (data.status === 'success' && isMounted.current) {
+                        setUsers(data.users.filter(u => u.role === 'operator') || []);
+                    } else {
+                        setError(data.error || 'Failed to fetch users');
+                    }
+                } catch (err) {
+                    console.error('Fetch users error:', err);
+                    setError(err.response?.data?.error || 'Failed to fetch users');
+                } finally {
+                    if (isMounted.current) setIsAdminDataLoading(false);
+                }
+            };
+
+            const saveUserChanges = async (editedUser) => {
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    // Change direction
+                    if (editedUser.direction) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'direction',
+                            value: editedUser.direction
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    // Change supervisor
+                    if (editedUser.supervisor_id) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'supervisor_id',
+                            value: editedUser.supervisor_id
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    // Change login
+                    if (editedUser.new_login) {
+                        await axios.post(`${API_BASE_URL}/api/user/change_login`, {
+                            user_id: editedUser.id,
+                            new_login: editedUser.new_login
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    // Change password
+                    if (editedUser.new_password) {
+                        await axios.post(`${API_BASE_URL}/api/user/change_password`, {
+                            user_id: editedUser.id,
+                            new_password: editedUser.new_password
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    setSuccess('User updated successfully');
+                    fetchUsers();
+                    setShowUserEditModal(false);
+                } catch (err) {
+                    console.error('Update user error:', err);
+                    setError(err.response?.data?.error || 'Failed to update user');
+                } finally {
+                    setIsLoading(false);
                 }
             };
             const isMounted = useRef(true);
@@ -1457,49 +1600,6 @@
                 }
             };
 
-            const fetchAllUsers = async () => {
-                setIsLoading(true);
-                try {
-                    const response = await axios.get(`${API_BASE_URL}/api/admin/users`, {
-                        headers: { 
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
-                    });
-                    setAllUsers(response.data.users || []);
-                } catch (err) {
-                    setError('Failed to fetch users');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-
-            const handleUpdateUser = async (userId, updates) => {
-                setIsLoading(true);
-                try {
-                    const response = await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
-                        user_id: userId,
-                        ...updates
-                    }, {
-                        headers: { 
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
-                    });
-                    if (response.data.status === 'success') {
-                        fetchAllUsers();
-                        setSuccess('User updated successfully');
-                    } else {
-                        setError('Failed to update user');
-                    }
-                } catch (err) {
-                    setError('Failed to update user');
-                } finally {
-                    setIsLoading(false);
-                    setEditingUser(null);
-                }
-            };
-
             const addSv = async () => {
                 if (!newSvName.trim() || !newSvId.trim()) {
                     setError('Please fill in both name and ID');
@@ -1520,45 +1620,48 @@
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'SV added successfully');
+                        setSuccess('Supervisor added successfully');
                         setNewSvName('');
                         setNewSvId('');
                         fetchSvList();
                     } else {
-                        setError(data.error || 'Failed to add SV');
+                        setError(data.error || 'Failed to add supervisor');
                     }
                 } catch (err) {
                     console.error('Add SV error:', err);
-                    setError(err.response?.data?.error || 'Failed to add SV');
+                    setError(err.response?.data?.error || 'Failed to add supervisor');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
             };
 
-            const removeSv = async (id) => {
+            const removeSv = async (svId) => {
+                if (!confirm('Are you sure you want to remove this supervisor?')) return;
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.post(`${API_BASE_URL}/api/admin/remove_sv`, { id }, {
+                    const response = await axios.post(`${API_BASE_URL}/api/admin/remove_sv`, {
+                        telegram_id: svId
+                    }, {
                         headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'SV removed successfully');
+                        setSuccess('Supervisor removed successfully');
                         fetchSvList();
                     } else {
-                        setError(data.error || 'Failed to remove SV');
+                        setError(data.error || 'Failed to remove supervisor');
                     }
                 } catch (err) {
                     console.error('Remove SV error:', err);
-                    setError(err.response?.data?.error || 'Failed to remove SV');
+                    setError(err.response?.data?.error || 'Failed to remove supervisor');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
             };
 
-            const changeSvTable = async (id, tableUrl) => {
-                if (!validateUrl(tableUrl)) {
+            const changeSvTable = async (svId, url) => {
+                if (!validateUrl(url)) {
                     setError('Invalid Google Sheets URL');
                     return;
                 }
@@ -1566,14 +1669,14 @@
                 clearMessages();
                 try {
                     const response = await axios.post(`${API_BASE_URL}/api/admin/change_sv_table`, {
-                        id,
-                        table_url: tableUrl
+                        telegram_id: svId,
+                        table_url: url
                     }, {
                         headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'Table updated successfully');
+                        setSuccess('Table updated successfully');
                         setNewTableUrl('');
                         setShowChangeTableForm(false);
                         setCurrentSvForTableChange(null);
@@ -1598,12 +1701,13 @@
                 clearMessages();
                 try {
                     const response = await axios.post(`${API_BASE_URL}/api/sv/update_table`, {
-                        id: user.id,
                         table_url: newTableUrl
+                    }, {
+                        headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'Table updated successfully');
+                        setSuccess('Table updated successfully');
                         setNewTableUrl('');
                         fetchSvData();
                     } else {
@@ -1612,6 +1716,27 @@
                 } catch (err) {
                     console.error('Update table error:', err);
                     setError(err.response?.data?.error || 'Failed to update table');
+                } finally {
+                    if (isMounted.current) setIsLoading(false);
+                }
+            };
+
+            const generateWeeklyReport = async () => {
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await axios.get(`${API_BASE_URL}/api/admin/weekly_report`, {
+                        headers: { 'X-API-Key': user.apiKey }
+                    });
+                    const data = response.data;
+                    if (data.status === 'success' && isMounted.current) {
+                        setSuccess('Report generated and sent successfully');
+                    } else {
+                        setError(data.error || 'Failed to generate report');
+                    }
+                } catch (err) {
+                    console.error('Generate report error:', err);
+                    setError(err.response?.data?.error || 'Failed to generate report');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -1629,34 +1754,13 @@
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'Notification sent successfully');
+                        setSuccess('Notification sent successfully');
                     } else {
                         setError(data.error || 'Failed to send notification');
                     }
                 } catch (err) {
-                    console.error('Notify supervisor error:', err);
+                    console.error('Notify SV error:', err);
                     setError(err.response?.data?.error || 'Failed to send notification');
-                } finally {
-                    if (isMounted.current) setIsLoading(false);
-                }
-            };
-
-            const generateWeeklyReport = async () => {
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.get(`${API_BASE_URL}/api/admin/generate_report`, {
-                        headers: { 'X-API-Key': user.apiKey }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'Report generation started');
-                    } else {
-                        setError(data.error || 'Failed to generate report');
-                    }
-                } catch (err) {
-                    console.error('Generate report error:', err);
-                    setError(err.response?.data?.error || 'Failed to generate report');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -1667,155 +1771,35 @@
                     if (user.role === 'admin') {
                         fetchSvList();
                         fetchDirections();
-                        fetchAllUsers();
-                        setView('dashboard');
+                        fetchUsers();
                     } else if (user.role === 'sv') {
                         fetchSvData();
-                        setView('operators');
                     } else if (user.role === 'operator') {
                         fetchProfileData();
                         fetchHoursData();
                         fetchOperatorData();
-                        setView('profile');
                     }
                 }
             }, [user, selectedMonth]);
 
-            const Sidebar = ({ role, currentView, setCurrentView }) => {
-                const menuItems = {
-                    admin: [
-                        { id: 'dashboard', label: 'Dashboard' },
-                        { id: 'manage-users', label: 'Manage Users' },
-                        { id: 'manage-scale', label: 'Manage Monitoring Scale' }
-                    ],
-                    sv: [
-                        { id: 'update-table', label: 'Update Table' },
-                        { id: 'operators', label: 'Operators' },
-                        { id: 'change-password', label: 'Change Password' }
-                    ],
-                    operator: [
-                        { id: 'profile', label: 'Profile' },
-                        { id: 'hours', label: 'My Hours' },
-                        { id: 'evaluations', label: 'Call Evaluations' },
-                        { id: 'salary', label: 'Salary Calculator' }
-                    ]
-                }[role] || [];
-
-                return (
-                    <div className="fixed left-0 top-0 h-full w-64 bg-white shadow-lg p-4">
-                        <h2 className="text-xl font-bold mb-6">{role.charAt(0).toUpperCase() + role.slice(1)} Dashboard</h2>
-                        <ul className="space-y-2">
-                            {menuItems.map(item => (
-                                <li key={item.id}>
-                                    <button 
-                                        onClick={() => setCurrentView(item.id)}
-                                        className={`w-full text-left p-2 rounded ${currentView === item.id ? 'bg-blue-500 text-white' : 'hover:bg-gray-100'}`}
-                                    >
-                                        {item.label}
-                                    </button>
-                                </li>
-                            ))}
-                        </ul>
-                        <button
-                            onClick={handleLogout}
-                            className="absolute bottom-4 w-[calc(100%-32px)] bg-red-500 text-white p-2 rounded hover:bg-red-600"
-                        >
-                            Logout
-                        </button>
-                    </div>
-                );
-            };
-
-            const ManageUsers = () => {
-                return (
-                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                        <h2 className="text-xl font-semibold mb-4">Manage Users</h2>
-                        <table className="min-w-full bg-white border-collapse">
-                            <thead>
-                                <tr className="bg-gray-200">
-                                    <th className="p-3 border-b text-left">Name</th>
-                                    <th className="p-3 border-b text-left">Role</th>
-                                    <th className="p-3 border-b text-left">Direction</th>
-                                    <th className="p-3 border-b text-left">Supervisor</th>
-                                    <th className="p-3 border-b text-left">Login</th>
-                                    <th className="p-3 border-b text-left">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {allUsers.map(u => u.role === 'operator' && (
-                                    <tr key={u.id}>
-                                        <td className="p-3 border-b">{u.name}</td>
-                                        <td className="p-3 border-b">{u.role}</td>
-                                        <td className="p-3 border-b">
-                                            {editingUser?.id === u.id ? (
-                                                <select 
-                                                    value={editingUser.direction_id || ''}
-                                                    onChange={e => setEditingUser({...editingUser, direction_id: e.target.value})}
-                                                >
-                                                    <option value="">Select Direction</option>
-                                                    {directions.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-                                                </select>
-                                            ) : u.direction_id ? directions.find(d => d.id === u.direction_id)?.name : '-'}
-                                        </td>
-                                        <td className="p-3 border-b">
-                                            {editingUser?.id === u.id ? (
-                                                <select 
-                                                    value={editingUser.supervisor_id || ''}
-                                                    onChange={e => setEditingUser({...editingUser, supervisor_id: e.target.value})}
-                                                >
-                                                    <option value="">Select Supervisor</option>
-                                                    {svList.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                                                </select>
-                                            ) : u.supervisor_id ? svList.find(s => s.id === u.supervisor_id)?.name : '-'}
-                                        </td>
-                                        <td className="p-3 border-b">
-                                            {editingUser?.id === u.id ? (
-                                                <input 
-                                                    type="text" 
-                                                    value={editingUser.login || ''}
-                                                    onChange={e => setEditingUser({...editingUser, login: e.target.value})}
-                                                    className="p-1 border rounded"
-                                                />
-                                            ) : u.login}
-                                        </td>
-                                        <td className="p-3 border-b">
-                                            {editingUser?.id === u.id ? (
-                                                <>
-                                                    <button onClick={() => handleUpdateUser(u.id, {
-                                                        direction_id: editingUser.direction_id,
-                                                        supervisor_id: editingUser.supervisor_id,
-                                                        new_login: editingUser.login
-                                                    })} className="bg-green-500 text-white px-2 py-1 rounded mr-2">Save</button>
-                                                    <button onClick={() => setEditingUser(null)} className="bg-gray-500 text-white px-2 py-1 rounded">Cancel</button>
-                                                </>
-                                            ) : (
-                                                <button onClick={() => setEditingUser(u)} className="bg-blue-500 text-white px-2 py-1 rounded">Edit</button>
-                                            )}
-                                            <button onClick={() => {
-                                                const newPass = prompt('New Password:');
-                                                if (newPass) handleUpdateUser(u.id, { new_password: newPass });
-                                            }} className="bg-yellow-500 text-white px-2 py-1 rounded ml-2">Change Password</button>
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                );
-            };
+            useEffect(() => {
+                if (selectedSvId) {
+                    fetchSelectedSvData(selectedSvId);
+                }
+            }, [selectedSvId]);
 
             if (!user) {
                 return (
-                    <div className="min-h-screen flex items-center justify-center">
-                        <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                            <h1 className="text-2xl font-bold mb-6 text-center">Login</h1>
+                    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
+                        <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md transform transition-all duration-300 hover:scale-105">
+                            <h1 className="text-3xl font-bold mb-6 text-center text-gray-800">OTP Bot Dashboard</h1>
                             <input
                                 type="text"
                                 placeholder="Login"
                                 value={login}
                                 onChange={(e) => setLogin(e.target.value)}
                                 onKeyPress={handleKeyPress}
-                                className="w-full p-3 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                 disabled={isLoading}
                             />
                             <input
@@ -1824,12 +1808,12 @@
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
                                 onKeyPress={handleKeyPress}
-                                className="w-full p-3 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                 disabled={isLoading}
                             />
                             <button
                                 onClick={handleLogin}
-                                className={`w-full bg-blue-500 text-white p-3 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                 disabled={isLoading}
                             >
                                 {isLoading ? 'Logging in...' : 'Login'}
@@ -1841,260 +1825,438 @@
                 );
             }
 
-            return (
-                <div className="flex min-h-screen">
-                    <Sidebar role={user.role} currentView={view} setCurrentView={setView} />
-                    <div className="ml-64 p-6 w-full">
+            if (showLogoutConfirm) {
+                return (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                            <h2 className="text-xl font-semibold mb-4">Confirm Logout</h2>
+                            <p className="mb-4">Are you sure you want to log out?</p>
+                            <div className="flex justify-between">
+                                <button
+                                    onClick={confirmLogout}
+                                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                                >
+                                    Yes, Logout
+                                </button>
+                                <button
+                                    onClick={() => setShowLogoutConfirm(false)}
+                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (showChangeLoginForm) {
+                return (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                            <h2 className="text-xl font-semibold mb-4">Change Login</h2>
+                            <input
+                                type="text"
+                                placeholder="New Login"
+                                value={loginData.new_login}
+                                onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <input
+                                type="text"
+                                placeholder="Confirm New Login"
+                                value={loginData.confirm_login}
+                                onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <div className="flex justify-between">
+                                <button
+                                    onClick={handleChangeLogin}
+                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                    disabled={isLoading}
+                                >
+                                    {isLoading ? 'Updating...' : 'Update Login'}
+                                </button>
+                                <button
+                                    onClick={() => setShowChangeLoginForm(false)}
+                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                        </div>
+                    </div>
+                );
+            }
+
+            if (showChangePasswordForm) {
+                return (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                            <h2 className="text-xl font-semibold mb-4">Change Password</h2>
+                            <input
+                                type="password"
+                                placeholder="New Password"
+                                value={passwordData.new_password}
+                                onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <input
+                                type="password"
+                                placeholder="Confirm New Password"
+                                value={passwordData.confirm_password}
+                                onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <div className="flex justify-between">
+                                <button
+                                    onClick={handleChangePassword}
+                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                    disabled={isLoading}
+                                >
+                                    {isLoading ? 'Updating...' : 'Update Password'}
+                                </button>
+                                <button
+                                    onClick={() => setShowChangePasswordForm(false)}
+                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                        </div>
+                    </div>
+                );
+            }
+
+            const Sidebar = () => {
+                return (
+                    <div className="fixed top-0 left-0 h-full w-64 bg-blue-800 text-white p-6 shadow-lg">
+                        <h1 className="text-2xl font-bold mb-8">Dashboard</h1>
+                        <ul className="space-y-4">
+                            {user.role === 'admin' && (
+                                <>
+                                    <li><button onClick={() => setView('add_sv')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'add_sv' ? 'bg-blue-900' : ''}`}>Add Supervisor</button></li>
+                                    <li><button onClick={() => setView('sv_list')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'sv_list' ? 'bg-blue-900' : ''}`}>Supervisors</button></li>
+                                    <li><button onClick={() => setView('view_scores')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'view_scores' ? 'bg-blue-900' : ''}`}>View Operator Scores</button></li>
+                                    <li><button onClick={() => setView('manage_users')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'manage_users' ? 'bg-blue-900' : ''}`}>Manage Users</button></li>
+                                    <li><button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-2 px-4 rounded hover:bg-blue-700">Manage Monitoring Scale</button></li>
+                                </>
+                            )}
+                            {user.role === 'sv' && (
+                                <>
+                                    <li><button onClick={() => setView('update_table')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'update_table' ? 'bg-blue-900' : ''}`}>Update Table</button></li>
+                                    <li><button onClick={() => setView('operators')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'operators' ? 'bg-blue-900' : ''}`}>Your Operators</button></li>
+                                    <li><button onClick={() => setShowChangePasswordForm(true)} className="w-full text-left py-2 px-4 rounded hover:bg-blue-700">Change Password</button></li>
+                                </>
+                            )}
+                            {user.role === 'operator' && (
+                                <>
+                                    <li><button onClick={() => setView('profile')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'profile' ? 'bg-blue-900' : ''}`}>Profile</button></li>
+                                    <li><button onClick={() => setView('hours')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'hours' ? 'bg-blue-900' : ''}`}>My Hours</button></li>
+                                    <li><button onClick={() => setView('evaluation')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'evaluation' ? 'bg-blue-900' : ''}`}>Call Evaluations</button></li>
+                                    <li><button onClick={() => setView('salary')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'salary' ? 'bg-blue-900' : ''}`}>Salary Calculator</button></li>
+                                </>
+                            )}
+                            <li><button onClick={() => setShowAccountMenu(true)} className="w-full text-left py-2 px-4 rounded hover:bg-blue-700">Account</button></li>
+                            <li><button onClick={handleLogout} className="w-full text-left py-2 px-4 rounded hover:bg-red-700 bg-red-600">Logout</button></li>
+                        </ul>
+                    </div>
+                );
+            };
+
+            const MainContent = () => {
+                return (
+                    <div className="ml-64 p-6 bg-gray-100 min-h-screen">
                         {user.role === 'admin' && (
                             <>
-                                {view === 'dashboard' && (
-                                    <>
-                                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                            <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
-                                            <input
-                                                type="text"
-                                                placeholder="Supervisor Name"
-                                                value={newSvName}
-                                                onChange={(e) => setNewSvName(e.target.value)}
-                                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading}
-                                            />
-                                            <input
-                                                type="text"
-                                                placeholder="Enter Supervisor ID"
-                                                value={newSvId}
-                                                onChange={(e) => setNewSvId(e.target.value)}
-                                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading}
-                                            />
+                                {view === 'add_sv' && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                        <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
+                                        <input
+                                            type="text"
+                                            placeholder="Supervisor Name"
+                                            value={newSvName}
+                                            onChange={(e) => setNewSvName(e.target.value)}
+                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                        <input
+                                            type="text"
+                                            placeholder="Enter Supervisor ID"
+                                            value={newSvId}
+                                            onChange={(e) => setNewSvId(e.target.value)}
+                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                        <button
+                                            onClick={addSv}
+                                            className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                            disabled={isLoading}
+                                        >
+                                            {isLoading ? 'Adding...' : 'Add Supervisor'}
+                                        </button>
+                                    </div>
+                                )}
+                                {view === 'sv_list' && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                        <div className="flex justify-between items-center mb-4">
+                                            <h2 className="text-xl font-semibold">Supervisors</h2>
                                             <button
-                                                onClick={addSv}
-                                                className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                onClick={generateWeeklyReport}
+                                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                                 disabled={isLoading}
                                             >
-                                                {isLoading ? 'Adding...' : 'Add Supervisor'}
+                                                {isLoading ? 'Generating...' : 'Generate Report'}
                                             </button>
                                         </div>
-
-                                        <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                            <div className="flex justify-between items-center mb-4">
-                                                <h2 className="text-xl font-semibold">Supervisors</h2>
-                                                <button
-                                                    onClick={generateWeeklyReport}
-                                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                                    disabled={isLoading}
-                                                >
-                                                    {isLoading ? 'Generating...' : 'Generate Report'}
-                                                </button>
-                                            </div>
-                                            {isAdminDataLoading ? (
-                                                <p className="text-center">Loading...</p>
-                                            ) : svList.length === 0 ? (
-                                                <p className="text-center">No supervisors found.</p>
-                                            ) : (
-                                                <div className="overflow-x-auto">
-                                                    <table className="min-w-full bg-white border-collapse">
-                                                        <thead>
-                                                            <tr className="bg-gray-200">
-                                                                <th className="p-3 border-b text-left">Name</th>
-                                                                <th className="p-3 border-b text-left">ID</th>
-                                                                <th className="p-3 border-b text-left">Table URL</th>
-                                                                <th className="p-3 border-b text-left">Actions</th>
+                                        {isAdminDataLoading ? (
+                                            <p className="text-center">Loading...</p>
+                                        ) : svList.length === 0 ? (
+                                            <p className="text-center">No supervisors found.</p>
+                                        ) : (
+                                            <div className="overflow-x-auto">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-gray-200">
+                                                            <th className="p-3 border-b text-left">Name</th>
+                                                            <th className="p-3 border-b text-left">ID</th>
+                                                            <th className="p-3 border-b text-left">Table URL</th>
+                                                            <th className="p-3 border-b text-left">Actions</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {svList.map(sv => (
+                                                            <tr key={sv.id} className="hover:bg-gray-50">
+                                                                <td className="p-3 border-b">{sv.name}</td>
+                                                                <td className="p-3 border-b">{sv.id}</td>
+                                                                <td className="p-3 border-b">
+                                                                    {sv.table ? (
+                                                                        <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
+                                                                    ) : 'No table'}
+                                                                </td>
+                                                                <td className="p-3 border-b space-x-2">
+                                                                    <button
+                                                                        onClick={() => removeSv(sv.id)}
+                                                                        className="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 text-sm"
+                                                                        disabled={isLoading}
+                                                                    >
+                                                                        Remove
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => {
+                                                                            setCurrentSvForTableChange(sv);
+                                                                            setShowChangeTableForm(true);
+                                                                        }}
+                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                        disabled={isLoading}
+                                                                    >
+                                                                        Change Table
+                                                                    </button>
+                                                                </td>
                                                             </tr>
-                                                        </thead>
-                                                        <tbody>
-                                                            {svList.map(sv => (
-                                                                <tr key={sv.id} className="hover:bg-gray-50">
-                                                                    <td className="p-3 border-b">{sv.name}</td>
-                                                                    <td className="p-3 border-b">{sv.id}</td>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                                {showChangeTableForm && currentSvForTableChange && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                        <h2 className="text-xl font-semibold mb-4">Change Table for {currentSvForTableChange.name}</h2>
+                                        <input
+                                            type="text"
+                                            placeholder="New Google Sheets URL"
+                                            value={newTableUrl}
+                                            onChange={(e) => setNewTableUrl(e.target.value)}
+                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                        <div className="flex justify-between">
+                                            <button
+                                                onClick={() => changeSvTable(currentSvForTableChange.id, newTableUrl)}
+                                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                disabled={isLoading}
+                                            >
+                                                {isLoading ? 'Updating...' : 'Update Table'}
+                                            </button>
+                                            <button
+                                                onClick={() => {
+                                                    setShowChangeTableForm(false);
+                                                    setCurrentSvForTableChange(null);
+                                                    setNewTableUrl('');
+                                                }}
+                                                className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                            >
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                                {view === 'view_scores' && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg">
+                                        <h2 className="text-xl font-semibold mb-4">View Operator Scores</h2>
+                                        <select
+                                            value={selectedSvId}
+                                            onChange={(e) => setSelectedSvId(e.target.value)}
+                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading || isAdminDataLoading}
+                                        >
+                                            <option value="">Select Supervisor</option>
+                                            {svList.map(sv => (
+                                                <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
+                                            ))}
+                                        </select>
+                                        {isAdminDataLoading ? (
+                                            <p className="text-center">Loading...</p>
+                                        ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
+                                            <div className="overflow-x-auto">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-gray-100">
+                                                            <th className="p-3 border-b text-left">Name</th>
+                                                            <th className="p-3 border-b text-left">Calls</th>
+                                                            <th className="p-3 border-b text-left">Expected</th>
+                                                            <th className="p-3 border-b text-left">Avg Score</th>
+                                                            <th className="p-3 border-b text-left">Link</th>
+                                                            <th className="p-3 border-b text-left">Actions</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {selectedSvData.operators.map((op, index) => {
+                                                            const currentWeek = getCurrentWeekOfMonth();
+                                                            const expectedCalls = getExpectedCalls(currentWeek);
+                                                            const callCount = parseInt(op.call_count) || 0;
+                                                            const hasIssue = callCount < expectedCalls;
+                                                            return (
+                                                                <tr key={index} className="hover:bg-gray-50">
+                                                                    <td className="p-3 border-b">{op.name}</td>
+                                                                    <td className={`p-3 border-b ${getCallCountColor(callCount, expectedCalls)}`}>
+                                                                        {callCount}
+                                                                    </td>
+                                                                    <td className="p-3 border-b">{expectedCalls}</td>
                                                                     <td className="p-3 border-b">
-                                                                        {sv.table ? (
-                                                                            <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
-                                                                        ) : 'No table'}
+                                                                        <span className={getScoreColor(op.avg_score)}>
+                                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="p-3 border-b">
+                                                                        {op.link ? (
+                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
+                                                                        ) : '-'}
                                                                     </td>
                                                                     <td className="p-3 border-b space-x-2">
-                                                                        <button
-                                                                            onClick={() => removeSv(sv.id)}
-                                                                            className="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 text-sm"
-                                                                            disabled={isLoading}
-                                                                        >
-                                                                            Remove
-                                                                        </button>
+                                                                        {hasIssue && (
+                                                                            <button
+                                                                                onClick={() => notifySupervisor(selectedSvId, op.name)}
+                                                                                className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
+                                                                                disabled={isLoading}
+                                                                            >
+                                                                                Notify
+                                                                            </button>
+                                                                        )}
                                                                         <button
                                                                             onClick={() => {
-                                                                                setCurrentSvForTableChange(sv);
-                                                                                setShowChangeTableForm(true);
+                                                                                // Generate token with operator data
+                                                                                const tokenData = {
+                                                                                    apiKey: user.apiKey,
+                                                                                    userId: user.id,
+                                                                                    role: user.role,
+                                                                                    name: user.name,
+                                                                                    operatorId: op.id,
+                                                                                    operatorName: op.name,
+                                                                                    supervisorId: selectedSvId,
+                                                                                    timestamp: Date.now()
+                                                                                };
+                                                                                const token = safeBtoa(JSON.stringify(tokenData));
+                                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
                                                                             }}
                                                                             className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
-                                                                            disabled={isLoading}
+                                                                            title="Listen to operator calls"
                                                                         >
-                                                                            Change Table
+                                                                            Listen Calls
                                                                         </button>
                                                                     </td>
                                                                 </tr>
-                                                            ))}
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                            )}
-                                        </div>
+                                                            );
+                                                        })}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        ) : selectedSvId ? (
+                                            <p className="text-center">No operators found for this supervisor.</p>
+                                        ) : null}
+                                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
 
-                                        {showChangeTableForm && currentSvForTableChange && (
-                                            <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                                <h2 className="text-xl font-semibold mb-4">Change Table for {currentSvForTableChange.name}</h2>
-                                                <input
-                                                    type="text"
-                                                    placeholder="New Google Sheets URL"
-                                                    value={newTableUrl}
-                                                    onChange={(e) => setNewTableUrl(e.target.value)}
-                                                    className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                    disabled={isLoading}
+                                        {showMonitoringScaleModal && (
+                                                <MonitoringScaleModal
+                                                    isOpen={showMonitoringScaleModal}
+                                                    onClose={() => setShowMonitoringScaleModal(false)}
+                                                    onSave={saveDirections}
+                                                    initialDirections={directions}
                                                 />
-                                                <div className="flex justify-between">
-                                                    <button
-                                                        onClick={() => changeSvTable(currentSvForTableChange.id, newTableUrl)}
-                                                        className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                                        disabled={isLoading}
-                                                    >
-                                                        {isLoading ? 'Updating...' : 'Update Table'}
-                                                    </button>
-                                                    <button
-                                                        onClick={() => {
-                                                            setShowChangeTableForm(false);
-                                                            setCurrentSvForTableChange(null);
-                                                            setNewTableUrl('');
-                                                        }}
-                                                        className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                                    >
-                                                        Cancel
-                                                    </button>
-                                                </div>
+                                            )}
+                                    </div>
+                                )}
+                                {view === 'manage_users' && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg">
+                                        <h2 className="text-xl font-semibold mb-4">Manage Users</h2>
+                                        {isAdminDataLoading ? (
+                                            <p className="text-center">Loading...</p>
+                                        ) : users.length === 0 ? (
+                                            <p className="text-center">No users found.</p>
+                                        ) : (
+                                            <div className="overflow-x-auto">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-gray-200">
+                                                            <th className="p-3 border-b text-left">Name</th>
+                                                            <th className="p-3 border-b text-left">ID</th>
+                                                            <th className="p-3 border-b text-left">Direction</th>
+                                                            <th className="p-3 border-b text-left">Supervisor</th>
+                                                            <th className="p-3 border-b text-left">Actions</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {users.map(u => (
+                                                            <tr key={u.id} className="hover:bg-gray-50">
+                                                                <td className="p-3 border-b">{u.name}</td>
+                                                                <td className="p-3 border-b">{u.id}</td>
+                                                                <td className="p-3 border-b">{u.direction || '-'}</td>
+                                                                <td className="p-3 border-b">{u.supervisor_name || '-'}</td>
+                                                                <td className="p-3 border-b">
+                                                                    <button
+                                                                        onClick={() => {
+                                                                            setUserToEdit(u);
+                                                                            setShowUserEditModal(true);
+                                                                        }}
+                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                    >
+                                                                        Edit
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
                                             </div>
                                         )}
-
-                                        <div className="bg-white p-6 rounded-lg shadow-lg">
-                                            <h2 className="text-xl font-semibold mb-4">View Operator Scores</h2>
-                                            <select
-                                                value={selectedSvId}
-                                                onChange={(e) => setSelectedSvId(e.target.value)}
-                                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading || isAdminDataLoading}
-                                            >
-                                                <option value="">Select Supervisor</option>
-                                                {svList.map(sv => (
-                                                    <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
-                                                ))}
-                                            </select>
-                                            {isAdminDataLoading ? (
-                                                <p className="text-center">Loading...</p>
-                                            ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
-                                                <div className="overflow-x-auto">
-                                                    <table className="min-w-full bg-white border-collapse">
-                                                        <thead>
-                                                            <tr className="bg-gray-100">
-                                                                <th className="p-3 border-b text-left">Name</th>
-                                                                <th className="p-3 border-b text-left">Calls</th>
-                                                                <th className="p-3 border-b text-left">Expected</th>
-                                                                <th className="p-3 border-b text-left">Avg Score</th>
-                                                                <th className="p-3 border-b text-left">Link</th>
-                                                                <th className="p-3 border-b text-left">Actions</th>
-                                                            </tr>
-                                                        </thead>
-                                                        <tbody>
-                                                            {selectedSvData.operators.map((op, index) => {
-                                                                const currentWeek = getCurrentWeekOfMonth();
-                                                                const expectedCalls = getExpectedCalls(currentWeek);
-                                                                const callCount = parseInt(op.call_count) || 0;
-                                                                const hasIssue = callCount < expectedCalls;
-                                                                return (
-                                                                    <tr key={index} className="hover:bg-gray-50">
-                                                                        <td className="p-3 border-b">{op.name}</td>
-                                                                        <td className={`p-3 border-b ${getCallCountColor(callCount, expectedCalls)}`}>
-                                                                            {callCount}
-                                                                        </td>
-                                                                        <td className="p-3 border-b">{expectedCalls}</td>
-                                                                        <td className="p-3 border-b">
-                                                                            <span className={getScoreColor(op.avg_score)}>
-                                                                                {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                                            </span>
-                                                                        </td>
-                                                                        <td className="p-3 border-b">
-                                                                            {op.link ? (
-                                                                                <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                                            ) : '-'}
-                                                                        </td>
-                                                                        <td className="p-3 border-b space-x-2">
-                                                                            {hasIssue && (
-                                                                                <button
-                                                                                    onClick={() => notifySupervisor(selectedSvId, op.name)}
-                                                                                    className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
-                                                                                    disabled={isLoading}
-                                                                                >
-                                                                                    Notify
-                                                                                </button>
-                                                                            )}
-                                                                            <button
-                                                                                onClick={() => {
-                                                                                    // Generate token with operator data
-                                                                                    const tokenData = {
-                                                                                        apiKey: user.apiKey,
-                                                                                        userId: user.id,
-                                                                                        role: user.role,
-                                                                                        name: user.name,
-                                                                                        operatorId: op.id,
-                                                                                        operatorName: op.name,
-                                                                                        supervisorId: selectedSvId,
-                                                                                        timestamp: Date.now()
-                                                                                    };
-                                                                                    const token = safeBtoa(JSON.stringify(tokenData));
-                                                                                    window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
-                                                                                }}
-                                                                                className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
-                                                                                title="Listen to operator calls"
-                                                                            >
-                                                                                Listen Calls
-                                                                            </button>
-                                                                        </td>
-                                                                    </tr>
-                                                                );
-                                                            })}
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                            ) : selectedSvId ? (
-                                                <p className="text-center">No operators found for this supervisor.</p>
-                                            ) : null}
-                                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-
-                                            {showMonitoringScaleModal && (
-                                                    <MonitoringScaleModal
-                                                        isOpen={showMonitoringScaleModal}
-                                                        onClose={() => setShowMonitoringScaleModal(false)}
-                                                        onSave={saveDirections}
-                                                        initialDirections={directions}
-                                                    />
-                                                )}
-                                        </div>
-                                    </>
-                                )}
-                                {view === 'manage-users' && <ManageUsers />}
-                                {view === 'manage-scale' && (
-                                    <button
-                                        onClick={() => {
-                                            fetchDirections();
-                                            setShowMonitoringScaleModal(true);
-                                        }}
-                                        className="bg-purple-500 text-white px-4 py-2 rounded hover:bg-purple-600"
-                                    >
-                                        Edit Monitoring Scale
-                                    </button>
+                                    </div>
                                 )}
                             </>
                         )}
                         {user.role === 'sv' && (
                             <>
-                                {view === 'update-table' && (
+                                {view === 'update_table' && (
                                     <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                                         <h2 className="text-xl font-semibold mb-4">Update Table</h2>
                                         <input
@@ -2122,60 +2284,60 @@
                                         ) : svData && svData.operators && svData.operators.length > 0 ? (
                                             <div className="overflow-x-auto">
                                                 <table className="min-w-full bg-white border-collapse">
-                                                    <thead>
-                                                        <tr className="bg-gray-200">
-                                                            <th className="p-3 border-b text-left">Name</th>
-                                                            <th className="p-3 border-b text-left">Calls</th>
-                                                            <th className="p-3 border-b text-left">Avg Score</th>
-                                                            <th className="p-3 border-b text-left">Link</th>
-                                                            <th className="p-3 border-b text-left">Actions</th>
+                                                <thead>
+                                                    <tr className="bg-gray-200">
+                                                    <th className="p-3 border-b text-left">Name</th>
+                                                    <th className="p-3 border-b text-left">Calls</th>
+                                                    <th className="p-3 border-b text-left">Avg Score</th>
+                                                    <th className="p-3 border-b text-left">Link</th>
+                                                    <th className="p-3 border-b text-left">Actions</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {svData.operators.map((op, index) => {
+                                                    const callCount = parseInt(op.call_count) || 0;
+                                                    return (
+                                                        <tr key={index} className="hover:bg-gray-50">
+                                                        <td className="p-3 border-b">{op.name}</td>
+                                                        <td className={`p-3 border-b ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
+                                                            {callCount}
+                                                        </td>
+                                                        <td className="p-3 border-b">
+                                                            <span className={getScoreColor(op.avg_score)}>
+                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
+                                                            </span>
+                                                        </td>
+                                                        <td className="p-3 border-b">
+                                                            {op.link ? (
+                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
+                                                            ) : '-'}
+                                                        </td>
+                                                        <td className="p-3 border-b space-x-2">
+                                                            <button
+                                                            onClick={() => {
+                                                                // Генерируем токен с данными оператора
+                                                                const tokenData = {
+                                                                apiKey: user.apiKey,
+                                                                userId: user.id,
+                                                                role: user.role,
+                                                                name: user.name,
+                                                                operatorId: op.id,
+                                                                operatorName: op.name,
+                                                                timestamp: Date.now()
+                                                                };
+                                                                const token = safeBtoa(JSON.stringify(tokenData));
+                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
+                                                            }}
+                                                            className="bg-blue-500 text-white px-3 py-1 rounded text-sm hover:bg-blue-600"
+                                                            title="Listen to operator calls"
+                                                            >
+                                                            Listen Calls
+                                                            </button>
+                                                        </td>
                                                         </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        {svData.operators.map((op, index) => {
-                                                            const callCount = parseInt(op.call_count) || 0;
-                                                            return (
-                                                                <tr key={index} className="hover:bg-gray-50">
-                                                                    <td className="p-3 border-b">{op.name}</td>
-                                                                    <td className={`p-3 border-b ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
-                                                                        {callCount}
-                                                                    </td>
-                                                                    <td className="p-3 border-b">
-                                                                        <span className={getScoreColor(op.avg_score)}>
-                                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                                        </span>
-                                                                    </td>
-                                                                    <td className="p-3 border-b">
-                                                                        {op.link ? (
-                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                                        ) : '-'}
-                                                                    </td>
-                                                                    <td className="p-3 border-b space-x-2">
-                                                                        <button
-                                                                            onClick={() => {
-                                                                                // Генерируем токен с данными оператора
-                                                                                const tokenData = {
-                                                                                    apiKey: user.apiKey,
-                                                                                    userId: user.id,
-                                                                                    role: user.role,
-                                                                                    name: user.name,
-                                                                                    operatorId: op.id,
-                                                                                    operatorName: op.name,
-                                                                                    timestamp: Date.now()
-                                                                                };
-                                                                                const token = safeBtoa(JSON.stringify(tokenData));
-                                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
-                                                                            }}
-                                                                            className="bg-blue-500 text-white px-3 py-1 rounded text-sm hover:bg-blue-600"
-                                                                            title="Listen to operator calls"
-                                                                        >
-                                                                            Listen Calls
-                                                                        </button>
-                                                                    </td>
-                                                                </tr>
-                                                            );
-                                                        })}
-                                                    </tbody>
+                                                    );
+                                                    })}
+                                                </tbody>
                                                 </table>
                                             </div>
                                         ) : (
@@ -2185,83 +2347,12 @@
                                         {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                                     </div>
                                 )}
-                                {view === 'change-password' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                        <div className="flex justify-between items-center mb-4">
-                                            <h2 className="text-xl font-semibold">Change Password</h2>
-                                            <button
-                                                onClick={() => setShowChangePasswordForm(!showChangePasswordForm)}
-                                                className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-                                            >
-                                                {showChangePasswordForm ? 'Hide Password Form' : 'Change Password'}
-                                            </button>
-                                        </div>
-                                        {showChangePasswordForm && (
-                                            <div className="mt-4">
-                                                <select
-                                                    value={passwordData.user_id}
-                                                    onChange={(e) => setPasswordData({ ...passwordData, user_id: e.target.value })}
-                                                    className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                    disabled={isLoading}
-                                                >
-                                                    <option value="">Select User</option>
-                                                    <option value={user.id}>{user.name} (Self)</option>
-                                                    {svData?.operators?.map(op => (
-                                                        <option key={op.id} value={op.id}>{op.name} (Operator, ID: {op.id})</option>
-                                                    ))}
-                                                </select>
-                                                <input
-                                                    type="password"
-                                                    placeholder="New Password"
-                                                    value={passwordData.new_password}
-                                                    onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
-                                                    className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                    disabled={isLoading}
-                                                />
-                                                <input
-                                                    type="password"
-                                                    placeholder="Confirm New Password"
-                                                    value={passwordData.confirm_password}
-                                                    onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
-                                                    className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                    disabled={isLoading}
-                                                />
-                                                <div className="flex justify-between">
-                                                    <button
-                                                        onClick={handleChangePassword}
-                                                        className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                                        disabled={isLoading}
-                                                    >
-                                                        {isLoading ? 'Updating...' : 'Update Password'}
-                                                    </button>
-                                                    <button
-                                                        onClick={() => setShowChangePasswordForm(false)}
-                                                        className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                                    >
-                                                        Cancel
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
                             </>
                         )}
                         {user.role === 'operator' && (
                             <>
-                                <div className="mb-6">
-                                    <label className="block mb-2 font-semibold text-gray-700">Select Month:</label>
-                                    <select
-                                        value={selectedMonth}
-                                        onChange={(e) => setSelectedMonth(e.target.value)}
-                                        className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    >
-                                        {getMonthOptions()}
-                                    </select>
-                                </div>
                                 {view === 'profile' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200">
+                                    <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
                                         {isLoading ? (
                                             <p className="text-center text-gray-600">Loading...</p>
@@ -2325,6 +2416,19 @@
                                         )}
                                     </div>
                                 )}
+                                {(view === 'hours' || view === 'evaluation') && (
+                                    <div className="mb-6">
+                                        <label className="block mb-2 font-semibold text-gray-700">Select Month:</label>
+                                        <select
+                                            value={selectedMonth}
+                                            onChange={(e) => setSelectedMonth(e.target.value)}
+                                            className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        >
+                                            {getMonthOptions()}
+                                        </select>
+                                    </div>
+                                )}
                                 {view === 'hours' && (
                                     <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
@@ -2370,7 +2474,7 @@
                                         )}
                                     </div>
                                 )}
-                                {view === 'evaluations' && (
+                                {view === 'evaluation' && (
                                     <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
                                         {isLoading ? (
@@ -2699,108 +2803,26 @@
                                 setShowDisputeModal={setShowDisputeModal}
                             />
                         )}
-                        {showLogoutConfirm && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                                <div className="bg-white p-6 rounded-lg shadow-lg">
-                                    <p className="mb-4">Are you sure you want to logout?</p>
-                                    <div className="flex justify-between">
-                                        <button onClick={confirmLogout} className="bg-red-500 text-white px-4 py-2 rounded">Yes</button>
-                                        <button onClick={() => setShowLogoutConfirm(false)} className="bg-gray-500 text-white px-4 py-2 rounded">No</button>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-                        {showChangeLoginForm && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                                    <h2 className="text-xl font-semibold mb-4">Change Login</h2>
-                                    <input
-                                        type="text"
-                                        placeholder="New Login"
-                                        value={loginData.new_login}
-                                        onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    />
-                                    <input
-                                        type="text"
-                                        placeholder="Confirm New Login"
-                                        value={loginData.confirm_login}
-                                        onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    />
-                                    <div className="flex justify-between">
-                                        <button
-                                            onClick={handleChangeLogin}
-                                            className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                            disabled={isLoading}
-                                        >
-                                            {isLoading ? 'Updating...' : 'Update Login'}
-                                        </button>
-                                        <button
-                                            onClick={() => setShowChangeLoginForm(false)}
-                                            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                        >
-                                            Cancel
-                                        </button>
-                                    </div>
-                                    {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                    {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                                </div>
-                            </div>
-                        )}
-                        {showChangePasswordForm && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                                    <h2 className="text-xl font-semibold mb-4">Change Password</h2>
-                                    <input
-                                        type="password"
-                                        placeholder="New Password"
-                                        value={passwordData.new_password}
-                                        onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    />
-                                    <input
-                                        type="password"
-                                        placeholder="Confirm New Password"
-                                        value={passwordData.confirm_password}
-                                        onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    />
-                                    <div className="flex justify-between">
-                                        <button
-                                            onClick={handleChangePassword}
-                                            className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                            disabled={isLoading}
-                                        >
-                                            {isLoading ? 'Updating...' : 'Update Password'}
-                                        </button>
-                                        <button
-                                            onClick={() => setShowChangePasswordForm(false)}
-                                            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                        >
-                                            Cancel
-                                        </button>
-                                    </div>
-                                    {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                    {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                                </div>
-                            </div>
-                        )}
-                        {showMonitoringScaleModal && (
-                            <MonitoringScaleModal
-                                isOpen={showMonitoringScaleModal}
-                                onClose={() => setShowMonitoringScaleModal(false)}
-                                onSave={saveDirections}
-                                initialDirections={directions}
+                        {showUserEditModal && (
+                            <UserEditModal
+                                isOpen={showUserEditModal}
+                                onClose={() => setShowUserEditModal(false)}
+                                userToEdit={userToEdit}
+                                svList={svList}
+                                directions={directions}
+                                onSave={saveUserChanges}
                             />
                         )}
                         {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
                         {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                     </div>
+                );
+            };
+
+            return (
+                <div>
+                    <Sidebar />
+                    <MainContent />
                 </div>
             );
         };
