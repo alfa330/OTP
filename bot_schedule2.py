@@ -189,6 +189,67 @@ def get_user_profile():
         logging.error(f"Error fetching user profile for user_id {user_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/admin/users', methods=['GET'])
+@require_api_key
+def get_admin_users():
+    try:
+        requester_id = int(request.headers.get('X-User-Id'))
+        requester = db.get_user(id=requester_id)
+        if not requester or requester[3] != 'admin':
+            return jsonify({"error": "Only admins can access users"}), 403
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id
+                FROM users u
+                LEFT JOIN directions d ON u.direction_id = d.id
+                LEFT JOIN users s ON u.supervisor_id = s.id
+                WHERE u.role = 'operator'
+            """)
+            users = []
+            for row in cursor.fetchall():
+                users.append({
+                    "id": row[0],
+                    "name": row[1],
+                    "direction": row[2],
+                    "supervisor_name": row[3],
+                    "direction_id": row[4],
+                    "supervisor_id": row[5]
+                })
+        return jsonify({"status": "success", "users": users}), 200
+    except Exception as e:
+        logging.error(f"Error fetching users: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/admin/update_user', methods=['POST'])
+@require_api_key
+def admin_update_user():
+    try:
+        data = request.get_json()
+        required_fields = ['user_id', 'field', 'value']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        user_id = int(data['user_id'])
+        field = data['field']
+        value = data['value']
+        if field in ['direction_id', 'supervisor_id']:
+            value = int(value) if value else None
+
+        requester_id = int(request.headers.get('X-User-Id'))
+        requester = db.get_user(id=requester_id)
+        if not requester or requester[3] != 'admin':
+            return jsonify({"error": "Only admins can update users"}), 403
+
+        success = db.update_user(user_id, field, value)
+        if not success:
+            return jsonify({"error": "Failed to update user"}), 500
+
+        return jsonify({"status": "success", "message": "User updated"}), 200
+    except Exception as e:
+        logging.error(f"Error updating user: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/user/change_password', methods=['POST'])
 @require_api_key
 def change_password():
