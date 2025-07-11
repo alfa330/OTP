@@ -348,7 +348,7 @@ def change_login():
             return jsonify({"error": "Unauthorized to change this user's login"}), 403
 
         # Update login
-        success = db.update_operator_login(user_id, requester_id if requester[3] == 'sv' else None, new_login)
+        success = db.update_operator_login(user_id, target_user[6] if requester[3] == 'sv' or requester[3] == 'admin' else None, new_login)
         if not success:
             return jsonify({"error": "Failed to update login"}), 500
 
