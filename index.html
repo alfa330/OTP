@@ -681,19 +681,21 @@
                                     ))}
                                 </select>
                             </div>
-                            <div>
-                                <label className="block mb-2 font-medium">Supervisor</label>
-                                <select
-                                    value={editedUser.supervisor_id || ''}
-                                    onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
-                                    className="w-full p-2 border rounded-lg"
-                                >
-                                    <option value="">Select Supervisor</option>
-                                    {svList.map(sv => (
-                                        <option key={sv.id} value={sv.id}>{sv.name}</option>
-                                    ))}
-                                </select>
-                            </div>
+                            {user.role === 'admin' && (  <!-- Hide supervisor change for SV -->
+                                <div>
+                                    <label className="block mb-2 font-medium">Supervisor</label>
+                                    <select
+                                        value={editedUser.supervisor_id || ''}
+                                        onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
+                                        className="w-full p-2 border rounded-lg"
+                                    >
+                                        <option value="">Select Supervisor</option>
+                                        {svList.map(sv => (
+                                            <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
                             <div>
                                 <label className="block mb-2 font-medium">New Login</label>
                                 <input
@@ -735,7 +737,6 @@
             const [hoursData, setHoursData] = useState(null);
             const [view, setView] = useState('hours');
             const [newSvName, setNewSvName] = useState('');
-            const [newSvId, setNewSvId] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
             const [isLoading, setIsLoading] = useState(false);
             const [isAdminDataLoading, setIsAdminDataLoading] = useState(false);
@@ -782,6 +783,7 @@
             const [users, setUsers] = useState([]);
             const [showUserEditModal, setShowUserEditModal] = useState(false);
             const [userToEdit, setUserToEdit] = useState(null);
+            const [svOperators, setSvOperators] = useState([]);
 
             const getMonthOptions = () => {
                 const options = [];
@@ -1601,39 +1603,42 @@
             };
 
             const addSv = async () => {
-                if (!newSvName.trim() || !newSvId.trim()) {
-                    setError('Please fill in both name and ID');
-                    return;
-                }
-                if (isNaN(newSvId) || newSvId <= 0) {
-                    setError('ID must be a positive number');
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.post(`${API_BASE_URL}/api/admin/add_sv`, {
-                        name: newSvName.trim(),
-                        telegram_id: newSvId.trim()
-                    }, {
-                        headers: { 'X-API-Key': user.apiKey }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Supervisor added successfully');
-                        setNewSvName('');
-                        setNewSvId('');
-                        fetchSvList();
-                    } else {
-                        setError(data.error || 'Failed to add supervisor');
+                    if (!newSvName.trim()) {
+                        setError('Please enter supervisor name');
+                        return;
                     }
-                } catch (err) {
-                    console.error('Add SV error:', err);
-                    setError(err.response?.data?.error || 'Failed to add supervisor');
-                } finally {
-                    if (isMounted.current) setIsLoading(false);
-                }
-            };
+                    setIsLoading(true);
+                    clearMessages();
+                    try {
+                        const response = await axios.post(
+                            `${API_BASE_URL}/api/admin/add_sv`,
+                            {
+                                name: newSvName.trim()
+                            },
+                            {
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-API-Key': user.apiKey,
+                                    'X-User-Id': user.id
+                                }
+                            }
+                        );
+                        const data = response.data;
+                        if (data.status === 'success' && isMounted.current) {
+                            setSuccess(data.message);
+                            alert(`Supervisor added successfully!\nLogin: ${data.login}\nPassword: ${data.password}`);  // Show credentials to admin
+                            fetchSvList();
+                            setNewSvName('');
+                        } else {
+                            setError(data.error || 'Failed to add supervisor');
+                        }
+                    } catch (err) {
+                        console.error('Add SV error:', err);
+                        setError(err.response?.data?.error || 'Failed to add supervisor');
+                    } finally {
+                        if (isMounted.current) setIsLoading(false);
+                    }
+                };
 
             const removeSv = async (svId) => {
                 if (!confirm('Are you sure you want to remove this supervisor?')) return;
@@ -1956,7 +1961,7 @@
                                 <>
                                     <li><button onClick={() => setView('update_table')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'update_table' ? 'bg-blue-900' : ''}`}>Update Table</button></li>
                                     <li><button onClick={() => setView('operators')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'operators' ? 'bg-blue-900' : ''}`}>Your Operators</button></li>
-                                    <li><button onClick={() => setShowChangePasswordForm(true)} className="w-full text-left py-2 px-4 rounded hover:bg-blue-700">Change Password</button></li>
+                                    <li><button onClick={() => setView('manage_operators')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'manage_operators' ? 'bg-blue-900' : ''}`}>Manage my operators</button></li>
                                 </>
                             )}
                             {user.role === 'operator' && (
@@ -1990,14 +1995,7 @@
                                             className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                             disabled={isLoading}
                                         />
-                                        <input
-                                            type="text"
-                                            placeholder="Enter Supervisor ID"
-                                            value={newSvId}
-                                            onChange={(e) => setNewSvId(e.target.value)}
-                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                            disabled={isLoading}
-                                        />
+                                        {/* Removed Telegram ID input */}
                                         <button
                                             onClick={addSv}
                                             className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
@@ -2276,6 +2274,49 @@
                                         >
                                             {isLoading ? 'Updating...' : 'Update Table'}
                                         </button>
+                                    </div>
+                                )}
+                                {view === 'manage_operators' && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg">
+                                        <h2 className="text-xl font-semibold mb-4">Manage Your Operators</h2>
+                                        {isLoading ? (
+                                            <p className="text-center">Loading...</p>
+                                        ) : svData?.operators?.length > 0 ? ( 
+                                            <div className="overflow-x-auto">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-gray-200">
+                                                            <th className="p-3 border-b text-left">Name</th>
+                                                            <th className="p-3 border-b text-left">ID</th>
+                                                            <th className="p-3 border-b text-left">Direction</th>
+                                                            <th className="p-3 border-b text-left">Actions</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {svData.operators.map(op => (
+                                                            <tr key={op.id} className="hover:bg-gray-50">
+                                                                <td className="p-3 border-b">{op.name}</td>
+                                                                <td className="p-3 border-b">{op.id}</td>
+                                                                <td className="p-3 border-b">{op.direction_id ? directions.find(d => d.id === op.direction_id)?.name || '-' : '-'}</td>
+                                                                <td className="p-3 border-b">
+                                                                    <button
+                                                                        onClick={() => {
+                                                                            setUserToEdit({ ...op, supervisor_id: user.id });  // Fix supervisor to themselves
+                                                                            setShowUserEditModal(true);
+                                                                        }}
+                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                    >
+                                                                        Edit
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        ) : (
+                                            <p className="text-center">No operators found.</p>
+                                        )}
                                     </div>
                                 )}
                                 {view === 'operators' && (
