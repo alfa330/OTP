@@ -1779,6 +1779,8 @@
                         fetchUsers();
                     } else if (user.role === 'sv') {
                         fetchSvData();
+                        fetchUsers();
+                        fetchDirections();
                     } else if (user.role === 'operator') {
                         fetchProfileData();
                         fetchHoursData();
