@@ -200,7 +200,7 @@ def get_admin_users():
 
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id
+                SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role
                 FROM users u
                 LEFT JOIN directions d ON u.direction_id = d.id
                 LEFT JOIN users s ON u.supervisor_id = s.id
@@ -214,7 +214,8 @@ def get_admin_users():
                     "direction": row[2],
                     "supervisor_name": row[3],
                     "direction_id": row[4],
-                    "supervisor_id": row[5]
+                    "supervisor_id": row[5],
+                    "role": row[6]
                 })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
