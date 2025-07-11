@@ -1068,6 +1068,15 @@ class Database:
                     "evaluator": row[15] if row[15] else None
                 } for row in cursor.fetchall()
             ]
+        
+    def update_user(self, user_id, field, value):
+        allowed_fields = ['direction_id', 'supervisor_id']
+        if field not in allowed_fields:
+            raise ValueError("Invalid field to update")
+        
+        with self._get_cursor() as cursor:
+            cursor.execute(f"UPDATE users SET {field} = %s WHERE id = %s RETURNING id", (value, user_id))
+            return cursor.fetchone() is not None
 
     def get_all_operators(self):
         with self._get_cursor() as cursor:
