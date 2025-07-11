@@ -2199,15 +2199,15 @@
                                         {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
                                         {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
 
-                                        {showMonitoringScaleModal && (
-                                                <MonitoringScaleModal
-                                                    isOpen={showMonitoringScaleModal}
-                                                    onClose={() => setShowMonitoringScaleModal(false)}
-                                                    onSave={saveDirections}
-                                                    initialDirections={directions}
-                                                />
-                                            )}
                                     </div>
+                                )}
+                                {showMonitoringScaleModal && (
+                                    <MonitoringScaleModal
+                                        isOpen={showMonitoringScaleModal}
+                                        onClose={() => setShowMonitoringScaleModal(false)}
+                                        onSave={saveDirections}
+                                        initialDirections={directions}
+                                    />
                                 )}
                                 {view === 'manage_users' && (
                                     <div className="bg-white p-6 rounded-lg shadow-lg">
@@ -2814,6 +2814,79 @@
                                 directions={directions}
                                 onSave={saveUserChanges}
                             />
+                        )}
+                        {showAccountMenu && (
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                                    <h2 className="text-xl font-semibold mb-4">Account Settings</h2>
+                                    <div className="space-y-4">
+                                        <button
+                                            onClick={() => {
+                                                setShowChangeLoginForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600"
+                                        >
+                                            Change Login
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setShowChangePasswordForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600"
+                                        >
+                                            Change Password
+                                        </button>
+                                        <button
+                                            onClick={() => setShowAccountMenu(false)}
+                                            className="w-full bg-gray-500 text-white py-2 rounded hover:bg-gray-600"
+                                        >
+                                            Close
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                        {showChangeLoginForm && (
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                                    <h2 className="text-xl font-semibold mb-4">Change Login</h2>
+                                    <input
+                                        type="text"
+                                        placeholder="New Login"
+                                        value={loginData.new_login}
+                                        onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
+                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        disabled={isLoading}
+                                    />
+                                    <input
+                                        type="text"
+                                        placeholder="Confirm New Login"
+                                        value={loginData.confirm_login}
+                                        onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
+                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        disabled={isLoading}
+                                    />
+                                    <div className="flex justify-between">
+                                        <button
+                                            onClick={handleChangeLogin}
+                                            className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                            disabled={isLoading}
+                                        >
+                                            {isLoading ? 'Updating...' : 'Update Login'}
+                                        </button>
+                                        <button
+                                            onClick={() => setShowChangeLoginForm(false)}
+                                            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                        >
+                                            Cancel
+                                        </button>
+                                    </div>
+                                    {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                                    {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                                </div>
+                            </div>
                         )}
                         {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
                         {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
