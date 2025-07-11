@@ -45,6 +45,7 @@
             font-weight: 800;
             background: linear-gradient(to right, #3b82f6, #1d4ed8);
             -webkit-background-clip: text;
+            background-clip: text;
             -webkit-text-fill-color: transparent;
         }
         .table th {
@@ -145,6 +146,51 @@
             border-color: #3b82f6;
             box-shadow: 0 0 0 3px rgba(59,130,246,0.2);
         }
+        .modal-backdrop {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0, 0, 0, 0.5);
+            z-index: 9998; /* High z-index for backdrop */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 1.5rem;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+            padding: 2.5rem;
+            border: 1px solid #dbeafe;
+            max-width: 90vw; /* Responsive width */
+            max-height: 90vh; /* Slightly reduced to prevent edge overflow */
+            overflow-y: auto;
+            z-index: 9999; /* Higher than backdrop and other elements */
+            position: relative; /* Ensures internal positioning is contained */
+        }
+
+        /* Prevent modal content from overflowing viewport */
+        .modal-content::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .modal-content::-webkit-scrollbar-thumb {
+            background-color: #bfdbfe;
+            border-radius: 4px;
+        }
+
+        /* Ensure no overlap with sidebar or header */
+        .sidebar, .header {
+            z-index: 1; /* Lower than modal */
+        }
+
+        .card {
+            z-index: 2; /* Lower than modal */
+        }        
+
     </style>
 </head>
 <body>
@@ -165,13 +211,13 @@
             const [editingCriterionIndex, setEditingCriterionIndex] = useState(null);
             const [isEditingCriterion, setIsEditingCriterion] = useState(false);
             const [activeTab, setActiveTab] = useState('directions');
-        
+
             const totalWeight = (directionIndex) => {
                 return directions[directionIndex]?.criteria
                     .filter(criterion => !criterion.isCritical)
                     .reduce((sum, c) => sum + Number(c.weight), 0) || 0;
             };
-        
+
             const handleAddDirection = () => {
                 if (!newDirectionName) {
                     alert('Please enter a direction name.');
@@ -184,7 +230,7 @@
                 setEditingDirectionIndex(null);
                 setSelectedDirectionIndex(directions.length);
             };
-        
+
             const handleEditDirection = () => {
                 if (!newDirectionName) {
                     alert('Please enter a direction name.');
@@ -200,7 +246,7 @@
                 setIsEditingDirection(false);
                 setEditingDirectionIndex(null);
             };
-        
+
             const handleStartEditDirection = (index) => {
                 setNewDirectionName(directions[index].name);
                 setNewDirectionFileUpload(directions[index].hasFileUpload);
@@ -208,7 +254,7 @@
                 setIsEditingDirection(true);
                 setSelectedDirectionIndex(index);
             };
-        
+
             const handleDeleteDirection = (index) => {
                 setDirections(directions.filter((_, i) => i !== index));
                 if (selectedDirectionIndex === index) {
@@ -221,7 +267,7 @@
                     setEditingDirectionIndex(null);
                 }
             };
-        
+
             const handleAddCriterion = () => {
                 if (!newCriterionName) {
                     alert('Please enter a criterion name.');
@@ -258,7 +304,7 @@
                 }));
                 resetCriterionForm();
             };
-        
+
             const handleEditCriterion = () => {
                 if (!newCriterionName) {
                     alert('Please enter a criterion name.');
@@ -276,7 +322,7 @@
                     }
                     const newTotalWeight = totalWeight(selectedDirectionIndex) - 
                         (directions[selectedDirectionIndex].criteria[editingCriterionIndex]?.isCritical ? 0 : 
-                         directions[selectedDirectionIndex].criteria[editingCriterionIndex]?.weight || 0) + weight;
+                        directions[selectedDirectionIndex].criteria[editingCriterionIndex]?.weight || 0) + weight;
                     if (newTotalWeight > 100) {
                         alert('Total weight of non-critical criteria cannot exceed 100.');
                         return;
@@ -300,7 +346,7 @@
                 }));
                 resetCriterionForm();
             };
-        
+
             const handleStartEditCriterion = (index) => {
                 const criterion = directions[selectedDirectionIndex].criteria[index];
                 setNewCriterionName(criterion.name);
@@ -310,7 +356,7 @@
                 setEditingCriterionIndex(index);
                 setIsEditingCriterion(true);
             };
-        
+
             const handleDeleteCriterion = (index) => {
                 setDirections(directions.map((direction, i) => {
                     if (i === selectedDirectionIndex) {
@@ -325,7 +371,7 @@
                     resetCriterionForm();
                 }
             };
-        
+
             const resetCriterionForm = () => {
                 setNewCriterionName('');
                 setNewCriterionWeight('');
@@ -334,7 +380,7 @@
                 setEditingCriterionIndex(null);
                 setIsEditingCriterion(false);
             };
-        
+
             const handleSave = () => {
                 const invalidDirection = directions.find((direction, index) => 
                     direction.criteria.some(c => !c.isCritical) && totalWeight(index) !== 100
@@ -346,12 +392,18 @@
                 onSave(directions);
                 onClose();
             };
-        
+
             if (!isOpen) return null;
-        
+
+            const handleBackdropClick = (e) => {
+                if (e.target === e.currentTarget) {
+                    onClose(); // Close only if clicking backdrop, not content
+                }
+            };
+
             return (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-5xl max-h-[95vh] overflow-y-auto border border-blue-100">
+                <div className="modal-backdrop" onClick={handleBackdropClick}>
+                    <div className="modal-content">
                         <h2 className="text-2xl font-bold mb-6 text-blue-800">Monitoring Scale</h2>
                         
                         <div className="flex mb-6 space-x-4">
@@ -368,7 +420,7 @@
                                 Criteria
                             </button>
                         </div>
-        
+
                         {activeTab === 'directions' && (
                             <div>
                                 <div className="mb-6">
@@ -417,7 +469,7 @@
                                         </div>
                                     </div>
                                 </div>
-        
+
                                 <div className="mb-6">
                                     <h3 className="text-xl font-semibold mb-3 text-blue-700">Directions</h3>
                                     {directions.length === 0 ? (
@@ -475,7 +527,7 @@
                                 </div>
                             </div>
                         )}
-        
+
                         {activeTab === 'criteria' && (
                             <div>
                                 <div className="mb-6">
@@ -495,7 +547,7 @@
                                         )}
                                     </select>
                                 </div>
-        
+
                                 <div className="mb-6">
                                     <label className="block mb-3 font-semibold text-blue-700">
                                         {isEditingCriterion ? `Editing Criterion: ${directions[selectedDirectionIndex]?.criteria[editingCriterionIndex]?.name}` : 'New Criterion'}
@@ -525,7 +577,7 @@
                                             onChange={(e) => setNewCriterionValue(e.target.value)}
                                             placeholder="Criterion description (optional)"
                                             className="w-full p-3 border-2 border-blue-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                            rows={4}
+                                            rows={3}
                                             disabled={directions.length === 0}
                                         />
                                         <div className="flex items-center">
@@ -562,8 +614,8 @@
                                         </div>
                                     </div>
                                 </div>
-        
-                                <div className="mb-6 max-h-96 overflow-y-auto scrollbar-thin scrollbar-thumb-blue-300 scrollbar-track-blue-100">
+
+                                <div className="mb-6 max-h-64 overflow-y-auto scrollbar-thin scrollbar-thumb-blue-300 scrollbar-track-blue-100">  {/* Adjusted max-h */}
                                     <h3 className="text-xl font-semibold mb-3 text-blue-700">Criteria</h3>
                                     {directions.length === 0 || directions[selectedDirectionIndex].criteria.length === 0 ? (
                                         <p className="text-gray-500 italic">No criteria added for this direction.</p>
@@ -625,7 +677,7 @@
                                 </div>
                             </div>
                         )}
-        
+
                         <div className="flex justify-between mt-6">
                             <button
                                 onClick={handleSave}
