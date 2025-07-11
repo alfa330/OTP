@@ -596,36 +596,34 @@ def dispute_call_evaluation():
 def add_sv():
     try:
         data = request.get_json()
-        required_fields = ['name', 'telegram_id']
+        required_fields = ['name']  # Removed 'telegram_id' from required fields
         if not data or not all(field in data for field in required_fields):
-            return jsonify({"error": "Missing required fields"}), 400
+            return jsonify({"error": "Missing required field: name"}), 400
 
         name = data['name']
-        telegram_id = int(data['telegram_id'])
         
-        # Проверяем существование пользователя
-        if db.get_user(telegram_id=telegram_id):
-            return jsonify({"error": "SV with this Telegram ID already exists"}), 400
+        # Generate random login and password
+        random_suffix = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
+        login = f"sv_{random_suffix}"
+        password = secrets.token_urlsafe(12)  # Secure random password
+        hashed_password = db.hash_password(password)  # Assuming db has hash_password function
         
-        # Создаем супервайзера
+        # Create supervisor with login and hashed_password, telegram_id set to None
         sv_id = db.create_user(
-            telegram_id=telegram_id,
+            telegram_id=None,  # Explicitly set to None
             name=name,
-            role='sv'
+            role='sv',
+            login=login,
+            password=hashed_password
         )
         
-        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": telegram_id,
-            "text": f"Принятие в команду прошло успешно <b>успешно✅</b>",
-            "parse_mode": "HTML"
-        }
-        response = requests.post(telegram_url, json=payload, timeout=10)
-        if response.status_code != 200:
-            error_detail = response.json().get('description', 'Unknown error')
-            logging.error(f"Telegram API error: {error_detail}")
-        
-        return jsonify({"status": "success", "message": f"SV {name} added", "id": sv_id})
+        return jsonify({
+            "status": "success",
+            "message": f"SV {name} added",
+            "id": sv_id,
+            "login": login,  # Return plain login
+            "password": password  # Return plain password for admin to share
+        })
     except Exception as e:
         logging.error(f"Error adding SV: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
