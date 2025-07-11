@@ -671,13 +671,13 @@
                             <div>
                                 <label className="block mb-2 font-medium">Direction</label>
                                 <select
-                                    value={editedUser.direction || ''}
-                                    onChange={(e) => setEditedUser({ ...editedUser, direction: e.target.value })}
+                                    value={editedUser.direction_id || ''}
+                                    onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value })}
                                     className="w-full p-2 border rounded-lg"
                                 >
                                     <option value="">Select Direction</option>
-                                    {directions.map((dir, idx) => (
-                                        <option key={idx} value={dir.name}>{dir.name}</option>
+                                    {directions.map((dir) => (
+                                        <option key={dir.id} value={dir.id}>{dir.name}</option>
                                     ))}
                                 </select>
                             </div>
@@ -887,8 +887,8 @@
                     if (editedUser.direction) {
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
                             user_id: editedUser.id,
-                            field: 'direction',
-                            value: editedUser.direction
+                            field: 'direction_id',
+                            value: editedUser.direction_id
                         }, {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
