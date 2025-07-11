@@ -604,9 +604,8 @@ def add_sv():
         
         # Generate random login and password
         random_suffix = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
-        login = f"sv_{random_suffix}"
-        password = secrets.token_urlsafe(12)  # Secure random password
-        hashed_password = db.hash_password(password)  # Assuming db has hash_password function
+        login = f"sv_{str(uuid.uuid4())[:8]}"
+        password = str(uuid.uuid4())[:8]  
         
         # Create supervisor with login and hashed_password, telegram_id set to None
         sv_id = db.create_user(
@@ -614,7 +613,7 @@ def add_sv():
             name=name,
             role='sv',
             login=login,
-            password=hashed_password
+            password=password
         )
         
         return jsonify({
