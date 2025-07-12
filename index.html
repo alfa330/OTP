@@ -654,7 +654,7 @@
           );
         };
 
-        const UserEditModal = ({ isOpen, onClose, userToEdit, svList, directions, onSave }) => {
+        const UserEditModal = ({ isOpen, onClose, userToEdit, svList, directions, onSave, user }) => {
             const [editedUser, setEditedUser] = useState(userToEdit || {});
 
             useEffect(() => {
