@@ -723,6 +723,29 @@
                 </div>
             );
         };
+
+        const AddSvForm = ({ isLoading, newSvName, setNewSvName, addSv }) => {
+            return (
+                <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                    <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
+                    <input
+                        type="text"
+                        placeholder="Supervisor Name"
+                        value={newSvName}
+                        onChange={(e) => setNewSvName(e.target.value)}
+                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        disabled={isLoading}
+                    />
+                    <button
+                        onClick={addSv}
+                        className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                        disabled={isLoading}
+                    >
+                        {isLoading ? 'Adding...' : 'Add Supervisor'}
+                    </button>
+                </div>
+            );
+        };
         
         const App = () => {
             const [user, setUser] = useState(null);
@@ -1987,26 +2010,13 @@
                         {user.role === 'admin' && (
                             <>
                                 {view === 'add_sv' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                        <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
-                                        <input
-                                            type="text"
-                                            placeholder="Supervisor Name"
-                                            value={newSvName}
-                                            onChange={(e) => setNewSvName(e.target.value)}
-                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                            disabled={isLoading}
-                                        />
-                                        {/* Removed Telegram ID input */}
-                                        <button
-                                            onClick={addSv}
-                                            className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                            disabled={isLoading}
-                                        >
-                                            {isLoading ? 'Adding...' : 'Add Supervisor'}
-                                        </button>
-                                    </div>
-                                )}
+                                            <AddSvForm
+                                                isLoading={isLoading}
+                                                newSvName={newSvName}
+                                                setNewSvName={setNewSvName}
+                                                addSv={addSv}
+                                            />
+                                        )}
                                 {view === 'sv_list' && (
                                     <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                                         <div className="flex justify-between items-center mb-4">
@@ -2855,6 +2865,7 @@
                                 userToEdit={userToEdit}
                                 svList={svList}
                                 directions={directions}
+                                user={user}
                                 onSave={saveUserChanges}
                             />
                         )}
