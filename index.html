@@ -10,6 +10,8 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
+    <!-- Added Font Awesome for icons in sidebar -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body class="bg-gray-200 font-sans antialiased">
     <div id="root"></div>
@@ -1496,7 +1498,7 @@
                 clearMessages();
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
-                        headers: {
+                        headers: { 
                             'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
                         }
@@ -1505,32 +1507,38 @@
                     if (data.status === 'success' && isMounted.current) {
                         setSvList(data.sv_list);
                     } else {
-                        setError(data.error || 'Failed to fetch supervisors');
+                        setError(data.error || 'Failed to fetch SV list');
                     }
                 } catch (err) {
                     console.error('Fetch SV list error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch supervisors');
+                    setError(err.response?.data?.error || 'Failed to fetch SV list');
                 } finally {
                     if (isMounted.current) setIsAdminDataLoading(false);
                 }
             };
-
+            
             const addSv = async () => {
                 if (!newSvName.trim()) {
-                    setError('Please enter a supervisor name');
+                    setError('Please enter supervisor name');
                     return;
                 }
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.post(`${API_BASE_URL}/api/admin/add_sv`, {
-                        name: newSvName.trim()
-                    }, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
-                    });
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/admin/add_sv`,
+                        { name: newSvName.trim() },
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        }
+                    );
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Supervisor added successfully');
+                        setSuccess(data.message || 'Supervisor added successfully');
                         setNewSvName('');
                         fetchSvList();
                     } else {
@@ -1543,20 +1551,27 @@
                     if (isMounted.current) setIsLoading(false);
                 }
             };
-
+            
             const removeSv = async (svId) => {
+                if (!svId) return;
                 if (!window.confirm('Are you sure you want to remove this supervisor?')) return;
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.post(`${API_BASE_URL}/api/admin/remove_sv`, {
-                        sv_id: svId
-                    }, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
-                    });
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/admin/remove_sv`,
+                        { sv_id: svId },
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        }
+                    );
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Supervisor removed successfully');
+                        setSuccess(data.message || 'Supervisor removed successfully');
                         fetchSvList();
                     } else {
                         setError(data.error || 'Failed to remove supervisor');
@@ -1568,24 +1583,36 @@
                     if (isMounted.current) setIsLoading(false);
                 }
             };
-
-            const changeSvTable = async (svId, url) => {
-                if (!validateUrl(url)) {
+            
+            const changeSvTable = async (svId, tableUrl) => {
+                if (!svId || !tableUrl) {
+                    setError('Invalid parameters');
+                    return;
+                }
+                if (!validateUrl(tableUrl)) {
                     setError('Invalid Google Sheets URL');
                     return;
                 }
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.post(`${API_BASE_URL}/api/admin/change_sv_table`, {
-                        sv_id: svId,
-                        table_url: url
-                    }, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
-                    });
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/admin/change_sv_table`,
+                        {
+                            sv_id: svId,
+                            table_url: tableUrl
+                        },
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        }
+                    );
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Table updated successfully');
+                        setSuccess(data.message || 'Table updated successfully');
                         setNewTableUrl('');
                         setShowChangeTableForm(false);
                         setCurrentSvForTableChange(null);
@@ -1600,13 +1627,16 @@
                     if (isMounted.current) setIsLoading(false);
                 }
             };
-
+            
             const fetchSvData = async () => {
                 setIsLoading(true);
                 clearMessages();
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/sv/data`, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        headers: { 
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
@@ -1621,8 +1651,12 @@
                     if (isMounted.current) setIsLoading(false);
                 }
             };
-
+            
             const updateTable = async () => {
+                if (!newTableUrl.trim()) {
+                    setError('Please enter Google Sheets URL');
+                    return;
+                }
                 if (!validateUrl(newTableUrl)) {
                     setError('Invalid Google Sheets URL');
                     return;
@@ -1630,14 +1664,20 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.post(`${API_BASE_URL}/api/sv/update_table`, {
-                        table_url: newTableUrl
-                    }, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
-                    });
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/sv/update_table`,
+                        { table_url: newTableUrl.trim() },
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        }
+                    );
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Table updated successfully');
+                        setSuccess(data.message || 'Table updated successfully');
                         setNewTableUrl('');
                         fetchSvData();
                     } else {
@@ -1650,13 +1690,16 @@
                     if (isMounted.current) setIsLoading(false);
                 }
             };
-
-            const fetchOperatorData = async (month) => {
+            
+            const fetchOperatorData = async () => {
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/operator/evaluations?month=${month}`, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                    const response = await axios.get(`${API_BASE_URL}/api/operator/evaluations?month=${selectedMonth}`, {
+                        headers: { 
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
@@ -1671,17 +1714,20 @@
                     if (isMounted.current) setIsLoading(false);
                 }
             };
-
+            
             const fetchProfileData = async () => {
                 setIsLoading(true);
                 clearMessages();
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/operator/profile`, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        headers: { 
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setProfileData(data.profile);
+                        setProfileData(data);
                     } else {
                         setError(data.error || 'Failed to fetch profile data');
                     }
@@ -1692,17 +1738,20 @@
                     if (isMounted.current) setIsLoading(false);
                 }
             };
-
-            const fetchHoursData = async (month) => {
+            
+            const fetchHoursData = async () => {
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/operator/hours?month=${month}`, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                    const response = await axios.get(`${API_BASE_URL}/api/operator/hours?month=${selectedMonth}`, {
+                        headers: { 
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setHoursData(data.hours);
+                        setHoursData(data);
                     } else {
                         setError(data.error || 'Failed to fetch hours data');
                     }
@@ -1713,42 +1762,54 @@
                     if (isMounted.current) setIsLoading(false);
                 }
             };
-
+            
             const fetchSelectedSvData = async (svId) => {
                 if (!svId) return;
                 setIsAdminDataLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/admin/sv_data?sv_id=${svId}`, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                    const response = await axios.get(`${API_BASE_URL}/api/admin/sv_operators?sv_id=${svId}`, {
+                        headers: { 
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
                         setSelectedSvData(data);
                     } else {
-                        setError(data.error || 'Failed to fetch SV data');
+                        setError(data.error || 'Failed to fetch SV operators');
                     }
                 } catch (err) {
-                    console.error('Fetch selected SV data error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch SV data');
+                    console.error('Fetch SV operators error:', err);
+                    setError(err.response?.data?.error || 'Failed to fetch SV operators');
                 } finally {
                     if (isMounted.current) setIsAdminDataLoading(false);
                 }
             };
-
+            
             const notifySupervisor = async (svId, operatorName) => {
+                if (!svId || !operatorName) return;
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.post(`${API_BASE_URL}/api/admin/notify_sv`, {
-                        sv_id: svId,
-                        operator_name: operatorName
-                    }, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
-                    });
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/admin/notify_sv`,
+                        {
+                            sv_id: svId,
+                            operator_name: operatorName
+                        },
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        }
+                    );
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Notification sent successfully');
+                        setSuccess(data.message || 'Notification sent successfully');
                     } else {
                         setError(data.error || 'Failed to send notification');
                     }
@@ -1759,17 +1820,25 @@
                     if (isMounted.current) setIsLoading(false);
                 }
             };
-
+            
             const generateWeeklyReport = async () => {
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.post(`${API_BASE_URL}/api/admin/generate_weekly_report`, {}, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
-                    });
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/admin/generate_weekly_report`,
+                        {},
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        }
+                    );
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Weekly report generated and sent successfully');
+                        setSuccess(data.message || 'Report generated successfully');
                     } else {
                         setError(data.error || 'Failed to generate report');
                     }
@@ -1781,183 +1850,247 @@
                 }
             };
 
-            const averageScore = operatorData?.evaluations.reduce((sum, eval1) => sum + eval1.score, 0) / operatorData?.evaluations.length || 0;
+            const averageScore = operatorData ? 
+                operatorData.evaluations.reduce((sum, eval1) => sum + eval1.score, 0) / operatorData.evaluations.length || 0 
+                : 0;
 
             useEffect(() => {
                 if (user) {
                     if (user.role === 'admin') {
-                        debouncedFetch(fetchSvList);
-                        debouncedFetch(fetchDirections);
-                        debouncedFetch(fetchUsers);
+                        fetchSvList();
+                        fetchDirections();
+                        fetchUsers();
                     } else if (user.role === 'sv') {
-                        debouncedFetch(fetchSvData);
-                        debouncedFetch(fetchDirections);
+                        fetchSvData();
+                        fetchDirections(); // For SV to see directions in manage operators
                     } else if (user.role === 'operator') {
-                        debouncedFetch(fetchProfileData);
-                        debouncedFetch(() => fetchHoursData(selectedMonth));
-                        debouncedFetch(() => fetchOperatorData(selectedMonth));
+                        fetchOperatorData();
+                        fetchProfileData();
+                        fetchHoursData();
                     }
                 }
             }, [user]);
 
             useEffect(() => {
-                if (user && user.role === 'operator' && selectedMonth) {
-                    debouncedFetch(() => fetchHoursData(selectedMonth));
-                    debouncedFetch(() => fetchOperatorData(selectedMonth));
+                if (user?.role === 'operator') {
+                    if (view === 'evaluation') {
+                        fetchOperatorData();
+                    } else if (view === 'hours') {
+                        fetchHoursData();
+                    }
                 }
-            }, [selectedMonth, user]);
+            }, [selectedMonth, view, user]);
 
             useEffect(() => {
-                if (user && user.role === 'admin' && selectedSvId) {
-                    debouncedFetch(() => fetchSelectedSvData(selectedSvId));
+                if (selectedSvId && user?.role === 'admin') {
+                    fetchSelectedSvData(selectedSvId);
                 }
             }, [selectedSvId, user]);
 
+            if (!user) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-gray-100">
+                        <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
+                            <h1 className="text-2xl font-bold mb-6 text-center">OTP Bot Dashboard</h1>
+                            <input
+                                type="text"
+                                placeholder="Login"
+                                value={login}
+                                onChange={(e) => setLogin(e.target.value)}
+                                onKeyPress={handleKeyPress}
+                                className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <input
+                                type="password"
+                                placeholder="Password"
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                onKeyPress={handleKeyPress}
+                                className="w-full p-3 mb-6 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <button
+                                onClick={handleLogin}
+                                className={`w-full bg-blue-500 text-white p-3 rounded-lg hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                disabled={isLoading}
+                            >
+                                {isLoading ? 'Logging in...' : 'Login'}
+                            </button>
+                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                        </div>
+                    </div>
+                );
+            }
+
+            if (showLogoutConfirm) {
+                return (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                            <h2 className="text-xl font-semibold mb-4">Confirm Logout</h2>
+                            <p className="mb-4">Are you sure you want to log out?</p>
+                            <div className="flex justify-between">
+                                <button onClick={confirmLogout} className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">Yes</button>
+                                <button onClick={() => setShowLogoutConfirm(false)} className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600">No</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
             const Sidebar = () => {
                 return (
-                    <div className="fixed left-0 top-0 h-full w-64 bg-gray-900 text-white shadow-xl p-6 flex flex-col overflow-y-auto">
-                        <h1 className="text-2xl font-bold mb-8 text-white flex items-center">
-                            <svg className="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
-                            </svg>
-                            OTP Bot
-                        </h1>
-                        {user ? (
-                            <>
-                                <div className="flex-grow space-y-2">
-                                    {user.role === 'admin' && (
-                                        <>
-                                            <button onClick={() => setView('add_sv')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'add_sv' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
-                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
-                                                Add Supervisor
+                    <div className="fixed top-0 left-0 h-full w-64 bg-gradient-to-b from-blue-800 to-blue-600 text-white shadow-2xl z-40 transform transition-all duration-300 ease-in-out">
+                        <div className="p-6 border-b border-blue-700">
+                            <h1 className="text-2xl font-bold flex items-center gap-2">
+                                <i className="fas fa-robot"></i> OTP Bot Dashboard
+                            </h1>
+                            <p className="text-sm mt-2 opacity-80">Welcome, {user.name}</p>
+                        </div>
+                        <nav className="mt-6">
+                            <ul className="space-y-1">
+                                {user.role === 'admin' && (
+                                    <>
+                                        <li>
+                                            <button 
+                                                onClick={() => setView('add_sv')}
+                                                className={`w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200 ${view === 'add_sv' ? 'bg-blue-900' : ''}`}
+                                            >
+                                                <i className="fas fa-user-plus"></i> Add Supervisor
                                             </button>
-                                            <button onClick={() => setView('sv_list')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'sv_list' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
-                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
-                                                Supervisor List
+                                        </li>
+                                        <li>
+                                            <button 
+                                                onClick={() => setView('sv_list')}
+                                                className={`w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200 ${view === 'sv_list' ? 'bg-blue-900' : ''}`}
+                                            >
+                                                <i className="fas fa-users"></i> Supervisor List
                                             </button>
-                                            <button onClick={() => setView('view_scores')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'view_scores' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
-                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
-                                                View Scores
+                                        </li>
+                                        <li>
+                                            <button 
+                                                onClick={() => setView('view_scores')}
+                                                className={`w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200 ${view === 'view_scores' ? 'bg-blue-900' : ''}`}
+                                            >
+                                                <i className="fas fa-chart-bar"></i> View Scores
                                             </button>
-                                            <button onClick={() => setView('manage_users')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'manage_users' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
-                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
-                                                Manage Users
+                                        </li>
+                                        <li>
+                                            <button 
+                                                onClick={() => setShowMonitoringScaleModal(true)}
+                                                className="w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200"
+                                            >
+                                                <i className="fas fa-balance-scale"></i> Monitoring Scale
                                             </button>
-                                            <button onClick={() => setShowMonitoringScaleModal(true)} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 hover:bg-gray-700`}>
-                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3"></path></svg>
-                                                Monitoring Scale
+                                        </li>
+                                        <li>
+                                            <button 
+                                                onClick={() => setView('manage_users')}
+                                                className={`w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200 ${view === 'manage_users' ? 'bg-blue-900' : ''}`}
+                                            >
+                                                <i className="fas fa-user-edit"></i> Manage Users
                                             </button>
-                                        </>
-                                    )}
-                                    {user.role === 'sv' && (
-                                        <>
-                                            <button onClick={() => setView('update_table')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'update_table' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
-                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
-                                                Update Table
+                                        </li>
+                                    </>
+                                )}
+                                {user.role === 'sv' && (
+                                    <>
+                                        <li>
+                                            <button 
+                                                onClick={() => setView('update_table')}
+                                                className={`w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200 ${view === 'update_table' ? 'bg-blue-900' : ''}`}
+                                            >
+                                                <i className="fas fa-table"></i> Update Table
                                             </button>
-                                            <button onClick={() => setView('operators')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'operators' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
-                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
-                                                Operators
+                                        </li>
+                                        <li>
+                                            <button 
+                                                onClick={() => setView('manage_operators')}
+                                                className={`w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200 ${view === 'manage_operators' ? 'bg-blue-900' : ''}`}
+                                            >
+                                                <i className="fas fa-user-cog"></i> Manage Operators
                                             </button>
-                                            <button onClick={() => setView('manage_operators')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'manage_operators' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
-                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
-                                                Manage Operators
+                                        </li>
+                                        <li>
+                                            <button 
+                                                onClick={() => setView('operators')}
+                                                className={`w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200 ${view === 'operators' ? 'bg-blue-900' : ''}`}
+                                            >
+                                                <i className="fas fa-users-cog"></i> Your Operators
                                             </button>
-                                        </>
-                                    )}
-                                    {user.role === 'operator' && (
-                                        <>
-                                            <button onClick={() => setView('profile')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'profile' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
-                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0zm6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                                                Profile
+                                        </li>
+                                    </>
+                                )}
+                                {user.role === 'operator' && (
+                                    <>
+                                        <li>
+                                            <button 
+                                                onClick={() => setView('profile')}
+                                                className={`w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200 ${view === 'profile' ? 'bg-blue-900' : ''}`}
+                                            >
+                                                <i className="fas fa-user"></i> Profile
                                             </button>
-                                            <button onClick={() => setView('hours')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'hours' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
-                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                                                Hours
+                                        </li>
+                                        <li>
+                                            <button 
+                                                onClick={() => setView('hours')}
+                                                className={`w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200 ${view === 'hours' ? 'bg-blue-900' : ''}`}
+                                            >
+                                                <i className="fas fa-clock"></i> Hours
                                             </button>
-                                            <button onClick={() => setView('evaluation')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'evaluation' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
-                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
-                                                Evaluation
+                                        </li>
+                                        <li>
+                                            <button 
+                                                onClick={() => setView('evaluation')}
+                                                className={`w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200 ${view === 'evaluation' ? 'bg-blue-900' : ''}`}
+                                            >
+                                                <i className="fas fa-phone-alt"></i> Evaluation
                                             </button>
-                                            <button onClick={() => setView('salary')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'salary' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
-                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
-                                                Salary Calculator
+                                        </li>
+                                        <li>
+                                            <button 
+                                                onClick={() => setView('salary')}
+                                                className={`w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200 ${view === 'salary' ? 'bg-blue-900' : ''}`}
+                                            >
+                                                <i className="fas fa-calculator"></i> Salary Calculator
                                             </button>
-                                        </>
-                                    )}
-                                </div>
-                                <div className="mt-auto space-y-2 pt-4 border-t border-gray-700">
-                                    <button onClick={handleLogout} className="w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 bg-red-600 hover:bg-red-700">
-                                        <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
-                                        Logout
-                                    </button>
-                                    <button onClick={() => setShowAccountMenu(true)} className="w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 hover:bg-gray-700">
-                                        <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-                                        Account Settings
-                                    </button>
-                                </div>
-                            </>
-                        ) : (
-                            <div className="space-y-4">
-                                <input
-                                    type="text"
-                                    placeholder="Login"
-                                    value={login}
-                                    onChange={(e) => setLogin(e.target.value)}
-                                    onKeyPress={handleKeyPress}
-                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-800 text-white placeholder-gray-400"
-                                    disabled={isLoading}
-                                    key="login-input" // Добавлен key для стабильности
-                                />
-                                <input
-                                    type="password"
-                                    placeholder="Password"
-                                    value={password}
-                                    onChange={(e) => setPassword(e.target.value)}
-                                    onKeyPress={handleKeyPress}
-                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-800 text-white placeholder-gray-400"
-                                    disabled={isLoading}
-                                    key="password-input" // Добавлен key для стабильности
-                                />
-                                <button
-                                    onClick={handleLogin}
-                                    className={`w-full bg-blue-500 text-white py-3 rounded-lg hover:bg-blue-600 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                    disabled={isLoading}
-                                >
-                                    {isLoading ? 'Logging in...' : 'Login'}
-                                </button>
-                                {error && <p className="text-red-500 text-center">{error}</p>}
-                                {success && <p className="text-green-500 text-center">{success}</p>}
-                            </div>
-                        )}
-                        {showLogoutConfirm && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                                    <p className="mb-4 text-center">Are you sure you want to logout?</p>
-                                    <div className="flex justify-between">
-                                        <button onClick={confirmLogout} className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">Yes</button>
-                                        <button onClick={() => setShowLogoutConfirm(false)} className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600">No</button>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
+                                        </li>
+                                    </>
+                                )}
+                            </ul>
+                        </nav>
+                        <div className="absolute bottom-0 w-full p-6 border-t border-blue-700">
+                            <button 
+                                onClick={() => setShowAccountMenu(true)}
+                                className="w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200 mb-2"
+                            >
+                                <i className="fas fa-cog"></i> Account Settings
+                            </button>
+                            <button 
+                                onClick={handleLogout}
+                                className="w-full flex items-center gap-3 px-6 py-3 text-left hover:bg-blue-700 transition-colors duration-200"
+                            >
+                                <i className="fas fa-sign-out-alt"></i> Logout
+                            </button>
+                        </div>
                     </div>
                 );
             };
 
-            const MainContent = () => {
+            const MainContent = () => {              
                 return (
                     <div className="ml-64 p-6 bg-gray-100 min-h-screen">
                         {user.role === 'admin' && (
                             <>
                                 {view === 'add_sv' && (
-                                    <AddSvForm
-                                        isLoading={isLoading}
-                                        newSvName={newSvName}
-                                        setNewSvName={setNewSvName}
-                                        addSv={addSv}
-                                    />
-                                )}
+                                            <AddSvForm
+                                                isLoading={isLoading}
+                                                newSvName={newSvName}
+                                                setNewSvName={setNewSvName}
+                                                addSv={addSv}
+                                            />
+                                        )}
                                 {view === 'sv_list' && (
                                     <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                                         <div className="flex justify-between items-center mb-4">
@@ -2611,7 +2744,6 @@
                                                     step="0.01"
                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
-                                                    key="quality-input" // Добавлен key для предотвращения разфокуса
                                                 />
                                             </div>
                                             <div className="form-group">
@@ -2625,7 +2757,6 @@
                                                     step="0.01"
                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
-                                                    key="callsPerHour-input" // Добавлен key для предотвращения разфокуса
                                                 />
                                             </div>
                                             <div className="form-group">
@@ -2639,7 +2770,6 @@
                                                     step="0.01"
                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
-                                                    key="hoursNorm-input" // Добавлен key для предотвращения разфокуса
                                                 />
                                             </div>
                                             <div className="form-group">
@@ -2653,7 +2783,6 @@
                                                     step="0.01"
                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
-                                                    key="totalHours-input" // Добавлен key для предотвращения разфокуса
                                                 />
                                             </div>
                                             <div className="form-group">
@@ -2688,7 +2817,6 @@
                                                                 placeholder="Quantity"
                                                                 className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                 disabled={isLoading}
-                                                                key="bonusReferQuantity-input" // Добавлен key для предотвращения разфокуса
                                                             />
                                                         )}
                                                     </div>
@@ -2711,7 +2839,6 @@
                                                                 placeholder="Quantity"
                                                                 className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                 disabled={isLoading}
-                                                                key="bonusFilmingQuantity-input" // Добавлен key для предотвращения разфокуса
                                                             />
                                                         )}
                                                     </div>
@@ -2860,7 +2987,6 @@
                                         onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
                                         className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         disabled={isLoading}
-                                        key="new-login-input" // Добавлен key для предотвращения разфокуса
                                     />
                                     <input
                                         type="text"
@@ -2869,7 +2995,6 @@
                                         onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
                                         className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         disabled={isLoading}
-                                        key="confirm-login-input" // Добавлен key для предотвращения разфокуса
                                     />
                                     <div className="flex justify-between">
                                         <button
@@ -2902,7 +3027,6 @@
                                         onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
                                         className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         disabled={isLoading}
-                                        key="new-password-input" // Добавлен key для предотвращения разфокуса
                                     />
                                     <input
                                         type="password"
@@ -2911,7 +3035,6 @@
                                         onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
                                         className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         disabled={isLoading}
-                                        key="confirm-password-input" // Добавлен key для предотвращения разфокуса
                                     />
                                     <div className="flex justify-between">
                                         <button
