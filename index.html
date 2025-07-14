@@ -11,40 +11,16 @@
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
     <style>
-        /* Custom scrollbar styles */
-        .scrollbar-custom::-webkit-scrollbar {
-            width: 6px;
-            height: 6px;
-        }
-        .scrollbar-custom::-webkit-scrollbar-track {
-            background: #f1f1f1;
-            border-radius: 10px;
-        }
-        .scrollbar-custom::-webkit-scrollbar-thumb {
-            background: #a0a0a0;
-            border-radius: 10px;
-        }
-        .scrollbar-custom::-webkit-scrollbar-thumb:hover {
-            background: #808080;
-        }
-        /* Fade-in animation */
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        .animate-fade-in {
-            animation: fadeIn 0.3s ease-out;
-        }
-        /* Improved hover effects */
-        .hover-scale {
-            transition: transform 0.2s ease-in-out;
-        }
-        .hover-scale:hover {
-            transform: scale(1.02);
-        }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .animate-fade-in { animation: fadeIn 0.3s ease-in; }
+        .scrollbar-thin { scrollbar-width: thin; }
+        .scrollbar-thumb-gray-300 { scrollbar-color: #d1d5db #f3f4f6; }
+        .scrollbar-track-gray-100 { /* for webkit */ }
+        .transition-transform { transition: transform 0.3s ease; }
+        .hover\:scale-105:hover { transform: scale(1.05); }
     </style>
 </head>
-<body class="bg-gray-100 font-sans antialiased text-gray-900">
+<body class="bg-gradient-to-br from-gray-50 to-gray-100 font-sans antialiased text-gray-900">
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef } = React;
@@ -247,19 +223,19 @@
             if (!isOpen) return null;
         
             return (
-                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
-                    <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-5xl max-h-[95vh] overflow-y-auto scrollbar-custom">
-                        <h2 className="text-2xl font-bold mb-6 text-gray-800">Monitoring Scale Configuration</h2>
+                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 backdrop-blur-sm">
+                    <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-5xl max-h-[95vh] overflow-y-auto transform scale-95 transition-transform duration-300">
+                        <h2 className="text-2xl font-bold mb-6 text-gray-800">Configure Monitoring Scale</h2>
                         
                         <div className="flex mb-6 space-x-4">
                             <button
-                                className={`flex-1 py-3 px-6 rounded-lg font-medium transition-all duration-200 ${activeTab === 'directions' ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                                className={`px-6 py-3 rounded-lg font-medium transition-all duration-200 ${activeTab === 'directions' ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
                                 onClick={() => setActiveTab('directions')}
                             >
                                 Directions
                             </button>
                             <button
-                                className={`flex-1 py-3 px-6 rounded-lg font-medium transition-all duration-200 ${activeTab === 'criteria' ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                                className={`px-6 py-3 rounded-lg font-medium transition-all duration-200 ${activeTab === 'criteria' ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
                                 onClick={() => setActiveTab('criteria')}
                             >
                                 Criteria
@@ -269,7 +245,7 @@
                         {activeTab === 'directions' && (
                             <div className="space-y-6">
                                 <div className="bg-gray-50 p-6 rounded-xl shadow-sm">
-                                    <label className="block mb-3 text-lg font-semibold text-gray-700">
+                                    <label className="block mb-3 font-semibold text-gray-700">
                                         {isEditingDirection ? `Edit Direction: ${directions[editingDirectionIndex]?.name}` : 'Add New Direction'}
                                     </label>
                                     <div className="space-y-4">
@@ -292,7 +268,7 @@
                                         <div className="flex space-x-4">
                                             <button
                                                 onClick={isEditingDirection ? handleEditDirection : handleAddDirection}
-                                                className={`flex-1 py-3 px-6 rounded-lg font-medium text-white transition-all duration-200 ${
+                                                className={`px-6 py-3 rounded-lg font-medium text-white transition-all duration-200 shadow-md ${
                                                     isEditingDirection ? 'bg-blue-600 hover:bg-blue-700' : 'bg-green-600 hover:bg-green-700'
                                                 }`}
                                             >
@@ -306,7 +282,7 @@
                                                         setIsEditingDirection(false);
                                                         setEditingDirectionIndex(null);
                                                     }}
-                                                    className="flex-1 py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200"
+                                                    className="px-6 py-3 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-all duration-200 shadow-md"
                                                 >
                                                     Cancel Edit
                                                 </button>
@@ -315,20 +291,20 @@
                                     </div>
                                 </div>
         
-                                <div>
-                                    <h3 className="text-xl font-semibold mb-4 text-gray-800">Existing Directions</h3>
+                                <div className="bg-gray-50 p-6 rounded-xl shadow-sm">
+                                    <h3 className="text-lg font-semibold mb-3 text-gray-800">Existing Directions</h3>
                                     {directions.length === 0 ? (
                                         <p className="text-gray-500 italic text-center">No directions have been added yet.</p>
                                     ) : (
-                                        <ul className="space-y-4 max-h-64 overflow-y-auto scrollbar-custom pr-2">
+                                        <ul className="space-y-3 max-h-48 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100">
                                             {directions.map((direction, index) => (
                                                 <li 
                                                     key={index} 
-                                                    className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-all duration-200 animate-fade-in"
+                                                    className="flex justify-between items-center bg-white p-4 rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition-shadow duration-200 animate-fade-in"
                                                 >
-                                                    <div className="flex items-center space-x-4">
+                                                    <div className="flex items-center space-x-3">
                                                         <svg
-                                                            className={`w-6 h-6 ${direction.hasFileUpload ? 'text-blue-600' : 'text-gray-500'}`}
+                                                            className={`w-5 h-5 ${direction.hasFileUpload ? 'text-blue-600' : 'text-gray-500'}`}
                                                             fill="none"
                                                             stroke="currentColor"
                                                             viewBox="0 0 24 24"
@@ -341,7 +317,7 @@
                                                                 d={direction.hasFileUpload ? 'M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12' : 'M9 12h6m-3-3v6'}
                                                             />
                                                         </svg>
-                                                        <span className="text-base font-medium text-gray-800">
+                                                        <span className="text-sm font-medium text-gray-800">
                                                             {direction.name} {direction.hasFileUpload ? '(File Upload Required)' : '(No File Upload)'}
                                                         </span>
                                                     </div>
@@ -376,7 +352,7 @@
                         {activeTab === 'criteria' && (
                             <div className="space-y-6">
                                 <div className="bg-gray-50 p-6 rounded-xl shadow-sm">
-                                    <label className="block mb-3 text-lg font-semibold text-gray-700">Select Direction to Manage Criteria</label>
+                                    <label className="block mb-3 font-semibold text-gray-700">Select Direction to Manage Criteria</label>
                                     <select
                                         value={selectedDirectionIndex}
                                         onChange={(e) => setSelectedDirectionIndex(Number(e.target.value))}
@@ -394,7 +370,7 @@
                                 </div>
         
                                 <div className="bg-gray-50 p-6 rounded-xl shadow-sm">
-                                    <label className="block mb-3 text-lg font-semibold text-gray-700">
+                                    <label className="block mb-3 font-semibold text-gray-700">
                                         {isEditingCriterion ? `Edit Criterion: ${directions[selectedDirectionIndex]?.criteria[editingCriterionIndex]?.name}` : 'Add New Criterion'}
                                     </label>
                                     <div className="space-y-4">
@@ -411,9 +387,8 @@
                                                 type="number"
                                                 value={newCriterionWeight}
                                                 onChange={(e) => setNewCriterionWeight(e.target.value)}
-                                                placeholder="Enter weight (1-100)"
+                                                placeholder="Enter weight"
                                                 min="1"
-                                                max="100"
                                                 className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                 disabled={directions.length === 0}
                                             />
@@ -421,8 +396,8 @@
                                         <textarea
                                             value={newCriterionValue}
                                             onChange={(e) => setNewCriterionValue(e.target.value)}
-                                            placeholder="Enter criterion description (optional)"
-                                            className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            placeholder="Optional criterion description"
+                                            className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 resize-none"
                                             rows={4}
                                             disabled={directions.length === 0}
                                         />
@@ -434,15 +409,15 @@
                                                     setNewCriterionCritical(e.target.checked);
                                                     if (e.target.checked) setNewCriterionWeight('');
                                                 }}
-                                                className="w-5 h-5 text-red-600 rounded focus:ring-red-500"
+                                                className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500"
                                                 disabled={directions.length === 0}
                                             />
-                                            <label className="text-sm font-medium text-gray-700">Mark as Critical (Score 0 if failed, no weight)</label>
+                                            <label className="text-sm font-medium text-gray-700">Mark as Critical (Score 0 if Error, No Weight)</label>
                                         </div>
                                         <div className="flex space-x-4">
                                             <button
                                                 onClick={isEditingCriterion ? handleEditCriterion : handleAddCriterion}
-                                                className={`flex-1 py-3 px-6 rounded-lg font-medium text-white transition-all duration-200 ${
+                                                className={`flex-1 p-3 rounded-lg font-medium text-white transition-all duration-200 shadow-md ${
                                                     isEditingCriterion ? 'bg-blue-600 hover:bg-blue-700' : 'bg-green-600 hover:bg-green-700'
                                                 } ${directions.length === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
                                                 disabled={directions.length === 0}
@@ -452,7 +427,7 @@
                                             {isEditingCriterion && (
                                                 <button
                                                     onClick={resetCriterionForm}
-                                                    className="flex-1 py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200"
+                                                    className="flex-1 p-3 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-all duration-200 shadow-md"
                                                 >
                                                     Cancel Edit
                                                 </button>
@@ -461,20 +436,20 @@
                                     </div>
                                 </div>
         
-                                <div className="max-h-96 overflow-y-auto scrollbar-custom pr-2">
-                                    <h3 className="text-xl font-semibold mb-4 text-gray-800">Existing Criteria</h3>
+                                <div className="bg-gray-50 p-6 rounded-xl shadow-sm max-h-96 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100">
+                                    <h3 className="text-lg font-semibold mb-3 text-gray-800">Existing Criteria</h3>
                                     {directions.length === 0 || directions[selectedDirectionIndex].criteria.length === 0 ? (
                                         <p className="text-gray-500 italic text-center">No criteria added for this direction yet.</p>
                                     ) : (
-                                        <ul className="space-y-4">
+                                        <ul className="space-y-3">
                                             {directions[selectedDirectionIndex].criteria.map((criterion, critIndex) => (
                                                 <li 
                                                     key={critIndex} 
-                                                    className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-all duration-200 animate-fade-in"
+                                                    className="flex justify-between items-center bg-white p-4 rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition-shadow duration-200 animate-fade-in"
                                                 >
-                                                    <div className="flex items-center space-x-4">
+                                                    <div className="flex items-center space-x-3">
                                                         <svg
-                                                            className={`w-6 h-6 ${criterion.isCritical ? 'text-red-600' : 'text-green-600'}`}
+                                                            className={`w-5 h-5 ${criterion.isCritical ? 'text-red-600' : 'text-green-600'}`}
                                                             fill="none"
                                                             stroke="currentColor"
                                                             viewBox="0 0 24 24"
@@ -487,8 +462,8 @@
                                                                 d={criterion.isCritical ? 'M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' : 'M5 13l4 4L19 7'}
                                                             />
                                                         </svg>
-                                                        <span className="text-base font-medium text-gray-800">
-                                                            {criterion.name} {criterion.isCritical ? '(Critical)' : `(${criterion.weight}% Weight)`}
+                                                        <span className="text-sm font-medium text-gray-800">
+                                                            {criterion.name} {criterion.isCritical ? '(Critical)' : `(${criterion.weight}%)`}
                                                         </span>
                                                     </div>
                                                     <div className="flex space-x-3">
@@ -516,7 +491,7 @@
                                         </ul>
                                     )}
                                     {directions.length > 0 && (
-                                        <p className={`mt-4 text-base font-medium ${totalWeight(selectedDirectionIndex) !== 100 && directions[selectedDirectionIndex].criteria.some(c => !c.isCritical) ? 'text-red-600' : 'text-green-600'}`}>
+                                        <p className={`mt-4 text-sm font-medium ${totalWeight(selectedDirectionIndex) !== 100 && directions[selectedDirectionIndex].criteria.some(c => !c.isCritical) ? 'text-red-600' : 'text-green-600'}`}>
                                             Total Non-Critical Weight: {totalWeight(selectedDirectionIndex)} / 100
                                         </p>
                                     )}
@@ -527,13 +502,13 @@
                         <div className="flex justify-end space-x-4 mt-8">
                             <button
                                 onClick={handleSave}
-                                className="py-3 px-8 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                                className="px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-all duration-200 shadow-md"
                             >
-                                Save Configuration
+                                Save Changes
                             </button>
                             <button
                                 onClick={onClose}
-                                className="py-3 px-8 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                                className="px-6 py-3 bg-gray-500 text-white rounded-lg font-medium hover:bg-gray-600 transition-all duration-200 shadow-md"
                             >
                                 Cancel
                             </button>
@@ -559,11 +534,11 @@
             render() {
                 if (this.state.hasError) {
                     return (
-                        <div className="min-h-screen flex items-center justify-center bg-gray-50">
-                            <div className="bg-white p-10 rounded-2xl shadow-xl w-full max-w-lg text-center">
-                                <h1 className="text-3xl font-bold mb-4 text-red-600">Application Error</h1>
-                                <p className="text-gray-600 mb-4">An unexpected error occurred: {this.state.error?.message || 'Unknown error'}</p>
-                                <p className="text-gray-500">Please check the console for more details or refresh the page.</p>
+                        <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-red-50 to-red-100">
+                            <div className="bg-white p-10 rounded-2xl shadow-2xl w-full max-w-lg transform transition-all duration-300">
+                                <h1 className="text-3xl font-bold mb-6 text-center text-red-600">Application Error</h1>
+                                <p className="text-center text-gray-700 mb-4">An unexpected error occurred: {this.state.error?.message || 'Unknown error'}</p>
+                                <p className="text-center text-gray-500">Please check the console for details or refresh the page to try again.</p>
                             </div>
                         </div>
                     );
@@ -572,7 +547,7 @@
             }
         }
 
-        // SemiCircle Progress Component with improved design
+        // SemiCircle Progress Component
         const SemiCircleProgress = ({ percentage, label }) => {
             const canvasRef = useRef(null);
 
@@ -589,14 +564,12 @@
 
                 ctx.clearRect(0, 0, width, height);
 
-                // Background arc
                 ctx.beginPath();
                 ctx.arc(centerX, centerY, radius, startAngle, maxAngle);
                 ctx.strokeStyle = '#e5e7eb';
                 ctx.lineWidth = 12;
                 ctx.stroke();
 
-                // Progress arc
                 const progressAngle = startAngle + (percentage / 100) * Math.PI;
                 ctx.beginPath();
                 ctx.arc(centerX, centerY, radius, startAngle, progressAngle);
@@ -604,7 +577,6 @@
                 ctx.lineWidth = 12;
                 ctx.stroke();
 
-                // Percentage text
                 ctx.font = 'bold 24px Arial';
                 ctx.fillStyle = '#1f2937';
                 ctx.textAlign = 'center';
@@ -613,9 +585,9 @@
             }, [percentage]);
 
             return (
-                <div className="flex flex-col items-center transition-all duration-300 hover:scale-105 hover:shadow-lg">
-                    <canvas ref={canvasRef} width={220} height={140} className="rounded-full shadow-md" />
-                    <p className="text-base font-semibold text-gray-700 mt-3">{label}</p>
+                <div className="flex flex-col items-center transition-transform duration-300 hover:scale-105">
+                    <canvas ref={canvasRef} width={220} height={140} />
+                    <p className="text-md font-semibold text-gray-700 mt-3">{label}</p>
                 </div>
             );
         };
@@ -638,11 +610,11 @@
           };
         
           return (
-            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
-              <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-lg">
+            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 backdrop-blur-sm">
+              <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-lg transform scale-95 transition-transform duration-300">
                 <h2 className="text-2xl font-bold mb-6 text-gray-800">Dispute Evaluation</h2>
                 
-                <div className="mb-6 space-y-3 bg-gray-50 p-4 rounded-xl">
+                <div className="mb-6 space-y-3 bg-gray-50 p-5 rounded-xl shadow-sm">
                   <p className="font-semibold text-gray-700">Evaluation Details:</p>
                   <div className="pl-4 space-y-2">
                     <p className="text-sm">• Call ID: <span className="font-medium">{selectedEvaluation?.id}</span></p>
@@ -659,8 +631,8 @@
                   <textarea
                     value={disputeText}
                     onChange={(e) => setDisputeText(e.target.value)}
-                    placeholder="Describe the reason for disputing the evaluation..."
-                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                    placeholder="Describe the reason for disputing this evaluation..."
+                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 resize-none"
                     rows={6}
                   />
                 </div>
@@ -668,7 +640,7 @@
                 <div className="flex justify-end space-x-4">
                   <button
                     onClick={handleSubmitDispute}
-                    className={`py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    className={`px-6 py-3 rounded-lg font-medium text-white transition-all duration-200 shadow-md bg-blue-600 hover:bg-blue-700 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                     disabled={isLoading}
                   >
                     {isLoading ? 'Submitting...' : 'Submit Dispute'}
@@ -678,14 +650,14 @@
                       setShowDisputeModal(false);
                       setDisputeText('');
                     }}
-                    className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                    className="px-6 py-3 bg-gray-500 text-white rounded-lg font-medium hover:bg-gray-600 transition-all duration-200 shadow-md"
                   >
                     Cancel
                   </button>
                 </div>
                 
-                {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
-                {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
+                {error && <p className="text-red-600 mt-4 text-center font-medium">{error}</p>}
+                {success && <p className="text-green-600 mt-4 text-center font-medium">{success}</p>}
               </div>
             </div>
           );
@@ -701,8 +673,8 @@
             if (!isOpen) return null;
 
             return (
-                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
-                    <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-lg">
+                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 backdrop-blur-sm">
+                    <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-lg transform scale-95 transition-transform duration-300">
                         <h2 className="text-2xl font-bold mb-6 text-gray-800">Edit User: {editedUser.name}</h2>
                         <div className="space-y-6">
                             <div>
@@ -752,8 +724,8 @@
                                 />
                             </div>
                             <div className="flex justify-end space-x-4">
-                                <button onClick={onClose} className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg">Cancel</button>
-                                <button onClick={() => onSave(editedUser)} className="py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg">Save Changes</button>
+                                <button onClick={onClose} className="px-6 py-3 bg-gray-500 text-white rounded-lg font-medium hover:bg-gray-600 transition-all duration-200 shadow-md">Cancel</button>
+                                <button onClick={() => onSave(editedUser)} className="px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-all duration-200 shadow-md">Save Changes</button>
                             </div>
                         </div>
                     </div>
@@ -761,28 +733,28 @@
             );
         };
 
-        const AddSvForm = React.memo(({ isLoading, newSvName, setNewSvName, addSv }) => {
+        const AddSvForm = ({ isLoading, newSvName, setNewSvName, addSv }) => {
             return (
-                <div className="bg-white p-8 rounded-2xl shadow-xl mb-8">
+                <div className="bg-white p-8 rounded-2xl shadow-2xl mb-8">
                     <h2 className="text-2xl font-bold mb-6 text-gray-800">Add New Supervisor</h2>
                     <input
                         type="text"
                         placeholder="Enter Supervisor Name"
                         value={newSvName}
                         onChange={(e) => setNewSvName(e.target.value)}
-                        className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 mb-6"
+                        className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                         disabled={isLoading}
                     />
                     <button
                         onClick={addSv}
-                        className={`w-full py-4 rounded-lg font-semibold text-lg text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        className={`w-full bg-blue-600 text-white p-4 rounded-lg font-semibold hover:bg-blue-700 transition-all duration-200 shadow-md ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                         disabled={isLoading}
                     >
                         {isLoading ? 'Adding Supervisor...' : 'Add Supervisor'}
                     </button>
                 </div>
             );
-        });
+        };
         
         const App = () => {
             const [user, setUser] = useState(null);
@@ -1069,46 +1041,52 @@
             if (!salaryResult) return null;
 
             return (
-                <div className="mt-8 p-8 bg-gray-50 rounded-2xl shadow-sm">
-                <h3 className="text-xl font-bold mb-6 text-gray-800">Calculation Results</h3>
-                <div className="space-y-3">
-                    <div className="flex justify-between text-sm">
-                    <span className="font-semibold text-gray-700">Direction:</span>
-                    <span className="text-gray-900">Operator</span>
+                <div className="mt-8 p-8 bg-gray-50 rounded-2xl shadow-sm border border-gray-200">
+                <h3 className="text-2xl font-bold mb-6 text-gray-800">Calculation Results</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-3">
+                        <div className="flex justify-between text-sm">
+                            <span className="font-medium text-gray-700">Direction:</span>
+                            <span className="text-gray-900">Operator</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                            <span className="font-medium text-gray-700">Points:</span>
+                            <span className="text-gray-900">{salaryResult.points}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                            <span className="font-medium text-gray-700">Premium Coefficient:</span>
+                            <span className="text-gray-900">{salaryResult.premiumCoefficient}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                            <span className="font-medium text-gray-700">Monthly Hours Norm:</span>
+                            <span className="text-gray-900">{salaryResult.hoursNorm.toFixed(2)}</span>
+                        </div>
                     </div>
-                    <div className="flex justify-between text-sm">
-                    <span className="font-semibold text-gray-700">Points:</span>
-                    <span className="text-gray-900">{salaryResult.points}</span>
+                    <div className="space-y-3">
+                        <div className="flex justify-between text-sm">
+                            <span className="font-medium text-gray-700">Hours Percentage:</span>
+                            <span className="text-gray-900">{salaryResult.hoursPercentage.toFixed(2)}%</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                            <span className="font-medium text-gray-700">Base Salary:</span>
+                            <span className="text-gray-900">{salaryResult.baseSalary.toFixed(2)} KZT</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                            <span className="font-medium text-gray-700">Premium Part:</span>
+                            <span className="text-gray-900">{salaryResult.premiumPart.toFixed(2)} KZT</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                            <span className="font-medium text-gray-700">Bonuses:</span>
+                            <span className="text-gray-900">{salaryResult.bonuses} KZT</span>
+                        </div>
                     </div>
-                    <div className="flex justify-between text-sm">
-                    <span className="font-semibold text-gray-700">Premium Coefficient:</span>
-                    <span className="text-gray-900">{salaryResult.premiumCoefficient}</span>
-                    </div>
-                    <div className="flex justify-between text-sm">
-                    <span className="font-semibold text-gray-700">Monthly Hours Norm:</span>
-                    <span className="text-gray-900">{salaryResult.hoursNorm.toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between text-sm">
-                    <span className="font-semibold text-gray-700">Hours Percentage:</span>
-                    <span className="text-gray-900">{salaryResult.hoursPercentage.toFixed(2)}%</span>
-                    </div>
-                    <div className="flex justify-between text-sm">
-                    <span className="font-semibold text-gray-700">Base Salary:</span>
-                    <span className="text-gray-900">{salaryResult.baseSalary.toFixed(2)} KZT</span>
-                    </div>
-                    <div className="flex justify-between text-sm">
-                    <span className="font-semibold text-gray-700">Premium Part:</span>
-                    <span className="text-gray-900">{salaryResult.premiumPart.toFixed(2)} KZT</span>
-                    </div>
-                    <div className="flex justify-between text-sm">
-                    <span className="font-semibold text-gray-700">Bonuses:</span>
-                    <span className="text-gray-900">{salaryResult.bonuses} KZT</span>
-                    </div>
-                    <div className="flex justify-between text-sm pt-2 border-t border-gray-200">
-                    <span className="font-bold text-gray-800">Total Salary:</span>
-                    <span className="text-green-600 font-bold">
-                        {salaryResult.finalSalary.toFixed(2)} KZT
-                    </span>
+                </div>
+                <div className="mt-6 pt-6 border-t border-gray-200">
+                    <div className="flex justify-between text-lg font-bold">
+                        <span className="text-gray-800">Total Salary:</span>
+                        <span className="text-green-600">
+                            {salaryResult.finalSalary.toFixed(2)} KZT
+                        </span>
                     </div>
                 </div>
                 </div>
@@ -1208,43 +1186,43 @@
                 ];
             
                 return (
-                    <table className="min-w-full bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
+                    <table className="min-w-full bg-white border-collapse rounded-2xl overflow-hidden shadow-sm">
                         <thead>
-                            <tr className="bg-blue-50 text-left">
-                                <th className="p-4 font-semibold text-gray-700 border-b">Category</th>
-                                <th className="p-4 font-semibold text-gray-700 border-b">Condition</th>
-                                <th className="p-4 font-semibold text-gray-700 border-b">Points</th>
+                            <tr className="bg-blue-50">
+                                <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Category</th>
+                                <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Condition</th>
+                                <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Points</th>
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-gray-200">
-                            <tr className="bg-gray-50">
-                                <td className="p-4 font-bold text-gray-800" colSpan="3">Experience</td>
+                        <tbody>
+                            <tr className="bg-gray-100 font-bold text-gray-800">
+                                <td className="p-5 border-b" colSpan="3">Experience</td>
                             </tr>
                             {experienceRanges.map((row, index) => (
-                                <tr key={`exp-${index}`} className={`${row.selected ? 'bg-blue-50' : ''} hover:bg-gray-50 transition-colors`}>
-                                    <td className="p-4"></td>
-                                    <td className="p-4">{row.range}</td>
-                                    <td className="p-4 font-medium">{row.points}</td>
+                                <tr key={`exp-${index}`} className={row.selected ? 'bg-blue-50' : 'hover:bg-gray-50'}>
+                                    <td className="p-5 border-b"></td>
+                                    <td className="p-5 border-b text-sm text-gray-700">{row.range}</td>
+                                    <td className="p-5 border-b text-sm font-medium text-gray-900">{row.points}</td>
                                 </tr>
                             ))}
-                            <tr className="bg-gray-50">
-                                <td className="p-4 font-bold text-gray-800" colSpan="3">Quality</td>
+                            <tr className="bg-gray-100 font-bold text-gray-800">
+                                <td className="p-5 border-b" colSpan="3">Quality</td>
                             </tr>
                             {qualityRanges.map((row, index) => (
-                                <tr key={`qual-${index}`} className={`${row.selected ? 'bg-blue-50' : ''} hover:bg-gray-50 transition-colors`}>
-                                    <td className="p-4"></td>
-                                    <td className="p-4">{row.range}</td>
-                                    <td className="p-4 font-medium">{row.points}</td>
+                                <tr key={`qual-${index}`} className={row.selected ? 'bg-blue-50' : 'hover:bg-gray-50'}>
+                                    <td className="p-5 border-b"></td>
+                                    <td className="p-5 border-b text-sm text-gray-700">{row.range}</td>
+                                    <td className="p-5 border-b text-sm font-medium text-gray-900">{row.points}</td>
                                 </tr>
                             ))}
-                            <tr className="bg-gray-50">
-                                <td className="p-4 font-bold text-gray-800" colSpan="3">Calls per Hour</td>
+                            <tr className="bg-gray-100 font-bold text-gray-800">
+                                <td className="p-5 border-b" colSpan="3">Calls per Hour</td>
                             </tr>
                             {callsPerHourRanges.map((row, index) => (
-                                <tr key={`cph-${index}`} className={`${row.selected ? 'bg-blue-50' : ''} hover:bg-gray-50 transition-colors`}>
-                                    <td className="p-4"></td>
-                                    <td className="p-4">{row.range}</td>
-                                    <td className="p-4 font-medium">{row.points}</td>
+                                <tr key={`cph-${index}`} className={row.selected ? 'bg-blue-50' : 'hover:bg-gray-50'}>
+                                    <td className="p-5 border-b"></td>
+                                    <td className="p-5 border-b text-sm text-gray-700">{row.range}</td>
+                                    <td className="p-5 border-b text-sm font-medium text-gray-900">{row.points}</td>
                                 </tr>
                             ))}
                         </tbody>
@@ -1662,41 +1640,43 @@
                 }
             };
 
-            const addSv = useCallback(async () => {
-                if (!newSvName.trim()) {
-                    setError('Please enter supervisor name');
-                    return;
-                }
-                setIsLoading(true);
-                clearMessages();
-                try {
-                    const response = await axios.post(
-                        `${API_BASE_URL}/api/admin/add_sv`,
-                        { name: newSvName.trim() },
-                        {
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'X-API-Key': user.apiKey,
-                                'X-User-Id': user.id
-                            }
-                        }
-                    );
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setSuccess(data.message);
-                        alert(`Supervisor added successfully!\nLogin: ${data.login}\nPassword: ${data.password}`);
-                        fetchSvList();
-                        setNewSvName('');
-                    } else {
-                        setError(data.error || 'Failed to add supervisor');
+            const addSv = async () => {
+                    if (!newSvName.trim()) {
+                        setError('Please enter supervisor name');
+                        return;
                     }
-                } catch (err) {
-                    console.error('Add SV error:', err);
-                    setError(err.response?.data?.error || 'Failed to add supervisor');
-                } finally {
-                    setIsLoading(false);
-                }
-            }, [newSvName, user]);
+                    setIsLoading(true);
+                    clearMessages();
+                    try {
+                        const response = await axios.post(
+                            `${API_BASE_URL}/api/admin/add_sv`,
+                            {
+                                name: newSvName.trim()
+                            },
+                            {
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-API-Key': user.apiKey,
+                                    'X-User-Id': user.id
+                                }
+                            }
+                        );
+                        const data = response.data;
+                        if (data.status === 'success' && isMounted.current) {
+                            setSuccess(data.message);
+                            alert(`Supervisor added successfully!\nLogin: ${data.login}\nPassword: ${data.password}`);  // Show credentials to admin
+                            fetchSvList();
+                            setNewSvName('');
+                        } else {
+                            setError(data.error || 'Failed to add supervisor');
+                        }
+                    } catch (err) {
+                        console.error('Add SV error:', err);
+                        setError(err.response?.data?.error || 'Failed to add supervisor');
+                    } finally {
+                        if (isMounted.current) setIsLoading(false);
+                    }
+                };
 
             const removeSv = async (svId) => {
                 if (!confirm('Are you sure you want to remove this supervisor?')) return;
@@ -1855,36 +1835,36 @@
 
             if (!user) {
                 return (
-                    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
-                        <div className="bg-white p-10 rounded-2xl shadow-2xl w-full max-w-md transform transition-all duration-300 hover:scale-[1.02]">
-                            <h1 className="text-3xl font-bold mb-8 text-center text-gray-800">OTP Bot Dashboard Login</h1>
+                    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-indigo-100">
+                        <div className="bg-white p-10 rounded-2xl shadow-2xl w-full max-w-lg transform transition-all duration-300 hover:shadow-2xl">
+                            <h1 className="text-4xl font-bold mb-8 text-center text-gray-800">OTP Bot Dashboard</h1>
                             <input
                                 type="text"
-                                placeholder="Enter your login"
+                                placeholder="Enter Login"
                                 value={login}
                                 onChange={(e) => setLogin(e.target.value)}
                                 onKeyPress={handleKeyPress}
-                                className="w-full p-4 mb-5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                 disabled={isLoading}
                             />
                             <input
                                 type="password"
-                                placeholder="Enter your password"
+                                placeholder="Enter Password"
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
                                 onKeyPress={handleKeyPress}
-                                className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                className="w-full p-4 mb-8 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                 disabled={isLoading}
                             />
                             <button
                                 onClick={handleLogin}
-                                className={`w-full py-4 rounded-lg font-semibold text-lg text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                className={`w-full bg-blue-600 text-white p-4 rounded-lg font-semibold hover:bg-blue-700 transition-all duration-200 shadow-md ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                 disabled={isLoading}
                             >
-                                {isLoading ? 'Logging in...' : 'Login to Dashboard'}
+                                {isLoading ? 'Logging In...' : 'Login'}
                             </button>
-                            {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
+                            {error && <p className="text-red-600 mt-6 text-center font-medium">{error}</p>}
+                            {success && <p className="text-green-600 mt-6 text-center font-medium">{success}</p>}
                         </div>
                     </div>
                 );
@@ -1892,20 +1872,20 @@
 
             if (showLogoutConfirm) {
                 return (
-                    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
-                        <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md text-center">
+                    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 backdrop-blur-sm">
+                        <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-lg transform scale-95 transition-transform duration-300">
                             <h2 className="text-2xl font-bold mb-6 text-gray-800">Confirm Logout</h2>
-                            <p className="mb-6 text-gray-600">Are you sure you want to log out of your account?</p>
-                            <div className="flex justify-center space-x-4">
+                            <p className="mb-6 text-center text-gray-700">Are you sure you want to log out of your account?</p>
+                            <div className="flex justify-center space-x-6">
                                 <button
                                     onClick={confirmLogout}
-                                    className="py-3 px-6 rounded-lg font-medium text-white bg-red-600 hover:bg-red-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                                    className="px-8 py-3 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition-all duration-200 shadow-md"
                                 >
                                     Yes, Logout
                                 </button>
                                 <button
                                     onClick={() => setShowLogoutConfirm(false)}
-                                    className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                                    className="px-8 py-3 bg-gray-500 text-white rounded-lg font-medium hover:bg-gray-600 transition-all duration-200 shadow-md"
                                 >
                                     Cancel
                                 </button>
@@ -1917,15 +1897,15 @@
 
             if (showChangeLoginForm) {
                 return (
-                    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
-                        <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
-                            <h2 className="text-2xl font-bold mb-6 text-gray-800">Change Your Login</h2>
+                    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 backdrop-blur-sm">
+                        <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-lg transform scale-95 transition-transform duration-300">
+                            <h2 className="text-2xl font-bold mb-6 text-gray-800">Change Login</h2>
                             <input
                                 type="text"
                                 placeholder="New Login"
                                 value={loginData.new_login}
                                 onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
-                                className="w-full p-4 mb-5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                className="w-full p-4 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                 disabled={isLoading}
                             />
                             <input
@@ -1933,26 +1913,26 @@
                                 placeholder="Confirm New Login"
                                 value={loginData.confirm_login}
                                 onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
-                                className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                 disabled={isLoading}
                             />
-                            <div className="flex justify-end space-x-4">
+                            <div className="flex justify-center space-x-6">
                                 <button
                                     onClick={handleChangeLogin}
-                                    className={`py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                    className={`px-8 py-3 rounded-lg font-medium text-white transition-all duration-200 shadow-md bg-blue-600 hover:bg-blue-700 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                     disabled={isLoading}
                                 >
                                     {isLoading ? 'Updating...' : 'Update Login'}
                                 </button>
                                 <button
                                     onClick={() => setShowChangeLoginForm(false)}
-                                    className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                                    className="px-8 py-3 bg-gray-500 text-white rounded-lg font-medium hover:bg-gray-600 transition-all duration-200 shadow-md"
                                 >
                                     Cancel
                                 </button>
                             </div>
-                            {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
+                            {error && <p className="text-red-600 mt-6 text-center font-medium">{error}</p>}
+                            {success && <p className="text-green-600 mt-6 text-center font-medium">{success}</p>}
                         </div>
                     </div>
                 );
@@ -1962,15 +1942,15 @@
                     : 0;
             if (showChangePasswordForm) {
                 return (
-                    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
-                        <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
-                            <h2 className="text-2xl font-bold mb-6 text-gray-800">Change Your Password</h2>
+                    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 backdrop-blur-sm">
+                        <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-lg transform scale-95 transition-transform duration-300">
+                            <h2 className="text-2xl font-bold mb-6 text-gray-800">Change Password</h2>
                             <input
                                 type="password"
                                 placeholder="New Password"
                                 value={passwordData.new_password}
                                 onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
-                                className="w-full p-4 mb-5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                className="w-full p-4 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                 disabled={isLoading}
                             />
                             <input
@@ -1978,26 +1958,26 @@
                                 placeholder="Confirm New Password"
                                 value={passwordData.confirm_password}
                                 onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
-                                className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                 disabled={isLoading}
                             />
-                            <div className="flex justify-end space-x-4">
+                            <div className="flex justify-center space-x-6">
                                 <button
                                     onClick={handleChangePassword}
-                                    className={`py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                    className={`px-8 py-3 rounded-lg font-medium text-white transition-all duration-200 shadow-md bg-blue-600 hover:bg-blue-700 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                     disabled={isLoading}
                                 >
                                     {isLoading ? 'Updating...' : 'Update Password'}
                                 </button>
                                 <button
                                     onClick={() => setShowChangePasswordForm(false)}
-                                    className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                                    className="px-8 py-3 bg-gray-500 text-white rounded-lg font-medium hover:bg-gray-600 transition-all duration-200 shadow-md"
                                 >
                                     Cancel
                                 </button>
                             </div>
-                            {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
+                            {error && <p className="text-red-600 mt-6 text-center font-medium">{error}</p>}
+                            {success && <p className="text-green-600 mt-6 text-center font-medium">{success}</p>}
                         </div>
                     </div>
                 );
@@ -2005,35 +1985,35 @@
 
             const Sidebar = () => {
                 return (
-                    <div className="fixed top-0 left-0 h-full w-72 bg-indigo-900 text-white p-8 shadow-2xl transition-all duration-300">
-                        <h1 className="text-3xl font-bold mb-10">Dashboard</h1>
-                        <ul className="space-y-3">
+                    <div className="fixed top-0 left-0 h-full w-72 bg-gradient-to-b from-blue-800 to-indigo-900 text-white p-8 shadow-2xl">
+                        <h1 className="text-3xl font-bold mb-10 text-white">OTP Dashboard</h1>
+                        <ul className="space-y-4">
                             {user.role === 'admin' && (
                                 <>
-                                    <li><button onClick={() => setView('add_sv')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'add_sv' ? 'bg-indigo-700' : ''}`}>Add Supervisor</button></li>
-                                    <li><button onClick={() => setView('sv_list')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'sv_list' ? 'bg-indigo-700' : ''}`}>Supervisors List</button></li>
-                                    <li><button onClick={() => setView('view_scores')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'view_scores' ? 'bg-indigo-700' : ''}`}>Operator Scores</button></li>
-                                    <li><button onClick={() => setView('manage_users')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'manage_users' ? 'bg-indigo-700' : ''}`}>Manage Users</button></li>
-                                    <li><button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200">Monitoring Scale</button></li>
+                                    <li><button onClick={() => setView('add_sv')} className={`w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md ${view === 'add_sv' ? 'bg-blue-900 shadow-md' : ''}`}>Add Supervisor</button></li>
+                                    <li><button onClick={() => setView('sv_list')} className={`w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md ${view === 'sv_list' ? 'bg-blue-900 shadow-md' : ''}`}>Supervisors List</button></li>
+                                    <li><button onClick={() => setView('view_scores')} className={`w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md ${view === 'view_scores' ? 'bg-blue-900 shadow-md' : ''}`}>Operator Scores</button></li>
+                                    <li><button onClick={() => setView('manage_users')} className={`w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md ${view === 'manage_users' ? 'bg-blue-900 shadow-md' : ''}`}>Manage Users</button></li>
+                                    <li><button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md">Monitoring Scale</button></li>
                                 </>
                             )}
                             {user.role === 'sv' && (
                                 <>
-                                    <li><button onClick={() => setView('update_table')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'update_table' ? 'bg-indigo-700' : ''}`}>Update Table</button></li>
-                                    <li><button onClick={() => setView('operators')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'operators' ? 'bg-indigo-700' : ''}`}>My Operators</button></li>
-                                    <li><button onClick={() => setView('manage_operators')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'manage_operators' ? 'bg-indigo-700' : ''}`}>Manage Operators</button></li>
+                                    <li><button onClick={() => setView('update_table')} className={`w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md ${view === 'update_table' ? 'bg-blue-900 shadow-md' : ''}`}>Update Table</button></li>
+                                    <li><button onClick={() => setView('operators')} className={`w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md ${view === 'operators' ? 'bg-blue-900 shadow-md' : ''}`}>My Operators</button></li>
+                                    <li><button onClick={() => setView('manage_operators')} className={`w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md ${view === 'manage_operators' ? 'bg-blue-900 shadow-md' : ''}`}>Manage Operators</button></li>
                                 </>
                             )}
                             {user.role === 'operator' && (
                                 <>
-                                    <li><button onClick={() => setView('profile')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'profile' ? 'bg-indigo-700' : ''}`}>My Profile</button></li>
-                                    <li><button onClick={() => setView('hours')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'hours' ? 'bg-indigo-700' : ''}`}>Work Hours</button></li>
-                                    <li><button onClick={() => setView('evaluation')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'evaluation' ? 'bg-indigo-700' : ''}`}>Call Evaluations</button></li>
-                                    <li><button onClick={() => setView('salary')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'salary' ? 'bg-indigo-700' : ''}`}>Salary Calculator</button></li>
+                                    <li><button onClick={() => setView('profile')} className={`w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md ${view === 'profile' ? 'bg-blue-900 shadow-md' : ''}`}>My Profile</button></li>
+                                    <li><button onClick={() => setView('hours')} className={`w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md ${view === 'hours' ? 'bg-blue-900 shadow-md' : ''}`}>Work Hours</button></li>
+                                    <li><button onClick={() => setView('evaluation')} className={`w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md ${view === 'evaluation' ? 'bg-blue-900 shadow-md' : ''}`}>Call Evaluations</button></li>
+                                    <li><button onClick={() => setView('salary')} className={`w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md ${view === 'salary' ? 'bg-blue-900 shadow-md' : ''}`}>Salary Calculator</button></li>
                                 </>
                             )}
-                            <li><button onClick={() => setShowAccountMenu(true)} className="w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200">Account Settings</button></li>
-                            <li><button onClick={handleLogout} className="w-full text-left py-3 px-5 rounded-lg bg-red-600 hover:bg-red-700 transition-all duration-200">Logout</button></li>
+                            <li><button onClick={() => setShowAccountMenu(true)} className="w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 hover:bg-blue-700 hover:shadow-md">Account Settings</button></li>
+                            <li><button onClick={handleLogout} className="w-full text-left py-3 px-5 rounded-lg font-medium transition-all duration-200 bg-red-600 hover:bg-red-700 hover:shadow-md">Logout</button></li>
                         </ul>
                     </div>
                 );
@@ -2041,7 +2021,7 @@
 
             const MainContent = () => {
                 return (
-                    <div className="ml-72 p-8 bg-gray-50 min-h-screen">
+                    <div className="ml-72 p-10 bg-gradient-to-br from-gray-50 to-gray-100 min-h-screen">
                         {user.role === 'admin' && (
                             <>
                                 {view === 'add_sv' && (
@@ -2053,12 +2033,12 @@
                                             />
                                         )}
                                 {view === 'sv_list' && (
-                                    <div className="bg-white p-8 rounded-2xl shadow-xl mb-8">
+                                    <div className="bg-white p-8 rounded-2xl shadow-2xl mb-8">
                                         <div className="flex justify-between items-center mb-6">
                                             <h2 className="text-2xl font-bold text-gray-800">Supervisors List</h2>
                                             <button
                                                 onClick={generateWeeklyReport}
-                                                className={`py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                                className={`px-6 py-3 rounded-lg font-medium text-white transition-all duration-200 shadow-md bg-blue-600 hover:bg-blue-700 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                                 disabled={isLoading}
                                             >
                                                 {isLoading ? 'Generating Report...' : 'Generate Weekly Report'}
@@ -2069,30 +2049,30 @@
                                         ) : svList.length === 0 ? (
                                             <p className="text-center text-gray-600">No supervisors found.</p>
                                         ) : (
-                                            <div className="overflow-x-auto rounded-xl shadow-sm">
-                                                <table className="min-w-full bg-white border border-gray-200 divide-y divide-gray-200">
-                                                    <thead className="bg-gray-50">
-                                                        <tr>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Name</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">ID</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Table URL</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Actions</th>
+                                            <div className="overflow-x-auto rounded-2xl shadow-sm">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-blue-50">
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Name</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">ID</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Table URL</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Actions</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody className="divide-y divide-gray-200">
+                                                    <tbody>
                                                         {svList.map(sv => (
                                                             <tr key={sv.id} className="hover:bg-gray-50 transition-colors duration-200">
-                                                                <td className="p-4">{sv.name}</td>
-                                                                <td className="p-4">{sv.id}</td>
-                                                                <td className="p-4">
+                                                                <td className="p-5 border-b text-sm text-gray-900">{sv.name}</td>
+                                                                <td className="p-5 border-b text-sm text-gray-900">{sv.id}</td>
+                                                                <td className="p-5 border-b text-sm">
                                                                     {sv.table ? (
-                                                                        <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 transition-colors duration-200">View Table</a>
+                                                                        <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200">View Table</a>
                                                                     ) : 'No table set'}
                                                                 </td>
-                                                                <td className="p-4 space-x-3">
+                                                                <td className="p-5 border-b space-x-4">
                                                                     <button
                                                                         onClick={() => removeSv(sv.id)}
-                                                                        className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-red-600 hover:bg-red-700 transition-all duration-200"
+                                                                        className="px-4 py-2 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition-all duration-200 shadow-sm text-sm"
                                                                         disabled={isLoading}
                                                                     >
                                                                         Remove
@@ -2102,7 +2082,7 @@
                                                                             setCurrentSvForTableChange(sv);
                                                                             setShowChangeTableForm(true);
                                                                         }}
-                                                                        className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200"
+                                                                        className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-all duration-200 shadow-sm text-sm"
                                                                         disabled={isLoading}
                                                                     >
                                                                         Change Table
@@ -2117,20 +2097,20 @@
                                     </div>
                                 )}
                                 {showChangeTableForm && currentSvForTableChange && (
-                                    <div className="bg-white p-8 rounded-2xl shadow-xl mb-8">
+                                    <div className="bg-white p-8 rounded-2xl shadow-2xl mb-8">
                                         <h2 className="text-2xl font-bold mb-6 text-gray-800">Change Table for {currentSvForTableChange.name}</h2>
                                         <input
                                             type="text"
-                                            placeholder="New Google Sheets URL"
+                                            placeholder="Enter New Google Sheets URL"
                                             value={newTableUrl}
                                             onChange={(e) => setNewTableUrl(e.target.value)}
-                                            className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                             disabled={isLoading}
                                         />
-                                        <div className="flex justify-end space-x-4">
+                                        <div className="flex justify-center space-x-6">
                                             <button
                                                 onClick={() => changeSvTable(currentSvForTableChange.id, newTableUrl)}
-                                                className={`py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                                className={`px-8 py-3 rounded-lg font-medium text-white transition-all duration-200 shadow-md bg-blue-600 hover:bg-blue-700 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                                 disabled={isLoading}
                                             >
                                                 {isLoading ? 'Updating Table...' : 'Update Table'}
@@ -2141,7 +2121,7 @@
                                                     setCurrentSvForTableChange(null);
                                                     setNewTableUrl('');
                                                 }}
-                                                className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                                                className="px-8 py-3 bg-gray-500 text-white rounded-lg font-medium hover:bg-gray-600 transition-all duration-200 shadow-md"
                                             >
                                                 Cancel
                                             </button>
@@ -2149,12 +2129,12 @@
                                     </div>
                                 )}
                                 {view === 'view_scores' && (
-                                    <div className="bg-white p-8 rounded-2xl shadow-xl">
+                                    <div className="bg-white p-8 rounded-2xl shadow-2xl">
                                         <h2 className="text-2xl font-bold mb-6 text-gray-800">View Operator Scores</h2>
                                         <select
                                             value={selectedSvId}
                                             onChange={(e) => setSelectedSvId(e.target.value)}
-                                            className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                             disabled={isLoading || isAdminDataLoading}
                                         >
                                             <option value="">Select a Supervisor</option>
@@ -2165,19 +2145,19 @@
                                         {isAdminDataLoading ? (
                                             <p className="text-center text-gray-600">Loading operator scores...</p>
                                         ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
-                                            <div className="overflow-x-auto rounded-xl shadow-sm">
-                                                <table className="min-w-full bg-white border border-gray-200 divide-y divide-gray-200">
-                                                    <thead className="bg-gray-50">
-                                                        <tr>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Name</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Calls</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Expected</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Avg Score</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Link</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Actions</th>
+                                            <div className="overflow-x-auto rounded-2xl shadow-sm">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-blue-50">
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Name</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Calls</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Expected</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Avg Score</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Link</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Actions</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody className="divide-y divide-gray-200">
+                                                    <tbody>
                                                         {selectedSvData.operators.map((op, index) => {
                                                             const currentWeek = getCurrentWeekOfMonth();
                                                             const expectedCalls = getExpectedCalls(currentWeek);
@@ -2185,26 +2165,26 @@
                                                             const hasIssue = callCount < expectedCalls;
                                                             return (
                                                                 <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
-                                                                    <td className="p-4">{op.name}</td>
-                                                                    <td className={`p-4 ${getCallCountColor(callCount, expectedCalls)}`}>
+                                                                    <td className="p-5 border-b text-sm text-gray-900">{op.name}</td>
+                                                                    <td className={`p-5 border-b text-sm font-medium ${getCallCountColor(callCount, expectedCalls)}`}>
                                                                         {callCount}
                                                                     </td>
-                                                                    <td className="p-4">{expectedCalls}</td>
-                                                                    <td className="p-4">
+                                                                    <td className="p-5 border-b text-sm text-gray-900">{expectedCalls}</td>
+                                                                    <td className="p-5 border-b text-sm">
                                                                         <span className={getScoreColor(op.avg_score)}>
                                                                             {op.avg_score ? op.avg_score.toFixed(2) : '-'}
                                                                         </span>
                                                                     </td>
-                                                                    <td className="p-4">
+                                                                    <td className="p-5 border-b text-sm">
                                                                         {op.link ? (
-                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 transition-colors duration-200">View Link</a>
+                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200">View Link</a>
                                                                         ) : '-'}
                                                                     </td>
-                                                                    <td className="p-4 space-x-3">
+                                                                    <td className="p-5 border-b space-x-4">
                                                                         {hasIssue && (
                                                                             <button
                                                                                 onClick={() => notifySupervisor(selectedSvId, op.name)}
-                                                                                className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-yellow-500 hover:bg-yellow-600 transition-all duration-200"
+                                                                                className="px-4 py-2 bg-yellow-500 text-white rounded-lg font-medium hover:bg-yellow-600 transition-all duration-200 shadow-sm text-sm"
                                                                                 disabled={isLoading}
                                                                             >
                                                                                 Notify Supervisor
@@ -2226,7 +2206,7 @@
                                                                                 const token = safeBtoa(JSON.stringify(tokenData));
                                                                                 window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
                                                                             }}
-                                                                            className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200"
+                                                                            className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-all duration-200 shadow-sm text-sm"
                                                                             title="Listen to operator calls"
                                                                         >
                                                                             Listen to Calls
@@ -2241,8 +2221,8 @@
                                         ) : selectedSvId ? (
                                             <p className="text-center text-gray-600">No operators found for this supervisor.</p>
                                         ) : null}
-                                        {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
-                                        {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
+                                        {error && <p className="text-red-600 mt-6 text-center font-medium">{error}</p>}
+                                        {success && <p className="text-green-600 mt-6 text-center font-medium">{success}</p>}
 
                                     </div>
                                 )}
@@ -2255,38 +2235,38 @@
                                     />
                                 )}
                                 {view === 'manage_users' && (
-                                    <div className="bg-white p-8 rounded-2xl shadow-xl">
+                                    <div className="bg-white p-8 rounded-2xl shadow-2xl">
                                         <h2 className="text-2xl font-bold mb-6 text-gray-800">Manage Users</h2>
                                         {isAdminDataLoading ? (
                                             <p className="text-center text-gray-600">Loading users...</p>
                                         ) : users.length === 0 ? (
                                             <p className="text-center text-gray-600">No users found.</p>
                                         ) : (
-                                            <div className="overflow-x-auto rounded-xl shadow-sm">
-                                                <table className="min-w-full bg-white border border-gray-200 divide-y divide-gray-200">
-                                                    <thead className="bg-gray-50">
-                                                        <tr>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Name</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">ID</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Direction</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Supervisor</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Actions</th>
+                                            <div className="overflow-x-auto rounded-2xl shadow-sm">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-blue-50">
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Name</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">ID</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Direction</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Supervisor</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Actions</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody className="divide-y divide-gray-200">
+                                                    <tbody>
                                                         {users.map(u => (
                                                             <tr key={u.id} className="hover:bg-gray-50 transition-colors duration-200">
-                                                                <td className="p-4">{u.name}</td>
-                                                                <td className="p-4">{u.id}</td>
-                                                                <td className="p-4">{u.direction || '-'}</td>
-                                                                <td className="p-4">{u.supervisor_name || '-'}</td>
-                                                                <td className="p-4">
+                                                                <td className="p-5 border-b text-sm text-gray-900">{u.name}</td>
+                                                                <td className="p-5 border-b text-sm text-gray-900">{u.id}</td>
+                                                                <td className="p-5 border-b text-sm text-gray-900">{u.direction || '-'}</td>
+                                                                <td className="p-5 border-b text-sm text-gray-900">{u.supervisor_name || '-'}</td>
+                                                                <td className="p-5 border-b">
                                                                     <button
                                                                         onClick={() => {
                                                                             setUserToEdit(u);
                                                                             setShowUserEditModal(true);
                                                                         }}
-                                                                        className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200"
+                                                                        className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-all duration-200 shadow-sm text-sm"
                                                                     >
                                                                         Edit User
                                                                     </button>
@@ -2304,19 +2284,19 @@
                         {user.role === 'sv' && (
                             <>
                                 {view === 'update_table' && (
-                                    <div className="bg-white p-8 rounded-2xl shadow-xl mb-8">
-                                        <h2 className="text-2xl font-bold mb-6 text-gray-800">Update Your Table</h2>
+                                    <div className="bg-white p-8 rounded-2xl shadow-2xl mb-8">
+                                        <h2 className="text-2xl font-bold mb-6 text-gray-800">Update Table URL</h2>
                                         <input
                                             type="text"
                                             placeholder="Enter Google Sheets URL"
                                             value={newTableUrl}
                                             onChange={(e) => setNewTableUrl(e.target.value)}
-                                            className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                             disabled={isLoading}
                                         />
                                         <button
                                             onClick={updateTable}
-                                            className={`w-full py-4 rounded-lg font-semibold text-lg text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                            className={`w-full bg-blue-600 text-white p-4 rounded-lg font-semibold hover:bg-blue-700 transition-all duration-200 shadow-md ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                             disabled={isLoading}
                                         >
                                             {isLoading ? 'Updating Table...' : 'Update Table'}
@@ -2324,34 +2304,34 @@
                                     </div>
                                 )}
                                 {view === 'manage_operators' && (
-                                    <div className="bg-white p-8 rounded-2xl shadow-xl">
+                                    <div className="bg-white p-8 rounded-2xl shadow-2xl">
                                         <h2 className="text-2xl font-bold mb-6 text-gray-800">Manage Your Operators</h2>
                                         {isLoading ? (
                                             <p className="text-center text-gray-600">Loading operators...</p>
                                         ) : svData?.operators?.length > 0 ? ( 
-                                            <div className="overflow-x-auto rounded-xl shadow-sm">
-                                                <table className="min-w-full bg-white border border-gray-200 divide-y divide-gray-200">
-                                                    <thead className="bg-gray-50">
-                                                        <tr>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Name</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">ID</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Direction</th>
-                                                            <th className="p-4 text-left font-semibold text-gray-700">Actions</th>
+                                            <div className="overflow-x-auto rounded-2xl shadow-sm">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-blue-50">
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Name</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">ID</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Direction</th>
+                                                            <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Actions</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody className="divide-y divide-gray-200">
+                                                    <tbody>
                                                         {svData.operators.map(op => (
                                                             <tr key={op.id} className="hover:bg-gray-50 transition-colors duration-200">
-                                                                <td className="p-4">{op.name}</td>
-                                                                <td className="p-4">{op.id}</td>
-                                                                <td className="p-4">{op.direction_id ? directions.find(d => d.id === op.direction_id)?.name || '-' : '-'}</td>
-                                                                <td className="p-4">
+                                                                <td className="p-5 border-b text-sm text-gray-900">{op.name}</td>
+                                                                <td className="p-5 border-b text-sm text-gray-900">{op.id}</td>
+                                                                <td className="p-5 border-b text-sm text-gray-900">{op.direction_id ? directions.find(d => d.id === op.direction_id)?.name || '-' : '-'}</td>
+                                                                <td className="p-5 border-b">
                                                                     <button
                                                                         onClick={() => {
                                                                             setUserToEdit({ ...op, supervisor_id: user.id });  // Fix supervisor to themselves
                                                                             setShowUserEditModal(true);
                                                                         }}
-                                                                        className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200"
+                                                                        className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-all duration-200 shadow-sm text-sm"
                                                                     >
                                                                         Edit Operator
                                                                     </button>
@@ -2362,47 +2342,47 @@
                                                 </table>
                                             </div>
                                         ) : (
-                                            <p className="text-center text-gray-600">No operators assigned yet.</p>
+                                            <p className="text-center text-gray-600">No operators found.</p>
                                         )}
                                     </div>
                                 )}
                                 {view === 'operators' && (
-                                    <div className="bg-white p-8 rounded-2xl shadow-xl mb-8">
+                                    <div className="bg-white p-8 rounded-2xl shadow-2xl mb-8">
                                         <h2 className="text-2xl font-bold mb-6 text-gray-800">Your Operators</h2>
                                         {isLoading ? (
-                                            <p className="text-center text-gray-600">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading operators...</p>
                                         ) : svData && svData.operators && svData.operators.length > 0 ? (
-                                            <div className="overflow-x-auto rounded-xl shadow-sm">
-                                                <table className="min-w-full bg-white border border-gray-200 divide-y divide-gray-200">
-                                                <thead className="bg-gray-50">
-                                                    <tr>
-                                                    <th className="p-4 text-left font-semibold text-gray-700">Name</th>
-                                                    <th className="p-4 text-left font-semibold text-gray-700">Calls</th>
-                                                    <th className="p-4 text-left font-semibold text-gray-700">Avg Score</th>
-                                                    <th className="p-4 text-left font-semibold text-gray-700">Link</th>
-                                                    <th className="p-4 text-left font-semibold text-gray-700">Actions</th>
+                                            <div className="overflow-x-auto rounded-2xl shadow-sm">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                <thead>
+                                                    <tr className="bg-blue-50">
+                                                    <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Name</th>
+                                                    <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Calls</th>
+                                                    <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Avg Score</th>
+                                                    <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Link</th>
+                                                    <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Actions</th>
                                                     </tr>
                                                 </thead>
-                                                <tbody className="divide-y divide-gray-200">
+                                                <tbody>
                                                     {svData.operators.map((op, index) => {
                                                     const callCount = parseInt(op.call_count) || 0;
                                                     return (
                                                         <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
-                                                        <td className="p-4">{op.name}</td>
-                                                        <td className={`p-4 ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
+                                                        <td className="p-5 border-b text-sm text-gray-900">{op.name}</td>
+                                                        <td className={`p-5 border-b text-sm font-medium ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
                                                             {callCount}
                                                         </td>
-                                                        <td className="p-4">
+                                                        <td className="p-5 border-b text-sm">
                                                             <span className={getScoreColor(op.avg_score)}>
                                                             {op.avg_score ? op.avg_score.toFixed(2) : '-'}
                                                             </span>
                                                         </td>
-                                                        <td className="p-4">
+                                                        <td className="p-5 border-b text-sm">
                                                             {op.link ? (
-                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 transition-colors duration-200">View Link</a>
+                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200">View Link</a>
                                                             ) : '-'}
                                                         </td>
-                                                        <td className="p-4 space-x-3">
+                                                        <td className="p-5 border-b space-x-4">
                                                             <button
                                                             onClick={() => {
                                                                 // Генерируем токен с данными оператора
@@ -2418,7 +2398,7 @@
                                                                 const token = safeBtoa(JSON.stringify(tokenData));
                                                                 window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
                                                             }}
-                                                            className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200"
+                                                            className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-all duration-200 shadow-sm text-sm"
                                                             title="Listen to operator calls"
                                                             >
                                                             Listen Calls
@@ -2433,8 +2413,8 @@
                                         ) : (
                                             <p className="text-center text-gray-600">No operators found.</p>
                                         )}
-                                        {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
-                                        {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
+                                        {error && <p className="text-red-600 mt-6 text-center font-medium">{error}</p>}
+                                        {success && <p className="text-green-600 mt-6 text-center font-medium">{success}</p>}
                                     </div>
                                 )}
                             </>
@@ -2442,62 +2422,62 @@
                         {user.role === 'operator' && (
                             <>
                                 {view === 'profile' && (
-                                    <div className="bg-white p-10 rounded-2xl shadow-xl mb-8 border border-gray-200">
-                                        <h2 className="text-3xl font-bold mb-8 text-gray-800">Your Profile Information</h2>
+                                    <div className="bg-white p-10 rounded-2xl shadow-2xl mb-10 border border-gray-200">
+                                        <h2 className="text-3xl font-bold mb-8 text-gray-800">Your Profile</h2>
                                         {isLoading ? (
                                             <p className="text-center text-gray-600">Loading profile...</p>
                                         ) : profileData ? (
-                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
-                                                    <p className="text-sm font-medium text-gray-500 mb-2">Full Name</p>
-                                                    <p className="text-lg font-semibold text-gray-900">{profileData.name || '-'}</p>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                                <div className="bg-gray-50 p-6 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
+                                                    <p className="text-sm font-medium text-gray-500 mb-2">Name</p>
+                                                    <p className="text-xl font-semibold text-gray-900">{profileData.name || '-'}</p>
                                                 </div>
-                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                <div className="bg-gray-50 p-6 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
                                                     <p className="text-sm font-medium text-gray-500 mb-2">Role</p>
-                                                    <p className="text-lg font-semibold text-gray-900">{profileData.role || '-'}</p>
+                                                    <p className="text-xl font-semibold text-gray-900">{profileData.role || '-'}</p>
                                                 </div>
-                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                <div className="bg-gray-50 p-6 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
                                                     <p className="text-sm font-medium text-gray-500 mb-2">Direction</p>
-                                                    <p className="text-lg font-semibold text-gray-900">
+                                                    <p className="text-xl font-semibold text-gray-900">
                                                         {profileData.direction ? profileData.direction : '-'}
                                                     </p>
                                                 </div>
-                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                <div className="bg-gray-50 p-6 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
                                                     <p className="text-sm font-medium text-gray-500 mb-2">Hire Date</p>
-                                                    <p className="text-lg font-semibold text-gray-900">{profileData.hire_date || '-'}</p>
+                                                    <p className="text-xl font-semibold text-gray-900">{profileData.hire_date || '-'}</p>
                                                 </div>
-                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                <div className="bg-gray-50 p-6 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
                                                     <p className="text-sm font-medium text-gray-500 mb-2">Supervisor</p>
-                                                    <p className="text-lg font-semibold text-gray-900">{profileData.supervisor_name || '-'}</p>
+                                                    <p className="text-xl font-semibold text-gray-900">{profileData.supervisor_name || '-'}</p>
                                                 </div>
-                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                <div className="bg-gray-50 p-6 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
                                                     <p className="text-sm font-medium text-gray-500 mb-2">Scores Table</p>
                                                     {profileData.scores_table_url ? (
                                                         <a
                                                             href={profileData.scores_table_url}
                                                             target="_blank"
                                                             rel="noopener noreferrer"
-                                                            className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
+                                                            className="text-blue-600 hover:text-blue-800 font-semibold transition-colors duration-200 text-xl"
                                                         >
-                                                            View Scores
+                                                            View Scores Table
                                                         </a>
                                                     ) : (
-                                                        <p className="text-lg text-gray-900">-</p>
+                                                        <p className="text-xl text-gray-900">-</p>
                                                     )}
                                                 </div>
-                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                <div className="bg-gray-50 p-6 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
                                                     <p className="text-sm font-medium text-gray-500 mb-2">Hours Table</p>
                                                     {profileData.hours_table_url ? (
                                                         <a
                                                             href={profileData.hours_table_url}
                                                             target="_blank"
                                                             rel="noopener noreferrer"
-                                                            className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
+                                                            className="text-blue-600 hover:text-blue-800 font-semibold transition-colors duration-200 text-xl"
                                                         >
-                                                            View Hours
+                                                            View Hours Table
                                                         </a>
                                                     ) : (
-                                                        <p className="text-lg text-gray-900">-</p>
+                                                        <p className="text-xl text-gray-900">-</p>
                                                     )}
                                                 </div>
                                             </div>
@@ -2508,11 +2488,11 @@
                                 )}
                                 {(view === 'hours' || view === 'evaluation') && (
                                     <div className="mb-8">
-                                        <label className="block mb-3 font-bold text-gray-800 text-lg">Select Month:</label>
+                                        <label className="block mb-3 font-bold text-gray-800">Select Month:</label>
                                         <select
                                             value={selectedMonth}
                                             onChange={(e) => setSelectedMonth(e.target.value)}
-                                            className="w-full max-w-sm p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            className="w-full max-w-md p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                             disabled={isLoading}
                                         >
                                             {getMonthOptions()}
@@ -2520,34 +2500,34 @@
                                     </div>
                                 )}
                                 {view === 'hours' && (
-                                    <div className="bg-white p-10 rounded-2xl shadow-xl border border-gray-200 transition-all duration-300">
-                                        <h2 className="text-3xl font-bold mb-8 text-gray-800">Your Work Hours Overview</h2>
+                                    <div className="bg-white p-10 rounded-2xl shadow-2xl border border-gray-200 transition-all duration-300">
+                                        <h2 className="text-3xl font-bold mb-8 text-gray-800">Your Work Hours</h2>
                                         {isLoading ? (
-                                            <p className="text-center text-gray-600">Loading hours data...</p>
+                                            <p className="text-center text-gray-600">Loading hours...</p>
                                         ) : hoursData ? (
                                             <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-                                                <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
-                                                    <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover-scale">
+                                                <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-8">
+                                                    <div className="p-6 bg-gray-50 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
                                                         <p className="text-sm font-medium text-gray-500 mb-2">Regular Hours</p>
-                                                        <p className={`text-xl font-bold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
+                                                        <p className={`text-2xl font-bold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
                                                             {hoursData.regular_hours.toFixed(2)} hours
                                                         </p>
                                                     </div>
-                                                    <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover-scale">
+                                                    <div className="p-6 bg-gray-50 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
                                                         <p className="text-sm font-medium text-gray-500 mb-2">Training Hours</p>
-                                                        <p className="text-xl font-bold text-gray-900">{hoursData.training_hours.toFixed(2)} hours</p>
+                                                        <p className="text-2xl font-bold text-gray-900">{hoursData.training_hours.toFixed(2)} hours</p>
                                                     </div>
-                                                    <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover-scale">
+                                                    <div className="p-6 bg-gray-50 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
                                                         <p className="text-sm font-medium text-gray-500 mb-2">Fines</p>
-                                                        <p className="text-xl font-bold text-red-600">{hoursData.fines.toFixed(2)}</p>
+                                                        <p className="text-2xl font-bold text-red-600">{hoursData.fines.toFixed(2)}</p>
                                                     </div>
-                                                    <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover-scale">
+                                                    <div className="p-6 bg-gray-50 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
                                                         <p className="text-sm font-medium text-gray-500 mb-2">Norm Hours</p>
-                                                        <p className="text-xl font-bold text-gray-900">{hoursData.norm_hours.toFixed(2)} hours</p>
+                                                        <p className="text-2xl font-bold text-gray-900">{hoursData.norm_hours.toFixed(2)} hours</p>
                                                     </div>
-                                                    <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover-scale">
+                                                    <div className="p-6 bg-gray-50 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
                                                         <p className="text-sm font-medium text-gray-500 mb-2">Performance</p>
-                                                        <p className={`text-xl font-bold ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
+                                                        <p className={`text-2xl font-bold ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
                                                             {((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%
                                                         </p>
                                                     </div>
@@ -2555,7 +2535,7 @@
                                                 <div className="col-span-1 flex justify-center items-center">
                                                     <SemiCircleProgress
                                                         percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
-                                                        label="Norm Fulfillment"
+                                                        label="Norm Completion"
                                                     />
                                                 </div>
                                             </div>
@@ -2565,7 +2545,7 @@
                                     </div>
                                 )}
                                 {view === 'evaluation' && (
-                                    <div className="bg-white p-10 rounded-2xl shadow-xl border border-gray-200 transition-all duration-300">
+                                    <div className="bg-white p-10 rounded-2xl shadow-2xl border border-gray-200 transition-all duration-300">
                                         <h2 className="text-3xl font-bold mb-8 text-gray-800">Your Call Evaluations</h2>
                                         {isLoading ? (
                                             <p className="text-center text-gray-600">Loading evaluations...</p>
@@ -2573,13 +2553,13 @@
                                             <div>
                                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-10">
                                                     <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-4">
-                                                        <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover-scale">
-                                                            <p className="text-sm font-medium text-gray-500 mb-2">Total Evaluated Calls</p>
+                                                        <div className="p-6 bg-gray-50 rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:scale-105">
+                                                            <p className="text-sm font-medium text-gray-500 mb-3">Total Evaluated Calls</p>
                                                             <p className="text-5xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
                                                             <p className={`text-xl font-medium mt-3 ${
                                                                 (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
                                                             }`}>
-                                                                {20 - operatorData.evaluations.length} calls remaining (Target: 20)
+                                                                {20 - operatorData.evaluations.length} calls remaining out of 20
                                                             </p>
                                                         </div>
                                                     </div>
@@ -2587,20 +2567,20 @@
                                                         <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
                                                     </div>
                                                 </div>
-                                                <div className="overflow-x-auto rounded-xl shadow-sm">
-                                                    <table className="min-w-full bg-white border border-gray-200 divide-y divide-gray-200">
-                                                        <thead className="bg-blue-50">
-                                                            <tr>
-                                                                <th className="p-4 text-left font-semibold text-gray-700">Call ID</th>
-                                                                <th className="p-4 text-left font-semibold text-gray-700">Phone Number</th>
-                                                                <th className="p-4 text-left font-semibold text-gray-700">Score</th>
-                                                                <th className="p-4 text-left font-semibold text-gray-700">Comment</th>
-                                                                <th className="p-4 text-left font-semibold text-gray-700">Month</th>
-                                                                <th className="p-4 text-left font-semibold text-gray-700">Evaluation Date</th>
-                                                                <th className="p-4 text-left font-semibold text-gray-700">Actions</th>
+                                                <div className="overflow-x-auto rounded-2xl shadow-sm">
+                                                    <table className="min-w-full bg-white border-collapse">
+                                                        <thead>
+                                                            <tr className="bg-blue-50">
+                                                                <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Call ID</th>
+                                                                <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Phone Number</th>
+                                                                <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Score</th>
+                                                                <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Comment</th>
+                                                                <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Month</th>
+                                                                <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Evaluation Date</th>
+                                                                <th className="p-5 border-b text-left text-sm font-bold text-gray-800">Actions</th>
                                                             </tr>
                                                         </thead>
-                                                        <tbody className="divide-y divide-gray-200">
+                                                        <tbody>
                                                         {operatorData.evaluations.map((eval1, index) => (
                                                             <React.Fragment key={index}>
                                                             <tr
@@ -2609,33 +2589,33 @@
                                                                 }`}
                                                                 onClick={() => handleEvaluationClick(eval1)}
                                                             >
-                                                                <td className="p-4 text-sm">{eval1.id || '-'}</td>
-                                                                <td className="p-4 text-sm">{eval1.phone_number || '-'}</td>
-                                                                <td className={`p-4 text-sm font-medium ${getScoreColor(eval1.score)}`}>
+                                                                <td className="p-5 border-b text-sm text-gray-900">{eval1.id || '-'}</td>
+                                                                <td className="p-5 border-b text-sm text-gray-900">{eval1.phone_number || '-'}</td>
+                                                                <td className={`p-5 border-b text-sm font-bold ${getScoreColor(eval1.score)}`}>
                                                                 {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
                                                                 </td>
-                                                                <td className="p-4 text-sm">
+                                                                <td className="p-5 border-b text-sm text-gray-700">
                                                                 {eval1.comment ? (
-                                                                    <div className="space-y-1">
+                                                                    <div className="space-y-2">
                                                                     {eval1.comment.split('\n').map((line, i) => {
                                                                         const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
                                                                         const match = cleanLine.match(/^(.*?):\s*(.*)$/);
                                                                         if (match) {
                                                                         return (
                                                                             <p key={i} className="text-sm">
-                                                                            <span className="font-semibold">{match[1]}:</span>{' '}
+                                                                            <span className="font-bold text-gray-800">{match[1]}:</span>{' '}
                                                                             <span className="italic text-gray-600">{match[2]}</span>
                                                                             </p>
                                                                         );
                                                                         }
-                                                                        return <p key={i} className="text-sm text-gray-600">{cleanLine || '-'}</p>;
+                                                                        return <p key={i} className="text-sm text-gray-700">{cleanLine || '-'}</p>;
                                                                     })}
                                                                     </div>
                                                                 ) : '-'}
                                                                 </td>
-                                                                <td className="p-4 text-sm">{eval1.month || '-'}</td>
-                                                                <td className="p-4 text-sm">{eval1.evaluation_date || '-'}</td>
-                                                                <td className="p-4 text-sm">
+                                                                <td className="p-5 border-b text-sm text-gray-900">{eval1.month || '-'}</td>
+                                                                <td className="p-5 border-b text-sm text-gray-900">{eval1.evaluation_date || '-'}</td>
+                                                                <td className="p-5 border-b text-sm">
                                                                 {eval1.score < 100 && (
                                                                     <button
                                                                     onClick={(e) => {
@@ -2643,9 +2623,9 @@
                                                                         setSelectedEvaluation(eval1);
                                                                         setShowDisputeModal(true);
                                                                     }}
-                                                                    className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-yellow-500 hover:bg-yellow-600 transition-all duration-200"
+                                                                    className="px-4 py-2 bg-yellow-500 text-white rounded-lg font-medium hover:bg-yellow-600 transition-all duration-200 shadow-sm text-sm"
                                                                     >
-                                                                    Dispute Score
+                                                                    Dispute Evaluation
                                                                     </button>
                                                                 )}
                                                                 </td>
@@ -2653,13 +2633,13 @@
 
                                                             {expandedEvaluation?.id === eval1.id && (
                                                                 <tr>
-                                                                <td colSpan={7} className="p-4 bg-gray-50 border-t text-sm">
+                                                                <td colSpan={7} className="p-5 bg-gray-50 border-t text-sm">
                                                                     {loadingAudioId === eval1.id ? (
-                                                                    <p className="text-gray-500 italic">Loading audio file...</p>
+                                                                    <p className="text-gray-500 italic text-center">Loading audio file...</p>
                                                                     ) : audioUrl ? (
-                                                                    <audio controls src={audioUrl} className="w-full rounded-lg shadow-sm" />
+                                                                    <audio controls src={audioUrl} className="w-full" />
                                                                     ) : (
-                                                                    <p className="text-red-500 font-medium">Audio file not available</p>
+                                                                    <p className="text-red-600 text-center font-medium">Audio not available</p>
                                                                     )}
                                                                 </td>
                                                                 </tr>
@@ -2676,25 +2656,25 @@
                                     </div>
                                 )}
                                 {view === 'salary' && (
-                                    <div className="bg-white p-10 rounded-2xl shadow-xl border border-gray-200 transition-all duration-300">
+                                    <div className="bg-white p-10 rounded-2xl shadow-2xl border border-gray-200 transition-all duration-300">
                                         <h2 className="text-3xl font-bold mb-8 text-gray-800">Salary Calculator</h2>
-                                        <div className="grid grid-cols-1 gap-6">
-                                            <div>
+                                        <div className="grid grid-cols-1 gap-8">
+                                            <div className="form-group">
                                                 <label className="block mb-3 font-bold text-gray-800">Employee Experience (months):</label>
                                                 <select
                                                     value={salaryData.experience}
                                                     onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
-                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                                     disabled={isLoading}
                                                 >
                                                     <option value="">Select Experience Level</option>
                                                     <option value="0-3">0-3 months</option>
                                                     <option value="4-9">4-9 months</option>
                                                     <option value="10-15">10-15 months</option>
-                                                    <option value="16+">16+ months</option>
+                                                    <option value="16+">≥16 months</option>
                                                 </select>
                                             </div>
-                                            <div>
+                                            <div className="form-group">
                                                 <label className="block mb-3 font-bold text-gray-800">Quality (%):</label>
                                                 <input
                                                     type="number"
@@ -2703,11 +2683,11 @@
                                                     min="0"
                                                     max="100"
                                                     step="0.01"
-                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                                     disabled={isLoading}
                                                 />
                                             </div>
-                                            <div>
+                                            <div className="form-group">
                                                 <label className="block mb-3 font-bold text-gray-800">Calls per Hour:</label>
                                                 <input
                                                     type="number"
@@ -2716,11 +2696,11 @@
                                                     min="0"
                                                     max="100"
                                                     step="0.01"
-                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                                     disabled={isLoading}
                                                 />
                                             </div>
-                                            <div>
+                                            <div className="form-group">
                                                 <label className="block mb-3 font-bold text-gray-800">Monthly Hours Norm:</label>
                                                 <input
                                                     type="number"
@@ -2729,11 +2709,11 @@
                                                     min="0"
                                                     max="744"
                                                     step="0.01"
-                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                                     disabled={isLoading}
                                                 />
                                             </div>
-                                            <div>
+                                            <div className="form-group">
                                                 <label className="block mb-3 font-bold text-gray-800">Total Hours Worked:</label>
                                                 <input
                                                     type="number"
@@ -2742,32 +2722,32 @@
                                                     min="0"
                                                     max="744"
                                                     step="0.01"
-                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                                     disabled={isLoading}
                                                 />
                                             </div>
-                                            <div>
+                                            <div className="form-group">
                                                 <label className="block mb-3 font-bold text-gray-800">Bonuses:</label>
-                                                <div className="space-y-5">
+                                                <div className="space-y-6">
                                                     <div className="flex items-center gap-4">
                                                         <input
                                                             type="checkbox"
                                                             checked={salaryData.bonusTraining}
                                                             onChange={(e) => setSalaryData({ ...salaryData, bonusTraining: e.target.checked })}
-                                                            className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500"
+                                                            className="w-6 h-6 text-blue-600 rounded focus:ring-blue-500"
                                                             disabled={isLoading}
                                                         />
-                                                        <label className="text-sm font-medium text-gray-700">Training Bonus (6000 KZT)</label>
+                                                        <label className="text-md font-medium text-gray-700">Training Bonus (6000 KZT)</label>
                                                     </div>
                                                     <div className="flex items-center gap-4">
                                                         <input
                                                             type="checkbox"
                                                             checked={salaryData.bonusRefer}
                                                             onChange={(e) => setSalaryData({ ...salaryData, bonusRefer: e.target.checked })}
-                                                            className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500"
+                                                            className="w-6 h-6 text-blue-600 rounded focus:ring-blue-500"
                                                             disabled={isLoading}
                                                         />
-                                                        <label className="text-sm font-medium text-gray-700">Refer a Friend (5000 KZT per friend)</label>
+                                                        <label className="text-md font-medium text-gray-700">Refer a Friend (5000 KZT per friend)</label>
                                                         {salaryData.bonusRefer && (
                                                             <input
                                                                 type="number"
@@ -2775,8 +2755,8 @@
                                                                 onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
                                                                 min="1"
                                                                 step="1"
-                                                                placeholder="Number of friends"
-                                                                className="w-32 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                                placeholder="Quantity"
+                                                                className="w-28 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                                                 disabled={isLoading}
                                                             />
                                                         )}
@@ -2786,10 +2766,10 @@
                                                             type="checkbox"
                                                             checked={salaryData.bonusFilming}
                                                             onChange={(e) => setSalaryData({ ...salaryData, bonusFilming: e.target.checked })}
-                                                            className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500"
+                                                            className="w-6 h-6 text-blue-600 rounded focus:ring-blue-500"
                                                             disabled={isLoading}
                                                         />
-                                                        <label className="text-sm font-medium text-gray-700">Filming Bonus (5000 KZT per session)</label>
+                                                        <label className="text-md font-medium text-gray-700">Filming Bonus (5000 KZT per session)</label>
                                                         {salaryData.bonusFilming && (
                                                             <input
                                                                 type="number"
@@ -2797,8 +2777,8 @@
                                                                 onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
                                                                 min="1"
                                                                 step="1"
-                                                                placeholder="Number of sessions"
-                                                                className="w-32 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                                placeholder="Quantity"
+                                                                className="w-28 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                                                 disabled={isLoading}
                                                             />
                                                         )}
@@ -2806,10 +2786,10 @@
                                                 </div>
                                             </div>
                                         </div>
-                                        <div className="flex justify-center gap-4 mt-8">
+                                        <div className="flex justify-center gap-6 mt-8">
                                             <button
                                                 onClick={calculateSalary}
-                                                className={`py-4 px-8 rounded-lg font-bold text-lg bg-green-600 text-white hover:bg-green-700 transition-all duration-200 shadow-md hover:shadow-lg ${
+                                                className={`px-8 py-4 rounded-lg font-bold text-xl bg-green-600 text-white hover:bg-green-700 transition-all duration-200 shadow-md ${
                                                     isLoading ||
                                                     !salaryData.experience ||
                                                     !salaryData.quality ||
@@ -2836,7 +2816,7 @@
                                             </button>
                                             <button
                                                 onClick={() => setShowPointsTable(!showPointsTable)}
-                                                className={`py-4 px-8 rounded-lg font-bold text-lg bg-purple-600 text-white hover:bg-purple-700 transition-all duration-200 shadow-md hover:shadow-lg ${
+                                                className={`px-8 py-4 rounded-lg font-bold text-xl bg-purple-600 text-white hover:bg-purple-700 transition-all duration-200 shadow-md ${
                                                     !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
                                                 }`}
                                                 disabled={!salaryResult}
@@ -2845,7 +2825,7 @@
                                             </button>
                                             <button
                                                 onClick={clearSalaryForm}
-                                                className={`py-4 px-8 rounded-lg font-bold text-lg bg-red-600 text-white hover:bg-red-700 transition-all duration-200 shadow-md hover:shadow-lg ${
+                                                className={`px-8 py-4 rounded-lg font-bold text-xl bg-red-600 text-white hover:bg-red-700 transition-all duration-200 shadow-md ${
                                                     !salaryData.experience &&
                                                     !salaryData.quality &&
                                                     !salaryData.callsPerHour &&
@@ -2905,16 +2885,16 @@
                             />
                         )}
                         {showAccountMenu && (
-                            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
-                                <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
+                            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 backdrop-blur-sm">
+                                <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-lg transform scale-95 transition-transform duration-300">
                                     <h2 className="text-2xl font-bold mb-6 text-gray-800">Account Settings</h2>
-                                    <div className="space-y-4">
+                                    <div className="space-y-6">
                                         <button
                                             onClick={() => {
                                                 setShowChangeLoginForm(true);
                                                 setShowAccountMenu(false);
                                             }}
-                                            className="w-full py-4 rounded-lg font-semibold text-lg text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                                            className="w-full bg-blue-600 text-white py-4 rounded-lg font-semibold hover:bg-blue-700 transition-all duration-200 shadow-md text-lg"
                                         >
                                             Change Login
                                         </button>
@@ -2923,13 +2903,13 @@
                                                 setShowChangePasswordForm(true);
                                                 setShowAccountMenu(false);
                                             }}
-                                            className="w-full py-4 rounded-lg font-semibold text-lg text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                                            className="w-full bg-blue-600 text-white py-4 rounded-lg font-semibold hover:bg-blue-700 transition-all duration-200 shadow-md text-lg"
                                         >
                                             Change Password
                                         </button>
                                         <button
                                             onClick={() => setShowAccountMenu(false)}
-                                            className="w-full py-4 rounded-lg font-semibold text-lg text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                                            className="w-full bg-gray-500 text-white py-4 rounded-lg font-semibold hover:bg-gray-600 transition-all duration-200 shadow-md text-lg"
                                         >
                                             Close Menu
                                         </button>
@@ -2938,15 +2918,15 @@
                             </div>
                         )}
                         {showChangeLoginForm && (
-                            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
-                                <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
+                            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 backdrop-blur-sm">
+                                <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-lg transform scale-95 transition-transform duration-300">
                                     <h2 className="text-2xl font-bold mb-6 text-gray-800">Change Login</h2>
                                     <input
                                         type="text"
                                         placeholder="New Login"
                                         value={loginData.new_login}
                                         onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
-                                        className="w-full p-4 mb-5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                        className="w-full p-4 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                         disabled={isLoading}
                                     />
                                     <input
@@ -2954,31 +2934,31 @@
                                         placeholder="Confirm New Login"
                                         value={loginData.confirm_login}
                                         onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
-                                        className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                        className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 shadow-sm"
                                         disabled={isLoading}
                                     />
-                                    <div className="flex justify-end space-x-4">
+                                    <div className="flex justify-center space-x-6">
                                         <button
                                             onClick={handleChangeLogin}
-                                            className={`py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                            className={`px-8 py-3 rounded-lg font-medium text-white transition-all duration-200 shadow-md bg-blue-600 hover:bg-blue-700 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                             disabled={isLoading}
                                         >
                                             {isLoading ? 'Updating...' : 'Update Login'}
                                         </button>
                                         <button
                                             onClick={() => setShowChangeLoginForm(false)}
-                                            className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
+                                            className="px-8 py-3 bg-gray-500 text-white rounded-lg font-medium hover:bg-gray-600 transition-all duration-200 shadow-md"
                                         >
                                             Cancel
                                         </button>
                                     </div>
-                                    {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
-                                    {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
+                                    {error && <p className="text-red-600 mt-6 text-center font-medium">{error}</p>}
+                                    {success && <p className="text-green-600 mt-6 text-center font-medium">{success}</p>}
                                 </div>
                             </div>
                         )}
-                        {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
-                        {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
+                        {error && <p className="text-red-600 mt-6 text-center font-medium">{error}</p>}
+                        {success && <p className="text-green-600 mt-6 text-center font-medium">{success}</p>}
                     </div>
                 );
             };
@@ -3001,11 +2981,11 @@
         } catch (err) {
             console.error('Root rendering error:', err);
             document.getElementById('root').innerHTML = `
-                <div class="min-h-screen flex items-center justify-center bg-gray-50">
-                    <div class="bg-white p-10 rounded-2xl shadow-2xl w-full max-w-lg text-center">
-                        <h1 class="text-3xl font-bold mb-4 text-red-600">Application Failed to Load</h1>
-                        <p class="text-gray-600 mb-4">An error occurred while loading the application.</p>
-                        <p class="text-gray-500">Please check the console for more details.</p>
+                <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-red-100 to-red-50">
+                    <div class="bg-white p-10 rounded-2xl shadow-2xl w-full max-w-lg transform transition-all duration-300">
+                        <h1 class="text-3xl font-bold mb-6 text-center text-red-600">Application Load Failed</h1>
+                        <p class="text-center text-gray-700 mb-4">An error occurred while loading the application.</p>
+                        <p class="text-center text-gray-500">Please check the console for details or refresh the page.</p>
                     </div>
                 </div>
             `;
