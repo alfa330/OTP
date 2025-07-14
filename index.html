@@ -724,7 +724,7 @@
             );
         };
 
-        const AddSvForm = ({ isLoading, newSvName, setNewSvName, addSv }) => {
+        const AddSvForm = React.memo(({ isLoading, newSvName, setNewSvName, addSv }) => {
             return (
                 <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                     <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
@@ -745,7 +745,7 @@
                     </button>
                 </div>
             );
-        };
+        });
         
         const App = () => {
             const [user, setUser] = useState(null);
@@ -1625,43 +1625,41 @@
                 }
             };
 
-            const addSv = async () => {
-                    if (!newSvName.trim()) {
-                        setError('Please enter supervisor name');
-                        return;
-                    }
-                    setIsLoading(true);
-                    clearMessages();
-                    try {
-                        const response = await axios.post(
-                            `${API_BASE_URL}/api/admin/add_sv`,
-                            {
-                                name: newSvName.trim()
-                            },
-                            {
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'X-API-Key': user.apiKey,
-                                    'X-User-Id': user.id
-                                }
+            const addSv = useCallback(async () => {
+                if (!newSvName.trim()) {
+                    setError('Please enter supervisor name');
+                    return;
+                }
+                setIsLoading(true);
+                clearMessages();
+                try {
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/admin/add_sv`,
+                        { name: newSvName.trim() },
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
                             }
-                        );
-                        const data = response.data;
-                        if (data.status === 'success' && isMounted.current) {
-                            setSuccess(data.message);
-                            alert(`Supervisor added successfully!\nLogin: ${data.login}\nPassword: ${data.password}`);  // Show credentials to admin
-                            fetchSvList();
-                            setNewSvName('');
-                        } else {
-                            setError(data.error || 'Failed to add supervisor');
                         }
-                    } catch (err) {
-                        console.error('Add SV error:', err);
-                        setError(err.response?.data?.error || 'Failed to add supervisor');
-                    } finally {
-                        if (isMounted.current) setIsLoading(false);
+                    );
+                    const data = response.data;
+                    if (data.status === 'success') {
+                        setSuccess(data.message);
+                        alert(`Supervisor added successfully!\nLogin: ${data.login}\nPassword: ${data.password}`);
+                        fetchSvList();
+                        setNewSvName('');
+                    } else {
+                        setError(data.error || 'Failed to add supervisor');
                     }
-                };
+                } catch (err) {
+                    console.error('Add SV error:', err);
+                    setError(err.response?.data?.error || 'Failed to add supervisor');
+                } finally {
+                    setIsLoading(false);
+                }
+            }, [newSvName, user]);
 
             const removeSv = async (svId) => {
                 if (!confirm('Are you sure you want to remove this supervisor?')) return;
