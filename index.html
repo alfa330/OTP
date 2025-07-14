@@ -10,8 +10,41 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
+    <style>
+        /* Custom scrollbar styles */
+        .scrollbar-custom::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .scrollbar-custom::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        .scrollbar-custom::-webkit-scrollbar-thumb {
+            background: #a0a0a0;
+            border-radius: 10px;
+        }
+        .scrollbar-custom::-webkit-scrollbar-thumb:hover {
+            background: #808080;
+        }
+        /* Fade-in animation */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in {
+            animation: fadeIn 0.3s ease-out;
+        }
+        /* Improved hover effects */
+        .hover-scale {
+            transition: transform 0.2s ease-in-out;
+        }
+        .hover-scale:hover {
+            transform: scale(1.02);
+        }
+    </style>
 </head>
-<body class="bg-gray-200 font-sans antialiased">
+<body class="bg-gray-100 font-sans antialiased text-gray-900">
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef } = React;
@@ -214,19 +247,19 @@
             if (!isOpen) return null;
         
             return (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-4xl max-h-[90vh] overflow-y-auto">
-                        <h2 className="text-xl font-semibold mb-4">Monitoring Scale</h2>
+                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+                    <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-5xl max-h-[95vh] overflow-y-auto scrollbar-custom">
+                        <h2 className="text-2xl font-bold mb-6 text-gray-800">Monitoring Scale Configuration</h2>
                         
-                        <div className="flex mb-4">
+                        <div className="flex mb-6 space-x-4">
                             <button
-                                className={`px-4 py-2 mr-2 rounded ${activeTab === 'directions' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                className={`flex-1 py-3 px-6 rounded-lg font-medium transition-all duration-200 ${activeTab === 'directions' ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
                                 onClick={() => setActiveTab('directions')}
                             >
                                 Directions
                             </button>
                             <button
-                                className={`px-4 py-2 rounded ${activeTab === 'criteria' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                className={`flex-1 py-3 px-6 rounded-lg font-medium transition-all duration-200 ${activeTab === 'criteria' ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
                                 onClick={() => setActiveTab('criteria')}
                             >
                                 Criteria
@@ -234,36 +267,36 @@
                         </div>
         
                         {activeTab === 'directions' && (
-                            <div>
-                                <div className="mb-4">
-                                    <label className="block mb-2 font-medium">
-                                        {isEditingDirection ? `Editing Direction: ${directions[editingDirectionIndex]?.name}` : 'New Direction'}
+                            <div className="space-y-6">
+                                <div className="bg-gray-50 p-6 rounded-xl shadow-sm">
+                                    <label className="block mb-3 text-lg font-semibold text-gray-700">
+                                        {isEditingDirection ? `Edit Direction: ${directions[editingDirectionIndex]?.name}` : 'Add New Direction'}
                                     </label>
-                                    <div className="flex flex-col space-y-2">
+                                    <div className="space-y-4">
                                         <input
                                             type="text"
                                             value={newDirectionName}
                                             onChange={(e) => setNewDirectionName(e.target.value)}
-                                            placeholder="Direction name"
-                                            className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            placeholder="Enter direction name"
+                                            className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                         />
-                                        <div className="flex items-center">
+                                        <div className="flex items-center space-x-3">
                                             <input
                                                 type="checkbox"
                                                 checked={newDirectionFileUpload}
                                                 onChange={(e) => setNewDirectionFileUpload(e.target.checked)}
-                                                className="mr-2"
+                                                className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500"
                                             />
-                                            <label className="text-sm font-medium">File Upload Required</label>
+                                            <label className="text-sm font-medium text-gray-700">Require File Upload</label>
                                         </div>
-                                        <div className="flex space-x-2">
+                                        <div className="flex space-x-4">
                                             <button
                                                 onClick={isEditingDirection ? handleEditDirection : handleAddDirection}
-                                                className={`p-2 rounded text-white ${
-                                                    isEditingDirection ? 'bg-blue-500 hover:bg-blue-600' : 'bg-green-500 hover:bg-green-600'
+                                                className={`flex-1 py-3 px-6 rounded-lg font-medium text-white transition-all duration-200 ${
+                                                    isEditingDirection ? 'bg-blue-600 hover:bg-blue-700' : 'bg-green-600 hover:bg-green-700'
                                                 }`}
                                             >
-                                                {isEditingDirection ? 'Save Changes' : 'Add Direction'}
+                                                {isEditingDirection ? 'Update Direction' : 'Add Direction'}
                                             </button>
                                             {isEditingDirection && (
                                                 <button
@@ -273,29 +306,29 @@
                                                         setIsEditingDirection(false);
                                                         setEditingDirectionIndex(null);
                                                     }}
-                                                    className="p-2 bg-gray-500 text-white rounded hover:bg-gray-600"
+                                                    className="flex-1 py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200"
                                                 >
-                                                    Cancel
+                                                    Cancel Edit
                                                 </button>
                                             )}
                                         </div>
                                     </div>
                                 </div>
         
-                                <div className="mb-4">
-                                    <h3 className="text-lg font-medium mb-2">Directions</h3>
+                                <div>
+                                    <h3 className="text-xl font-semibold mb-4 text-gray-800">Existing Directions</h3>
                                     {directions.length === 0 ? (
-                                        <p className="text-gray-500 italic">No directions added.</p>
+                                        <p className="text-gray-500 italic text-center">No directions have been added yet.</p>
                                     ) : (
-                                        <ul className="space-y-2 max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100">
+                                        <ul className="space-y-4 max-h-64 overflow-y-auto scrollbar-custom pr-2">
                                             {directions.map((direction, index) => (
                                                 <li 
                                                     key={index} 
-                                                    className="flex justify-between items-center bg-white p-2 rounded-md shadow-sm border border-gray-200 animate-fade-in"
+                                                    className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-all duration-200 animate-fade-in"
                                                 >
-                                                    <div className="flex items-center space-x-2">
+                                                    <div className="flex items-center space-x-4">
                                                         <svg
-                                                            className={`w-4 h-4 ${direction.hasFileUpload ? 'text-blue-500' : 'text-gray-500'}`}
+                                                            className={`w-6 h-6 ${direction.hasFileUpload ? 'text-blue-600' : 'text-gray-500'}`}
                                                             fill="none"
                                                             stroke="currentColor"
                                                             viewBox="0 0 24 24"
@@ -308,26 +341,26 @@
                                                                 d={direction.hasFileUpload ? 'M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12' : 'M9 12h6m-3-3v6'}
                                                             />
                                                         </svg>
-                                                        <span className="text-sm font-medium text-gray-800">
-                                                            {direction.name} {direction.hasFileUpload ? '(File Required)' : '(No File)'}
+                                                        <span className="text-base font-medium text-gray-800">
+                                                            {direction.name} {direction.hasFileUpload ? '(File Upload Required)' : '(No File Upload)'}
                                                         </span>
                                                     </div>
-                                                    <div className="flex space-x-2">
+                                                    <div className="flex space-x-3">
                                                         <button
                                                             onClick={() => handleStartEditDirection(index)}
-                                                            className="text-blue-500 hover:text-blue-700 p-1"
+                                                            className="text-blue-600 hover:text-blue-800 p-2 rounded-full hover:bg-blue-100 transition-all duration-200"
                                                             title="Edit direction"
                                                         >
-                                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.29 2.29 0 113.232 3.232L6.5 20.5l-3.5 1 1-3.5L17.768 4.232z" />
                                                             </svg>
                                                         </button>
                                                         <button
                                                             onClick={() => handleDeleteDirection(index)}
-                                                            className="text-red-500 hover:text-red-700 p-1"
+                                                            className="text-red-600 hover:text-red-800 p-2 rounded-full hover:bg-red-100 transition-all duration-200"
                                                             title="Delete direction"
                                                         >
-                                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
                                                             </svg>
                                                         </button>
@@ -341,13 +374,13 @@
                         )}
         
                         {activeTab === 'criteria' && (
-                            <div>
-                                <div className="mb-4">
-                                    <label className="block mb-2 font-medium">Select Direction for Criteria</label>
+                            <div className="space-y-6">
+                                <div className="bg-gray-50 p-6 rounded-xl shadow-sm">
+                                    <label className="block mb-3 text-lg font-semibold text-gray-700">Select Direction to Manage Criteria</label>
                                     <select
                                         value={selectedDirectionIndex}
                                         onChange={(e) => setSelectedDirectionIndex(Number(e.target.value))}
-                                        className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                         disabled={directions.length === 0}
                                     >
                                         {directions.length === 0 ? (
@@ -360,17 +393,17 @@
                                     </select>
                                 </div>
         
-                                <div className="mb-4">
-                                    <label className="block mb-2 font-medium">
-                                        {isEditingCriterion ? `Editing Criterion: ${directions[selectedDirectionIndex]?.criteria[editingCriterionIndex]?.name}` : 'New Criterion'}
+                                <div className="bg-gray-50 p-6 rounded-xl shadow-sm">
+                                    <label className="block mb-3 text-lg font-semibold text-gray-700">
+                                        {isEditingCriterion ? `Edit Criterion: ${directions[selectedDirectionIndex]?.criteria[editingCriterionIndex]?.name}` : 'Add New Criterion'}
                                     </label>
-                                    <div className="flex flex-col space-y-2">
+                                    <div className="space-y-4">
                                         <input
                                             type="text"
                                             value={newCriterionName}
                                             onChange={(e) => setNewCriterionName(e.target.value)}
-                                            placeholder="Criterion name"
-                                            className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            placeholder="Enter criterion name"
+                                            className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={directions.length === 0}
                                         />
                                         {!newCriterionCritical && (
@@ -378,21 +411,22 @@
                                                 type="number"
                                                 value={newCriterionWeight}
                                                 onChange={(e) => setNewCriterionWeight(e.target.value)}
-                                                placeholder="Weight"
+                                                placeholder="Enter weight (1-100)"
                                                 min="1"
-                                                className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                max="100"
+                                                className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                 disabled={directions.length === 0}
                                             />
                                         )}
                                         <textarea
                                             value={newCriterionValue}
                                             onChange={(e) => setNewCriterionValue(e.target.value)}
-                                            placeholder="Criterion description (optional)"
-                                            className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                            rows={3}
+                                            placeholder="Enter criterion description (optional)"
+                                            className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            rows={4}
                                             disabled={directions.length === 0}
                                         />
-                                        <div className="flex items-center">
+                                        <div className="flex items-center space-x-3">
                                             <input
                                                 type="checkbox"
                                                 checked={newCriterionCritical}
@@ -400,47 +434,47 @@
                                                     setNewCriterionCritical(e.target.checked);
                                                     if (e.target.checked) setNewCriterionWeight('');
                                                 }}
-                                                className="mr-2"
+                                                className="w-5 h-5 text-red-600 rounded focus:ring-red-500"
                                                 disabled={directions.length === 0}
                                             />
-                                            <label className="text-sm font-medium">Critical (sets score to 0 if Error, no weight)</label>
+                                            <label className="text-sm font-medium text-gray-700">Mark as Critical (Score 0 if failed, no weight)</label>
                                         </div>
-                                        <div className="flex space-x-2">
+                                        <div className="flex space-x-4">
                                             <button
                                                 onClick={isEditingCriterion ? handleEditCriterion : handleAddCriterion}
-                                                className={`w-full p-2 rounded text-white ${
-                                                    isEditingCriterion ? 'bg-blue-500 hover:bg-blue-600' : 'bg-green-500 hover:bg-green-600'
+                                                className={`flex-1 py-3 px-6 rounded-lg font-medium text-white transition-all duration-200 ${
+                                                    isEditingCriterion ? 'bg-blue-600 hover:bg-blue-700' : 'bg-green-600 hover:bg-green-700'
                                                 } ${directions.length === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
                                                 disabled={directions.length === 0}
                                             >
-                                                {isEditingCriterion ? 'Save Changes' : 'Add Criterion'}
+                                                {isEditingCriterion ? 'Update Criterion' : 'Add Criterion'}
                                             </button>
                                             {isEditingCriterion && (
                                                 <button
                                                     onClick={resetCriterionForm}
-                                                    className="w-full p-2 bg-gray-500 text-white rounded hover:bg-gray-600"
+                                                    className="flex-1 py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200"
                                                 >
-                                                    Cancel Editing
+                                                    Cancel Edit
                                                 </button>
                                             )}
                                         </div>
                                     </div>
                                 </div>
         
-                                <div className="mb-4 max-h-80 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100">
-                                    <h3 className="text-lg font-medium mb-2">Criteria</h3>
+                                <div className="max-h-96 overflow-y-auto scrollbar-custom pr-2">
+                                    <h3 className="text-xl font-semibold mb-4 text-gray-800">Existing Criteria</h3>
                                     {directions.length === 0 || directions[selectedDirectionIndex].criteria.length === 0 ? (
-                                        <p className="text-gray-500 italic">No criteria added for this direction.</p>
+                                        <p className="text-gray-500 italic text-center">No criteria added for this direction yet.</p>
                                     ) : (
-                                        <ul className="space-y-2">
+                                        <ul className="space-y-4">
                                             {directions[selectedDirectionIndex].criteria.map((criterion, critIndex) => (
                                                 <li 
                                                     key={critIndex} 
-                                                    className="flex justify-between items-center bg-white p-2 rounded-md shadow-sm border border-gray-200 animate-fade-in"
+                                                    className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-all duration-200 animate-fade-in"
                                                 >
-                                                    <div className="flex items-center space-x-2">
+                                                    <div className="flex items-center space-x-4">
                                                         <svg
-                                                            className={`w-4 h-4 ${criterion.isCritical ? 'text-red-500' : 'text-green-500'}`}
+                                                            className={`w-6 h-6 ${criterion.isCritical ? 'text-red-600' : 'text-green-600'}`}
                                                             fill="none"
                                                             stroke="currentColor"
                                                             viewBox="0 0 24 24"
@@ -453,26 +487,26 @@
                                                                 d={criterion.isCritical ? 'M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' : 'M5 13l4 4L19 7'}
                                                             />
                                                         </svg>
-                                                        <span className="text-sm font-medium text-gray-800">
-                                                            {criterion.name} {criterion.isCritical ? '(Critical)' : `(${criterion.weight}%)`}
+                                                        <span className="text-base font-medium text-gray-800">
+                                                            {criterion.name} {criterion.isCritical ? '(Critical)' : `(${criterion.weight}% Weight)`}
                                                         </span>
                                                     </div>
-                                                    <div className="flex space-x-2">
+                                                    <div className="flex space-x-3">
                                                         <button
                                                             onClick={() => handleStartEditCriterion(critIndex)}
-                                                            className="text-blue-500 hover:text-blue-700 p-1"
+                                                            className="text-blue-600 hover:text-blue-800 p-2 rounded-full hover:bg-blue-100 transition-all duration-200"
                                                             title="Edit criterion"
                                                         >
-                                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.29 2.29 0 113.232 3.232L6.5 20.5l-3.5 1 1-3.5L17.768 4.232z" />
                                                             </svg>
                                                         </button>
                                                         <button
                                                             onClick={() => handleDeleteCriterion(critIndex)}
-                                                            className="text-red-500 hover:text-red-700 p-1"
+                                                            className="text-red-600 hover:text-red-800 p-2 rounded-full hover:bg-red-100 transition-all duration-200"
                                                             title="Delete criterion"
                                                         >
-                                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
                                                             </svg>
                                                         </button>
@@ -482,24 +516,24 @@
                                         </ul>
                                     )}
                                     {directions.length > 0 && (
-                                        <p className={`mt-2 text-sm ${totalWeight(selectedDirectionIndex) !== 100 && directions[selectedDirectionIndex].criteria.some(c => !c.isCritical) ? 'text-red-500' : 'text-green-500'}`}>
-                                            Total Weight (non-critical): {totalWeight(selectedDirectionIndex)}/100
+                                        <p className={`mt-4 text-base font-medium ${totalWeight(selectedDirectionIndex) !== 100 && directions[selectedDirectionIndex].criteria.some(c => !c.isCritical) ? 'text-red-600' : 'text-green-600'}`}>
+                                            Total Non-Critical Weight: {totalWeight(selectedDirectionIndex)} / 100
                                         </p>
                                     )}
                                 </div>
                             </div>
                         )}
         
-                        <div className="flex justify-between">
+                        <div className="flex justify-end space-x-4 mt-8">
                             <button
                                 onClick={handleSave}
-                                className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                                className="py-3 px-8 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg"
                             >
-                                Save
+                                Save Configuration
                             </button>
                             <button
                                 onClick={onClose}
-                                className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                className="py-3 px-8 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
                             >
                                 Cancel
                             </button>
@@ -525,11 +559,11 @@
             render() {
                 if (this.state.hasError) {
                     return (
-                        <div className="min-h-screen flex items-center justify-center bg-gray-100">
-                            <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                                <h1 className="text-2xl font-bold mb-4 text-center text-red-500">Application Error</h1>
-                                <p className="text-center">An error occurred: {this.state.error?.message || 'Unknown error'}</p>
-                                <p className="text-center">Please check the console for details or try refreshing the page.</p>
+                        <div className="min-h-screen flex items-center justify-center bg-gray-50">
+                            <div className="bg-white p-10 rounded-2xl shadow-xl w-full max-w-lg text-center">
+                                <h1 className="text-3xl font-bold mb-4 text-red-600">Application Error</h1>
+                                <p className="text-gray-600 mb-4">An unexpected error occurred: {this.state.error?.message || 'Unknown error'}</p>
+                                <p className="text-gray-500">Please check the console for more details or refresh the page.</p>
                             </div>
                         </div>
                     );
@@ -538,7 +572,7 @@
             }
         }
 
-        // SemiCircle Progress Component
+        // SemiCircle Progress Component with improved design
         const SemiCircleProgress = ({ percentage, label }) => {
             const canvasRef = useRef(null);
 
@@ -555,30 +589,33 @@
 
                 ctx.clearRect(0, 0, width, height);
 
+                // Background arc
                 ctx.beginPath();
                 ctx.arc(centerX, centerY, radius, startAngle, maxAngle);
                 ctx.strokeStyle = '#e5e7eb';
-                ctx.lineWidth = 10;
+                ctx.lineWidth = 12;
                 ctx.stroke();
 
+                // Progress arc
                 const progressAngle = startAngle + (percentage / 100) * Math.PI;
                 ctx.beginPath();
                 ctx.arc(centerX, centerY, radius, startAngle, progressAngle);
-                ctx.strokeStyle = percentage >= 90 ? '#16a34a' : percentage >= 50 ? '#eab308' : '#dc2626';
-                ctx.lineWidth = 10;
+                ctx.strokeStyle = percentage >= 90 ? '#22c55e' : percentage >= 50 ? '#eab308' : '#ef4444';
+                ctx.lineWidth = 12;
                 ctx.stroke();
 
-                ctx.font = '20px Arial';
+                // Percentage text
+                ctx.font = 'bold 24px Arial';
                 ctx.fillStyle = '#1f2937';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
-                ctx.fillText(`${percentage.toFixed(2)}%`, centerX, centerY - radius - 20);
+                ctx.fillText(`${percentage.toFixed(2)}%`, centerX, centerY - radius - 25);
             }, [percentage]);
 
             return (
-                <div className="flex flex-col items-center transition-transform duration-300 hover:scale-105">
-                    <canvas ref={canvasRef} width={200} height={120} />
-                    <p className="text-sm font-medium text-gray-600 mt-2">{label}</p>
+                <div className="flex flex-col items-center transition-all duration-300 hover:scale-105 hover:shadow-lg">
+                    <canvas ref={canvasRef} width={220} height={140} className="rounded-full shadow-md" />
+                    <p className="text-base font-semibold text-gray-700 mt-3">{label}</p>
                 </div>
             );
         };
@@ -601,54 +638,54 @@
           };
         
           return (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-              <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                <h2 className="text-xl font-semibold mb-4">Оспорить оценку</h2>
+            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+              <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-lg">
+                <h2 className="text-2xl font-bold mb-6 text-gray-800">Dispute Evaluation</h2>
                 
-                <div className="mb-4 space-y-2">
-                  <p className="font-medium">Информация об оценке:</p>
-                  <div className="pl-4">
-                    <p>• ID звонка: <span className="font-semibold">{selectedEvaluation?.id}</span></p>
-                    <p>• Телефон: <span className="font-semibold">{selectedEvaluation?.phone_number}</span></p>
-                    <p>• Оценка: <span className={`font-semibold ${getScoreColor(selectedEvaluation?.score)}`}>
+                <div className="mb-6 space-y-3 bg-gray-50 p-4 rounded-xl">
+                  <p className="font-semibold text-gray-700">Evaluation Details:</p>
+                  <div className="pl-4 space-y-2">
+                    <p className="text-sm">• Call ID: <span className="font-medium">{selectedEvaluation?.id}</span></p>
+                    <p className="text-sm">• Phone: <span className="font-medium">{selectedEvaluation?.phone_number}</span></p>
+                    <p className="text-sm">• Score: <span className={`font-medium ${getScoreColor(selectedEvaluation?.score)}`}>
                       {selectedEvaluation?.score?.toFixed(2)}
                     </span></p>
-                    <p>• Месяц: <span className="font-semibold">{selectedEvaluation?.month}</span></p>
+                    <p className="text-sm">• Month: <span className="font-medium">{selectedEvaluation?.month}</span></p>
                   </div>
                 </div>
         
-                <div className="mb-4">
-                  <label className="block mb-2 font-medium">Ваше сообщение супервайзеру:</label>
+                <div className="mb-6">
+                  <label className="block mb-3 font-semibold text-gray-700">Message to Supervisor:</label>
                   <textarea
                     value={disputeText}
                     onChange={(e) => setDisputeText(e.target.value)}
-                    placeholder="Опишите причину оспаривания оценки..."
-                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    rows={5}
+                    placeholder="Describe the reason for disputing the evaluation..."
+                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                    rows={6}
                   />
                 </div>
         
-                <div className="flex justify-between">
+                <div className="flex justify-end space-x-4">
                   <button
                     onClick={handleSubmitDispute}
-                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    className={`py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                     disabled={isLoading}
                   >
-                    {isLoading ? 'Отправка...' : 'Отправить запрос'}
+                    {isLoading ? 'Submitting...' : 'Submit Dispute'}
                   </button>
                   <button
                     onClick={() => {
                       setShowDisputeModal(false);
                       setDisputeText('');
                     }}
-                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                    className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
                   >
-                    Отмена
+                    Cancel
                   </button>
                 </div>
                 
-                {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
+                {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
               </div>
             </div>
           );
@@ -664,16 +701,16 @@
             if (!isOpen) return null;
 
             return (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                        <h2 className="text-xl font-semibold mb-4">Edit User {editedUser.name}</h2>
-                        <div className="space-y-4">
+                <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+                    <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-lg">
+                        <h2 className="text-2xl font-bold mb-6 text-gray-800">Edit User: {editedUser.name}</h2>
+                        <div className="space-y-6">
                             <div>
-                                <label className="block mb-2 font-medium">Direction</label>
+                                <label className="block mb-3 font-semibold text-gray-700">Direction</label>
                                 <select
                                     value={editedUser.direction_id || ''}
                                     onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value })}
-                                    className="w-full p-2 border rounded-lg"
+                                    className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                 >
                                     <option value="">Select Direction</option>
                                     {directions.map((dir) => (
@@ -683,11 +720,11 @@
                             </div>
                             {user.role === 'admin' && ( 
                                 <div>
-                                    <label className="block mb-2 font-medium">Supervisor</label>
+                                    <label className="block mb-3 font-semibold text-gray-700">Supervisor</label>
                                     <select
                                         value={editedUser.supervisor_id || ''}
                                         onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
-                                        className="w-full p-2 border rounded-lg"
+                                        className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                     >
                                         <option value="">Select Supervisor</option>
                                         {svList.map(sv => (
@@ -697,26 +734,26 @@
                                 </div>
                             )}
                             <div>
-                                <label className="block mb-2 font-medium">New Login</label>
+                                <label className="block mb-3 font-semibold text-gray-700">New Login</label>
                                 <input
                                     type="text"
                                     value={editedUser.new_login || ''}
                                     onChange={(e) => setEditedUser({ ...editedUser, new_login: e.target.value })}
-                                    className="w-full p-2 border rounded-lg"
+                                    className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                 />
                             </div>
                             <div>
-                                <label className="block mb-2 font-medium">New Password</label>
+                                <label className="block mb-3 font-semibold text-gray-700">New Password</label>
                                 <input
                                     type="password"
                                     value={editedUser.new_password || ''}
                                     onChange={(e) => setEditedUser({ ...editedUser, new_password: e.target.value })}
-                                    className="w-full p-2 border rounded-lg"
+                                    className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                 />
                             </div>
-                            <div className="flex justify-end space-x-2">
-                                <button onClick={onClose} className="bg-gray-500 text-white px-4 py-2 rounded">Cancel</button>
-                                <button onClick={() => onSave(editedUser)} className="bg-blue-500 text-white px-4 py-2 rounded">Save</button>
+                            <div className="flex justify-end space-x-4">
+                                <button onClick={onClose} className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg">Cancel</button>
+                                <button onClick={() => onSave(editedUser)} className="py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg">Save Changes</button>
                             </div>
                         </div>
                     </div>
@@ -726,22 +763,22 @@
 
         const AddSvForm = React.memo(({ isLoading, newSvName, setNewSvName, addSv }) => {
             return (
-                <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                    <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
+                <div className="bg-white p-8 rounded-2xl shadow-xl mb-8">
+                    <h2 className="text-2xl font-bold mb-6 text-gray-800">Add New Supervisor</h2>
                     <input
                         type="text"
-                        placeholder="Supervisor Name"
+                        placeholder="Enter Supervisor Name"
                         value={newSvName}
                         onChange={(e) => setNewSvName(e.target.value)}
-                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200 mb-6"
                         disabled={isLoading}
                     />
                     <button
                         onClick={addSv}
-                        className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                        className={`w-full py-4 rounded-lg font-semibold text-lg text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                         disabled={isLoading}
                     >
-                        {isLoading ? 'Adding...' : 'Add Supervisor'}
+                        {isLoading ? 'Adding Supervisor...' : 'Add Supervisor'}
                     </button>
                 </div>
             );
@@ -1032,44 +1069,44 @@
             if (!salaryResult) return null;
 
             return (
-                <div className="mt-6 p-6 bg-gray-50 rounded-lg">
-                <h3 className="text-xl font-semibold mb-4">Calculation Result</h3>
-                <div className="space-y-2">
-                    <div className="flex justify-between">
-                    <span className="font-medium">Direction:</span>
-                    <span>Operator</span>
+                <div className="mt-8 p-8 bg-gray-50 rounded-2xl shadow-sm">
+                <h3 className="text-xl font-bold mb-6 text-gray-800">Calculation Results</h3>
+                <div className="space-y-3">
+                    <div className="flex justify-between text-sm">
+                    <span className="font-semibold text-gray-700">Direction:</span>
+                    <span className="text-gray-900">Operator</span>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Points:</span>
-                    <span>{salaryResult.points}</span>
+                    <div className="flex justify-between text-sm">
+                    <span className="font-semibold text-gray-700">Points:</span>
+                    <span className="text-gray-900">{salaryResult.points}</span>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Premium Coefficient:</span>
-                    <span>{salaryResult.premiumCoefficient}</span>
+                    <div className="flex justify-between text-sm">
+                    <span className="font-semibold text-gray-700">Premium Coefficient:</span>
+                    <span className="text-gray-900">{salaryResult.premiumCoefficient}</span>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Monthly Hours Norm:</span>
-                    <span>{salaryResult.hoursNorm.toFixed(2)}</span>
+                    <div className="flex justify-between text-sm">
+                    <span className="font-semibold text-gray-700">Monthly Hours Norm:</span>
+                    <span className="text-gray-900">{salaryResult.hoursNorm.toFixed(2)}</span>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Hours Percentage:</span>
-                    <span>{salaryResult.hoursPercentage.toFixed(2)}%</span>
+                    <div className="flex justify-between text-sm">
+                    <span className="font-semibold text-gray-700">Hours Percentage:</span>
+                    <span className="text-gray-900">{salaryResult.hoursPercentage.toFixed(2)}%</span>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Base Salary:</span>
-                    <span>{salaryResult.baseSalary.toFixed(2)} KZT</span>
+                    <div className="flex justify-between text-sm">
+                    <span className="font-semibold text-gray-700">Base Salary:</span>
+                    <span className="text-gray-900">{salaryResult.baseSalary.toFixed(2)} KZT</span>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Premium Part:</span>
-                    <span>{salaryResult.premiumPart.toFixed(2)} KZT</span>
+                    <div className="flex justify-between text-sm">
+                    <span className="font-semibold text-gray-700">Premium Part:</span>
+                    <span className="text-gray-900">{salaryResult.premiumPart.toFixed(2)} KZT</span>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Bonuses:</span>
-                    <span>{salaryResult.bonuses} KZT</span>
+                    <div className="flex justify-between text-sm">
+                    <span className="font-semibold text-gray-700">Bonuses:</span>
+                    <span className="text-gray-900">{salaryResult.bonuses} KZT</span>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Total Salary:</span>
-                    <span className="text-green-600 font-semibold">
+                    <div className="flex justify-between text-sm pt-2 border-t border-gray-200">
+                    <span className="font-bold text-gray-800">Total Salary:</span>
+                    <span className="text-green-600 font-bold">
                         {salaryResult.finalSalary.toFixed(2)} KZT
                     </span>
                     </div>
@@ -1171,43 +1208,43 @@
                 ];
             
                 return (
-                    <table className="min-w-full bg-white border-collapse">
+                    <table className="min-w-full bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
                         <thead>
-                            <tr className="bg-blue-50">
-                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Category</th>
-                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Condition</th>
-                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Points</th>
+                            <tr className="bg-blue-50 text-left">
+                                <th className="p-4 font-semibold text-gray-700 border-b">Category</th>
+                                <th className="p-4 font-semibold text-gray-700 border-b">Condition</th>
+                                <th className="p-4 font-semibold text-gray-700 border-b">Points</th>
                             </tr>
                         </thead>
-                        <tbody>
-                            <tr className="bg-gray-100 font-semibold">
-                                <td className="p-4 border-b" colSpan="3">Experience</td>
+                        <tbody className="divide-y divide-gray-200">
+                            <tr className="bg-gray-50">
+                                <td className="p-4 font-bold text-gray-800" colSpan="3">Experience</td>
                             </tr>
                             {experienceRanges.map((row, index) => (
-                                <tr key={`exp-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
-                                    <td className="p-4 border-b"></td>
-                                    <td className="p-4 border-b">{row.range}</td>
-                                    <td className="p-4 border-b">{row.points}</td>
+                                <tr key={`exp-${index}`} className={`${row.selected ? 'bg-blue-50' : ''} hover:bg-gray-50 transition-colors`}>
+                                    <td className="p-4"></td>
+                                    <td className="p-4">{row.range}</td>
+                                    <td className="p-4 font-medium">{row.points}</td>
                                 </tr>
                             ))}
-                            <tr className="bg-gray-100 font-semibold">
-                                <td className="p-4 border-b" colSpan="3">Quality</td>
+                            <tr className="bg-gray-50">
+                                <td className="p-4 font-bold text-gray-800" colSpan="3">Quality</td>
                             </tr>
                             {qualityRanges.map((row, index) => (
-                                <tr key={`qual-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
-                                    <td className="p-4 border-b"></td>
-                                    <td className="p-4 border-b">{row.range}</td>
-                                    <td className="p-4 border-b">{row.points}</td>
+                                <tr key={`qual-${index}`} className={`${row.selected ? 'bg-blue-50' : ''} hover:bg-gray-50 transition-colors`}>
+                                    <td className="p-4"></td>
+                                    <td className="p-4">{row.range}</td>
+                                    <td className="p-4 font-medium">{row.points}</td>
                                 </tr>
                             ))}
-                            <tr className="bg-gray-100 font-semibold">
-                                <td className="p-4 border-b" colSpan="3">Calls per Hour</td>
+                            <tr className="bg-gray-50">
+                                <td className="p-4 font-bold text-gray-800" colSpan="3">Calls per Hour</td>
                             </tr>
                             {callsPerHourRanges.map((row, index) => (
-                                <tr key={`cph-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
-                                    <td className="p-4 border-b"></td>
-                                    <td className="p-4 border-b">{row.range}</td>
-                                    <td className="p-4 border-b">{row.points}</td>
+                                <tr key={`cph-${index}`} className={`${row.selected ? 'bg-blue-50' : ''} hover:bg-gray-50 transition-colors`}>
+                                    <td className="p-4"></td>
+                                    <td className="p-4">{row.range}</td>
+                                    <td className="p-4 font-medium">{row.points}</td>
                                 </tr>
                             ))}
                         </tbody>
@@ -1818,36 +1855,36 @@
 
             if (!user) {
                 return (
-                    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
-                        <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md transform transition-all duration-300 hover:scale-105">
-                            <h1 className="text-3xl font-bold mb-6 text-center text-gray-800">OTP Bot Dashboard</h1>
+                    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
+                        <div className="bg-white p-10 rounded-2xl shadow-2xl w-full max-w-md transform transition-all duration-300 hover:scale-[1.02]">
+                            <h1 className="text-3xl font-bold mb-8 text-center text-gray-800">OTP Bot Dashboard Login</h1>
                             <input
                                 type="text"
-                                placeholder="Login"
+                                placeholder="Enter your login"
                                 value={login}
                                 onChange={(e) => setLogin(e.target.value)}
                                 onKeyPress={handleKeyPress}
-                                className="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                className="w-full p-4 mb-5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                 disabled={isLoading}
                             />
                             <input
                                 type="password"
-                                placeholder="Password"
+                                placeholder="Enter your password"
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
                                 onKeyPress={handleKeyPress}
-                                className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                 disabled={isLoading}
                             />
                             <button
                                 onClick={handleLogin}
-                                className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                className={`w-full py-4 rounded-lg font-semibold text-lg text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                 disabled={isLoading}
                             >
-                                {isLoading ? 'Logging in...' : 'Login'}
+                                {isLoading ? 'Logging in...' : 'Login to Dashboard'}
                             </button>
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                            {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
                         </div>
                     </div>
                 );
@@ -1855,20 +1892,20 @@
 
             if (showLogoutConfirm) {
                 return (
-                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                            <h2 className="text-xl font-semibold mb-4">Confirm Logout</h2>
-                            <p className="mb-4">Are you sure you want to log out?</p>
-                            <div className="flex justify-between">
+                    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+                        <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md text-center">
+                            <h2 className="text-2xl font-bold mb-6 text-gray-800">Confirm Logout</h2>
+                            <p className="mb-6 text-gray-600">Are you sure you want to log out of your account?</p>
+                            <div className="flex justify-center space-x-4">
                                 <button
                                     onClick={confirmLogout}
-                                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                                    className="py-3 px-6 rounded-lg font-medium text-white bg-red-600 hover:bg-red-700 transition-all duration-200 shadow-md hover:shadow-lg"
                                 >
                                     Yes, Logout
                                 </button>
                                 <button
                                     onClick={() => setShowLogoutConfirm(false)}
-                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                    className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
                                 >
                                     Cancel
                                 </button>
@@ -1880,15 +1917,15 @@
 
             if (showChangeLoginForm) {
                 return (
-                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                            <h2 className="text-xl font-semibold mb-4">Change Login</h2>
+                    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+                        <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
+                            <h2 className="text-2xl font-bold mb-6 text-gray-800">Change Your Login</h2>
                             <input
                                 type="text"
                                 placeholder="New Login"
                                 value={loginData.new_login}
                                 onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full p-4 mb-5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                 disabled={isLoading}
                             />
                             <input
@@ -1896,26 +1933,26 @@
                                 placeholder="Confirm New Login"
                                 value={loginData.confirm_login}
                                 onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                 disabled={isLoading}
                             />
-                            <div className="flex justify-between">
+                            <div className="flex justify-end space-x-4">
                                 <button
                                     onClick={handleChangeLogin}
-                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                    className={`py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                     disabled={isLoading}
                                 >
                                     {isLoading ? 'Updating...' : 'Update Login'}
                                 </button>
                                 <button
                                     onClick={() => setShowChangeLoginForm(false)}
-                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                    className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
                                 >
                                     Cancel
                                 </button>
                             </div>
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                            {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
                         </div>
                     </div>
                 );
@@ -1925,15 +1962,15 @@
                     : 0;
             if (showChangePasswordForm) {
                 return (
-                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                            <h2 className="text-xl font-semibold mb-4">Change Password</h2>
+                    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+                        <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
+                            <h2 className="text-2xl font-bold mb-6 text-gray-800">Change Your Password</h2>
                             <input
                                 type="password"
                                 placeholder="New Password"
                                 value={passwordData.new_password}
                                 onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full p-4 mb-5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                 disabled={isLoading}
                             />
                             <input
@@ -1941,26 +1978,26 @@
                                 placeholder="Confirm New Password"
                                 value={passwordData.confirm_password}
                                 onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                 disabled={isLoading}
                             />
-                            <div className="flex justify-between">
+                            <div className="flex justify-end space-x-4">
                                 <button
                                     onClick={handleChangePassword}
-                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                    className={`py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                     disabled={isLoading}
                                 >
                                     {isLoading ? 'Updating...' : 'Update Password'}
                                 </button>
                                 <button
                                     onClick={() => setShowChangePasswordForm(false)}
-                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                    className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
                                 >
                                     Cancel
                                 </button>
                             </div>
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                            {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
                         </div>
                     </div>
                 );
@@ -1968,35 +2005,35 @@
 
             const Sidebar = () => {
                 return (
-                    <div className="fixed top-0 left-0 h-full w-64 bg-blue-800 text-white p-6 shadow-lg">
-                        <h1 className="text-2xl font-bold mb-8">Dashboard</h1>
-                        <ul className="space-y-4">
+                    <div className="fixed top-0 left-0 h-full w-72 bg-indigo-900 text-white p-8 shadow-2xl transition-all duration-300">
+                        <h1 className="text-3xl font-bold mb-10">Dashboard</h1>
+                        <ul className="space-y-3">
                             {user.role === 'admin' && (
                                 <>
-                                    <li><button onClick={() => setView('add_sv')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'add_sv' ? 'bg-blue-900' : ''}`}>Add Supervisor</button></li>
-                                    <li><button onClick={() => setView('sv_list')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'sv_list' ? 'bg-blue-900' : ''}`}>Supervisors</button></li>
-                                    <li><button onClick={() => setView('view_scores')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'view_scores' ? 'bg-blue-900' : ''}`}>View Operator Scores</button></li>
-                                    <li><button onClick={() => setView('manage_users')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'manage_users' ? 'bg-blue-900' : ''}`}>Manage Users</button></li>
-                                    <li><button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-2 px-4 rounded hover:bg-blue-700">Manage Monitoring Scale</button></li>
+                                    <li><button onClick={() => setView('add_sv')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'add_sv' ? 'bg-indigo-700' : ''}`}>Add Supervisor</button></li>
+                                    <li><button onClick={() => setView('sv_list')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'sv_list' ? 'bg-indigo-700' : ''}`}>Supervisors List</button></li>
+                                    <li><button onClick={() => setView('view_scores')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'view_scores' ? 'bg-indigo-700' : ''}`}>Operator Scores</button></li>
+                                    <li><button onClick={() => setView('manage_users')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'manage_users' ? 'bg-indigo-700' : ''}`}>Manage Users</button></li>
+                                    <li><button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200">Monitoring Scale</button></li>
                                 </>
                             )}
                             {user.role === 'sv' && (
                                 <>
-                                    <li><button onClick={() => setView('update_table')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'update_table' ? 'bg-blue-900' : ''}`}>Update Table</button></li>
-                                    <li><button onClick={() => setView('operators')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'operators' ? 'bg-blue-900' : ''}`}>Your Operators</button></li>
-                                    <li><button onClick={() => setView('manage_operators')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'manage_operators' ? 'bg-blue-900' : ''}`}>Manage my operators</button></li>
+                                    <li><button onClick={() => setView('update_table')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'update_table' ? 'bg-indigo-700' : ''}`}>Update Table</button></li>
+                                    <li><button onClick={() => setView('operators')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'operators' ? 'bg-indigo-700' : ''}`}>My Operators</button></li>
+                                    <li><button onClick={() => setView('manage_operators')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'manage_operators' ? 'bg-indigo-700' : ''}`}>Manage Operators</button></li>
                                 </>
                             )}
                             {user.role === 'operator' && (
                                 <>
-                                    <li><button onClick={() => setView('profile')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'profile' ? 'bg-blue-900' : ''}`}>Profile</button></li>
-                                    <li><button onClick={() => setView('hours')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'hours' ? 'bg-blue-900' : ''}`}>My Hours</button></li>
-                                    <li><button onClick={() => setView('evaluation')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'evaluation' ? 'bg-blue-900' : ''}`}>Call Evaluations</button></li>
-                                    <li><button onClick={() => setView('salary')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'salary' ? 'bg-blue-900' : ''}`}>Salary Calculator</button></li>
+                                    <li><button onClick={() => setView('profile')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'profile' ? 'bg-indigo-700' : ''}`}>My Profile</button></li>
+                                    <li><button onClick={() => setView('hours')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'hours' ? 'bg-indigo-700' : ''}`}>Work Hours</button></li>
+                                    <li><button onClick={() => setView('evaluation')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'evaluation' ? 'bg-indigo-700' : ''}`}>Call Evaluations</button></li>
+                                    <li><button onClick={() => setView('salary')} className={`w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200 ${view === 'salary' ? 'bg-indigo-700' : ''}`}>Salary Calculator</button></li>
                                 </>
                             )}
-                            <li><button onClick={() => setShowAccountMenu(true)} className="w-full text-left py-2 px-4 rounded hover:bg-blue-700">Account</button></li>
-                            <li><button onClick={handleLogout} className="w-full text-left py-2 px-4 rounded hover:bg-red-700 bg-red-600">Logout</button></li>
+                            <li><button onClick={() => setShowAccountMenu(true)} className="w-full text-left py-3 px-5 rounded-lg hover:bg-indigo-800 transition-all duration-200">Account Settings</button></li>
+                            <li><button onClick={handleLogout} className="w-full text-left py-3 px-5 rounded-lg bg-red-600 hover:bg-red-700 transition-all duration-200">Logout</button></li>
                         </ul>
                     </div>
                 );
@@ -2004,7 +2041,7 @@
 
             const MainContent = () => {
                 return (
-                    <div className="ml-64 p-6 bg-gray-100 min-h-screen">
+                    <div className="ml-72 p-8 bg-gray-50 min-h-screen">
                         {user.role === 'admin' && (
                             <>
                                 {view === 'add_sv' && (
@@ -2016,46 +2053,46 @@
                                             />
                                         )}
                                 {view === 'sv_list' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                        <div className="flex justify-between items-center mb-4">
-                                            <h2 className="text-xl font-semibold">Supervisors</h2>
+                                    <div className="bg-white p-8 rounded-2xl shadow-xl mb-8">
+                                        <div className="flex justify-between items-center mb-6">
+                                            <h2 className="text-2xl font-bold text-gray-800">Supervisors List</h2>
                                             <button
                                                 onClick={generateWeeklyReport}
-                                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                className={`py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                                 disabled={isLoading}
                                             >
-                                                {isLoading ? 'Generating...' : 'Generate Report'}
+                                                {isLoading ? 'Generating Report...' : 'Generate Weekly Report'}
                                             </button>
                                         </div>
                                         {isAdminDataLoading ? (
-                                            <p className="text-center">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading supervisors...</p>
                                         ) : svList.length === 0 ? (
-                                            <p className="text-center">No supervisors found.</p>
+                                            <p className="text-center text-gray-600">No supervisors found.</p>
                                         ) : (
-                                            <div className="overflow-x-auto">
-                                                <table className="min-w-full bg-white border-collapse">
-                                                    <thead>
-                                                        <tr className="bg-gray-200">
-                                                            <th className="p-3 border-b text-left">Name</th>
-                                                            <th className="p-3 border-b text-left">ID</th>
-                                                            <th className="p-3 border-b text-left">Table URL</th>
-                                                            <th className="p-3 border-b text-left">Actions</th>
+                                            <div className="overflow-x-auto rounded-xl shadow-sm">
+                                                <table className="min-w-full bg-white border border-gray-200 divide-y divide-gray-200">
+                                                    <thead className="bg-gray-50">
+                                                        <tr>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Name</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">ID</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Table URL</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Actions</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody>
+                                                    <tbody className="divide-y divide-gray-200">
                                                         {svList.map(sv => (
-                                                            <tr key={sv.id} className="hover:bg-gray-50">
-                                                                <td className="p-3 border-b">{sv.name}</td>
-                                                                <td className="p-3 border-b">{sv.id}</td>
-                                                                <td className="p-3 border-b">
+                                                            <tr key={sv.id} className="hover:bg-gray-50 transition-colors duration-200">
+                                                                <td className="p-4">{sv.name}</td>
+                                                                <td className="p-4">{sv.id}</td>
+                                                                <td className="p-4">
                                                                     {sv.table ? (
-                                                                        <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
-                                                                    ) : 'No table'}
+                                                                        <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 transition-colors duration-200">View Table</a>
+                                                                    ) : 'No table set'}
                                                                 </td>
-                                                                <td className="p-3 border-b space-x-2">
+                                                                <td className="p-4 space-x-3">
                                                                     <button
                                                                         onClick={() => removeSv(sv.id)}
-                                                                        className="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 text-sm"
+                                                                        className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-red-600 hover:bg-red-700 transition-all duration-200"
                                                                         disabled={isLoading}
                                                                     >
                                                                         Remove
@@ -2065,7 +2102,7 @@
                                                                             setCurrentSvForTableChange(sv);
                                                                             setShowChangeTableForm(true);
                                                                         }}
-                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                        className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200"
                                                                         disabled={isLoading}
                                                                     >
                                                                         Change Table
@@ -2080,23 +2117,23 @@
                                     </div>
                                 )}
                                 {showChangeTableForm && currentSvForTableChange && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                        <h2 className="text-xl font-semibold mb-4">Change Table for {currentSvForTableChange.name}</h2>
+                                    <div className="bg-white p-8 rounded-2xl shadow-xl mb-8">
+                                        <h2 className="text-2xl font-bold mb-6 text-gray-800">Change Table for {currentSvForTableChange.name}</h2>
                                         <input
                                             type="text"
                                             placeholder="New Google Sheets URL"
                                             value={newTableUrl}
                                             onChange={(e) => setNewTableUrl(e.target.value)}
-                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading}
                                         />
-                                        <div className="flex justify-between">
+                                        <div className="flex justify-end space-x-4">
                                             <button
                                                 onClick={() => changeSvTable(currentSvForTableChange.id, newTableUrl)}
-                                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                className={`py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                                 disabled={isLoading}
                                             >
-                                                {isLoading ? 'Updating...' : 'Update Table'}
+                                                {isLoading ? 'Updating Table...' : 'Update Table'}
                                             </button>
                                             <button
                                                 onClick={() => {
@@ -2104,7 +2141,7 @@
                                                     setCurrentSvForTableChange(null);
                                                     setNewTableUrl('');
                                                 }}
-                                                className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                                className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
                                             >
                                                 Cancel
                                             </button>
@@ -2112,65 +2149,65 @@
                                     </div>
                                 )}
                                 {view === 'view_scores' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg">
-                                        <h2 className="text-xl font-semibold mb-4">View Operator Scores</h2>
+                                    <div className="bg-white p-8 rounded-2xl shadow-xl">
+                                        <h2 className="text-2xl font-bold mb-6 text-gray-800">View Operator Scores</h2>
                                         <select
                                             value={selectedSvId}
                                             onChange={(e) => setSelectedSvId(e.target.value)}
-                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading || isAdminDataLoading}
                                         >
-                                            <option value="">Select Supervisor</option>
+                                            <option value="">Select a Supervisor</option>
                                             {svList.map(sv => (
                                                 <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
                                             ))}
                                         </select>
                                         {isAdminDataLoading ? (
-                                            <p className="text-center">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading operator scores...</p>
                                         ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
-                                            <div className="overflow-x-auto">
-                                                <table className="min-w-full bg-white border-collapse">
-                                                    <thead>
-                                                        <tr className="bg-gray-100">
-                                                            <th className="p-3 border-b text-left">Name</th>
-                                                            <th className="p-3 border-b text-left">Calls</th>
-                                                            <th className="p-3 border-b text-left">Expected</th>
-                                                            <th className="p-3 border-b text-left">Avg Score</th>
-                                                            <th className="p-3 border-b text-left">Link</th>
-                                                            <th className="p-3 border-b text-left">Actions</th>
+                                            <div className="overflow-x-auto rounded-xl shadow-sm">
+                                                <table className="min-w-full bg-white border border-gray-200 divide-y divide-gray-200">
+                                                    <thead className="bg-gray-50">
+                                                        <tr>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Name</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Calls</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Expected</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Avg Score</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Link</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Actions</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody>
+                                                    <tbody className="divide-y divide-gray-200">
                                                         {selectedSvData.operators.map((op, index) => {
                                                             const currentWeek = getCurrentWeekOfMonth();
                                                             const expectedCalls = getExpectedCalls(currentWeek);
                                                             const callCount = parseInt(op.call_count) || 0;
                                                             const hasIssue = callCount < expectedCalls;
                                                             return (
-                                                                <tr key={index} className="hover:bg-gray-50">
-                                                                    <td className="p-3 border-b">{op.name}</td>
-                                                                    <td className={`p-3 border-b ${getCallCountColor(callCount, expectedCalls)}`}>
+                                                                <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
+                                                                    <td className="p-4">{op.name}</td>
+                                                                    <td className={`p-4 ${getCallCountColor(callCount, expectedCalls)}`}>
                                                                         {callCount}
                                                                     </td>
-                                                                    <td className="p-3 border-b">{expectedCalls}</td>
-                                                                    <td className="p-3 border-b">
+                                                                    <td className="p-4">{expectedCalls}</td>
+                                                                    <td className="p-4">
                                                                         <span className={getScoreColor(op.avg_score)}>
                                                                             {op.avg_score ? op.avg_score.toFixed(2) : '-'}
                                                                         </span>
                                                                     </td>
-                                                                    <td className="p-3 border-b">
+                                                                    <td className="p-4">
                                                                         {op.link ? (
-                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
+                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 transition-colors duration-200">View Link</a>
                                                                         ) : '-'}
                                                                     </td>
-                                                                    <td className="p-3 border-b space-x-2">
+                                                                    <td className="p-4 space-x-3">
                                                                         {hasIssue && (
                                                                             <button
                                                                                 onClick={() => notifySupervisor(selectedSvId, op.name)}
-                                                                                className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
+                                                                                className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-yellow-500 hover:bg-yellow-600 transition-all duration-200"
                                                                                 disabled={isLoading}
                                                                             >
-                                                                                Notify
+                                                                                Notify Supervisor
                                                                             </button>
                                                                         )}
                                                                         <button
@@ -2189,10 +2226,10 @@
                                                                                 const token = safeBtoa(JSON.stringify(tokenData));
                                                                                 window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
                                                                             }}
-                                                                            className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                            className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200"
                                                                             title="Listen to operator calls"
                                                                         >
-                                                                            Listen Calls
+                                                                            Listen to Calls
                                                                         </button>
                                                                     </td>
                                                                 </tr>
@@ -2202,10 +2239,10 @@
                                                 </table>
                                             </div>
                                         ) : selectedSvId ? (
-                                            <p className="text-center">No operators found for this supervisor.</p>
+                                            <p className="text-center text-gray-600">No operators found for this supervisor.</p>
                                         ) : null}
-                                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                                        {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
+                                        {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
 
                                     </div>
                                 )}
@@ -2218,40 +2255,40 @@
                                     />
                                 )}
                                 {view === 'manage_users' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg">
-                                        <h2 className="text-xl font-semibold mb-4">Manage Users</h2>
+                                    <div className="bg-white p-8 rounded-2xl shadow-xl">
+                                        <h2 className="text-2xl font-bold mb-6 text-gray-800">Manage Users</h2>
                                         {isAdminDataLoading ? (
-                                            <p className="text-center">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading users...</p>
                                         ) : users.length === 0 ? (
-                                            <p className="text-center">No users found.</p>
+                                            <p className="text-center text-gray-600">No users found.</p>
                                         ) : (
-                                            <div className="overflow-x-auto">
-                                                <table className="min-w-full bg-white border-collapse">
-                                                    <thead>
-                                                        <tr className="bg-gray-200">
-                                                            <th className="p-3 border-b text-left">Name</th>
-                                                            <th className="p-3 border-b text-left">ID</th>
-                                                            <th className="p-3 border-b text-left">Direction</th>
-                                                            <th className="p-3 border-b text-left">Supervisor</th>
-                                                            <th className="p-3 border-b text-left">Actions</th>
+                                            <div className="overflow-x-auto rounded-xl shadow-sm">
+                                                <table className="min-w-full bg-white border border-gray-200 divide-y divide-gray-200">
+                                                    <thead className="bg-gray-50">
+                                                        <tr>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Name</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">ID</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Direction</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Supervisor</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Actions</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody>
+                                                    <tbody className="divide-y divide-gray-200">
                                                         {users.map(u => (
-                                                            <tr key={u.id} className="hover:bg-gray-50">
-                                                                <td className="p-3 border-b">{u.name}</td>
-                                                                <td className="p-3 border-b">{u.id}</td>
-                                                                <td className="p-3 border-b">{u.direction || '-'}</td>
-                                                                <td className="p-3 border-b">{u.supervisor_name || '-'}</td>
-                                                                <td className="p-3 border-b">
+                                                            <tr key={u.id} className="hover:bg-gray-50 transition-colors duration-200">
+                                                                <td className="p-4">{u.name}</td>
+                                                                <td className="p-4">{u.id}</td>
+                                                                <td className="p-4">{u.direction || '-'}</td>
+                                                                <td className="p-4">{u.supervisor_name || '-'}</td>
+                                                                <td className="p-4">
                                                                     <button
                                                                         onClick={() => {
                                                                             setUserToEdit(u);
                                                                             setShowUserEditModal(true);
                                                                         }}
-                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                        className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200"
                                                                     >
-                                                                        Edit
+                                                                        Edit User
                                                                     </button>
                                                                 </td>
                                                             </tr>
@@ -2267,56 +2304,56 @@
                         {user.role === 'sv' && (
                             <>
                                 {view === 'update_table' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                        <h2 className="text-xl font-semibold mb-4">Update Table</h2>
+                                    <div className="bg-white p-8 rounded-2xl shadow-xl mb-8">
+                                        <h2 className="text-2xl font-bold mb-6 text-gray-800">Update Your Table</h2>
                                         <input
                                             type="text"
                                             placeholder="Enter Google Sheets URL"
                                             value={newTableUrl}
                                             onChange={(e) => setNewTableUrl(e.target.value)}
-                                            className="w-full p-2 mb-4 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading}
                                         />
                                         <button
                                             onClick={updateTable}
-                                            className={`w-full bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                            className={`w-full py-4 rounded-lg font-semibold text-lg text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                             disabled={isLoading}
                                         >
-                                            {isLoading ? 'Updating...' : 'Update Table'}
+                                            {isLoading ? 'Updating Table...' : 'Update Table'}
                                         </button>
                                     </div>
                                 )}
                                 {view === 'manage_operators' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg">
-                                        <h2 className="text-xl font-semibold mb-4">Manage Your Operators</h2>
+                                    <div className="bg-white p-8 rounded-2xl shadow-xl">
+                                        <h2 className="text-2xl font-bold mb-6 text-gray-800">Manage Your Operators</h2>
                                         {isLoading ? (
-                                            <p className="text-center">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading operators...</p>
                                         ) : svData?.operators?.length > 0 ? ( 
-                                            <div className="overflow-x-auto">
-                                                <table className="min-w-full bg-white border-collapse">
-                                                    <thead>
-                                                        <tr className="bg-gray-200">
-                                                            <th className="p-3 border-b text-left">Name</th>
-                                                            <th className="p-3 border-b text-left">ID</th>
-                                                            <th className="p-3 border-b text-left">Direction</th>
-                                                            <th className="p-3 border-b text-left">Actions</th>
+                                            <div className="overflow-x-auto rounded-xl shadow-sm">
+                                                <table className="min-w-full bg-white border border-gray-200 divide-y divide-gray-200">
+                                                    <thead className="bg-gray-50">
+                                                        <tr>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Name</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">ID</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Direction</th>
+                                                            <th className="p-4 text-left font-semibold text-gray-700">Actions</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody>
+                                                    <tbody className="divide-y divide-gray-200">
                                                         {svData.operators.map(op => (
-                                                            <tr key={op.id} className="hover:bg-gray-50">
-                                                                <td className="p-3 border-b">{op.name}</td>
-                                                                <td className="p-3 border-b">{op.id}</td>
-                                                                <td className="p-3 border-b">{op.direction_id ? directions.find(d => d.id === op.direction_id)?.name || '-' : '-'}</td>
-                                                                <td className="p-3 border-b">
+                                                            <tr key={op.id} className="hover:bg-gray-50 transition-colors duration-200">
+                                                                <td className="p-4">{op.name}</td>
+                                                                <td className="p-4">{op.id}</td>
+                                                                <td className="p-4">{op.direction_id ? directions.find(d => d.id === op.direction_id)?.name || '-' : '-'}</td>
+                                                                <td className="p-4">
                                                                     <button
                                                                         onClick={() => {
                                                                             setUserToEdit({ ...op, supervisor_id: user.id });  // Fix supervisor to themselves
                                                                             setShowUserEditModal(true);
                                                                         }}
-                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                        className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200"
                                                                     >
-                                                                        Edit
+                                                                        Edit Operator
                                                                     </button>
                                                                 </td>
                                                             </tr>
@@ -2325,47 +2362,47 @@
                                                 </table>
                                             </div>
                                         ) : (
-                                            <p className="text-center">No operators found.</p>
+                                            <p className="text-center text-gray-600">No operators assigned yet.</p>
                                         )}
                                     </div>
                                 )}
                                 {view === 'operators' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                        <h2 className="text-xl font-semibold mb-4">Your Operators</h2>
+                                    <div className="bg-white p-8 rounded-2xl shadow-xl mb-8">
+                                        <h2 className="text-2xl font-bold mb-6 text-gray-800">Your Operators</h2>
                                         {isLoading ? (
-                                            <p className="text-center">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading...</p>
                                         ) : svData && svData.operators && svData.operators.length > 0 ? (
-                                            <div className="overflow-x-auto">
-                                                <table className="min-w-full bg-white border-collapse">
-                                                <thead>
-                                                    <tr className="bg-gray-200">
-                                                    <th className="p-3 border-b text-left">Name</th>
-                                                    <th className="p-3 border-b text-left">Calls</th>
-                                                    <th className="p-3 border-b text-left">Avg Score</th>
-                                                    <th className="p-3 border-b text-left">Link</th>
-                                                    <th className="p-3 border-b text-left">Actions</th>
+                                            <div className="overflow-x-auto rounded-xl shadow-sm">
+                                                <table className="min-w-full bg-white border border-gray-200 divide-y divide-gray-200">
+                                                <thead className="bg-gray-50">
+                                                    <tr>
+                                                    <th className="p-4 text-left font-semibold text-gray-700">Name</th>
+                                                    <th className="p-4 text-left font-semibold text-gray-700">Calls</th>
+                                                    <th className="p-4 text-left font-semibold text-gray-700">Avg Score</th>
+                                                    <th className="p-4 text-left font-semibold text-gray-700">Link</th>
+                                                    <th className="p-4 text-left font-semibold text-gray-700">Actions</th>
                                                     </tr>
                                                 </thead>
-                                                <tbody>
+                                                <tbody className="divide-y divide-gray-200">
                                                     {svData.operators.map((op, index) => {
                                                     const callCount = parseInt(op.call_count) || 0;
                                                     return (
-                                                        <tr key={index} className="hover:bg-gray-50">
-                                                        <td className="p-3 border-b">{op.name}</td>
-                                                        <td className={`p-3 border-b ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
+                                                        <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
+                                                        <td className="p-4">{op.name}</td>
+                                                        <td className={`p-4 ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
                                                             {callCount}
                                                         </td>
-                                                        <td className="p-3 border-b">
+                                                        <td className="p-4">
                                                             <span className={getScoreColor(op.avg_score)}>
                                                             {op.avg_score ? op.avg_score.toFixed(2) : '-'}
                                                             </span>
                                                         </td>
-                                                        <td className="p-3 border-b">
+                                                        <td className="p-4">
                                                             {op.link ? (
-                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
+                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 transition-colors duration-200">View Link</a>
                                                             ) : '-'}
                                                         </td>
-                                                        <td className="p-3 border-b space-x-2">
+                                                        <td className="p-4 space-x-3">
                                                             <button
                                                             onClick={() => {
                                                                 // Генерируем токен с данными оператора
@@ -2381,7 +2418,7 @@
                                                                 const token = safeBtoa(JSON.stringify(tokenData));
                                                                 window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
                                                             }}
-                                                            className="bg-blue-500 text-white px-3 py-1 rounded text-sm hover:bg-blue-600"
+                                                            className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200"
                                                             title="Listen to operator calls"
                                                             >
                                                             Listen Calls
@@ -2394,10 +2431,10 @@
                                                 </table>
                                             </div>
                                         ) : (
-                                            <p className="text-center">No operators found.</p>
+                                            <p className="text-center text-gray-600">No operators found.</p>
                                         )}
-                                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                                        {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
+                                        {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
                                     </div>
                                 )}
                             </>
@@ -2405,36 +2442,36 @@
                         {user.role === 'operator' && (
                             <>
                                 {view === 'profile' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
+                                    <div className="bg-white p-10 rounded-2xl shadow-xl mb-8 border border-gray-200">
+                                        <h2 className="text-3xl font-bold mb-8 text-gray-800">Your Profile Information</h2>
                                         {isLoading ? (
-                                            <p className="text-center text-gray-600">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading profile...</p>
                                         ) : profileData ? (
                                             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Name</p>
-                                                    <p className="text-lg font-medium text-gray-900">{profileData.name || '-'}</p>
+                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                    <p className="text-sm font-medium text-gray-500 mb-2">Full Name</p>
+                                                    <p className="text-lg font-semibold text-gray-900">{profileData.name || '-'}</p>
                                                 </div>
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Role</p>
-                                                    <p className="text-lg font-medium text-gray-900">{profileData.role || '-'}</p>
+                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                    <p className="text-sm font-medium text-gray-500 mb-2">Role</p>
+                                                    <p className="text-lg font-semibold text-gray-900">{profileData.role || '-'}</p>
                                                 </div>
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Direction</p>
-                                                    <p className="text-lg font-medium text-gray-900">
+                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                    <p className="text-sm font-medium text-gray-500 mb-2">Direction</p>
+                                                    <p className="text-lg font-semibold text-gray-900">
                                                         {profileData.direction ? profileData.direction : '-'}
                                                     </p>
                                                 </div>
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Hire Date</p>
-                                                    <p className="text-lg font-medium text-gray-900">{profileData.hire_date || '-'}</p>
+                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                    <p className="text-sm font-medium text-gray-500 mb-2">Hire Date</p>
+                                                    <p className="text-lg font-semibold text-gray-900">{profileData.hire_date || '-'}</p>
                                                 </div>
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Supervisor</p>
-                                                    <p className="text-lg font-medium text-gray-900">{profileData.supervisor_name || '-'}</p>
+                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                    <p className="text-sm font-medium text-gray-500 mb-2">Supervisor</p>
+                                                    <p className="text-lg font-semibold text-gray-900">{profileData.supervisor_name || '-'}</p>
                                                 </div>
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Scores Table</p>
+                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                    <p className="text-sm font-medium text-gray-500 mb-2">Scores Table</p>
                                                     {profileData.scores_table_url ? (
                                                         <a
                                                             href={profileData.scores_table_url}
@@ -2442,14 +2479,14 @@
                                                             rel="noopener noreferrer"
                                                             className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
                                                         >
-                                                            View Scores Table
+                                                            View Scores
                                                         </a>
                                                     ) : (
                                                         <p className="text-lg text-gray-900">-</p>
                                                     )}
                                                 </div>
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Hours Table</p>
+                                                <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover-scale">
+                                                    <p className="text-sm font-medium text-gray-500 mb-2">Hours Table</p>
                                                     {profileData.hours_table_url ? (
                                                         <a
                                                             href={profileData.hours_table_url}
@@ -2457,7 +2494,7 @@
                                                             rel="noopener noreferrer"
                                                             className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
                                                         >
-                                                            View Hours Table
+                                                            View Hours
                                                         </a>
                                                     ) : (
                                                         <p className="text-lg text-gray-900">-</p>
@@ -2470,12 +2507,12 @@
                                     </div>
                                 )}
                                 {(view === 'hours' || view === 'evaluation') && (
-                                    <div className="mb-6">
-                                        <label className="block mb-2 font-semibold text-gray-700">Select Month:</label>
+                                    <div className="mb-8">
+                                        <label className="block mb-3 font-bold text-gray-800 text-lg">Select Month:</label>
                                         <select
                                             value={selectedMonth}
                                             onChange={(e) => setSelectedMonth(e.target.value)}
-                                            className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            className="w-full max-w-sm p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading}
                                         >
                                             {getMonthOptions()}
@@ -2483,34 +2520,34 @@
                                     </div>
                                 )}
                                 {view === 'hours' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
+                                    <div className="bg-white p-10 rounded-2xl shadow-xl border border-gray-200 transition-all duration-300">
+                                        <h2 className="text-3xl font-bold mb-8 text-gray-800">Your Work Hours Overview</h2>
                                         {isLoading ? (
-                                            <p className="text-center text-gray-600">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading hours data...</p>
                                         ) : hoursData ? (
-                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
                                                 <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-1">Regular Hours</p>
-                                                        <p className={`text-lg font-semibold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
+                                                    <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover-scale">
+                                                        <p className="text-sm font-medium text-gray-500 mb-2">Regular Hours</p>
+                                                        <p className={`text-xl font-bold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
                                                             {hoursData.regular_hours.toFixed(2)} hours
                                                         </p>
                                                     </div>
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-1">Training Hours</p>
-                                                        <p className="text-lg font-semibold">{hoursData.training_hours.toFixed(2)} hours</p>
+                                                    <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover-scale">
+                                                        <p className="text-sm font-medium text-gray-500 mb-2">Training Hours</p>
+                                                        <p className="text-xl font-bold text-gray-900">{hoursData.training_hours.toFixed(2)} hours</p>
                                                     </div>
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-1">Fines</p>
-                                                        <p className="text-lg font-semibold text-red-600">{hoursData.fines.toFixed(2)}</p>
+                                                    <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover-scale">
+                                                        <p className="text-sm font-medium text-gray-500 mb-2">Fines</p>
+                                                        <p className="text-xl font-bold text-red-600">{hoursData.fines.toFixed(2)}</p>
                                                     </div>
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-1">Norm Hours</p>
-                                                        <p className="text-lg font-semibold">{hoursData.norm_hours.toFixed(2)} hours</p>
+                                                    <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover-scale">
+                                                        <p className="text-sm font-medium text-gray-500 mb-2">Norm Hours</p>
+                                                        <p className="text-xl font-bold text-gray-900">{hoursData.norm_hours.toFixed(2)} hours</p>
                                                     </div>
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-1">Performance</p>
-                                                        <p className={`text-lg font-semibold ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
+                                                    <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover-scale">
+                                                        <p className="text-sm font-medium text-gray-500 mb-2">Performance</p>
+                                                        <p className={`text-xl font-bold ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
                                                             {((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%
                                                         </p>
                                                     </div>
@@ -2518,31 +2555,31 @@
                                                 <div className="col-span-1 flex justify-center items-center">
                                                     <SemiCircleProgress
                                                         percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
-                                                        label="Выполнение нормы"
+                                                        label="Norm Fulfillment"
                                                     />
                                                 </div>
                                             </div>
                                         ) : (
-                                            <p className="text-center text-gray-600">No hours data available.</p>
+                                            <p className="text-center text-gray-600">No hours data available for this period.</p>
                                         )}
                                     </div>
                                 )}
                                 {view === 'evaluation' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
+                                    <div className="bg-white p-10 rounded-2xl shadow-xl border border-gray-200 transition-all duration-300">
+                                        <h2 className="text-3xl font-bold mb-8 text-gray-800">Your Call Evaluations</h2>
                                         {isLoading ? (
-                                            <p className="text-center text-gray-600">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading evaluations...</p>
                                         ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
                                             <div>
-                                                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                                                    <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-2">
-                                                        <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-10">
+                                                    <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-4">
+                                                        <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover-scale">
                                                             <p className="text-sm font-medium text-gray-500 mb-2">Total Evaluated Calls</p>
-                                                            <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
-                                                            <p className={`text-lg font-medium mt-2 ${
+                                                            <p className="text-5xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
+                                                            <p className={`text-xl font-medium mt-3 ${
                                                                 (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
                                                             }`}>
-                                                                {20 - operatorData.evaluations.length} calls remaining out of 20
+                                                                {20 - operatorData.evaluations.length} calls remaining (Target: 20)
                                                             </p>
                                                         </div>
                                                     </div>
@@ -2550,20 +2587,20 @@
                                                         <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
                                                     </div>
                                                 </div>
-                                                <div className="overflow-x-auto rounded-lg shadow-sm">
-                                                    <table className="min-w-full bg-white border-collapse">
-                                                        <thead>
-                                                            <tr className="bg-blue-50">
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call ID</th>
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Score</th>
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Comment</th>
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Month</th>
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Evaluation Date</th>
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Actions</th>
+                                                <div className="overflow-x-auto rounded-xl shadow-sm">
+                                                    <table className="min-w-full bg-white border border-gray-200 divide-y divide-gray-200">
+                                                        <thead className="bg-blue-50">
+                                                            <tr>
+                                                                <th className="p-4 text-left font-semibold text-gray-700">Call ID</th>
+                                                                <th className="p-4 text-left font-semibold text-gray-700">Phone Number</th>
+                                                                <th className="p-4 text-left font-semibold text-gray-700">Score</th>
+                                                                <th className="p-4 text-left font-semibold text-gray-700">Comment</th>
+                                                                <th className="p-4 text-left font-semibold text-gray-700">Month</th>
+                                                                <th className="p-4 text-left font-semibold text-gray-700">Evaluation Date</th>
+                                                                <th className="p-4 text-left font-semibold text-gray-700">Actions</th>
                                                             </tr>
                                                         </thead>
-                                                        <tbody>
+                                                        <tbody className="divide-y divide-gray-200">
                                                         {operatorData.evaluations.map((eval1, index) => (
                                                             <React.Fragment key={index}>
                                                             <tr
@@ -2572,12 +2609,12 @@
                                                                 }`}
                                                                 onClick={() => handleEvaluationClick(eval1)}
                                                             >
-                                                                <td className="p-4 border-b text-sm">{eval1.id || '-'}</td>
-                                                                <td className="p-4 border-b text-sm">{eval1.phone_number || '-'}</td>
-                                                                <td className={`p-4 border-b text-sm font-medium ${getScoreColor(eval1.score)}`}>
+                                                                <td className="p-4 text-sm">{eval1.id || '-'}</td>
+                                                                <td className="p-4 text-sm">{eval1.phone_number || '-'}</td>
+                                                                <td className={`p-4 text-sm font-medium ${getScoreColor(eval1.score)}`}>
                                                                 {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
                                                                 </td>
-                                                                <td className="p-4 border-b text-sm">
+                                                                <td className="p-4 text-sm">
                                                                 {eval1.comment ? (
                                                                     <div className="space-y-1">
                                                                     {eval1.comment.split('\n').map((line, i) => {
@@ -2587,18 +2624,18 @@
                                                                         return (
                                                                             <p key={i} className="text-sm">
                                                                             <span className="font-semibold">{match[1]}:</span>{' '}
-                                                                            <span className="italic">{match[2]}</span>
+                                                                            <span className="italic text-gray-600">{match[2]}</span>
                                                                             </p>
                                                                         );
                                                                         }
-                                                                        return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
+                                                                        return <p key={i} className="text-sm text-gray-600">{cleanLine || '-'}</p>;
                                                                     })}
                                                                     </div>
                                                                 ) : '-'}
                                                                 </td>
-                                                                <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
-                                                                <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
-                                                                <td className="p-4 border-b text-sm">
+                                                                <td className="p-4 text-sm">{eval1.month || '-'}</td>
+                                                                <td className="p-4 text-sm">{eval1.evaluation_date || '-'}</td>
+                                                                <td className="p-4 text-sm">
                                                                 {eval1.score < 100 && (
                                                                     <button
                                                                     onClick={(e) => {
@@ -2606,9 +2643,9 @@
                                                                         setSelectedEvaluation(eval1);
                                                                         setShowDisputeModal(true);
                                                                     }}
-                                                                    className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
+                                                                    className="py-2 px-4 rounded-lg text-sm font-medium text-white bg-yellow-500 hover:bg-yellow-600 transition-all duration-200"
                                                                     >
-                                                                    Dispute
+                                                                    Dispute Score
                                                                     </button>
                                                                 )}
                                                                 </td>
@@ -2618,11 +2655,11 @@
                                                                 <tr>
                                                                 <td colSpan={7} className="p-4 bg-gray-50 border-t text-sm">
                                                                     {loadingAudioId === eval1.id ? (
-                                                                    <p className="text-gray-500 italic">Loading audio...</p>
+                                                                    <p className="text-gray-500 italic">Loading audio file...</p>
                                                                     ) : audioUrl ? (
-                                                                    <audio controls src={audioUrl} className="w-full" />
+                                                                    <audio controls src={audioUrl} className="w-full rounded-lg shadow-sm" />
                                                                     ) : (
-                                                                    <p className="text-red-500">Audio not available</p>
+                                                                    <p className="text-red-500 font-medium">Audio file not available</p>
                                                                     )}
                                                                 </td>
                                                                 </tr>
@@ -2639,26 +2676,26 @@
                                     </div>
                                 )}
                                 {view === 'salary' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
+                                    <div className="bg-white p-10 rounded-2xl shadow-xl border border-gray-200 transition-all duration-300">
+                                        <h2 className="text-3xl font-bold mb-8 text-gray-800">Salary Calculator</h2>
                                         <div className="grid grid-cols-1 gap-6">
-                                            <div className="form-group">
-                                                <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
+                                            <div>
+                                                <label className="block mb-3 font-bold text-gray-800">Employee Experience (months):</label>
                                                 <select
                                                     value={salaryData.experience}
                                                     onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                     disabled={isLoading}
                                                 >
-                                                    <option value="">Select Experience</option>
+                                                    <option value="">Select Experience Level</option>
                                                     <option value="0-3">0-3 months</option>
                                                     <option value="4-9">4-9 months</option>
                                                     <option value="10-15">10-15 months</option>
-                                                    <option value="16+">≥16 months</option>
+                                                    <option value="16+">16+ months</option>
                                                 </select>
                                             </div>
-                                            <div className="form-group">
-                                                <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
+                                            <div>
+                                                <label className="block mb-3 font-bold text-gray-800">Quality (%):</label>
                                                 <input
                                                     type="number"
                                                     value={salaryData.quality}
@@ -2666,12 +2703,12 @@
                                                     min="0"
                                                     max="100"
                                                     step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                     disabled={isLoading}
                                                 />
                                             </div>
-                                            <div className="form-group">
-                                                <label className="block mb-2 font-semibold text-gray-700">Calls per Hour:</label>
+                                            <div>
+                                                <label className="block mb-3 font-bold text-gray-800">Calls per Hour:</label>
                                                 <input
                                                     type="number"
                                                     value={salaryData.callsPerHour}
@@ -2679,12 +2716,12 @@
                                                     min="0"
                                                     max="100"
                                                     step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                     disabled={isLoading}
                                                 />
                                             </div>
-                                            <div className="form-group">
-                                                <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
+                                            <div>
+                                                <label className="block mb-3 font-bold text-gray-800">Monthly Hours Norm:</label>
                                                 <input
                                                     type="number"
                                                     value={salaryData.hoursNorm}
@@ -2692,12 +2729,12 @@
                                                     min="0"
                                                     max="744"
                                                     step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                     disabled={isLoading}
                                                 />
                                             </div>
-                                            <div className="form-group">
-                                                <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
+                                            <div>
+                                                <label className="block mb-3 font-bold text-gray-800">Total Hours Worked:</label>
                                                 <input
                                                     type="number"
                                                     value={salaryData.totalHours}
@@ -2705,32 +2742,32 @@
                                                     min="0"
                                                     max="744"
                                                     step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    className="w-full p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                     disabled={isLoading}
                                                 />
                                             </div>
-                                            <div className="form-group">
-                                                <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
-                                                <div className="space-y-4">
+                                            <div>
+                                                <label className="block mb-3 font-bold text-gray-800">Bonuses:</label>
+                                                <div className="space-y-5">
                                                     <div className="flex items-center gap-4">
                                                         <input
                                                             type="checkbox"
                                                             checked={salaryData.bonusTraining}
                                                             onChange={(e) => setSalaryData({ ...salaryData, bonusTraining: e.target.checked })}
-                                                            className="w-5 h-5"
+                                                            className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500"
                                                             disabled={isLoading}
                                                         />
-                                                        <label className="text-sm">Training (6000 KZT)</label>
+                                                        <label className="text-sm font-medium text-gray-700">Training Bonus (6000 KZT)</label>
                                                     </div>
                                                     <div className="flex items-center gap-4">
                                                         <input
                                                             type="checkbox"
                                                             checked={salaryData.bonusRefer}
                                                             onChange={(e) => setSalaryData({ ...salaryData, bonusRefer: e.target.checked })}
-                                                            className="w-5 h-5"
+                                                            className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500"
                                                             disabled={isLoading}
                                                         />
-                                                        <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
+                                                        <label className="text-sm font-medium text-gray-700">Refer a Friend (5000 KZT per friend)</label>
                                                         {salaryData.bonusRefer && (
                                                             <input
                                                                 type="number"
@@ -2738,8 +2775,8 @@
                                                                 onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
                                                                 min="1"
                                                                 step="1"
-                                                                placeholder="Quantity"
-                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                placeholder="Number of friends"
+                                                                className="w-32 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                                 disabled={isLoading}
                                                             />
                                                         )}
@@ -2749,10 +2786,10 @@
                                                             type="checkbox"
                                                             checked={salaryData.bonusFilming}
                                                             onChange={(e) => setSalaryData({ ...salaryData, bonusFilming: e.target.checked })}
-                                                            className="w-5 h-5"
+                                                            className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500"
                                                             disabled={isLoading}
                                                         />
-                                                        <label className="text-sm">Filming (5000 KZT per session)</label>
+                                                        <label className="text-sm font-medium text-gray-700">Filming Bonus (5000 KZT per session)</label>
                                                         {salaryData.bonusFilming && (
                                                             <input
                                                                 type="number"
@@ -2760,8 +2797,8 @@
                                                                 onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
                                                                 min="1"
                                                                 step="1"
-                                                                placeholder="Quantity"
-                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                placeholder="Number of sessions"
+                                                                className="w-32 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                                 disabled={isLoading}
                                                             />
                                                         )}
@@ -2769,10 +2806,10 @@
                                                 </div>
                                             </div>
                                         </div>
-                                        <div className="flex justify-center gap-4 mt-6">
+                                        <div className="flex justify-center gap-4 mt-8">
                                             <button
                                                 onClick={calculateSalary}
-                                                className={`px-6 py-3 rounded-lg font-semibold text-lg bg-green-500 text-white hover:bg-green-600 transition-all duration-200 ${
+                                                className={`py-4 px-8 rounded-lg font-bold text-lg bg-green-600 text-white hover:bg-green-700 transition-all duration-200 shadow-md hover:shadow-lg ${
                                                     isLoading ||
                                                     !salaryData.experience ||
                                                     !salaryData.quality ||
@@ -2795,11 +2832,11 @@
                                                     (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
                                                 }
                                             >
-                                                Calculate
+                                                Calculate Salary
                                             </button>
                                             <button
                                                 onClick={() => setShowPointsTable(!showPointsTable)}
-                                                className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
+                                                className={`py-4 px-8 rounded-lg font-bold text-lg bg-purple-600 text-white hover:bg-purple-700 transition-all duration-200 shadow-md hover:shadow-lg ${
                                                     !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
                                                 }`}
                                                 disabled={!salaryResult}
@@ -2808,7 +2845,7 @@
                                             </button>
                                             <button
                                                 onClick={clearSalaryForm}
-                                                className={`px-6 py-3 rounded-lg font-semibold text-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200 ${
+                                                className={`py-4 px-8 rounded-lg font-bold text-lg bg-red-600 text-white hover:bg-red-700 transition-all duration-200 shadow-md hover:shadow-lg ${
                                                     !salaryData.experience &&
                                                     !salaryData.quality &&
                                                     !salaryData.callsPerHour &&
@@ -2831,13 +2868,13 @@
                                                     !salaryData.bonusFilming
                                                 }
                                             >
-                                                Clear
+                                                Clear Form
                                             </button>
                                         </div>
 
                                         <SalaryCalculationResult salaryResult={salaryResult} />
                                         
-                                        <div id="points-table" className={`mt-6 ${showPointsTable ? 'block' : 'hidden'}`}>
+                                        <div id="points-table" className={`mt-8 ${showPointsTable ? 'block' : 'hidden'}`}>
                                             {salaryResult && generatePointsTable()}
                                         </div>
                                     </div>
@@ -2868,16 +2905,16 @@
                             />
                         )}
                         {showAccountMenu && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                                    <h2 className="text-xl font-semibold mb-4">Account Settings</h2>
+                            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+                                <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
+                                    <h2 className="text-2xl font-bold mb-6 text-gray-800">Account Settings</h2>
                                     <div className="space-y-4">
                                         <button
                                             onClick={() => {
                                                 setShowChangeLoginForm(true);
                                                 setShowAccountMenu(false);
                                             }}
-                                            className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600"
+                                            className="w-full py-4 rounded-lg font-semibold text-lg text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg"
                                         >
                                             Change Login
                                         </button>
@@ -2886,30 +2923,30 @@
                                                 setShowChangePasswordForm(true);
                                                 setShowAccountMenu(false);
                                             }}
-                                            className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600"
+                                            className="w-full py-4 rounded-lg font-semibold text-lg text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg"
                                         >
                                             Change Password
                                         </button>
                                         <button
                                             onClick={() => setShowAccountMenu(false)}
-                                            className="w-full bg-gray-500 text-white py-2 rounded hover:bg-gray-600"
+                                            className="w-full py-4 rounded-lg font-semibold text-lg text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
                                         >
-                                            Close
+                                            Close Menu
                                         </button>
                                     </div>
                                 </div>
                             </div>
                         )}
                         {showChangeLoginForm && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                                    <h2 className="text-xl font-semibold mb-4">Change Login</h2>
+                            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+                                <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
+                                    <h2 className="text-2xl font-bold mb-6 text-gray-800">Change Login</h2>
                                     <input
                                         type="text"
                                         placeholder="New Login"
                                         value={loginData.new_login}
                                         onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        className="w-full p-4 mb-5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                         disabled={isLoading}
                                     />
                                     <input
@@ -2917,31 +2954,31 @@
                                         placeholder="Confirm New Login"
                                         value={loginData.confirm_login}
                                         onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        className="w-full p-4 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                         disabled={isLoading}
                                     />
-                                    <div className="flex justify-between">
+                                    <div className="flex justify-end space-x-4">
                                         <button
                                             onClick={handleChangeLogin}
-                                            className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                            className={`py-3 px-6 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700 transition-all duration-200 shadow-md hover:shadow-lg ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                                             disabled={isLoading}
                                         >
                                             {isLoading ? 'Updating...' : 'Update Login'}
                                         </button>
                                         <button
                                             onClick={() => setShowChangeLoginForm(false)}
-                                            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                            className="py-3 px-6 rounded-lg font-medium text-white bg-gray-600 hover:bg-gray-700 transition-all duration-200 shadow-md hover:shadow-lg"
                                         >
                                             Cancel
                                         </button>
                                     </div>
-                                    {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                    {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                                    {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
+                                    {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
                                 </div>
                             </div>
                         )}
-                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                        {error && <p className="text-red-500 mt-4 text-center font-medium">{error}</p>}
+                        {success && <p className="text-green-500 mt-4 text-center font-medium">{success}</p>}
                     </div>
                 );
             };
@@ -2964,10 +3001,11 @@
         } catch (err) {
             console.error('Root rendering error:', err);
             document.getElementById('root').innerHTML = `
-                <div class="min-h-screen flex items-center justify-center bg-gray-100">
-                    <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                        <h1 class="text-2xl font-bold mb-4 text-center text-red-500">Application Failed to Load</h1>
-                        <p class="text-center">An error occurred while loading the application. Please check the console for details.</p>
+                <div class="min-h-screen flex items-center justify-center bg-gray-50">
+                    <div class="bg-white p-10 rounded-2xl shadow-2xl w-full max-w-lg text-center">
+                        <h1 class="text-3xl font-bold mb-4 text-red-600">Application Failed to Load</h1>
+                        <p class="text-gray-600 mb-4">An error occurred while loading the application.</p>
+                        <p class="text-gray-500">Please check the console for more details.</p>
                     </div>
                 </div>
             `;
