@@ -11,7 +11,7 @@
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
 </head>
-<body class="bg-gray-100 font-sans antialiased">
+<body class="bg-gray-200 font-sans antialiased">
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef } = React;
@@ -1496,14 +1496,14 @@
                 clearMessages();
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
-                        headers: { 
+                        headers: {
                             'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
                         }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSvList(data.sv_list || []);
+                        setSvList(data.sv_list);
                     } else {
                         setError(data.error || 'Failed to fetch supervisors');
                     }
@@ -1517,7 +1517,7 @@
 
             const addSv = async () => {
                 if (!newSvName.trim()) {
-                    setError('Please enter supervisor name');
+                    setError('Please enter a supervisor name');
                     return;
                 }
                 setIsLoading(true);
@@ -1526,15 +1526,11 @@
                     const response = await axios.post(`${API_BASE_URL}/api/admin/add_sv`, {
                         name: newSvName.trim()
                     }, {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'Supervisor added successfully');
+                        setSuccess('Supervisor added successfully');
                         setNewSvName('');
                         fetchSvList();
                     } else {
@@ -1556,15 +1552,11 @@
                     const response = await axios.post(`${API_BASE_URL}/api/admin/remove_sv`, {
                         sv_id: svId
                     }, {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'Supervisor removed successfully');
+                        setSuccess('Supervisor removed successfully');
                         fetchSvList();
                     } else {
                         setError(data.error || 'Failed to remove supervisor');
@@ -1577,8 +1569,8 @@
                 }
             };
 
-            const changeSvTable = async (svId, tableUrl) => {
-                if (!validateUrl(tableUrl)) {
+            const changeSvTable = async (svId, url) => {
+                if (!validateUrl(url)) {
                     setError('Invalid Google Sheets URL');
                     return;
                 }
@@ -1587,17 +1579,13 @@
                 try {
                     const response = await axios.post(`${API_BASE_URL}/api/admin/change_sv_table`, {
                         sv_id: svId,
-                        table_url: tableUrl
+                        table_url: url
                     }, {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'Table updated successfully');
+                        setSuccess('Table updated successfully');
                         setNewTableUrl('');
                         setShowChangeTableForm(false);
                         setCurrentSvForTableChange(null);
@@ -1618,20 +1606,17 @@
                 clearMessages();
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/sv/data`, {
-                        headers: { 
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
                         setSvData(data);
                     } else {
-                        setError(data.error || 'Failed to fetch data');
+                        setError(data.error || 'Failed to fetch SV data');
                     }
                 } catch (err) {
                     console.error('Fetch SV data error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch data');
+                    setError(err.response?.data?.error || 'Failed to fetch SV data');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -1648,15 +1633,11 @@
                     const response = await axios.post(`${API_BASE_URL}/api/sv/update_table`, {
                         table_url: newTableUrl
                     }, {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'Table updated successfully');
+                        setSuccess('Table updated successfully');
                         setNewTableUrl('');
                         fetchSvData();
                     } else {
@@ -1675,20 +1656,17 @@
                 clearMessages();
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/operator/evaluations?month=${month}`, {
-                        headers: { 
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
                         setOperatorData(data);
                     } else {
-                        setError(data.error || 'Failed to fetch evaluations');
+                        setError(data.error || 'Failed to fetch operator data');
                     }
                 } catch (err) {
                     console.error('Fetch operator data error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch evaluations');
+                    setError(err.response?.data?.error || 'Failed to fetch operator data');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -1699,20 +1677,17 @@
                 clearMessages();
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/operator/profile`, {
-                        headers: { 
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
                         setProfileData(data.profile);
                     } else {
-                        setError(data.error || 'Failed to fetch profile');
+                        setError(data.error || 'Failed to fetch profile data');
                     }
                 } catch (err) {
-                    console.error('Fetch profile error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch profile');
+                    console.error('Fetch profile data error:', err);
+                    setError(err.response?.data?.error || 'Failed to fetch profile data');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -1723,46 +1698,41 @@
                 clearMessages();
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/operator/hours?month=${month}`, {
-                        headers: { 
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
                         setHoursData(data.hours);
                     } else {
-                        setError(data.error || 'Failed to fetch hours');
+                        setError(data.error || 'Failed to fetch hours data');
                     }
                 } catch (err) {
-                    console.error('Fetch hours error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch hours');
+                    console.error('Fetch hours data error:', err);
+                    setError(err.response?.data?.error || 'Failed to fetch hours data');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
             };
 
-            const fetchSvOperators = async () => {
-                setIsLoading(true);
+            const fetchSelectedSvData = async (svId) => {
+                if (!svId) return;
+                setIsAdminDataLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/sv/operators`, {
-                        headers: { 
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                    const response = await axios.get(`${API_BASE_URL}/api/admin/sv_data?sv_id=${svId}`, {
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSvOperators(data.operators || []);
+                        setSelectedSvData(data);
                     } else {
-                        setError(data.error || 'Failed to fetch operators');
+                        setError(data.error || 'Failed to fetch SV data');
                     }
                 } catch (err) {
-                    console.error('Fetch SV operators error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch operators');
+                    console.error('Fetch selected SV data error:', err);
+                    setError(err.response?.data?.error || 'Failed to fetch SV data');
                 } finally {
-                    if (isMounted.current) setIsLoading(false);
+                    if (isMounted.current) setIsAdminDataLoading(false);
                 }
             };
 
@@ -1774,15 +1744,11 @@
                         sv_id: svId,
                         operator_name: operatorName
                     }, {
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'Notification sent successfully');
+                        setSuccess('Notification sent successfully');
                     } else {
                         setError(data.error || 'Failed to send notification');
                     }
@@ -1798,16 +1764,12 @@
                 setIsLoading(true);
                 clearMessages();
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/admin/weekly_report`, {
-                        headers: { 
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
+                    const response = await axios.post(`${API_BASE_URL}/api/admin/generate_weekly_report`, {}, {
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Weekly report generated successfully');
-                        // Optionally download or display the report
+                        setSuccess('Weekly report generated and sent successfully');
                     } else {
                         setError(data.error || 'Failed to generate report');
                     }
@@ -1819,192 +1781,183 @@
                 }
             };
 
+            const averageScore = operatorData?.evaluations.reduce((sum, eval1) => sum + eval1.score, 0) / operatorData?.evaluations.length || 0;
+
             useEffect(() => {
                 if (user) {
                     if (user.role === 'admin') {
-                        fetchSvList();
-                        fetchDirections();
-                        fetchUsers();
+                        debouncedFetch(fetchSvList);
+                        debouncedFetch(fetchDirections);
+                        debouncedFetch(fetchUsers);
                     } else if (user.role === 'sv') {
-                        fetchSvData();
-                        fetchDirections();
-                        fetchSvOperators();
+                        debouncedFetch(fetchSvData);
+                        debouncedFetch(fetchDirections);
                     } else if (user.role === 'operator') {
-                        fetchProfileData();
-                        fetchOperatorData(selectedMonth);
-                        fetchHoursData(selectedMonth);
+                        debouncedFetch(fetchProfileData);
+                        debouncedFetch(() => fetchHoursData(selectedMonth));
+                        debouncedFetch(() => fetchOperatorData(selectedMonth));
                     }
                 }
             }, [user]);
 
             useEffect(() => {
-                if (user?.role === 'operator') {
-                    fetchOperatorData(selectedMonth);
-                    fetchHoursData(selectedMonth);
+                if (user && user.role === 'operator' && selectedMonth) {
+                    debouncedFetch(() => fetchHoursData(selectedMonth));
+                    debouncedFetch(() => fetchOperatorData(selectedMonth));
                 }
-            }, [selectedMonth]);
+            }, [selectedMonth, user]);
 
             useEffect(() => {
-                if (selectedSvId && user?.role === 'admin') {
-                    setIsAdminDataLoading(true);
-                    debouncedFetch(async () => {
-                        try {
-                            const response = await axios.get(`${API_BASE_URL}/api/admin/sv_data?sv_id=${selectedSvId}`, {
-                                headers: { 
-                                    'X-API-Key': user.apiKey,
-                                    'X-User-Id': user.id
-                                }
-                            });
-                            const data = response.data;
-                            if (data.status === 'success' && isMounted.current) {
-                                setSelectedSvData(data);
-                            } else {
-                                setError(data.error || 'Failed to fetch SV data');
-                            }
-                        } catch (err) {
-                            console.error('Fetch SV data error:', err);
-                            setError(err.response?.data?.error || 'Failed to fetch SV data');
-                        } finally {
-                            if (isMounted.current) setIsAdminDataLoading(false);
-                        }
-                    });
+                if (user && user.role === 'admin' && selectedSvId) {
+                    debouncedFetch(() => fetchSelectedSvData(selectedSvId));
                 }
-            }, [selectedSvId]);
-
-            if (!user) {
-                return (
-                    <div className="min-h-screen flex items-center justify-center bg-gray-100">
-                        <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                            <h1 className="text-2xl font-bold mb-6 text-center">OTP Bot Dashboard</h1>
-                            <input
-                                type="text"
-                                placeholder="Login"
-                                value={login}
-                                onChange={(e) => setLogin(e.target.value)}
-                                onKeyPress={handleKeyPress}
-                                className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            />
-                            <input
-                                type="password"
-                                placeholder="Password"
-                                value={password}
-                                onChange={(e) => setPassword(e.target.value)}
-                                onKeyPress={handleKeyPress}
-                                className="w-full p-3 mb-6 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            />
-                            <button
-                                onClick={handleLogin}
-                                className={`w-full bg-blue-500 text-white py-3 rounded-lg hover:bg-blue-600 transition-colors duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                disabled={isLoading}
-                            >
-                                {isLoading ? 'Logging in...' : 'Login'}
-                            </button>
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                        </div>
-                    </div>
-                );
-            }
-
-            const averageScore = operatorData?.evaluations?.reduce((sum, eval1) => sum + (eval1.score || 0), 0) / (operatorData?.evaluations?.length || 1) || 0;
+            }, [selectedSvId, user]);
 
             const Sidebar = () => {
                 return (
-                    <div className="fixed left-0 top-0 h-screen w-64 bg-gradient-to-b from-blue-700 to-blue-900 text-white shadow-xl overflow-y-auto transition-all duration-300">
-                        <div className="p-6 text-2xl font-bold border-b border-blue-800">Dashboard</div>
-                        <nav className="mt-6">
-                            {user.role === 'admin' && (
-                                <>
-                                    <button onClick={() => setView('add_sv')} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"/></svg>
-                                        Add Supervisor
+                    <div className="fixed left-0 top-0 h-full w-64 bg-gray-900 text-white shadow-xl p-6 flex flex-col overflow-y-auto">
+                        <h1 className="text-2xl font-bold mb-8 text-white flex items-center">
+                            <svg className="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+                            </svg>
+                            OTP Bot
+                        </h1>
+                        {user ? (
+                            <>
+                                <div className="flex-grow space-y-2">
+                                    {user.role === 'admin' && (
+                                        <>
+                                            <button onClick={() => setView('add_sv')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'add_sv' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
+                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+                                                Add Supervisor
+                                            </button>
+                                            <button onClick={() => setView('sv_list')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'sv_list' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
+                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
+                                                Supervisor List
+                                            </button>
+                                            <button onClick={() => setView('view_scores')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'view_scores' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
+                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
+                                                View Scores
+                                            </button>
+                                            <button onClick={() => setView('manage_users')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'manage_users' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
+                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+                                                Manage Users
+                                            </button>
+                                            <button onClick={() => setShowMonitoringScaleModal(true)} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 hover:bg-gray-700`}>
+                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3"></path></svg>
+                                                Monitoring Scale
+                                            </button>
+                                        </>
+                                    )}
+                                    {user.role === 'sv' && (
+                                        <>
+                                            <button onClick={() => setView('update_table')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'update_table' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
+                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                                                Update Table
+                                            </button>
+                                            <button onClick={() => setView('operators')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'operators' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
+                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+                                                Operators
+                                            </button>
+                                            <button onClick={() => setView('manage_operators')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'manage_operators' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
+                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+                                                Manage Operators
+                                            </button>
+                                        </>
+                                    )}
+                                    {user.role === 'operator' && (
+                                        <>
+                                            <button onClick={() => setView('profile')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'profile' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
+                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0zm6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                                Profile
+                                            </button>
+                                            <button onClick={() => setView('hours')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'hours' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
+                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                                Hours
+                                            </button>
+                                            <button onClick={() => setView('evaluation')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'evaluation' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
+                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                                                Evaluation
+                                            </button>
+                                            <button onClick={() => setView('salary')} className={`w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 ${view === 'salary' ? 'bg-blue-600 text-white' : 'hover:bg-gray-700'}`}>
+                                                <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
+                                                Salary Calculator
+                                            </button>
+                                        </>
+                                    )}
+                                </div>
+                                <div className="mt-auto space-y-2 pt-4 border-t border-gray-700">
+                                    <button onClick={handleLogout} className="w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 bg-red-600 hover:bg-red-700">
+                                        <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                                        Logout
                                     </button>
-                                    <button onClick={() => setView('sv_list')} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5h6m-6 4h6m-6 4h6"/></svg>
-                                        Supervisor List
+                                    <button onClick={() => setShowAccountMenu(true)} className="w-full flex items-center text-left p-3 rounded-lg transition-all duration-200 hover:bg-gray-700">
+                                        <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                                        Account Settings
                                     </button>
-                                    <button onClick={() => setView('view_scores')} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h18M3 14h18M3 6h18M3 18h18"/></svg>
-                                        View Scores
-                                    </button>
-                                    <button onClick={() => setShowMonitoringScaleModal(true)} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                                        Monitoring Scale
-                                    </button>
-                                    <button onClick={() => setView('manage_users')} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
-                                        Manage Users
-                                    </button>
-                                </>
-                            )}
-                            {user.role === 'sv' && (
-                                <>
-                                    <button onClick={() => setView('operators')} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
-                                        Your Operators
-                                    </button>
-                                    <button onClick={() => setView('update_table')} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
-                                        Update Table
-                                    </button>
-                                    <button onClick={() => setView('manage_operators')} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
-                                        Manage Operators
-                                    </button>
-                                </>
-                            )}
-                            {user.role === 'operator' && (
-                                <>
-                                    <button onClick={() => setView('profile')} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
-                                        Profile
-                                    </button>
-                                    <button onClick={() => setView('hours')} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                                        Work Hours
-                                    </button>
-                                    <button onClick={() => setView('evaluation')} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
-                                        Call Evaluations
-                                    </button>
-                                    <button onClick={() => setView('salary')} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                                        Salary Calculator
-                                    </button>
-                                </>
-                            )}
-                            <button onClick={() => setShowAccountMenu(true)} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-                                Account Settings
-                            </button>
-                            <button onClick={handleLogout} className="w-full text-left p-4 hover:bg-blue-800 transition-colors duration-200 flex items-center gap-2">
-                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
-                                Logout
-                            </button>
-                        </nav>
+                                </div>
+                            </>
+                        ) : (
+                            <div className="space-y-4">
+                                <input
+                                    type="text"
+                                    placeholder="Login"
+                                    value={login}
+                                    onChange={(e) => setLogin(e.target.value)}
+                                    onKeyPress={handleKeyPress}
+                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-800 text-white placeholder-gray-400"
+                                    disabled={isLoading}
+                                    key="login-input" // Добавлен key для стабильности
+                                />
+                                <input
+                                    type="password"
+                                    placeholder="Password"
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
+                                    onKeyPress={handleKeyPress}
+                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-800 text-white placeholder-gray-400"
+                                    disabled={isLoading}
+                                    key="password-input" // Добавлен key для стабильности
+                                />
+                                <button
+                                    onClick={handleLogin}
+                                    className={`w-full bg-blue-500 text-white py-3 rounded-lg hover:bg-blue-600 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                    disabled={isLoading}
+                                >
+                                    {isLoading ? 'Logging in...' : 'Login'}
+                                </button>
+                                {error && <p className="text-red-500 text-center">{error}</p>}
+                                {success && <p className="text-green-500 text-center">{success}</p>}
+                            </div>
+                        )}
+                        {showLogoutConfirm && (
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                                    <p className="mb-4 text-center">Are you sure you want to logout?</p>
+                                    <div className="flex justify-between">
+                                        <button onClick={confirmLogout} className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">Yes</button>
+                                        <button onClick={() => setShowLogoutConfirm(false)} className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600">No</button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 );
             };
 
             const MainContent = () => {
                 return (
-                    <div className="ml-64 p-8 bg-gray-100 min-h-screen">
-                        <header className="bg-white p-4 rounded-lg shadow mb-6 flex justify-between items-center">
-                            <h1 className="text-2xl font-bold">Welcome, {user.name}</h1>
-                            <span className="text-gray-600">Role: {user.role.charAt(0).toUpperCase() + user.role.slice(1)}</span>
-                        </header>
+                    <div className="ml-64 p-6 bg-gray-100 min-h-screen">
                         {user.role === 'admin' && (
                             <>
                                 {view === 'add_sv' && (
-                                            <AddSvForm
-                                                isLoading={isLoading}
-                                                newSvName={newSvName}
-                                                setNewSvName={setNewSvName}
-                                                addSv={addSv}
-                                            />
-                                        )}
+                                    <AddSvForm
+                                        isLoading={isLoading}
+                                        newSvName={newSvName}
+                                        setNewSvName={setNewSvName}
+                                        addSv={addSv}
+                                    />
+                                )}
                                 {view === 'sv_list' && (
                                     <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                                         <div className="flex justify-between items-center mb-4">
@@ -2658,6 +2611,7 @@
                                                     step="0.01"
                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
+                                                    key="quality-input" // Добавлен key для предотвращения разфокуса
                                                 />
                                             </div>
                                             <div className="form-group">
@@ -2671,6 +2625,7 @@
                                                     step="0.01"
                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
+                                                    key="callsPerHour-input" // Добавлен key для предотвращения разфокуса
                                                 />
                                             </div>
                                             <div className="form-group">
@@ -2684,6 +2639,7 @@
                                                     step="0.01"
                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
+                                                    key="hoursNorm-input" // Добавлен key для предотвращения разфокуса
                                                 />
                                             </div>
                                             <div className="form-group">
@@ -2697,6 +2653,7 @@
                                                     step="0.01"
                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
+                                                    key="totalHours-input" // Добавлен key для предотвращения разфокуса
                                                 />
                                             </div>
                                             <div className="form-group">
@@ -2731,6 +2688,7 @@
                                                                 placeholder="Quantity"
                                                                 className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                 disabled={isLoading}
+                                                                key="bonusReferQuantity-input" // Добавлен key для предотвращения разфокуса
                                                             />
                                                         )}
                                                     </div>
@@ -2753,6 +2711,7 @@
                                                                 placeholder="Quantity"
                                                                 className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                 disabled={isLoading}
+                                                                key="bonusFilmingQuantity-input" // Добавлен key для предотвращения разфокуса
                                                             />
                                                         )}
                                                     </div>
@@ -2901,6 +2860,7 @@
                                         onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
                                         className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         disabled={isLoading}
+                                        key="new-login-input" // Добавлен key для предотвращения разфокуса
                                     />
                                     <input
                                         type="text"
@@ -2909,6 +2869,7 @@
                                         onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
                                         className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         disabled={isLoading}
+                                        key="confirm-login-input" // Добавлен key для предотвращения разфокуса
                                     />
                                     <div className="flex justify-between">
                                         <button
@@ -2941,6 +2902,7 @@
                                         onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
                                         className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         disabled={isLoading}
+                                        key="new-password-input" // Добавлен key для предотвращения разфокуса
                                     />
                                     <input
                                         type="password"
@@ -2949,6 +2911,7 @@
                                         onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
                                         className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         disabled={isLoading}
+                                        key="confirm-password-input" // Добавлен key для предотвращения разфокуса
                                     />
                                     <div className="flex justify-between">
                                         <button
@@ -2967,28 +2930,6 @@
                                     </div>
                                     {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
                                     {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                                </div>
-                            </div>
-                        )}
-                        {showLogoutConfirm && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                                    <h2 className="text-xl font-semibold mb-4">Confirm Logout</h2>
-                                    <p className="mb-4">Are you sure you want to logout?</p>
-                                    <div className="flex justify-between">
-                                        <button
-                                            onClick={confirmLogout}
-                                            className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
-                                        >
-                                            Yes, Logout
-                                        </button>
-                                        <button
-                                            onClick={() => setShowLogoutConfirm(false)}
-                                            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                        >
-                                            Cancel
-                                        </button>
-                                    </div>
                                 </div>
                             </div>
                         )}
