@@ -375,11 +375,11 @@
                                         />
                                         {!newCriterionCritical && (
                                             <input
-                                                type="number"
+                                                type="text"
                                                 value={newCriterionWeight}
                                                 onChange={(e) => setNewCriterionWeight(e.target.value)}
                                                 placeholder="Weight"
-                                                min="1"
+                                                inputMode="decimal"
                                                 className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                 disabled={directions.length === 0}
                                             />
@@ -2662,12 +2662,10 @@
                                             <div className="form-group">
                                                 <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
                                                 <input
-                                                    type="number"
+                                                    type="text"
                                                     value={salaryData.quality}
                                                     onChange={(e) => setSalaryData({ ...salaryData, quality: e.target.value })}
-                                                    min="0"
-                                                    max="100"
-                                                    step="0.01"
+                                                    inputMode="decimal"
                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
                                                 />
@@ -2675,12 +2673,10 @@
                                             <div className="form-group">
                                                 <label className="block mb-2 font-semibold text-gray-700">Calls per Hour:</label>
                                                 <input
-                                                    type="number"
+                                                    type="text"
                                                     value={salaryData.callsPerHour}
                                                     onChange={(e) => setSalaryData({ ...salaryData, callsPerHour: e.target.value })}
-                                                    min="0"
-                                                    max="100"
-                                                    step="0.01"
+                                                    inputMode="decimal"
                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
                                                 />
@@ -2688,12 +2684,10 @@
                                             <div className="form-group">
                                                 <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
                                                 <input
-                                                    type="number"
+                                                    type="text"
                                                     value={salaryData.hoursNorm}
                                                     onChange={(e) => setSalaryData({ ...salaryData, hoursNorm: e.target.value })}
-                                                    min="0"
-                                                    max="744"
-                                                    step="0.01"
+                                                    inputMode="decimal"
                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
                                                 />
@@ -2701,12 +2695,10 @@
                                             <div className="form-group">
                                                 <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
                                                 <input
-                                                    type="number"
+                                                    type="text"
                                                     value={salaryData.totalHours}
                                                     onChange={(e) => setSalaryData({ ...salaryData, totalHours: e.target.value })}
-                                                    min="0"
-                                                    max="744"
-                                                    step="0.01"
+                                                    inputMode="decimal"
                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
                                                 />
@@ -2735,11 +2727,10 @@
                                                         <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
                                                         {salaryData.bonusRefer && (
                                                             <input
-                                                                type="number"
+                                                                type="text"
                                                                 value={salaryData.bonusReferQuantity}
                                                                 onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
-                                                                min="1"
-                                                                step="1"
+                                                                inputMode="numeric"
                                                                 placeholder="Quantity"
                                                                 className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                 disabled={isLoading}
@@ -2757,11 +2748,10 @@
                                                         <label className="text-sm">Filming (5000 KZT per session)</label>
                                                         {salaryData.bonusFilming && (
                                                             <input
-                                                                type="number"
+                                                                type="text"
                                                                 value={salaryData.bonusFilmingQuantity}
                                                                 onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
-                                                                min="1"
-                                                                step="1"
+                                                                inputMode="numeric"
                                                                 placeholder="Quantity"
                                                                 className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                 disabled={isLoading}
