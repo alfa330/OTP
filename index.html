@@ -10,6 +10,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
+    <script src="https://kit.fontawesome.com/a076d05399.js" crossorigin="anonymous"></script> <!-- Added Font Awesome for icons -->
 </head>
 <body class="bg-gray-100 font-sans antialiased">
     <div id="root"></div>
@@ -1947,158 +1948,54 @@
 
             return (
                 <div>
-                    <div className="fixed top-0 left-0 h-full w-64 bg-gradient-to-b from-blue-900 to-blue-700 text-white p-6 shadow-2xl overflow-y-auto transition-all duration-300 ease-in-out">
-                        <div className="flex items-center mb-8">
-                            <svg className="w-8 h-8 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                            </svg>
-                            <h1 className="text-2xl font-bold">Dashboard</h1>
-                        </div>
-                        <ul className="space-y-2">
+                    <div className="fixed top-0 left-0 h-full w-64 bg-gradient-to-b from-blue-900 to-blue-700 text-white p-6 shadow-xl transition-all duration-300 hover:shadow-2xl">
+                        <h1 className="text-2xl font-bold mb-8 flex items-center gap-2"><i className="fas fa-robot"></i> Dashboard</h1>
+                        <ul className="space-y-3">
                             {user.role === 'admin' && (
                                 <>
-                                    <li>
-                                        <button onClick={() => setView('add_sv')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'add_sv' ? 'bg-blue-800 shadow-md' : ''}`}>
-                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M18 9a3 3 0 00-3-3H9a3 3 0 00-3 3v6a3 3 0 003 3h6a3 3 0 003-3V9zM12 6v12" />
-                                            </svg>
-                                            Add Supervisor
-                                        </button>
-                                    </li>
-                                    <li>
-                                        <button onClick={() => setView('sv_list')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'sv_list' ? 'bg-blue-800 shadow-md' : ''}`}>
-                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v1m-10-1h-5v2a3 3 0 005.356 1.857M7 20H17m-10-1v1m10-1v1M5 10h14M5 14h14M5 6h14" />
-                                            </svg>
-                                            Supervisors
-                                        </button>
-                                    </li>
-                                    <li>
-                                        <button onClick={() => setView('view_scores')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'view_scores' ? 'bg-blue-800 shadow-md' : ''}`}>
-                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5h6m-3-3v6m-3 3h6m-3-3v6m-3 3h6" />
-                                            </svg>
-                                            View Operator Scores
-                                        </button>
-                                    </li>
-                                    <li>
-                                        <button onClick={() => setView('manage_users')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'manage_users' ? 'bg-blue-800 shadow-md' : ''}`}>
-                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-                                            </svg>
-                                            Manage Users
-                                        </button>
-                                    </li>
-                                    <li>
-                                        <button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1">
-                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
-                                            </svg>
-                                            Manage Monitoring Scale
-                                        </button>
-                                    </li>
+                                    <li><button onClick={() => setView('add_sv')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'add_sv' ? 'bg-blue-800' : ''}`}><i className="fas fa-user-plus"></i> Add Supervisor</button></li>
+                                    <li><button onClick={() => setView('sv_list')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'sv_list' ? 'bg-blue-800' : ''}`}><i className="fas fa-users"></i> Supervisors</button></li>
+                                    <li><button onClick={() => setView('view_scores')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'view_scores' ? 'bg-blue-800' : ''}`}><i className="fas fa-chart-bar"></i> View Operator Scores</button></li>
+                                    <li><button onClick={() => setView('manage_users')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'manage_users' ? 'bg-blue-800' : ''}`}><i className="fas fa-user-cog"></i> Manage Users</button></li>
+                                    <li><button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2"><i className="fas fa-balance-scale"></i> Manage Monitoring Scale</button></li>
                                 </>
                             )}
                             {user.role === 'sv' && (
                                 <>
-                                    <li>
-                                        <button onClick={() => setView('update_table')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'update_table' ? 'bg-blue-800 shadow-md' : ''}`}>
-                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                                            </svg>
-                                            Update Table
-                                        </button>
-                                    </li>
-                                    <li>
-                                        <button onClick={() => setView('operators')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'operators' ? 'bg-blue-800 shadow-md' : ''}`}>
-                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v1m-10-1h-5v2a3 3 0 005.356 1.857M7 20H17m-10-1v1m10-1v1M5 10h14M5 14h14M5 6h14" />
-                                            </svg>
-                                            Your Operators
-                                        </button>
-                                    </li>
-                                    <li>
-                                        <button onClick={() => setView('manage_operators')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'manage_operators' ? 'bg-blue-800 shadow-md' : ''}`}>
-                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-                                            </svg>
-                                            Manage my operators
-                                        </button>
-                                    </li>
+                                    <li><button onClick={() => setView('update_table')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'update_table' ? 'bg-blue-800' : ''}`}><i className="fas fa-table"></i> Update Table</button></li>
+                                    <li><button onClick={() => setView('operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'operators' ? 'bg-blue-800' : ''}`}><i className="fas fa-users-cog"></i> Your Operators</button></li>
+                                    <li><button onClick={() => setView('manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'manage_operators' ? 'bg-blue-800' : ''}`}><i className="fas fa-user-edit"></i> Manage my operators</button></li>
                                 </>
                             )}
                             {user.role === 'operator' && (
                                 <>
-                                    <li>
-                                        <button onClick={() => setView('profile')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'profile' ? 'bg-blue-800 shadow-md' : ''}`}>
-                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0zm6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                            </svg>
-                                            Profile
-                                        </button>
-                                    </li>
-                                    <li>
-                                        <button onClick={() => setView('hours')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'hours' ? 'bg-blue-800 shadow-md' : ''}`}>
-                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                            </svg>
-                                            My Hours
-                                        </button>
-                                    </li>
-                                    <li>
-                                        <button onClick={() => setView('evaluation')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'evaluation' ? 'bg-blue-800 shadow-md' : ''}`}>
-                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.961 10.013 10.326 16.333 9 18.215M6 11l4 4 4-4" />
-                                            </svg>
-                                            Call Evaluations
-                                        </button>
-                                    </li>
-                                    <li>
-                                        <button onClick={() => setView('salary')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'salary' ? 'bg-blue-800 shadow-md' : ''}`}>
-                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                            </svg>
-                                            Salary Calculator
-                                        </button>
-                                    </li>
+                                    <li><button onClick={() => setView('profile')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'profile' ? 'bg-blue-800' : ''}`}><i className="fas fa-user"></i> Profile</button></li>
+                                    <li><button onClick={() => setView('hours')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'hours' ? 'bg-blue-800' : ''}`}><i className="fas fa-clock"></i> My Hours</button></li>
+                                    <li><button onClick={() => setView('evaluation')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'evaluation' ? 'bg-blue-800' : ''}`}><i className="fas fa-phone-alt"></i> Call Evaluations</button></li>
+                                    <li><button onClick={() => setView('salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'salary' ? 'bg-blue-800' : ''}`}><i className="fas fa-money-bill-wave"></i> Salary Calculator</button></li>
                                 </>
                             )}
-                            <li>
-                                <button onClick={() => setShowAccountMenu(true)} className="w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1">
-                                    <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                    </svg>
-                                    Account
-                                </button>
-                            </li>
-                            <li>
-                                <button onClick={handleLogout} className="w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 bg-red-600 hover:bg-red-700 hover:translate-x-1">
-                                    <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-                                    </svg>
-                                    Logout
-                                </button>
-                            </li>
+                            <li><button onClick={() => setShowAccountMenu(true)} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2"><i className="fas fa-cog"></i> Account</button></li>
+                            <li><button onClick={handleLogout} className="w-full text-left py-3 px-4 rounded-lg hover:bg-red-800 bg-red-700 transition-all duration-200 flex items-center gap-2"><i className="fas fa-sign-out-alt"></i> Logout</button></li>
                         </ul>
                     </div>
-                    <div className="ml-64 p-6 bg-gray-100 min-h-screen">
+                    <div className="ml-64 p-6 bg-gradient-to-br from-gray-50 to-gray-200 min-h-screen transition-all duration-300">
                         {user.role === 'admin' && (
                             <>
                                 {view === 'add_sv' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                    <div className="bg-white p-6 rounded-xl shadow-md mb-6 border border-gray-200 hover:shadow-lg transition-shadow duration-300">
                                         <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
                                         <input
                                             type="text"
                                             placeholder="Supervisor Name"
                                             value={newSvName}
                                             onChange={(e) => setNewSvName(e.target.value)}
-                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading}
                                         />
                                         <button
                                             onClick={addSv}
-                                            className={`w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                            className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                             disabled={isLoading}
                                         >
                                             {isLoading ? 'Adding...' : 'Add Supervisor'}
@@ -2106,12 +2003,12 @@
                                     </div>
                                 )}
                                 {view === 'sv_list' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                    <div className="bg-white p-6 rounded-xl shadow-md mb-6 border border-gray-200 hover:shadow-lg transition-shadow duration-300">
                                         <div className="flex justify-between items-center mb-4">
                                             <h2 className="text-xl font-semibold">Supervisors</h2>
                                             <button
                                                 onClick={generateWeeklyReport}
-                                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                className={`bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                                 disabled={isLoading}
                                             >
                                                 {isLoading ? 'Generating...' : 'Generate Report'}
@@ -2125,7 +2022,7 @@
                                             <div className="overflow-x-auto">
                                                 <table className="min-w-full bg-white border-collapse">
                                                     <thead>
-                                                        <tr className="bg-gray-200">
+                                                        <tr className="bg-gray-100">
                                                             <th className="p-3 border-b text-left">Name</th>
                                                             <th className="p-3 border-b text-left">ID</th>
                                                             <th className="p-3 border-b text-left">Table URL</th>
@@ -2134,7 +2031,7 @@
                                                     </thead>
                                                     <tbody>
                                                         {svList.map(sv => (
-                                                            <tr key={sv.id} className="hover:bg-gray-50">
+                                                            <tr key={sv.id} className="hover:bg-gray-50 transition-colors duration-200">
                                                                 <td className="p-3 border-b">{sv.name}</td>
                                                                 <td className="p-3 border-b">{sv.id}</td>
                                                                 <td className="p-3 border-b">
@@ -2170,20 +2067,20 @@
                                     </div>
                                 )}
                                 {showChangeTableForm && currentSvForTableChange && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                    <div className="bg-white p-6 rounded-xl shadow-md mb-6 border border-gray-200 hover:shadow-lg transition-shadow duration-300">
                                         <h2 className="text-xl font-semibold mb-4">Change Table for {currentSvForTableChange.name}</h2>
                                         <input
                                             type="text"
                                             placeholder="New Google Sheets URL"
                                             value={newTableUrl}
                                             onChange={(e) => setNewTableUrl(e.target.value)}
-                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading}
                                         />
                                         <div className="flex justify-between">
                                             <button
                                                 onClick={() => changeSvTable(currentSvForTableChange.id, newTableUrl)}
-                                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                className={`bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                                 disabled={isLoading}
                                             >
                                                 {isLoading ? 'Updating...' : 'Update Table'}
@@ -2194,7 +2091,7 @@
                                                     setCurrentSvForTableChange(null);
                                                     setNewTableUrl('');
                                                 }}
-                                                className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                                className="bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600 transition-all duration-200"
                                             >
                                                 Cancel
                                             </button>
@@ -2202,12 +2099,12 @@
                                     </div>
                                 )}
                                 {view === 'view_scores' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg">
+                                    <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 hover:shadow-lg transition-shadow duration-300">
                                         <h2 className="text-xl font-semibold mb-4">View Operator Scores</h2>
                                         <select
                                             value={selectedSvId}
                                             onChange={(e) => setSelectedSvId(e.target.value)}
-                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading || isAdminDataLoading}
                                         >
                                             <option value="">Select Supervisor</option>
@@ -2237,7 +2134,7 @@
                                                             const callCount = parseInt(op.call_count) || 0;
                                                             const hasIssue = callCount < expectedCalls;
                                                             return (
-                                                                <tr key={index} className="hover:bg-gray-50">
+                                                                <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
                                                                     <td className="p-3 border-b">{op.name}</td>
                                                                     <td className={`p-3 border-b ${getCallCountColor(callCount, expectedCalls)}`}>
                                                                         {callCount}
@@ -2308,7 +2205,7 @@
                                     />
                                 )}
                                 {view === 'manage_users' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg">
+                                    <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 hover:shadow-lg transition-shadow duration-300">
                                         <h2 className="text-xl font-semibold mb-4">Manage Users</h2>
                                         {isAdminDataLoading ? (
                                             <p className="text-center">Loading...</p>
@@ -2318,7 +2215,7 @@
                                             <div className="overflow-x-auto">
                                                 <table className="min-w-full bg-white border-collapse">
                                                     <thead>
-                                                        <tr className="bg-gray-200">
+                                                        <tr className="bg-gray-100">
                                                             <th className="p-3 border-b text-left">Name</th>
                                                             <th className="p-3 border-b text-left">ID</th>
                                                             <th className="p-3 border-b text-left">Direction</th>
@@ -2328,7 +2225,7 @@
                                                     </thead>
                                                     <tbody>
                                                         {users.map(u => (
-                                                            <tr key={u.id} className="hover:bg-gray-50">
+                                                            <tr key={u.id} className="hover:bg-gray-50 transition-colors duration-200">
                                                                 <td className="p-3 border-b">{u.name}</td>
                                                                 <td className="p-3 border-b">{u.id}</td>
                                                                 <td className="p-3 border-b">{u.direction || '-'}</td>
@@ -2357,19 +2254,19 @@
                         {user.role === 'sv' && (
                             <>
                                 {view === 'update_table' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                    <div className="bg-white p-6 rounded-xl shadow-md mb-6 border border-gray-200 hover:shadow-lg transition-shadow duration-300">
                                         <h2 className="text-xl font-semibold mb-4">Update Table</h2>
                                         <input
                                             type="text"
                                             placeholder="Enter Google Sheets URL"
                                             value={newTableUrl}
                                             onChange={(e) => setNewTableUrl(e.target.value)}
-                                            className="w-full p-2 mb-4 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading}
                                         />
                                         <button
                                             onClick={updateTable}
-                                            className={`w-full bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                            className={`w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                             disabled={isLoading}
                                         >
                                             {isLoading ? 'Updating...' : 'Update Table'}
@@ -2377,7 +2274,7 @@
                                     </div>
                                 )}
                                 {view === 'manage_operators' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg">
+                                    <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 hover:shadow-lg transition-shadow duration-300">
                                         <h2 className="text-xl font-semibold mb-4">Manage Your Operators</h2>
                                         {isLoading ? (
                                             <p className="text-center">Loading...</p>
@@ -2385,7 +2282,7 @@
                                             <div className="overflow-x-auto">
                                                 <table className="min-w-full bg-white border-collapse">
                                                     <thead>
-                                                        <tr className="bg-gray-200">
+                                                        <tr className="bg-gray-100">
                                                             <th className="p-3 border-b text-left">Name</th>
                                                             <th className="p-3 border-b text-left">ID</th>
                                                             <th className="p-3 border-b text-left">Direction</th>
@@ -2394,7 +2291,7 @@
                                                     </thead>
                                                     <tbody>
                                                         {svData.operators.map(op => (
-                                                            <tr key={op.id} className="hover:bg-gray-50">
+                                                            <tr key={op.id} className="hover:bg-gray-50 transition-colors duration-200">
                                                                 <td className="p-3 border-b">{op.name}</td>
                                                                 <td className="p-3 border-b">{op.id}</td>
                                                                 <td className="p-3 border-b">{op.direction_id ? directions.find(d => d.id === op.direction_id)?.name || '-' : '-'}</td>
@@ -2420,7 +2317,7 @@
                                     </div>
                                 )}
                                 {view === 'operators' && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                    <div className="bg-white p-6 rounded-xl shadow-md mb-6 border border-gray-200 hover:shadow-lg transition-shadow duration-300">
                                         <h2 className="text-xl font-semibold mb-4">Your Operators</h2>
                                         {isLoading ? (
                                             <p className="text-center">Loading...</p>
@@ -2428,7 +2325,7 @@
                                             <div className="overflow-x-auto">
                                                 <table className="min-w-full bg-white border-collapse">
                                                 <thead>
-                                                    <tr className="bg-gray-200">
+                                                    <tr className="bg-gray-100">
                                                     <th className="p-3 border-b text-left">Name</th>
                                                     <th className="p-3 border-b text-left">Calls</th>
                                                     <th className="p-3 border-b text-left">Avg Score</th>
@@ -2440,7 +2337,7 @@
                                                     {svData.operators.map((op, index) => {
                                                     const callCount = parseInt(op.call_count) || 0;
                                                     return (
-                                                        <tr key={index} className="hover:bg-gray-50">
+                                                        <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
                                                         <td className="p-3 border-b">{op.name}</td>
                                                         <td className={`p-3 border-b ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
                                                             {callCount}
@@ -2495,7 +2392,7 @@
                         {user.role === 'operator' && (
                             <>
                                 {view === 'profile' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 hover:shadow-lg transition-shadow duration-300">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
                                         {isLoading ? (
                                             <p className="text-center text-gray-600">Loading...</p>
@@ -2565,7 +2462,7 @@
                                         <select
                                             value={selectedMonth}
                                             onChange={(e) => setSelectedMonth(e.target.value)}
-                                            className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading}
                                         >
                                             {getMonthOptions()}
@@ -2573,7 +2470,7 @@
                                     </div>
                                 )}
                                 {view === 'hours' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                    <div className="bg-white p-8 rounded-xl shadow-md border border-gray-200 hover:shadow-lg transition-shadow duration-300">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
                                         {isLoading ? (
                                             <p className="text-center text-gray-600">Loading...</p>
@@ -2618,7 +2515,7 @@
                                     </div>
                                 )}
                                 {view === 'evaluation' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                    <div className="bg-white p-8 rounded-xl shadow-md border border-gray-200 hover:shadow-lg transition-shadow duration-300">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
                                         {isLoading ? (
                                             <p className="text-center text-gray-600">Loading...</p>
@@ -2729,7 +2626,7 @@
                                     </div>
                                 )}
                                 {view === 'salary' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                    <div className="bg-white p-8 rounded-xl shadow-md border border-gray-200 hover:shadow-lg transition-shadow duration-300">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
                                         <div className="grid grid-cols-1 gap-6">
                                             <div className="form-group">
@@ -2737,7 +2634,7 @@
                                                 <select
                                                     value={salaryData.experience}
                                                     onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                     disabled={isLoading}
                                                 >
                                                     <option value="">Select Experience</option>
@@ -2756,7 +2653,7 @@
                                                     min="0"
                                                     max="100"
                                                     step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                     disabled={isLoading}
                                                 />
                                             </div>
@@ -2769,7 +2666,7 @@
                                                     min="0"
                                                     max="100"
                                                     step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                     disabled={isLoading}
                                                 />
                                             </div>
@@ -2782,7 +2679,7 @@
                                                     min="0"
                                                     max="744"
                                                     step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                     disabled={isLoading}
                                                 />
                                             </div>
@@ -2795,7 +2692,7 @@
                                                     min="0"
                                                     max="744"
                                                     step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                     disabled={isLoading}
                                                 />
                                             </div>
@@ -2829,7 +2726,7 @@
                                                                 min="1"
                                                                 step="1"
                                                                 placeholder="Quantity"
-                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                                 disabled={isLoading}
                                                             />
                                                         )}
@@ -2851,7 +2748,7 @@
                                                                 min="1"
                                                                 step="1"
                                                                 placeholder="Quantity"
-                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                                                 disabled={isLoading}
                                                             />
                                                         )}
