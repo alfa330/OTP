@@ -620,8 +620,6 @@ def add_sv():
 
         name = data['name']
         
-        # Generate random login and password
-        random_suffix = ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
         login = f"sv_{str(uuid.uuid4())[:8]}"
         password = str(uuid.uuid4())[:8]  
         
