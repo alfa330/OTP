@@ -1947,35 +1947,139 @@
 
             return (
                 <div>
-                    <div className="fixed top-0 left-0 h-full w-64 bg-blue-800 text-white p-6 shadow-lg">
-                        <h1 className="text-2xl font-bold mb-8">Dashboard</h1>
-                        <ul className="space-y-4">
+                    <div className="fixed top-0 left-0 h-full w-64 bg-gradient-to-b from-blue-900 to-blue-700 text-white p-6 shadow-2xl overflow-y-auto transition-all duration-300 ease-in-out">
+                        <div className="flex items-center mb-8">
+                            <svg className="w-8 h-8 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                            </svg>
+                            <h1 className="text-2xl font-bold">Dashboard</h1>
+                        </div>
+                        <ul className="space-y-2">
                             {user.role === 'admin' && (
                                 <>
-                                    <li><button onClick={() => setView('add_sv')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'add_sv' ? 'bg-blue-900' : ''}`}>Add Supervisor</button></li>
-                                    <li><button onClick={() => setView('sv_list')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'sv_list' ? 'bg-blue-900' : ''}`}>Supervisors</button></li>
-                                    <li><button onClick={() => setView('view_scores')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'view_scores' ? 'bg-blue-900' : ''}`}>View Operator Scores</button></li>
-                                    <li><button onClick={() => setView('manage_users')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'manage_users' ? 'bg-blue-900' : ''}`}>Manage Users</button></li>
-                                    <li><button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-2 px-4 rounded hover:bg-blue-700">Manage Monitoring Scale</button></li>
+                                    <li>
+                                        <button onClick={() => setView('add_sv')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'add_sv' ? 'bg-blue-800 shadow-md' : ''}`}>
+                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M18 9a3 3 0 00-3-3H9a3 3 0 00-3 3v6a3 3 0 003 3h6a3 3 0 003-3V9zM12 6v12" />
+                                            </svg>
+                                            Add Supervisor
+                                        </button>
+                                    </li>
+                                    <li>
+                                        <button onClick={() => setView('sv_list')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'sv_list' ? 'bg-blue-800 shadow-md' : ''}`}>
+                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v1m-10-1h-5v2a3 3 0 005.356 1.857M7 20H17m-10-1v1m10-1v1M5 10h14M5 14h14M5 6h14" />
+                                            </svg>
+                                            Supervisors
+                                        </button>
+                                    </li>
+                                    <li>
+                                        <button onClick={() => setView('view_scores')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'view_scores' ? 'bg-blue-800 shadow-md' : ''}`}>
+                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5h6m-3-3v6m-3 3h6m-3-3v6m-3 3h6" />
+                                            </svg>
+                                            View Operator Scores
+                                        </button>
+                                    </li>
+                                    <li>
+                                        <button onClick={() => setView('manage_users')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'manage_users' ? 'bg-blue-800 shadow-md' : ''}`}>
+                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                                            </svg>
+                                            Manage Users
+                                        </button>
+                                    </li>
+                                    <li>
+                                        <button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1">
+                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                                            </svg>
+                                            Manage Monitoring Scale
+                                        </button>
+                                    </li>
                                 </>
                             )}
                             {user.role === 'sv' && (
                                 <>
-                                    <li><button onClick={() => setView('update_table')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'update_table' ? 'bg-blue-900' : ''}`}>Update Table</button></li>
-                                    <li><button onClick={() => setView('operators')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'operators' ? 'bg-blue-900' : ''}`}>Your Operators</button></li>
-                                    <li><button onClick={() => setView('manage_operators')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'manage_operators' ? 'bg-blue-900' : ''}`}>Manage my operators</button></li>
+                                    <li>
+                                        <button onClick={() => setView('update_table')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'update_table' ? 'bg-blue-800 shadow-md' : ''}`}>
+                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                                            </svg>
+                                            Update Table
+                                        </button>
+                                    </li>
+                                    <li>
+                                        <button onClick={() => setView('operators')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'operators' ? 'bg-blue-800 shadow-md' : ''}`}>
+                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v1m-10-1h-5v2a3 3 0 005.356 1.857M7 20H17m-10-1v1m10-1v1M5 10h14M5 14h14M5 6h14" />
+                                            </svg>
+                                            Your Operators
+                                        </button>
+                                    </li>
+                                    <li>
+                                        <button onClick={() => setView('manage_operators')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'manage_operators' ? 'bg-blue-800 shadow-md' : ''}`}>
+                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                                            </svg>
+                                            Manage my operators
+                                        </button>
+                                    </li>
                                 </>
                             )}
                             {user.role === 'operator' && (
                                 <>
-                                    <li><button onClick={() => setView('profile')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'profile' ? 'bg-blue-900' : ''}`}>Profile</button></li>
-                                    <li><button onClick={() => setView('hours')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'hours' ? 'bg-blue-900' : ''}`}>My Hours</button></li>
-                                    <li><button onClick={() => setView('evaluation')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'evaluation' ? 'bg-blue-900' : ''}`}>Call Evaluations</button></li>
-                                    <li><button onClick={() => setView('salary')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'salary' ? 'bg-blue-900' : ''}`}>Salary Calculator</button></li>
+                                    <li>
+                                        <button onClick={() => setView('profile')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'profile' ? 'bg-blue-800 shadow-md' : ''}`}>
+                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0zm6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                            </svg>
+                                            Profile
+                                        </button>
+                                    </li>
+                                    <li>
+                                        <button onClick={() => setView('hours')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'hours' ? 'bg-blue-800 shadow-md' : ''}`}>
+                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                            </svg>
+                                            My Hours
+                                        </button>
+                                    </li>
+                                    <li>
+                                        <button onClick={() => setView('evaluation')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'evaluation' ? 'bg-blue-800 shadow-md' : ''}`}>
+                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.961 10.013 10.326 16.333 9 18.215M6 11l4 4 4-4" />
+                                            </svg>
+                                            Call Evaluations
+                                        </button>
+                                    </li>
+                                    <li>
+                                        <button onClick={() => setView('salary')} className={`w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1 ${view === 'salary' ? 'bg-blue-800 shadow-md' : ''}`}>
+                                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                            </svg>
+                                            Salary Calculator
+                                        </button>
+                                    </li>
                                 </>
                             )}
-                            <li><button onClick={() => setShowAccountMenu(true)} className="w-full text-left py-2 px-4 rounded hover:bg-blue-700">Account</button></li>
-                            <li><button onClick={handleLogout} className="w-full text-left py-2 px-4 rounded hover:bg-red-700 bg-red-600">Logout</button></li>
+                            <li>
+                                <button onClick={() => setShowAccountMenu(true)} className="w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 hover:bg-blue-600 hover:translate-x-1">
+                                    <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    </svg>
+                                    Account
+                                </button>
+                            </li>
+                            <li>
+                                <button onClick={handleLogout} className="w-full flex items-center text-left py-3 px-4 rounded-lg transition-all duration-200 bg-red-600 hover:bg-red-700 hover:translate-x-1">
+                                    <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                                    </svg>
+                                    Logout
+                                </button>
+                            </li>
                         </ul>
                     </div>
                     <div className="ml-64 p-6 bg-gray-100 min-h-screen">
