@@ -725,14 +725,26 @@
         };
 
         const AddSvForm = ({ isLoading, newSvName, setNewSvName, addSv }) => {
+            const inputRef = useRef(null);
+            const [isFocused, setIsFocused] = useState(false);
+
+            useEffect(() => {
+                if (isFocused && inputRef.current) {
+                    inputRef.current.focus();
+                }
+            }, [newSvName]);
+
             return (
                 <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
                     <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
                     <input
+                        ref={inputRef}
                         type="text"
                         placeholder="Supervisor Name"
                         value={newSvName}
                         onChange={(e) => setNewSvName(e.target.value)}
+                        onFocus={() => setIsFocused(true)}
+                        onBlur={() => setIsFocused(false)}
                         className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                         disabled={isLoading}
                     />
@@ -746,1262 +758,7 @@
                 </div>
             );
         };
-
-        const getCurrentWeekOfMonth = () => {
-            const today = new Date();
-            const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
-            const diff = today.getDate() + firstDay.getDay() - 1;
-            return Math.ceil(diff / 7);
-        };
-
-        const getExpectedCalls = (weekNumber) => {
-            return weekNumber * 5;
-        };
-
-        const getScoreColor = (score) => {
-            if (!score) return 'text-gray-500';
-            if (score >= 90) return 'text-green-600';
-            if (score >= 60) return 'text-yellow-600';
-            return 'text-red-600';
-        };
-
-        const getCallCountColor = (count, expected) => {
-            if (count >= expected) return 'text-green-600';
-            if (count >= expected * 0.5) return 'text-yellow-500';
-            return 'text-red-600';
-        };
-
-        const getHoursPerformanceColor = (hours, norm) => {
-            if (hours >= norm * 0.9) return 'text-green-600';
-            if (hours >= norm * 0.5) return 'text-yellow-600';
-            return 'text-red-600';
-        };
-
-        const safeBtoa = (str) => {
-            return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (match, p1) => {
-                return String.fromCharCode('0x' + p1);
-            }));
-        };
-
-        const SalaryCalculationResult = ({ salaryResult }) => {
-            if (!salaryResult) return null;
-
-            return (
-                <div className="mt-6 p-6 bg-gray-50 rounded-lg">
-                <h3 className="text-xl font-semibold mb-4">Calculation Result</h3>
-                <div className="space-y-2">
-                    <div className="flex justify-between">
-                    <span className="font-medium">Direction:</span>
-                    <span>Operator</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Points:</span>
-                    <span>{salaryResult.points}</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Premium Coefficient:</span>
-                    <span>{salaryResult.premiumCoefficient}</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Monthly Hours Norm:</span>
-                    <span>{salaryResult.hoursNorm.toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Hours Percentage:</span>
-                    <span>{salaryResult.hoursPercentage.toFixed(2)}%</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Base Salary:</span>
-                    <span>{salaryResult.baseSalary.toFixed(2)} KZT</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Premium Part:</span>
-                    <span>{salaryResult.premiumPart.toFixed(2)} KZT</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Bonuses:</span>
-                    <span>{salaryResult.bonuses} KZT</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Total Salary:</span>
-                    <span className="text-green-600 font-semibold">
-                        {salaryResult.finalSalary.toFixed(2)} KZT
-                    </span>
-                    </div>
-                </div>
-                </div>
-            );
-        };
-
-        const generatePointsTable = (salaryData) => {
-            const { experience, quality, callsPerHour } = salaryData;
         
-            const experienceRanges = [
-                { range: '0-3 months', points: 15, selected: experience === '0-3' },
-                { range: '4-9 months', points: 25, selected: experience === '4-9' },
-                { range: '10-15 months', points: 35, selected: experience === '10-15' },
-                { range: '≥16 months', points: 50, selected: experience === '16+' }
-            ];
-        
-            const qualityRanges = [
-                { range: '85-89%', points: 20, selected: quality >= 85 && quality < 90 },
-                { range: '90-94%', points: 25, selected: quality >= 90 && quality < 95 },
-                { range: '95-98%', points: 30, selected: quality >= 95 && quality < 99 },
-                { range: '99-100%', points: 50, selected: quality >= 99 && quality <= 100 }
-            ];
-        
-            const callsPerHourRanges = [
-                { range: '≥5', points: 20, selected: callsPerHour >= 5 && callsPerHour < 10 },
-                { range: '≥10', points: 25, selected: callsPerHour >= 10 && callsPerHour < 15 },
-                { range: '≥15', points: 30, selected: callsPerHour >= 15 && callsPerHour < 20 },
-                { range: '≥20', points: 50, selected: callsPerHour >= 20 }
-            ];
-        
-            return (
-                <table className="min-w-full bg-white border-collapse">
-                    <thead>
-                        <tr className="bg-blue-50">
-                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Category</th>
-                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Condition</th>
-                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Points</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr className="bg-gray-100 font-semibold">
-                            <td className="p-4 border-b" colSpan="3">Experience</td>
-                        </tr>
-                        {experienceRanges.map((row, index) => (
-                            <tr key={`exp-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
-                                <td className="p-4 border-b"></td>
-                                <td className="p-4 border-b">{row.range}</td>
-                                <td className="p-4 border-b">{row.points}</td>
-                            </tr>
-                        ))}
-                        <tr className="bg-gray-100 font-semibold">
-                            <td className="p-4 border-b" colSpan="3">Quality</td>
-                        </tr>
-                        {qualityRanges.map((row, index) => (
-                            <tr key={`qual-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
-                                <td className="p-4 border-b"></td>
-                                <td className="p-4 border-b">{row.range}</td>
-                                <td className="p-4 border-b">{row.points}</td>
-                            </tr>
-                        ))}
-                        <tr className="bg-gray-100 font-semibold">
-                            <td className="p-4 border-b" colSpan="3">Calls per Hour</td>
-                        </tr>
-                        {callsPerHourRanges.map((row, index) => (
-                            <tr key={`cph-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
-                                <td className="p-4 border-b"></td>
-                                <td className="p-4 border-b">{row.range}</td>
-                                <td className="p-4 border-b">{row.points}</td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
-            );
-        };
-
-        const Sidebar = ({ user, setView, view, fetchDirections, setShowMonitoringScaleModal, handleLogout, setShowAccountMenu }) => {
-            return (
-                <div className="fixed top-0 left-0 h-full w-64 bg-blue-800 text-white p-6 shadow-lg">
-                    <h1 className="text-2xl font-bold mb-8">Dashboard</h1>
-                    <ul className="space-y-4">
-                        {user.role === 'admin' && (
-                            <>
-                                <li><button onClick={() => setView('add_sv')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'add_sv' ? 'bg-blue-900' : ''}`}>Add Supervisor</button></li>
-                                <li><button onClick={() => setView('sv_list')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'sv_list' ? 'bg-blue-900' : ''}`}>Supervisors</button></li>
-                                <li><button onClick={() => setView('view_scores')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'view_scores' ? 'bg-blue-900' : ''}`}>View Operator Scores</button></li>
-                                <li><button onClick={() => setView('manage_users')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'manage_users' ? 'bg-blue-900' : ''}`}>Manage Users</button></li>
-                                <li><button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-2 px-4 rounded hover:bg-blue-700">Manage Monitoring Scale</button></li>
-                            </>
-                        )}
-                        {user.role === 'sv' && (
-                            <>
-                                <li><button onClick={() => setView('update_table')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'update_table' ? 'bg-blue-900' : ''}`}>Update Table</button></li>
-                                <li><button onClick={() => setView('operators')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'operators' ? 'bg-blue-900' : ''}`}>Your Operators</button></li>
-                                <li><button onClick={() => setView('manage_operators')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'manage_operators' ? 'bg-blue-900' : ''}`}>Manage my operators</button></li>
-                            </>
-                        )}
-                        {user.role === 'operator' && (
-                            <>
-                                <li><button onClick={() => setView('profile')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'profile' ? 'bg-blue-900' : ''}`}>Profile</button></li>
-                                <li><button onClick={() => setView('hours')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'hours' ? 'bg-blue-900' : ''}`}>My Hours</button></li>
-                                <li><button onClick={() => setView('evaluation')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'evaluation' ? 'bg-blue-900' : ''}`}>Call Evaluations</button></li>
-                                <li><button onClick={() => setView('salary')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'salary' ? 'bg-blue-900' : ''}`}>Salary Calculator</button></li>
-                            </>
-                        )}
-                        <li><button onClick={() => setShowAccountMenu(true)} className="w-full text-left py-2 px-4 rounded hover:bg-blue-700">Account</button></li>
-                        <li><button onClick={handleLogout} className="w-full text-left py-2 px-4 rounded hover:bg-red-700 bg-red-600">Logout</button></li>
-                    </ul>
-                </div>
-            );
-        };
-
-        const MainContent = ({
-            user,
-            view,
-            isLoading,
-            error,
-            success,
-            newSvName,
-            setNewSvName,
-            addSv,
-            svList,
-            isAdminDataLoading,
-            generateWeeklyReport,
-            removeSv,
-            setShowChangeTableForm,
-            setCurrentSvForTableChange,
-            showChangeTableForm,
-            currentSvForTableChange,
-            newTableUrl,
-            setNewTableUrl,
-            changeSvTable,
-            selectedSvId,
-            setSelectedSvId,
-            selectedSvData,
-            notifySupervisor,
-            updateTable,
-            showMonitoringScaleModal,
-            setShowMonitoringScaleModal,
-            directions,
-            saveDirections,
-            users,
-            showUserEditModal,
-            setShowUserEditModal,
-            userToEdit,
-            setUserToEdit,
-            saveUserChanges,
-            svData,
-            profileData,
-            selectedMonth,
-            setSelectedMonth,
-            hoursData,
-            operatorData,
-            expandedEvaluation,
-            setExpandedEvaluation,
-            audioUrl,
-            setAudioUrl,
-            loadingAudioId,
-            setLoadingAudioId,
-            showDisputeModal,
-            setShowDisputeModal,
-            selectedEvaluation,
-            setSelectedEvaluation,
-            disputeText,
-            setDisputeText,
-            handleSubmitDispute,
-            salaryData,
-            setSalaryData,
-            salaryResult,
-            setSalaryResult,
-            showPointsTable,
-            setShowPointsTable,
-            calculateSalary,
-            clearSalaryForm,
-            showAccountMenu,
-            setShowAccountMenu,
-            setShowChangeLoginForm,
-            setShowChangePasswordForm,
-            loginData,
-            setLoginData,
-            handleChangeLogin,
-            passwordData,
-            setPasswordData,
-            handleChangePassword,
-            averageScore,
-            handleEvaluationClick
-        }) => {
-            return (
-                <div className="ml-64 p-6 bg-gray-100 min-h-screen">
-                    {user.role === 'admin' && (
-                        <>
-                            {view === 'add_sv' && (
-                                <AddSvForm
-                                    isLoading={isLoading}
-                                    newSvName={newSvName}
-                                    setNewSvName={setNewSvName}
-                                    addSv={addSv}
-                                />
-                            )}
-                            {view === 'sv_list' && (
-                                <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                    <div className="flex justify-between items-center mb-4">
-                                        <h2 className="text-xl font-semibold">Supervisors</h2>
-                                        <button
-                                            onClick={generateWeeklyReport}
-                                            className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                            disabled={isLoading}
-                                        >
-                                            {isLoading ? 'Generating...' : 'Generate Report'}
-                                        </button>
-                                    </div>
-                                    {isAdminDataLoading ? (
-                                        <p className="text-center">Loading...</p>
-                                    ) : svList.length === 0 ? (
-                                        <p className="text-center">No supervisors found.</p>
-                                    ) : (
-                                        <div className="overflow-x-auto">
-                                            <table className="min-w-full bg-white border-collapse">
-                                                <thead>
-                                                    <tr className="bg-gray-200">
-                                                        <th className="p-3 border-b text-left">Name</th>
-                                                        <th className="p-3 border-b text-left">ID</th>
-                                                        <th className="p-3 border-b text-left">Table URL</th>
-                                                        <th className="p-3 border-b text-left">Actions</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {svList.map(sv => (
-                                                        <tr key={sv.id} className="hover:bg-gray-50">
-                                                            <td className="p-3 border-b">{sv.name}</td>
-                                                            <td className="p-3 border-b">{sv.id}</td>
-                                                            <td className="p-3 border-b">
-                                                                {sv.table ? (
-                                                                    <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
-                                                                ) : 'No table'}
-                                                            </td>
-                                                            <td className="p-3 border-b space-x-2">
-                                                                <button
-                                                                    onClick={() => removeSv(sv.id)}
-                                                                    className="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 text-sm"
-                                                                    disabled={isLoading}
-                                                                >
-                                                                    Remove
-                                                                </button>
-                                                                <button
-                                                                    onClick={() => {
-                                                                        setCurrentSvForTableChange(sv);
-                                                                        setShowChangeTableForm(true);
-                                                                    }}
-                                                                    className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
-                                                                    disabled={isLoading}
-                                                                >
-                                                                    Change Table
-                                                                </button>
-                                                            </td>
-                                                        </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-                            {showChangeTableForm && currentSvForTableChange && (
-                                <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                    <h2 className="text-xl font-semibold mb-4">Change Table for {currentSvForTableChange.name}</h2>
-                                    <input
-                                        type="text"
-                                        placeholder="New Google Sheets URL"
-                                        value={newTableUrl}
-                                        onChange={(e) => setNewTableUrl(e.target.value)}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    />
-                                    <div className="flex justify-between">
-                                        <button
-                                            onClick={() => changeSvTable(currentSvForTableChange.id, newTableUrl)}
-                                            className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                            disabled={isLoading}
-                                        >
-                                            {isLoading ? 'Updating...' : 'Update Table'}
-                                        </button>
-                                        <button
-                                            onClick={() => {
-                                                setShowChangeTableForm(false);
-                                                setCurrentSvForTableChange(null);
-                                                setNewTableUrl('');
-                                            }}
-                                            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                        >
-                                            Cancel
-                                        </button>
-                                    </div>
-                                </div>
-                            )}
-                            {view === 'view_scores' && (
-                                <div className="bg-white p-6 rounded-lg shadow-lg">
-                                    <h2 className="text-xl font-semibold mb-4">View Operator Scores</h2>
-                                    <select
-                                        value={selectedSvId}
-                                        onChange={(e) => setSelectedSvId(e.target.value)}
-                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading || isAdminDataLoading}
-                                    >
-                                        <option value="">Select Supervisor</option>
-                                        {svList.map(sv => (
-                                            <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
-                                        ))}
-                                    </select>
-                                    {isAdminDataLoading ? (
-                                        <p className="text-center">Loading...</p>
-                                    ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
-                                        <div className="overflow-x-auto">
-                                            <table className="min-w-full bg-white border-collapse">
-                                                <thead>
-                                                    <tr className="bg-gray-100">
-                                                        <th className="p-3 border-b text-left">Name</th>
-                                                        <th className="p-3 border-b text-left">Calls</th>
-                                                        <th className="p-3 border-b text-left">Expected</th>
-                                                        <th className="p-3 border-b text-left">Avg Score</th>
-                                                        <th className="p-3 border-b text-left">Link</th>
-                                                        <th className="p-3 border-b text-left">Actions</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {selectedSvData.operators.map((op, index) => {
-                                                        const currentWeek = getCurrentWeekOfMonth();
-                                                        const expectedCalls = getExpectedCalls(currentWeek);
-                                                        const callCount = parseInt(op.call_count) || 0;
-                                                        const hasIssue = callCount < expectedCalls;
-                                                        return (
-                                                            <tr key={index} className="hover:bg-gray-50">
-                                                                <td className="p-3 border-b">{op.name}</td>
-                                                                <td className={`p-3 border-b ${getCallCountColor(callCount, expectedCalls)}`}>
-                                                                    {callCount}
-                                                                </td>
-                                                                <td className="p-3 border-b">{expectedCalls}</td>
-                                                                <td className="p-3 border-b">
-                                                                    <span className={getScoreColor(op.avg_score)}>
-                                                                        {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                                    </span>
-                                                                </td>
-                                                                <td className="p-3 border-b">
-                                                                    {op.link ? (
-                                                                        <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                                    ) : '-'}
-                                                                </td>
-                                                                <td className="p-3 border-b space-x-2">
-                                                                    {hasIssue && (
-                                                                        <button
-                                                                            onClick={() => notifySupervisor(selectedSvId, op.name)}
-                                                                            className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
-                                                                            disabled={isLoading}
-                                                                        >
-                                                                            Notify
-                                                                        </button>
-                                                                    )}
-                                                                    <button
-                                                                        onClick={() => {
-                                                                            const tokenData = {
-                                                                                apiKey: user.apiKey,
-                                                                                userId: user.id,
-                                                                                role: user.role,
-                                                                                name: user.name,
-                                                                                operatorId: op.id,
-                                                                                operatorName: op.name,
-                                                                                supervisorId: selectedSvId,
-                                                                                timestamp: Date.now()
-                                                                            };
-                                                                            const token = safeBtoa(JSON.stringify(tokenData));
-                                                                            window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
-                                                                        }}
-                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
-                                                                        title="Listen to operator calls"
-                                                                    >
-                                                                        Listen Calls
-                                                                    </button>
-                                                                </td>
-                                                            </tr>
-                                                        );
-                                                    })}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    ) : selectedSvId ? (
-                                        <p className="text-center">No operators found for this supervisor.</p>
-                                    ) : null}
-                                    {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                    {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-
-                                </div>
-                            )}
-                            {showMonitoringScaleModal && (
-                                <MonitoringScaleModal
-                                    isOpen={showMonitoringScaleModal}
-                                    onClose={() => setShowMonitoringScaleModal(false)}
-                                    onSave={saveDirections}
-                                    initialDirections={directions}
-                                />
-                            )}
-                            {view === 'manage_users' && (
-                                <div className="bg-white p-6 rounded-lg shadow-lg">
-                                    <h2 className="text-xl font-semibold mb-4">Manage Users</h2>
-                                    {isAdminDataLoading ? (
-                                        <p className="text-center">Loading...</p>
-                                    ) : users.length === 0 ? (
-                                        <p className="text-center">No users found.</p>
-                                    ) : (
-                                        <div className="overflow-x-auto">
-                                            <table className="min-w-full bg-white border-collapse">
-                                                <thead>
-                                                    <tr className="bg-gray-200">
-                                                        <th className="p-3 border-b text-left">Name</th>
-                                                        <th className="p-3 border-b text-left">ID</th>
-                                                        <th className="p-3 border-b text-left">Direction</th>
-                                                        <th className="p-3 border-b text-left">Supervisor</th>
-                                                        <th className="p-3 border-b text-left">Actions</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {users.map(u => (
-                                                        <tr key={u.id} className="hover:bg-gray-50">
-                                                            <td className="p-3 border-b">{u.name}</td>
-                                                            <td className="p-3 border-b">{u.id}</td>
-                                                            <td className="p-3 border-b">{u.direction || '-'}</td>
-                                                            <td className="p-3 border-b">{u.supervisor_name || '-'}</td>
-                                                            <td className="p-3 border-b">
-                                                                <button
-                                                                    onClick={() => {
-                                                                        setUserToEdit(u);
-                                                                        setShowUserEditModal(true);
-                                                                    }}
-                                                                    className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
-                                                                >
-                                                                    Edit
-                                                                </button>
-                                                            </td>
-                                                        </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-                        </>
-                    )}
-                    {user.role === 'sv' && (
-                        <>
-                            {view === 'update_table' && (
-                                <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                    <h2 className="text-xl font-semibold mb-4">Update Table</h2>
-                                    <input
-                                        type="text"
-                                        placeholder="Enter Google Sheets URL"
-                                        value={newTableUrl}
-                                        onChange={(e) => setNewTableUrl(e.target.value)}
-                                        className="w-full p-2 mb-4 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    />
-                                    <button
-                                        onClick={updateTable}
-                                        className={`w-full bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                        disabled={isLoading}
-                                    >
-                                        {isLoading ? 'Updating...' : 'Update Table'}
-                                    </button>
-                                </div>
-                            )}
-                            {view === 'manage_operators' && (
-                                <div className="bg-white p-6 rounded-lg shadow-lg">
-                                    <h2 className="text-xl font-semibold mb-4">Manage Your Operators</h2>
-                                    {isLoading ? (
-                                        <p className="text-center">Loading...</p>
-                                    ) : svData?.operators?.length > 0 ? ( 
-                                        <div className="overflow-x-auto">
-                                            <table className="min-w-full bg-white border-collapse">
-                                                <thead>
-                                                    <tr className="bg-gray-200">
-                                                        <th className="p-3 border-b text-left">Name</th>
-                                                        <th className="p-3 border-b text-left">ID</th>
-                                                        <th className="p-3 border-b text-left">Direction</th>
-                                                        <th className="p-3 border-b text-left">Actions</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {svData.operators.map(op => (
-                                                        <tr key={op.id} className="hover:bg-gray-50">
-                                                            <td className="p-3 border-b">{op.name}</td>
-                                                            <td className="p-3 border-b">{op.id}</td>
-                                                            <td className="p-3 border-b">{op.direction_id ? directions.find(d => d.id === op.direction_id)?.name || '-' : '-'}</td>
-                                                            <td className="p-3 border-b">
-                                                                <button
-                                                                    onClick={() => {
-                                                                        setUserToEdit({ ...op, supervisor_id: user.id });  // Fix supervisor to themselves
-                                                                        setShowUserEditModal(true);
-                                                                    }}
-                                                                    className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
-                                                                >
-                                                                    Edit
-                                                                </button>
-                                                            </td>
-                                                        </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    ) : (
-                                        <p className="text-center">No operators found.</p>
-                                    )}
-                                </div>
-                            )}
-                            {view === 'operators' && (
-                                <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
-                                    <h2 className="text-xl font-semibold mb-4">Your Operators</h2>
-                                    {isLoading ? (
-                                        <p className="text-center">Loading...</p>
-                                    ) : svData && svData.operators && svData.operators.length > 0 ? (
-                                        <div className="overflow-x-auto">
-                                            <table className="min-w-full bg-white border-collapse">
-                                            <thead>
-                                                <tr className="bg-gray-200">
-                                                <th className="p-3 border-b text-left">Name</th>
-                                                <th className="p-3 border-b text-left">Calls</th>
-                                                <th className="p-3 border-b text-left">Avg Score</th>
-                                                <th className="p-3 border-b text-left">Link</th>
-                                                <th className="p-3 border-b text-left">Actions</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {svData.operators.map((op, index) => {
-                                                const callCount = parseInt(op.call_count) || 0;
-                                                return (
-                                                    <tr key={index} className="hover:bg-gray-50">
-                                                    <td className="p-3 border-b">{op.name}</td>
-                                                    <td className={`p-3 border-b ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
-                                                        {callCount}
-                                                    </td>
-                                                    <td className="p-3 border-b">
-                                                        <span className={getScoreColor(op.avg_score)}>
-                                                        {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                        </span>
-                                                    </td>
-                                                    <td className="p-3 border-b">
-                                                        {op.link ? (
-                                                        <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                        ) : '-'}
-                                                    </td>
-                                                    <td className="p-3 border-b space-x-2">
-                                                        <button
-                                                        onClick={() => {
-                                                            const tokenData = {
-                                                            apiKey: user.apiKey,
-                                                            userId: user.id,
-                                                            role: user.role,
-                                                            name: user.name,
-                                                            operatorId: op.id,
-                                                            operatorName: op.name,
-                                                            timestamp: Date.now()
-                                                            };
-                                                            const token = safeBtoa(JSON.stringify(tokenData));
-                                                            window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
-                                                        }}
-                                                        className="bg-blue-500 text-white px-3 py-1 rounded text-sm hover:bg-blue-600"
-                                                        title="Listen to operator calls"
-                                                        >
-                                                        Listen Calls
-                                                        </button>
-                                                    </td>
-                                                    </tr>
-                                                );
-                                                })}
-                                            </tbody>
-                                            </table>
-                                        </div>
-                                    ) : (
-                                        <p className="text-center">No operators found.</p>
-                                    )}
-                                    {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                    {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                                </div>
-                            )}
-                        </>
-                    )}
-                    {user.role === 'operator' && (
-                        <>
-                            {view === 'profile' && (
-                                <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
-                                    <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
-                                    {isLoading ? (
-                                        <p className="text-center text-gray-600">Loading...</p>
-                                    ) : profileData ? (
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                            <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                <p className="text-sm font-medium text-gray-500 mb-1">Name</p>
-                                                <p className="text-lg font-medium text-gray-900">{profileData.name || '-'}</p>
-                                            </div>
-                                            <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                <p className="text-sm font-medium text-gray-500 mb-1">Role</p>
-                                                <p className="text-lg font-medium text-gray-900">{profileData.role || '-'}</p>
-                                            </div>
-                                            <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                <p className="text-sm font-medium text-gray-500 mb-1">Direction</p>
-                                                <p className="text-lg font-medium text-gray-900">
-                                                    {profileData.direction ? profileData.direction : '-'}
-                                                </p>
-                                            </div>
-                                            <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                <p className="text-sm font-medium text-gray-500 mb-1">Hire Date</p>
-                                                <p className="text-lg font-medium text-gray-900">{profileData.hire_date || '-'}</p>
-                                            </div>
-                                            <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                <p className="text-sm font-medium text-gray-500 mb-1">Supervisor</p>
-                                                <p className="text-lg font-medium text-gray-900">{profileData.supervisor_name || '-'}</p>
-                                            </div>
-                                            <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                <p className="text-sm font-medium text-gray-500 mb-1">Scores Table</p>
-                                                {profileData.scores_table_url ? (
-                                                    <a
-                                                        href={profileData.scores_table_url}
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
-                                                    >
-                                                        View Scores Table
-                                                    </a>
-                                                ) : (
-                                                    <p className="text-lg text-gray-900">-</p>
-                                                )}
-                                            </div>
-                                            <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                <p className="text-sm font-medium text-gray-500 mb-1">Hours Table</p>
-                                                {profileData.hours_table_url ? (
-                                                    <a
-                                                        href={profileData.hours_table_url}
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
-                                                    >
-                                                        View Hours Table
-                                                    </a>
-                                                ) : (
-                                                    <p className="text-lg text-gray-900">-</p>
-                                                )}
-                                            </div>
-                                        </div>
-                                    ) : (
-                                        <p className="text-center text-gray-600">No profile data available. Please try refreshing or contact support.</p>
-                                    )}
-                                </div>
-                            )}
-                            {(view === 'hours' || view === 'evaluation') && (
-                                <div className="mb-6">
-                                    <label className="block mb-2 font-semibold text-gray-700">Select Month:</label>
-                                    <select
-                                        value={selectedMonth}
-                                        onChange={(e) => setSelectedMonth(e.target.value)}
-                                        className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    >
-                                        {getMonthOptions()}
-                                    </select>
-                                </div>
-                            )}
-                            {view === 'hours' && (
-                                <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
-                                    <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
-                                    {isLoading ? (
-                                        <p className="text-center text-gray-600">Loading...</p>
-                                    ) : hoursData ? (
-                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                            <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
-                                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Regular Hours</p>
-                                                    <p className={`text-lg font-semibold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
-                                                        {hoursData.regular_hours.toFixed(2)} hours
-                                                    </p>
-                                                </div>
-                                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Training Hours</p>
-                                                    <p className="text-lg font-semibold">{hoursData.training_hours.toFixed(2)} hours</p>
-                                                </div>
-                                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Fines</p>
-                                                    <p className="text-lg font-semibold text-red-600">{hoursData.fines.toFixed(2)}</p>
-                                                </div>
-                                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Norm Hours</p>
-                                                    <p className="text-lg font-semibold">{hoursData.norm_hours.toFixed(2)} hours</p>
-                                                </div>
-                                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Performance</p>
-                                                    <p className={`text-lg font-semibold ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
-                                                        {((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%
-                                                    </p>
-                                                </div>
-                                            </div>
-                                            <div className="col-span-1 flex justify-center items-center">
-                                                <SemiCircleProgress
-                                                    percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
-                                                    label="Выполнение нормы"
-                                                />
-                                            </div>
-                                        </div>
-                                    ) : (
-                                        <p className="text-center text-gray-600">No hours data available.</p>
-                                    )}
-                                </div>
-                            )}
-                            {view === 'evaluation' && (
-                                <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
-                                    <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
-                                    {isLoading ? (
-                                        <p className="text-center text-gray-600">Loading...</p>
-                                    ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
-                                        <div>
-                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                                                <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-2">
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-2">Total Evaluated Calls</p>
-                                                        <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
-                                                        <p className={`text-lg font-medium mt-2 ${
-                                                            (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
-                                                        }`}>
-                                                            {20 - operatorData.evaluations.length} calls remaining out of 20
-                                                        </p>
-                                                    </div>
-                                                </div>
-                                                <div className="col-span-1 flex justify-center items-center">
-                                                    <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
-                                                </div>
-                                            </div>
-                                            <div className="overflow-x-auto rounded-lg shadow-sm">
-                                                <table className="min-w-full bg-white border-collapse">
-                                                    <thead>
-                                                        <tr className="bg-blue-50">
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call ID</th>
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Score</th>
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Comment</th>
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Month</th>
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Evaluation Date</th>
-                                                            <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Actions</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                    {operatorData.evaluations.map((eval1, index) => (
-                                                        <React.Fragment key={index}>
-                                                        <tr
-                                                            className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${
-                                                            expandedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''
-                                                            }`}
-                                                            onClick={() => handleEvaluationClick(eval1)}
-                                                        >
-                                                            <td className="p-4 border-b text-sm">{eval1.id || '-'}</td>
-                                                            <td className="p-4 border-b text-sm">{eval1.phone_number || '-'}</td>
-                                                            <td className={`p-4 border-b text-sm font-medium ${getScoreColor(eval1.score)}`}>
-                                                            {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
-                                                            </td>
-                                                            <td className="p-4 border-b text-sm">
-                                                            {eval1.comment ? (
-                                                                <div className="space-y-1">
-                                                                {eval1.comment.split('\n').map((line, i) => {
-                                                                    const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
-                                                                    const match = cleanLine.match(/^(.*?):\s*(.*)$/);
-                                                                    if (match) {
-                                                                    return (
-                                                                        <p key={i} className="text-sm">
-                                                                        <span className="font-semibold">{match[1]}:</span>{' '}
-                                                                        <span className="italic">{match[2]}</span>
-                                                                        </p>
-                                                                    );
-                                                                    }
-                                                                    return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
-                                                                })}
-                                                                </div>
-                                                            ) : '-'}
-                                                            </td>
-                                                            <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
-                                                            <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
-                                                            <td className="p-4 border-b text-sm">
-                                                            {eval1.score < 100 && (
-                                                                <button
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    setSelectedEvaluation(eval1);
-                                                                    setShowDisputeModal(true);
-                                                                }}
-                                                                className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
-                                                                >
-                                                                Dispute
-                                                                </button>
-                                                            )}
-                                                            </td>
-                                                        </tr>
-
-                                                        {expandedEvaluation?.id === eval1.id && (
-                                                            <tr>
-                                                            <td colSpan={7} className="p-4 bg-gray-50 border-t text-sm">
-                                                                {loadingAudioId === eval1.id ? (
-                                                                <p className="text-gray-500 italic">Loading audio...</p>
-                                                                ) : audioUrl ? (
-                                                                <audio controls src={audioUrl} className="w-full" />
-                                                                ) : (
-                                                                <p className="text-red-500">Audio not available</p>
-                                                                )}
-                                                            </td>
-                                                            </tr>
-                                                        )}
-                                                        </React.Fragment>
-                                                    ))}
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        </div>
-                                    ) : (
-                                        <p className="text-center text-gray-600">No evaluations found for this period.</p>
-                                    )}
-                                </div>
-                            )}
-                            {view === 'salary' && (
-                                <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
-                                    <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
-                                    <div className="grid grid-cols-1 gap-6">
-                                        <div className="form-group">
-                                            <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
-                                            <select
-                                                value={salaryData.experience}
-                                                onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
-                                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading}
-                                            >
-                                                <option value="">Select Experience</option>
-                                                <option value="0-3">0-3 months</option>
-                                                <option value="4-9">4-9 months</option>
-                                                <option value="10-15">10-15 months</option>
-                                                <option value="16+">≥16 months</option>
-                                            </select>
-                                        </div>
-                                        <div className="form-group">
-                                            <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
-                                            <input
-                                                type="number"
-                                                value={salaryData.quality}
-                                                onChange={(e) => setSalaryData({ ...salaryData, quality: e.target.value })}
-                                                min="0"
-                                                max="100"
-                                                step="0.01"
-                                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading}
-                                            />
-                                        </div>
-                                        <div className="form-group">
-                                            <label className="block mb-2 font-semibold text-gray-700">Calls per Hour:</label>
-                                            <input
-                                                type="number"
-                                                value={salaryData.callsPerHour}
-                                                onChange={(e) => setSalaryData({ ...salaryData, callsPerHour: e.target.value })}
-                                                min="0"
-                                                max="100"
-                                                step="0.01"
-                                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading}
-                                            />
-                                        </div>
-                                        <div className="form-group">
-                                            <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
-                                            <input
-                                                type="number"
-                                                value={salaryData.hoursNorm}
-                                                onChange={(e) => setSalaryData({ ...salaryData, hoursNorm: e.target.value })}
-                                                min="0"
-                                                max="744"
-                                                step="0.01"
-                                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading}
-                                            />
-                                        </div>
-                                        <div className="form-group">
-                                            <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
-                                            <input
-                                                type="number"
-                                                value={salaryData.totalHours}
-                                                onChange={(e) => setSalaryData({ ...salaryData, totalHours: e.target.value })}
-                                                min="0"
-                                                max="744"
-                                                step="0.01"
-                                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                disabled={isLoading}
-                                            />
-                                        </div>
-                                        <div className="form-group">
-                                            <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
-                                            <div className="space-y-4">
-                                                <div className="flex items-center gap-4">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={salaryData.bonusTraining}
-                                                        onChange={(e) => setSalaryData({ ...salaryData, bonusTraining: e.target.checked })}
-                                                        className="w-5 h-5"
-                                                        disabled={isLoading}
-                                                    />
-                                                    <label className="text-sm">Training (6000 KZT)</label>
-                                                </div>
-                                                <div className="flex items-center gap-4">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={salaryData.bonusRefer}
-                                                        onChange={(e) => setSalaryData({ ...salaryData, bonusRefer: e.target.checked })}
-                                                        className="w-5 h-5"
-                                                        disabled={isLoading}
-                                                    />
-                                                    <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
-                                                    {salaryData.bonusRefer && (
-                                                        <input
-                                                            type="number"
-                                                            value={salaryData.bonusReferQuantity}
-                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
-                                                            min="1"
-                                                            step="1"
-                                                            placeholder="Quantity"
-                                                            className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                            disabled={isLoading}
-                                                        />
-                                                    )}
-                                                </div>
-                                                <div className="flex items-center gap-4">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={salaryData.bonusFilming}
-                                                        onChange={(e) => setSalaryData({ ...salaryData, bonusFilming: e.target.checked })}
-                                                        className="w-5 h-5"
-                                                        disabled={isLoading}
-                                                    />
-                                                    <label className="text-sm">Filming (5000 KZT per session)</label>
-                                                    {salaryData.bonusFilming && (
-                                                        <input
-                                                            type="number"
-                                                            value={salaryData.bonusFilmingQuantity}
-                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
-                                                            min="1"
-                                                            step="1"
-                                                            placeholder="Quantity"
-                                                            className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                            disabled={isLoading}
-                                                        />
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div className="flex justify-center gap-4 mt-6">
-                                        <button
-                                            onClick={calculateSalary}
-                                            className={`px-6 py-3 rounded-lg font-semibold text-lg bg-green-500 text-white hover:bg-green-600 transition-all duration-200 ${
-                                                isLoading ||
-                                                !salaryData.experience ||
-                                                !salaryData.quality ||
-                                                !salaryData.callsPerHour ||
-                                                !salaryData.hoursNorm ||
-                                                !salaryData.totalHours ||
-                                                (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
-                                                (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
-                                                    ? 'opacity-50 cursor-not-allowed'
-                                                    : ''
-                                            }`}
-                                            disabled={
-                                                isLoading ||
-                                                !salaryData.experience ||
-                                                !salaryData.quality ||
-                                                !salaryData.callsPerHour ||
-                                                !salaryData.hoursNorm ||
-                                                !salaryData.totalHours ||
-                                                (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
-                                                (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
-                                            }
-                                        >
-                                            Calculate
-                                        </button>
-                                        <button
-                                            onClick={() => setShowPointsTable(!showPointsTable)}
-                                            className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
-                                                !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
-                                            }`}
-                                            disabled={!salaryResult}
-                                        >
-                                            {showPointsTable ? 'Hide Points Table' : 'Show Points Table'}
-                                        </button>
-                                        <button
-                                            onClick={clearSalaryForm}
-                                            className={`px-6 py-3 rounded-lg font-semibold text-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200 ${
-                                                !salaryData.experience &&
-                                                !salaryData.quality &&
-                                                !salaryData.callsPerHour &&
-                                                !salaryData.hoursNorm &&
-                                                !salaryData.totalHours &&
-                                                !salaryData.bonusTraining &&
-                                                !salaryData.bonusRefer &&
-                                                !salaryData.bonusFilming
-                                                    ? 'opacity-50 cursor-not-allowed'
-                                                    : ''
-                                            }`}
-                                            disabled={
-                                                !salaryData.experience &&
-                                                !salaryData.quality &&
-                                                !salaryData.callsPerHour &&
-                                                !salaryData.hoursNorm &&
-                                                !salaryData.totalHours &&
-                                                !salaryData.bonusTraining &&
-                                                !salaryData.bonusRefer &&
-                                                !salaryData.bonusFilming
-                                            }
-                                        >
-                                            Clear
-                                        </button>
-                                    </div>
-
-                                    <SalaryCalculationResult salaryResult={salaryResult} />
-                                    
-                                    <div id="points-table" className={`mt-6 ${showPointsTable ? 'block' : 'hidden'}`}>
-                                        {salaryResult && generatePointsTable(salaryData)}
-                                    </div>
-                                </div>
-                            )}
-                        </>
-                    )}
-                    {showDisputeModal && (
-                        <DisputeModal
-                            selectedEvaluation={selectedEvaluation}
-                            disputeText={disputeText}
-                            setDisputeText={setDisputeText}
-                            handleSubmitDispute={handleSubmitDispute}
-                            isLoading={isLoading}
-                            error={error}
-                            success={success}
-                            setShowDisputeModal={setShowDisputeModal}
-                        />
-                    )}
-                    {showUserEditModal && (
-                        <UserEditModal
-                            isOpen={showUserEditModal}
-                            onClose={() => setShowUserEditModal(false)}
-                            userToEdit={userToEdit}
-                            svList={svList}
-                            directions={directions}
-                            user={user}
-                            onSave={saveUserChanges}
-                        />
-                    )}
-                    {showMonitoringScaleModal && (
-                        <MonitoringScaleModal
-                            isOpen={showMonitoringScaleModal}
-                            onClose={() => setShowMonitoringScaleModal(false)}
-                            onSave={saveDirections}
-                            initialDirections={directions}
-                        />
-                    )}
-                    {showAccountMenu && (
-                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                            <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                                <h2 className="text-xl font-semibold mb-4">Account Settings</h2>
-                                <div className="space-y-4">
-                                    <button
-                                        onClick={() => {
-                                            setShowChangeLoginForm(true);
-                                            setShowAccountMenu(false);
-                                        }}
-                                        className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600"
-                                    >
-                                        Change Login
-                                    </button>
-                                    <button
-                                        onClick={() => {
-                                            setShowChangePasswordForm(true);
-                                            setShowAccountMenu(false);
-                                        }}
-                                        className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600"
-                                    >
-                                        Change Password
-                                    </button>
-                                    <button
-                                        onClick={() => setShowAccountMenu(false)}
-                                        className="w-full bg-gray-500 text-white py-2 rounded hover:bg-gray-600"
-                                    >
-                                        Close
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                    {showChangeLoginForm && (
-                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                            <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                                <h2 className="text-xl font-semibold mb-4">Change Login</h2>
-                                <input
-                                    type="text"
-                                    placeholder="New Login"
-                                    value={loginData.new_login}
-                                    onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
-                                    className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    disabled={isLoading}
-                                />
-                                <input
-                                    type="text"
-                                    placeholder="Confirm New Login"
-                                    value={loginData.confirm_login}
-                                    onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
-                                    className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    disabled={isLoading}
-                                />
-                                <div className="flex justify-between">
-                                    <button
-                                        onClick={handleChangeLogin}
-                                        className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                        disabled={isLoading}
-                                    >
-                                        {isLoading ? 'Updating...' : 'Update Login'}
-                                    </button>
-                                    <button
-                                        onClick={() => setShowChangeLoginForm(false)}
-                                        className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                    >
-                                        Cancel
-                                    </button>
-                                </div>
-                                {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                            </div>
-                        </div>
-                    )}
-                    {showChangePasswordForm && (
-                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                            <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                                <h2 className="text-xl font-semibold mb-4">Change Password</h2>
-                                <input
-                                    type="password"
-                                    placeholder="New Password"
-                                    value={passwordData.new_password}
-                                    onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
-                                    className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    disabled={isLoading}
-                                />
-                                <input
-                                    type="password"
-                                    placeholder="Confirm New Password"
-                                    value={passwordData.confirm_password}
-                                    onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
-                                    className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    disabled={isLoading}
-                                />
-                                <div className="flex justify-between">
-                                    <button
-                                        onClick={handleChangePassword}
-                                        className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                        disabled={isLoading}
-                                    >
-                                        {isLoading ? 'Updating...' : 'Update Password'}
-                                    </button>
-                                    <button
-                                        onClick={() => setShowChangePasswordForm(false)}
-                                        className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                    >
-                                        Cancel
-                                    </button>
-                                </div>
-                                {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                            </div>
-                        </div>
-                    )}
-                    {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                    {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-                </div>
-            );
-        };
-
         const App = () => {
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
@@ -2062,6 +819,14 @@
             const [showUserEditModal, setShowUserEditModal] = useState(false);
             const [userToEdit, setUserToEdit] = useState(null);
             const [svOperators, setSvOperators] = useState([]);
+            const tableInputRef = useRef(null);
+            const [isTableInputFocused, setIsTableInputFocused] = useState(false);
+
+            useEffect(() => {
+                if (isTableInputFocused && tableInputRef.current) {
+                    tableInputRef.current.focus();
+                }
+            }, [newTableUrl]);
 
             const getMonthOptions = () => {
                 const options = [];
@@ -2283,6 +1048,57 @@
                 }
             };        
             
+            const SalaryCalculationResult = ({ salaryResult }) => {
+            if (!salaryResult) return null;
+
+            return (
+                <div className="mt-6 p-6 bg-gray-50 rounded-lg">
+                <h3 className="text-xl font-semibold mb-4">Calculation Result</h3>
+                <div className="space-y-2">
+                    <div className="flex justify-between">
+                    <span className="font-medium">Direction:</span>
+                    <span>Operator</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Points:</span>
+                    <span>{salaryResult.points}</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Premium Coefficient:</span>
+                    <span>{salaryResult.premiumCoefficient}</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Monthly Hours Norm:</span>
+                    <span>{salaryResult.hoursNorm.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Hours Percentage:</span>
+                    <span>{salaryResult.hoursPercentage.toFixed(2)}%</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Base Salary:</span>
+                    <span>{salaryResult.baseSalary.toFixed(2)} KZT</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Premium Part:</span>
+                    <span>{salaryResult.premiumPart.toFixed(2)} KZT</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Bonuses:</span>
+                    <span>{salaryResult.bonuses} KZT</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Total Salary:</span>
+                    <span className="text-green-600 font-semibold">
+                        {salaryResult.finalSalary.toFixed(2)} KZT
+                    </span>
+                    </div>
+                </div>
+                </div>
+            );
+            };
+
+
             const calculateSalary = () => {
                 const hoursNorm = parseFloat(salaryData.hoursNorm) || 0;
                 const totalHours = parseFloat(salaryData.totalHours) || 0;
@@ -2349,6 +1165,76 @@
                 setShowPointsTable(false);
             };
             
+            // Add this function to generate points table
+            const generatePointsTable = () => {
+                const { experience, quality, callsPerHour } = salaryData;
+            
+                const experienceRanges = [
+                    { range: '0-3 months', points: 15, selected: experience === '0-3' },
+                    { range: '4-9 months', points: 25, selected: experience === '4-9' },
+                    { range: '10-15 months', points: 35, selected: experience === '10-15' },
+                    { range: '≥16 months', points: 50, selected: experience === '16+' }
+                ];
+            
+                const qualityRanges = [
+                    { range: '85-89%', points: 20, selected: quality >= 85 && quality < 90 },
+                    { range: '90-94%', points: 25, selected: quality >= 90 && quality < 95 },
+                    { range: '95-98%', points: 30, selected: quality >= 95 && quality < 99 },
+                    { range: '99-100%', points: 50, selected: quality >= 99 && quality <= 100 }
+                ];
+            
+                const callsPerHourRanges = [
+                    { range: '≥5', points: 20, selected: callsPerHour >= 5 && callsPerHour < 10 },
+                    { range: '≥10', points: 25, selected: callsPerHour >= 10 && callsPerHour < 15 },
+                    { range: '≥15', points: 30, selected: callsPerHour >= 15 && callsPerHour < 20 },
+                    { range: '≥20', points: 50, selected: callsPerHour >= 20 }
+                ];
+            
+                return (
+                    <table className="min-w-full bg-white border-collapse">
+                        <thead>
+                            <tr className="bg-blue-50">
+                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Category</th>
+                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Condition</th>
+                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Points</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr className="bg-gray-100 font-semibold">
+                                <td className="p-4 border-b" colSpan="3">Experience</td>
+                            </tr>
+                            {experienceRanges.map((row, index) => (
+                                <tr key={`exp-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
+                                    <td className="p-4 border-b"></td>
+                                    <td className="p-4 border-b">{row.range}</td>
+                                    <td className="p-4 border-b">{row.points}</td>
+                                </tr>
+                            ))}
+                            <tr className="bg-gray-100 font-semibold">
+                                <td className="p-4 border-b" colSpan="3">Quality</td>
+                            </tr>
+                            {qualityRanges.map((row, index) => (
+                                <tr key={`qual-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
+                                    <td className="p-4 border-b"></td>
+                                    <td className="p-4 border-b">{row.range}</td>
+                                    <td className="p-4 border-b">{row.points}</td>
+                                </tr>
+                            ))}
+                            <tr className="bg-gray-100 font-semibold">
+                                <td className="p-4 border-b" colSpan="3">Calls per Hour</td>
+                            </tr>
+                            {callsPerHourRanges.map((row, index) => (
+                                <tr key={`cph-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
+                                    <td className="p-4 border-b"></td>
+                                    <td className="p-4 border-b">{row.range}</td>
+                                    <td className="p-4 border-b">{row.points}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                );
+            };
+            
             // Add this function to clear the salary form
             const clearSalaryForm = () => {
                 setSalaryData({
@@ -2411,6 +1297,36 @@
             };
 
 
+            const getScoreColor = (score) => {
+                if (!score) return 'text-gray-500';
+                if (score >= 90) return 'text-green-600';
+                if (score >= 60) return 'text-yellow-600';
+                return 'text-red-600';
+            };
+
+            const getCallCountColor = (count, expected) => {
+                if (count >= expected) return 'text-green-600';
+                if (count >= expected * 0.5) return 'text-yellow-500';
+                return 'text-red-600';
+            };
+
+            const getHoursPerformanceColor = (hours, norm) => {
+                if (hours >= norm * 0.9) return 'text-green-600';
+                if (hours >= norm * 0.5) return 'text-yellow-600';
+                return 'text-red-600';
+            };
+
+            const getCurrentWeekOfMonth = () => {
+                const today = new Date();
+                const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+                const diff = today.getDate() + firstDay.getDay() - 1;
+                return Math.ceil(diff / 7);
+            };
+
+            const getExpectedCalls = (weekNumber) => {
+                return weekNumber * 5;
+            };
+
             const handleChangeLogin = async () => {
                 if (!loginData.new_login || !loginData.confirm_login) {
                     setError('Please fill in both login fields');
@@ -2458,6 +1374,12 @@
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
+            };
+
+            const safeBtoa = (str) => {
+            return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (match, p1) => {
+                return String.fromCharCode('0x' + p1);
+            }));
             };
 
             const handleChangePassword = async () => {
@@ -2916,10 +1838,6 @@
                 }
             }, [selectedSvId]);
 
-            const averageScore = operatorData?.evaluations?.length > 0
-                ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
-                : 0;
-
             if (!user) {
                 return (
                     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
@@ -2982,92 +1900,1084 @@
                 );
             }
 
+            if (showChangeLoginForm) {
+                return (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                            <h2 className="text-xl font-semibold mb-4">Change Login</h2>
+                            <input
+                                type="text"
+                                placeholder="New Login"
+                                value={loginData.new_login}
+                                onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <input
+                                type="text"
+                                placeholder="Confirm New Login"
+                                value={loginData.confirm_login}
+                                onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <div className="flex justify-between">
+                                <button
+                                    onClick={handleChangeLogin}
+                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                    disabled={isLoading}
+                                >
+                                    {isLoading ? 'Updating...' : 'Update Login'}
+                                </button>
+                                <button
+                                    onClick={() => setShowChangeLoginForm(false)}
+                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                        </div>
+                    </div>
+                );
+            }
+            const averageScore = operatorData?.evaluations?.length > 0
+                    ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
+                    : 0;
+            if (showChangePasswordForm) {
+                return (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                            <h2 className="text-xl font-semibold mb-4">Change Password</h2>
+                            <input
+                                type="password"
+                                placeholder="New Password"
+                                value={passwordData.new_password}
+                                onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <input
+                                type="password"
+                                placeholder="Confirm New Password"
+                                value={passwordData.confirm_password}
+                                onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
+                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isLoading}
+                            />
+                            <div className="flex justify-between">
+                                <button
+                                    onClick={handleChangePassword}
+                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                    disabled={isLoading}
+                                >
+                                    {isLoading ? 'Updating...' : 'Update Password'}
+                                </button>
+                                <button
+                                    onClick={() => setShowChangePasswordForm(false)}
+                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                        </div>
+                    </div>
+                );
+            }
+
+            const Sidebar = () => {
+                return (
+                    <div className="fixed top-0 left-0 h-full w-64 bg-blue-800 text-white p-6 shadow-lg">
+                        <h1 className="text-2xl font-bold mb-8">Dashboard</h1>
+                        <ul className="space-y-4">
+                            {user.role === 'admin' && (
+                                <>
+                                    <li><button onClick={() => setView('add_sv')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'add_sv' ? 'bg-blue-900' : ''}`}>Add Supervisor</button></li>
+                                    <li><button onClick={() => setView('sv_list')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'sv_list' ? 'bg-blue-900' : ''}`}>Supervisors</button></li>
+                                    <li><button onClick={() => setView('view_scores')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'view_scores' ? 'bg-blue-900' : ''}`}>View Operator Scores</button></li>
+                                    <li><button onClick={() => setView('manage_users')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'manage_users' ? 'bg-blue-900' : ''}`}>Manage Users</button></li>
+                                    <li><button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-2 px-4 rounded hover:bg-blue-700">Manage Monitoring Scale</button></li>
+                                </>
+                            )}
+                            {user.role === 'sv' && (
+                                <>
+                                    <li><button onClick={() => setView('update_table')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'update_table' ? 'bg-blue-900' : ''}`}>Update Table</button></li>
+                                    <li><button onClick={() => setView('operators')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'operators' ? 'bg-blue-900' : ''}`}>Your Operators</button></li>
+                                    <li><button onClick={() => setView('manage_operators')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'manage_operators' ? 'bg-blue-900' : ''}`}>Manage my operators</button></li>
+                                </>
+                            )}
+                            {user.role === 'operator' && (
+                                <>
+                                    <li><button onClick={() => setView('profile')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'profile' ? 'bg-blue-900' : ''}`}>Profile</button></li>
+                                    <li><button onClick={() => setView('hours')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'hours' ? 'bg-blue-900' : ''}`}>My Hours</button></li>
+                                    <li><button onClick={() => setView('evaluation')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'evaluation' ? 'bg-blue-900' : ''}`}>Call Evaluations</button></li>
+                                    <li><button onClick={() => setView('salary')} className={`w-full text-left py-2 px-4 rounded hover:bg-blue-700 ${view === 'salary' ? 'bg-blue-900' : ''}`}>Salary Calculator</button></li>
+                                </>
+                            )}
+                            <li><button onClick={() => setShowAccountMenu(true)} className="w-full text-left py-2 px-4 rounded hover:bg-blue-700">Account</button></li>
+                            <li><button onClick={handleLogout} className="w-full text-left py-2 px-4 rounded hover:bg-red-700 bg-red-600">Logout</button></li>
+                        </ul>
+                    </div>
+                );
+            };
+
+            const MainContent = () => {
+                return (
+                    <div className="ml-64 p-6 bg-gray-100 min-h-screen">
+                        {user.role === 'admin' && (
+                            <>
+                                {view === 'add_sv' && (
+                                            <AddSvForm
+                                                isLoading={isLoading}
+                                                newSvName={newSvName}
+                                                setNewSvName={setNewSvName}
+                                                addSv={addSv}
+                                            />
+                                        )}
+                                {view === 'sv_list' && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                        <div className="flex justify-between items-center mb-4">
+                                            <h2 className="text-xl font-semibold">Supervisors</h2>
+                                            <button
+                                                onClick={generateWeeklyReport}
+                                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                disabled={isLoading}
+                                            >
+                                                {isLoading ? 'Generating...' : 'Generate Report'}
+                                            </button>
+                                        </div>
+                                        {isAdminDataLoading ? (
+                                            <p className="text-center">Loading...</p>
+                                        ) : svList.length === 0 ? (
+                                            <p className="text-center">No supervisors found.</p>
+                                        ) : (
+                                            <div className="overflow-x-auto">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-gray-200">
+                                                            <th className="p-3 border-b text-left">Name</th>
+                                                            <th className="p-3 border-b text-left">ID</th>
+                                                            <th className="p-3 border-b text-left">Table URL</th>
+                                                            <th className="p-3 border-b text-left">Actions</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {svList.map(sv => (
+                                                            <tr key={sv.id} className="hover:bg-gray-50">
+                                                                <td className="p-3 border-b">{sv.name}</td>
+                                                                <td className="p-3 border-b">{sv.id}</td>
+                                                                <td className="p-3 border-b">
+                                                                    {sv.table ? (
+                                                                        <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
+                                                                    ) : 'No table'}
+                                                                </td>
+                                                                <td className="p-3 border-b space-x-2">
+                                                                    <button
+                                                                        onClick={() => removeSv(sv.id)}
+                                                                        className="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 text-sm"
+                                                                        disabled={isLoading}
+                                                                    >
+                                                                        Remove
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => {
+                                                                            setCurrentSvForTableChange(sv);
+                                                                            setShowChangeTableForm(true);
+                                                                        }}
+                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                        disabled={isLoading}
+                                                                    >
+                                                                        Change Table
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                                {showChangeTableForm && currentSvForTableChange && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                        <h2 className="text-xl font-semibold mb-4">Change Table for {currentSvForTableChange.name}</h2>
+                                        <input
+                                            ref={tableInputRef}
+                                            type="text"
+                                            placeholder="New Google Sheets URL"
+                                            value={newTableUrl}
+                                            onChange={(e) => setNewTableUrl(e.target.value)}
+                                            onFocus={() => setIsTableInputFocused(true)}
+                                            onBlur={() => setIsTableInputFocused(false)}
+                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                        <div className="flex justify-between">
+                                            <button
+                                                onClick={() => changeSvTable(currentSvForTableChange.id, newTableUrl)}
+                                                className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                disabled={isLoading}
+                                            >
+                                                {isLoading ? 'Updating...' : 'Update Table'}
+                                            </button>
+                                            <button
+                                                onClick={() => {
+                                                    setShowChangeTableForm(false);
+                                                    setCurrentSvForTableChange(null);
+                                                    setNewTableUrl('');
+                                                }}
+                                                className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                            >
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                                {view === 'view_scores' && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg">
+                                        <h2 className="text-xl font-semibold mb-4">View Operator Scores</h2>
+                                        <select
+                                            value={selectedSvId}
+                                            onChange={(e) => setSelectedSvId(e.target.value)}
+                                            className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading || isAdminDataLoading}
+                                        >
+                                            <option value="">Select Supervisor</option>
+                                            {svList.map(sv => (
+                                                <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
+                                            ))}
+                                        </select>
+                                        {isAdminDataLoading ? (
+                                            <p className="text-center">Loading...</p>
+                                        ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
+                                            <div className="overflow-x-auto">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-gray-100">
+                                                            <th className="p-3 border-b text-left">Name</th>
+                                                            <th className="p-3 border-b text-left">Calls</th>
+                                                            <th className="p-3 border-b text-left">Expected</th>
+                                                            <th className="p-3 border-b text-left">Avg Score</th>
+                                                            <th className="p-3 border-b text-left">Link</th>
+                                                            <th className="p-3 border-b text-left">Actions</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {selectedSvData.operators.map((op, index) => {
+                                                            const currentWeek = getCurrentWeekOfMonth();
+                                                            const expectedCalls = getExpectedCalls(currentWeek);
+                                                            const callCount = parseInt(op.call_count) || 0;
+                                                            const hasIssue = callCount < expectedCalls;
+                                                            return (
+                                                                <tr key={index} className="hover:bg-gray-50">
+                                                                    <td className="p-3 border-b">{op.name}</td>
+                                                                    <td className={`p-3 border-b ${getCallCountColor(callCount, expectedCalls)}`}>
+                                                                        {callCount}
+                                                                    </td>
+                                                                    <td className="p-3 border-b">{expectedCalls}</td>
+                                                                    <td className="p-3 border-b">
+                                                                        <span className={getScoreColor(op.avg_score)}>
+                                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="p-3 border-b">
+                                                                        {op.link ? (
+                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
+                                                                        ) : '-'}
+                                                                    </td>
+                                                                    <td className="p-3 border-b space-x-2">
+                                                                        {hasIssue && (
+                                                                            <button
+                                                                                onClick={() => notifySupervisor(selectedSvId, op.name)}
+                                                                                className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
+                                                                                disabled={isLoading}
+                                                                            >
+                                                                                Notify
+                                                                            </button>
+                                                                        )}
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                // Generate token with operator data
+                                                                                const tokenData = {
+                                                                                    apiKey: user.apiKey,
+                                                                                    userId: user.id,
+                                                                                    role: user.role,
+                                                                                    name: user.name,
+                                                                                    operatorId: op.id,
+                                                                                    operatorName: op.name,
+                                                                                    supervisorId: selectedSvId,
+                                                                                    timestamp: Date.now()
+                                                                                };
+                                                                                const token = safeBtoa(JSON.stringify(tokenData));
+                                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
+                                                                            }}
+                                                                            className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                            title="Listen to operator calls"
+                                                                        >
+                                                                            Listen Calls
+                                                                        </button>
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        })}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        ) : selectedSvId ? (
+                                            <p className="text-center">No operators found for this supervisor.</p>
+                                        ) : null}
+                                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+
+                                    </div>
+                                )}
+                                {showMonitoringScaleModal && (
+                                    <MonitoringScaleModal
+                                        isOpen={showMonitoringScaleModal}
+                                        onClose={() => setShowMonitoringScaleModal(false)}
+                                        onSave={saveDirections}
+                                        initialDirections={directions}
+                                    />
+                                )}
+                                {view === 'manage_users' && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg">
+                                        <h2 className="text-xl font-semibold mb-4">Manage Users</h2>
+                                        {isAdminDataLoading ? (
+                                            <p className="text-center">Loading...</p>
+                                        ) : users.length === 0 ? (
+                                            <p className="text-center">No users found.</p>
+                                        ) : (
+                                            <div className="overflow-x-auto">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-gray-200">
+                                                            <th className="p-3 border-b text-left">Name</th>
+                                                            <th className="p-3 border-b text-left">ID</th>
+                                                            <th className="p-3 border-b text-left">Direction</th>
+                                                            <th className="p-3 border-b text-left">Supervisor</th>
+                                                            <th className="p-3 border-b text-left">Actions</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {users.map(u => (
+                                                            <tr key={u.id} className="hover:bg-gray-50">
+                                                                <td className="p-3 border-b">{u.name}</td>
+                                                                <td className="p-3 border-b">{u.id}</td>
+                                                                <td className="p-3 border-b">{u.direction || '-'}</td>
+                                                                <td className="p-3 border-b">{u.supervisor_name || '-'}</td>
+                                                                <td className="p-3 border-b">
+                                                                    <button
+                                                                        onClick={() => {
+                                                                            setUserToEdit(u);
+                                                                            setShowUserEditModal(true);
+                                                                        }}
+                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                    >
+                                                                        Edit
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </>
+                        )}
+                        {user.role === 'sv' && (
+                            <>
+                                {view === 'update_table' && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                        <h2 className="text-xl font-semibold mb-4">Update Table</h2>
+                                        <input
+                                            ref={tableInputRef}
+                                            type="text"
+                                            placeholder="Enter Google Sheets URL"
+                                            value={newTableUrl}
+                                            onChange={(e) => setNewTableUrl(e.target.value)}
+                                            onFocus={() => setIsTableInputFocused(true)}
+                                            onBlur={() => setIsTableInputFocused(false)}
+                                            className="w-full p-2 mb-4 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        />
+                                        <button
+                                            onClick={updateTable}
+                                            className={`w-full bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                            disabled={isLoading}
+                                        >
+                                            {isLoading ? 'Updating...' : 'Update Table'}
+                                        </button>
+                                    </div>
+                                )}
+                                {view === 'manage_operators' && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg">
+                                        <h2 className="text-xl font-semibold mb-4">Manage Your Operators</h2>
+                                        {isLoading ? (
+                                            <p className="text-center">Loading...</p>
+                                        ) : svData?.operators?.length > 0 ? ( 
+                                            <div className="overflow-x-auto">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-gray-200">
+                                                            <th className="p-3 border-b text-left">Name</th>
+                                                            <th className="p-3 border-b text-left">ID</th>
+                                                            <th className="p-3 border-b text-left">Direction</th>
+                                                            <th className="p-3 border-b text-left">Actions</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {svData.operators.map(op => (
+                                                            <tr key={op.id} className="hover:bg-gray-50">
+                                                                <td className="p-3 border-b">{op.name}</td>
+                                                                <td className="p-3 border-b">{op.id}</td>
+                                                                <td className="p-3 border-b">{op.direction_id ? directions.find(d => d.id === op.direction_id)?.name || '-' : '-'}</td>
+                                                                <td className="p-3 border-b">
+                                                                    <button
+                                                                        onClick={() => {
+                                                                            setUserToEdit({ ...op, supervisor_id: user.id });  // Fix supervisor to themselves
+                                                                            setShowUserEditModal(true);
+                                                                        }}
+                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                    >
+                                                                        Edit
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        ) : (
+                                            <p className="text-center">No operators found.</p>
+                                        )}
+                                    </div>
+                                )}
+                                {view === 'operators' && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg mb-6">
+                                        <h2 className="text-xl font-semibold mb-4">Your Operators</h2>
+                                        {isLoading ? (
+                                            <p className="text-center">Loading...</p>
+                                        ) : svData && svData.operators && svData.operators.length > 0 ? (
+                                            <div className="overflow-x-auto">
+                                                <table className="min-w-full bg-white border-collapse">
+                                                <thead>
+                                                    <tr className="bg-gray-200">
+                                                    <th className="p-3 border-b text-left">Name</th>
+                                                    <th className="p-3 border-b text-left">Calls</th>
+                                                    <th className="p-3 border-b text-left">Avg Score</th>
+                                                    <th className="p-3 border-b text-left">Link</th>
+                                                    <th className="p-3 border-b text-left">Actions</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {svData.operators.map((op, index) => {
+                                                    const callCount = parseInt(op.call_count) || 0;
+                                                    return (
+                                                        <tr key={index} className="hover:bg-gray-50">
+                                                        <td className="p-3 border-b">{op.name}</td>
+                                                        <td className={`p-3 border-b ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
+                                                            {callCount}
+                                                        </td>
+                                                        <td className="p-3 border-b">
+                                                            <span className={getScoreColor(op.avg_score)}>
+                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
+                                                            </span>
+                                                        </td>
+                                                        <td className="p-3 border-b">
+                                                            {op.link ? (
+                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
+                                                            ) : '-'}
+                                                        </td>
+                                                        <td className="p-3 border-b space-x-2">
+                                                            <button
+                                                            onClick={() => {
+                                                                // Генерируем токен с данными оператора
+                                                                const tokenData = {
+                                                                apiKey: user.apiKey,
+                                                                userId: user.id,
+                                                                role: user.role,
+                                                                name: user.name,
+                                                                operatorId: op.id,
+                                                                operatorName: op.name,
+                                                                timestamp: Date.now()
+                                                                };
+                                                                const token = safeBtoa(JSON.stringify(tokenData));
+                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
+                                                            }}
+                                                            className="bg-blue-500 text-white px-3 py-1 rounded text-sm hover:bg-blue-600"
+                                                            title="Listen to operator calls"
+                                                            >
+                                                            Listen Calls
+                                                            </button>
+                                                        </td>
+                                                        </tr>
+                                                    );
+                                                    })}
+                                                </tbody>
+                                                </table>
+                                            </div>
+                                        ) : (
+                                            <p className="text-center">No operators found.</p>
+                                        )}
+                                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                                    </div>
+                                )}
+                            </>
+                        )}
+                        {user.role === 'operator' && (
+                            <>
+                                {view === 'profile' && (
+                                    <div className="bg-white p-8 rounded-xl shadow-lg mb-8 border border-gray-200">
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
+                                        {isLoading ? (
+                                            <p className="text-center text-gray-600">Loading...</p>
+                                        ) : profileData ? (
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                    <p className="text-sm font-medium text-gray-500 mb-1">Name</p>
+                                                    <p className="text-lg font-medium text-gray-900">{profileData.name || '-'}</p>
+                                                </div>
+                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                    <p className="text-sm font-medium text-gray-500 mb-1">Role</p>
+                                                    <p className="text-lg font-medium text-gray-900">{profileData.role || '-'}</p>
+                                                </div>
+                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                    <p className="text-sm font-medium text-gray-500 mb-1">Direction</p>
+                                                    <p className="text-lg font-medium text-gray-900">
+                                                        {profileData.direction ? profileData.direction : '-'}
+                                                    </p>
+                                                </div>
+                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                    <p className="text-sm font-medium text-gray-500 mb-1">Hire Date</p>
+                                                    <p className="text-lg font-medium text-gray-900">{profileData.hire_date || '-'}</p>
+                                                </div>
+                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                    <p className="text-sm font-medium text-gray-500 mb-1">Supervisor</p>
+                                                    <p className="text-lg font-medium text-gray-900">{profileData.supervisor_name || '-'}</p>
+                                                </div>
+                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                    <p className="text-sm font-medium text-gray-500 mb-1">Scores Table</p>
+                                                    {profileData.scores_table_url ? (
+                                                        <a
+                                                            href={profileData.scores_table_url}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
+                                                        >
+                                                            View Scores Table
+                                                        </a>
+                                                    ) : (
+                                                        <p className="text-lg text-gray-900">-</p>
+                                                    )}
+                                                </div>
+                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                    <p className="text-sm font-medium text-gray-500 mb-1">Hours Table</p>
+                                                    {profileData.hours_table_url ? (
+                                                        <a
+                                                            href={profileData.hours_table_url}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
+                                                        >
+                                                            View Hours Table
+                                                        </a>
+                                                    ) : (
+                                                        <p className="text-lg text-gray-900">-</p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <p className="text-center text-gray-600">No profile data available. Please try refreshing or contact support.</p>
+                                        )}
+                                    </div>
+                                )}
+                                {(view === 'hours' || view === 'evaluation') && (
+                                    <div className="mb-6">
+                                        <label className="block mb-2 font-semibold text-gray-700">Select Month:</label>
+                                        <select
+                                            value={selectedMonth}
+                                            onChange={(e) => setSelectedMonth(e.target.value)}
+                                            className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                        >
+                                            {getMonthOptions()}
+                                        </select>
+                                    </div>
+                                )}
+                                {view === 'hours' && (
+                                    <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
+                                        {isLoading ? (
+                                            <p className="text-center text-gray-600">Loading...</p>
+                                        ) : hoursData ? (
+                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                                <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
+                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                        <p className="text-sm font-medium text-gray-500 mb-1">Regular Hours</p>
+                                                        <p className={`text-lg font-semibold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
+                                                            {hoursData.regular_hours.toFixed(2)} hours
+                                                        </p>
+                                                    </div>
+                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                        <p className="text-sm font-medium text-gray-500 mb-1">Training Hours</p>
+                                                        <p className="text-lg font-semibold">{hoursData.training_hours.toFixed(2)} hours</p>
+                                                    </div>
+                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                        <p className="text-sm font-medium text-gray-500 mb-1">Fines</p>
+                                                        <p className="text-lg font-semibold text-red-600">{hoursData.fines.toFixed(2)}</p>
+                                                    </div>
+                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                        <p className="text-sm font-medium text-gray-500 mb-1">Norm Hours</p>
+                                                        <p className="text-lg font-semibold">{hoursData.norm_hours.toFixed(2)} hours</p>
+                                                    </div>
+                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                        <p className="text-sm font-medium text-gray-500 mb-1">Performance</p>
+                                                        <p className={`text-lg font-semibold ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
+                                                            {((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                                <div className="col-span-1 flex justify-center items-center">
+                                                    <SemiCircleProgress
+                                                        percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
+                                                        label="Выполнение нормы"
+                                                    />
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <p className="text-center text-gray-600">No hours data available.</p>
+                                        )}
+                                    </div>
+                                )}
+                                {view === 'evaluation' && (
+                                    <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
+                                        {isLoading ? (
+                                            <p className="text-center text-gray-600">Loading...</p>
+                                        ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
+                                            <div>
+                                                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                                                    <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-2">
+                                                        <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                            <p className="text-sm font-medium text-gray-500 mb-2">Total Evaluated Calls</p>
+                                                            <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
+                                                            <p className={`text-lg font-medium mt-2 ${
+                                                                (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
+                                                            }`}>
+                                                                {20 - operatorData.evaluations.length} calls remaining out of 20
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                    <div className="col-span-1 flex justify-center items-center">
+                                                        <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
+                                                    </div>
+                                                </div>
+                                                <div className="overflow-x-auto rounded-lg shadow-sm">
+                                                    <table className="min-w-full bg-white border-collapse">
+                                                        <thead>
+                                                            <tr className="bg-blue-50">
+                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call ID</th>
+                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
+                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Score</th>
+                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Comment</th>
+                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Month</th>
+                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Evaluation Date</th>
+                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Actions</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                        {operatorData.evaluations.map((eval1, index) => (
+                                                            <React.Fragment key={index}>
+                                                            <tr
+                                                                className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${
+                                                                expandedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''
+                                                                }`}
+                                                                onClick={() => handleEvaluationClick(eval1)}
+                                                            >
+                                                                <td className="p-4 border-b text-sm">{eval1.id || '-'}</td>
+                                                                <td className="p-4 border-b text-sm">{eval1.phone_number || '-'}</td>
+                                                                <td className={`p-4 border-b text-sm font-medium ${getScoreColor(eval1.score)}`}>
+                                                                {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
+                                                                </td>
+                                                                <td className="p-4 border-b text-sm">
+                                                                {eval1.comment ? (
+                                                                    <div className="space-y-1">
+                                                                    {eval1.comment.split('\n').map((line, i) => {
+                                                                        const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
+                                                                        const match = cleanLine.match(/^(.*?):\s*(.*)$/);
+                                                                        if (match) {
+                                                                        return (
+                                                                            <p key={i} className="text-sm">
+                                                                            <span className="font-semibold">{match[1]}:</span>{' '}
+                                                                            <span className="italic">{match[2]}</span>
+                                                                            </p>
+                                                                        );
+                                                                        }
+                                                                        return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
+                                                                    })}
+                                                                    </div>
+                                                                ) : '-'}
+                                                                </td>
+                                                                <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
+                                                                <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
+                                                                <td className="p-4 border-b text-sm">
+                                                                {eval1.score < 100 && (
+                                                                    <button
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        setSelectedEvaluation(eval1);
+                                                                        setShowDisputeModal(true);
+                                                                    }}
+                                                                    className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
+                                                                    >
+                                                                    Dispute
+                                                                    </button>
+                                                                )}
+                                                                </td>
+                                                            </tr>
+
+                                                            {expandedEvaluation?.id === eval1.id && (
+                                                                <tr>
+                                                                <td colSpan={7} className="p-4 bg-gray-50 border-t text-sm">
+                                                                    {loadingAudioId === eval1.id ? (
+                                                                    <p className="text-gray-500 italic">Loading audio...</p>
+                                                                    ) : audioUrl ? (
+                                                                    <audio controls src={audioUrl} className="w-full" />
+                                                                    ) : (
+                                                                    <p className="text-red-500">Audio not available</p>
+                                                                    )}
+                                                                </td>
+                                                                </tr>
+                                                            )}
+                                                            </React.Fragment>
+                                                        ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <p className="text-center text-gray-600">No evaluations found for this period.</p>
+                                        )}
+                                    </div>
+                                )}
+                                {view === 'salary' && (
+                                    <div className="bg-white p-8 rounded-xl shadow-lg border border-gray-200 transition-all duration-300">
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
+                                        <div className="grid grid-cols-1 gap-6">
+                                            <div className="form-group">
+                                                <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
+                                                <select
+                                                    value={salaryData.experience}
+                                                    onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    disabled={isLoading}
+                                                >
+                                                    <option value="">Select Experience</option>
+                                                    <option value="0-3">0-3 months</option>
+                                                    <option value="4-9">4-9 months</option>
+                                                    <option value="10-15">10-15 months</option>
+                                                    <option value="16+">≥16 months</option>
+                                                </select>
+                                            </div>
+                                            <div className="form-group">
+                                                <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
+                                                <input
+                                                    type="number"
+                                                    value={salaryData.quality}
+                                                    onChange={(e) => setSalaryData({ ...salaryData, quality: e.target.value })}
+                                                    min="0"
+                                                    max="100"
+                                                    step="0.01"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    disabled={isLoading}
+                                                />
+                                            </div>
+                                            <div className="form-group">
+                                                <label className="block mb-2 font-semibold text-gray-700">Calls per Hour:</label>
+                                                <input
+                                                    type="number"
+                                                    value={salaryData.callsPerHour}
+                                                    onChange={(e) => setSalaryData({ ...salaryData, callsPerHour: e.target.value })}
+                                                    min="0"
+                                                    max="100"
+                                                    step="0.01"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    disabled={isLoading}
+                                                />
+                                            </div>
+                                            <div className="form-group">
+                                                <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
+                                                <input
+                                                    type="number"
+                                                    value={salaryData.hoursNorm}
+                                                    onChange={(e) => setSalaryData({ ...salaryData, hoursNorm: e.target.value })}
+                                                    min="0"
+                                                    max="744"
+                                                    step="0.01"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    disabled={isLoading}
+                                                />
+                                            </div>
+                                            <div className="form-group">
+                                                <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
+                                                <input
+                                                    type="number"
+                                                    value={salaryData.totalHours}
+                                                    onChange={(e) => setSalaryData({ ...salaryData, totalHours: e.target.value })}
+                                                    min="0"
+                                                    max="744"
+                                                    step="0.01"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    disabled={isLoading}
+                                                />
+                                            </div>
+                                            <div className="form-group">
+                                                <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
+                                                <div className="space-y-4">
+                                                    <div className="flex items-center gap-4">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={salaryData.bonusTraining}
+                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusTraining: e.target.checked })}
+                                                            className="w-5 h-5"
+                                                            disabled={isLoading}
+                                                        />
+                                                        <label className="text-sm">Training (6000 KZT)</label>
+                                                    </div>
+                                                    <div className="flex items-center gap-4">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={salaryData.bonusRefer}
+                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusRefer: e.target.checked })}
+                                                            className="w-5 h-5"
+                                                            disabled={isLoading}
+                                                        />
+                                                        <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
+                                                        {salaryData.bonusRefer && (
+                                                            <input
+                                                                type="number"
+                                                                value={salaryData.bonusReferQuantity}
+                                                                onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
+                                                                min="1"
+                                                                step="1"
+                                                                placeholder="Quantity"
+                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                disabled={isLoading}
+                                                            />
+                                                        )}
+                                                    </div>
+                                                    <div className="flex items-center gap-4">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={salaryData.bonusFilming}
+                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusFilming: e.target.checked })}
+                                                            className="w-5 h-5"
+                                                            disabled={isLoading}
+                                                        />
+                                                        <label className="text-sm">Filming (5000 KZT per session)</label>
+                                                        {salaryData.bonusFilming && (
+                                                            <input
+                                                                type="number"
+                                                                value={salaryData.bonusFilmingQuantity}
+                                                                onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
+                                                                min="1"
+                                                                step="1"
+                                                                placeholder="Quantity"
+                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                disabled={isLoading}
+                                                            />
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div className="flex justify-center gap-4 mt-6">
+                                            <button
+                                                onClick={calculateSalary}
+                                                className={`px-6 py-3 rounded-lg font-semibold text-lg bg-green-500 text-white hover:bg-green-600 transition-all duration-200 ${
+                                                    isLoading ||
+                                                    !salaryData.experience ||
+                                                    !salaryData.quality ||
+                                                    !salaryData.callsPerHour ||
+                                                    !salaryData.hoursNorm ||
+                                                    !salaryData.totalHours ||
+                                                    (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
+                                                    (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
+                                                        ? 'opacity-50 cursor-not-allowed'
+                                                        : ''
+                                                }`}
+                                                disabled={
+                                                    isLoading ||
+                                                    !salaryData.experience ||
+                                                    !salaryData.quality ||
+                                                    !salaryData.callsPerHour ||
+                                                    !salaryData.hoursNorm ||
+                                                    !salaryData.totalHours ||
+                                                    (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
+                                                    (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
+                                                }
+                                            >
+                                                Calculate
+                                            </button>
+                                            <button
+                                                onClick={() => setShowPointsTable(!showPointsTable)}
+                                                className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
+                                                    !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
+                                                }`}
+                                                disabled={!salaryResult}
+                                            >
+                                                {showPointsTable ? 'Hide Points Table' : 'Show Points Table'}
+                                            </button>
+                                            <button
+                                                onClick={clearSalaryForm}
+                                                className={`px-6 py-3 rounded-lg font-semibold text-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200 ${
+                                                    !salaryData.experience &&
+                                                    !salaryData.quality &&
+                                                    !salaryData.callsPerHour &&
+                                                    !salaryData.hoursNorm &&
+                                                    !salaryData.totalHours &&
+                                                    !salaryData.bonusTraining &&
+                                                    !salaryData.bonusRefer &&
+                                                    !salaryData.bonusFilming
+                                                        ? 'opacity-50 cursor-not-allowed'
+                                                        : ''
+                                                }`}
+                                                disabled={
+                                                    !salaryData.experience &&
+                                                    !salaryData.quality &&
+                                                    !salaryData.callsPerHour &&
+                                                    !salaryData.hoursNorm &&
+                                                    !salaryData.totalHours &&
+                                                    !salaryData.bonusTraining &&
+                                                    !salaryData.bonusRefer &&
+                                                    !salaryData.bonusFilming
+                                                }
+                                            >
+                                                Clear
+                                            </button>
+                                        </div>
+
+                                        <SalaryCalculationResult salaryResult={salaryResult} />
+                                        
+                                        <div id="points-table" className={`mt-6 ${showPointsTable ? 'block' : 'hidden'}`}>
+                                            {salaryResult && generatePointsTable()}
+                                        </div>
+                                    </div>
+                                )}
+                            </>
+                        )}
+                        {showDisputeModal && (
+                            <DisputeModal
+                                selectedEvaluation={selectedEvaluation}
+                                disputeText={disputeText}
+                                setDisputeText={setDisputeText}
+                                handleSubmitDispute={handleSubmitDispute}
+                                isLoading={isLoading}
+                                error={error}
+                                success={success}
+                                setShowDisputeModal={setShowDisputeModal}
+                            />
+                        )}
+                        {showUserEditModal && (
+                            <UserEditModal
+                                isOpen={showUserEditModal}
+                                onClose={() => setShowUserEditModal(false)}
+                                userToEdit={userToEdit}
+                                svList={svList}
+                                directions={directions}
+                                user={user}
+                                onSave={saveUserChanges}
+                            />
+                        )}
+                        {showAccountMenu && (
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                                    <h2 className="text-xl font-semibold mb-4">Account Settings</h2>
+                                    <div className="space-y-4">
+                                        <button
+                                            onClick={() => {
+                                                setShowChangeLoginForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600"
+                                        >
+                                            Change Login
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setShowChangePasswordForm(true);
+                                                setShowAccountMenu(false);
+                                            }}
+                                            className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600"
+                                        >
+                                            Change Password
+                                        </button>
+                                        <button
+                                            onClick={() => setShowAccountMenu(false)}
+                                            className="w-full bg-gray-500 text-white py-2 rounded hover:bg-gray-600"
+                                        >
+                                            Close
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                        {showChangeLoginForm && (
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                                    <h2 className="text-xl font-semibold mb-4">Change Login</h2>
+                                    <input
+                                        type="text"
+                                        placeholder="New Login"
+                                        value={loginData.new_login}
+                                        onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
+                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        disabled={isLoading}
+                                    />
+                                    <input
+                                        type="text"
+                                        placeholder="Confirm New Login"
+                                        value={loginData.confirm_login}
+                                        onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
+                                        className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        disabled={isLoading}
+                                    />
+                                    <div className="flex justify-between">
+                                        <button
+                                            onClick={handleChangeLogin}
+                                            className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                            disabled={isLoading}
+                                        >
+                                            {isLoading ? 'Updating...' : 'Update Login'}
+                                        </button>
+                                        <button
+                                            onClick={() => setShowChangeLoginForm(false)}
+                                            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                        >
+                                            Cancel
+                                        </button>
+                                    </div>
+                                    {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                                    {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                                </div>
+                            </div>
+                        )}
+                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
+                    </div>
+                );
+            };
+
             return (
                 <div>
-                    <Sidebar
-                        user={user}
-                        view={view}
-                        setView={setView}
-                        fetchDirections={fetchDirections}
-                        setShowMonitoringScaleModal={setShowMonitoringScaleModal}
-                        handleLogout={handleLogout}
-                        setShowAccountMenu={setShowAccountMenu}
-                    />
-                    <MainContent
-                        user={user}
-                        view={view}
-                        isLoading={isLoading}
-                        error={error}
-                        success={success}
-                        newSvName={newSvName}
-                        setNewSvName={setNewSvName}
-                        addSv={addSv}
-                        svList={svList}
-                        generateWeeklyReport={generateWeeklyReport}
-                        isAdminDataLoading={isAdminDataLoading}
-                        removeSv={removeSv}
-                        setShowChangeTableForm={setShowChangeTableForm}
-                        setCurrentSvForTableChange={setCurrentSvForTableChange}
-                        showChangeTableForm={showChangeTableForm}
-                        currentSvForTableChange={currentSvForTableChange}
-                        newTableUrl={newTableUrl}
-                        setNewTableUrl={setNewTableUrl}
-                        changeSvTable={changeSvTable}
-                        selectedSvId={selectedSvId}
-                        setSelectedSvId={setSelectedSvId}
-                        selectedSvData={selectedSvData}
-                        notifySupervisor={notifySupervisor}
-                        updateTable={updateTable}
-                        showMonitoringScaleModal={showMonitoringScaleModal}
-                        setShowMonitoringScaleModal={setShowMonitoringScaleModal}
-                        directions={directions}
-                        saveDirections={saveDirections}
-                        users={users}
-                        showUserEditModal={showUserEditModal}
-                        setShowUserEditModal={setShowUserEditModal}
-                        userToEdit={userToEdit}
-                        setUserToEdit={setUserToEdit}
-                        saveUserChanges={saveUserChanges}
-                        svData={svData}
-                        profileData={profileData}
-                        selectedMonth={selectedMonth}
-                        setSelectedMonth={setSelectedMonth}
-                        hoursData={hoursData}
-                        operatorData={operatorData}
-                        expandedEvaluation={expandedEvaluation}
-                        setExpandedEvaluation={setExpandedEvaluation}
-                        audioUrl={audioUrl}
-                        setAudioUrl={setAudioUrl}
-                        loadingAudioId={loadingAudioId}
-                        setLoadingAudioId={setLoadingAudioId}
-                        showDisputeModal={showDisputeModal}
-                        setShowDisputeModal={setShowDisputeModal}
-                        selectedEvaluation={selectedEvaluation}
-                        setSelectedEvaluation={setSelectedEvaluation}
-                        disputeText={disputeText}
-                        setDisputeText={setDisputeText}
-                        handleSubmitDispute={handleSubmitDispute}
-                        salaryData={salaryData}
-                        setSalaryData={setSalaryData}
-                        salaryResult={salaryResult}
-                        setSalaryResult={setSalaryResult}
-                        showPointsTable={showPointsTable}
-                        setShowPointsTable={setShowPointsTable}
-                        calculateSalary={calculateSalary}
-                        clearSalaryForm={clearSalaryForm}
-                        showAccountMenu={showAccountMenu}
-                        setShowAccountMenu={setShowAccountMenu}
-                        setShowChangeLoginForm={setShowChangeLoginForm}
-                        setShowChangePasswordForm={setShowChangePasswordForm}
-                        loginData={loginData}
-                        setLoginData={setLoginData}
-                        handleChangeLogin={handleChangeLogin}
-                        passwordData={passwordData}
-                        setPasswordData={setPasswordData}
-                        handleChangePassword={handleChangePassword}
-                        averageScore={averageScore}
-                        handleEvaluationClick={handleEvaluationClick}
-                    />
+                    <Sidebar />
+                    <MainContent />
                 </div>
             );
         };
