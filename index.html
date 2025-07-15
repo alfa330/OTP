@@ -10,9 +10,9 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
-    <script src="https://kit.fontawesome.com/a076d05399.js" crossorigin="anonymous"></script> <!-- Added Font Awesome for icons -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 </head>
-<body class="bg-gray-100 font-sans antialiased">
+<body class="bg-gray-50 font-sans antialiased text-gray-900">
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef } = React;
@@ -1947,50 +1947,110 @@
             }
 
             return (
-                <div>
-                    <div className="fixed top-0 left-0 h-full w-64 bg-gradient-to-b from-blue-900 to-blue-700 text-white p-6 shadow-xl transition-all duration-300 hover:shadow-2xl">
-                        <h1 className="text-2xl font-bold mb-8 flex items-center gap-2"><i className="fas fa-robot"></i> Dashboard</h1>
-                        <ul className="space-y-3">
-                            {user.role === 'admin' && (
-                                <>
-                                    <li><button onClick={() => setView('add_sv')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'add_sv' ? 'bg-blue-800' : ''}`}><i className="fas fa-user-plus"></i> Add Supervisor</button></li>
-                                    <li><button onClick={() => setView('sv_list')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'sv_list' ? 'bg-blue-800' : ''}`}><i className="fas fa-users"></i> Supervisors</button></li>
-                                    <li><button onClick={() => setView('view_scores')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'view_scores' ? 'bg-blue-800' : ''}`}><i className="fas fa-chart-bar"></i> View Operator Scores</button></li>
-                                    <li><button onClick={() => setView('manage_users')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'manage_users' ? 'bg-blue-800' : ''}`}><i className="fas fa-user-cog"></i> Manage Users</button></li>
-                                    <li><button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2"><i className="fas fa-balance-scale"></i> Manage Monitoring Scale</button></li>
-                                </>
-                            )}
-                            {user.role === 'sv' && (
-                                <>
-                                    <li><button onClick={() => setView('update_table')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'update_table' ? 'bg-blue-800' : ''}`}><i className="fas fa-table"></i> Update Table</button></li>
-                                    <li><button onClick={() => setView('operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'operators' ? 'bg-blue-800' : ''}`}><i className="fas fa-users-cog"></i> Your Operators</button></li>
-                                    <li><button onClick={() => setView('manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'manage_operators' ? 'bg-blue-800' : ''}`}><i className="fas fa-user-edit"></i> Manage my operators</button></li>
-                                </>
-                            )}
-                            {user.role === 'operator' && (
-                                <>
-                                    <li><button onClick={() => setView('profile')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'profile' ? 'bg-blue-800' : ''}`}><i className="fas fa-user"></i> Profile</button></li>
-                                    <li><button onClick={() => setView('hours')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'hours' ? 'bg-blue-800' : ''}`}><i className="fas fa-clock"></i> My Hours</button></li>
-                                    <li><button onClick={() => setView('evaluation')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'evaluation' ? 'bg-blue-800' : ''}`}><i className="fas fa-phone-alt"></i> Call Evaluations</button></li>
-                                    <li><button onClick={() => setView('salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2 ${view === 'salary' ? 'bg-blue-800' : ''}`}><i className="fas fa-money-bill-wave"></i> Salary Calculator</button></li>
-                                </>
-                            )}
-                            <li><button onClick={() => setShowAccountMenu(true)} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-800 transition-all duration-200 flex items-center gap-2"><i className="fas fa-cog"></i> Account</button></li>
-                            <li><button onClick={handleLogout} className="w-full text-left py-3 px-4 rounded-lg hover:bg-red-800 bg-red-700 transition-all duration-200 flex items-center gap-2"><i className="fas fa-sign-out-alt"></i> Logout</button></li>
-                        </ul>
+                <div className="flex h-screen overflow-hidden">
+                    <div className="fixed top-0 left-0 h-full w-64 bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 transition-all duration-300 ease-in-out">
+                        <div className="p-6">
+                            <h1 className="text-2xl font-bold mb-8 flex items-center gap-2">
+                                <i className="fas fa-robot"></i> OTP Bot Dashboard
+                            </h1>
+                            <ul className="space-y-2">
+                                {user.role === 'admin' && (
+                                    <>
+                                        <li>
+                                            <button onClick={() => setView('add_sv')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'add_sv' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-user-plus"></i> Add Supervisor
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => setView('sv_list')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_list' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-users"></i> Supervisors
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => setView('view_scores')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'view_scores' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-chart-bar"></i> View Operator Scores
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => setView('manage_users')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_users' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-user-cog"></i> Manage Users
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3">
+                                                <i className="fas fa-sliders-h"></i> Manage Monitoring Scale
+                                            </button>
+                                        </li>
+                                    </>
+                                )}
+                                {user.role === 'sv' && (
+                                    <>
+                                        <li>
+                                            <button onClick={() => setView('update_table')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'update_table' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-table"></i> Update Table
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => setView('operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'operators' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-users-cog"></i> Your Operators
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => setView('manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-user-edit"></i> Manage my operators
+                                            </button>
+                                        </li>
+                                    </>
+                                )}
+                                {user.role === 'operator' && (
+                                    <>
+                                        <li>
+                                            <button onClick={() => setView('profile')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'profile' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-user-circle"></i> Profile
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => setView('hours')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'hours' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-clock"></i> My Hours
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => setView('evaluation')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'evaluation' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-phone-alt"></i> Call Evaluations
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => setView('salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-calculator"></i> Salary Calculator
+                                            </button>
+                                        </li>
+                                    </>
+                                )}
+                                <li>
+                                    <button onClick={() => setShowAccountMenu(true)} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3">
+                                        <i className="fas fa-cog"></i> Account
+                                    </button>
+                                </li>
+                                <li>
+                                    <button onClick={handleLogout} className="w-full text-left py-3 px-4 rounded-lg hover:bg-red-700 bg-red-600 transition-all duration-200 flex items-center gap-3">
+                                        <i className="fas fa-sign-out-alt"></i> Logout
+                                    </button>
+                                </li>
+                            </ul>
+                        </div>
                     </div>
-                    <div className="ml-64 p-6 bg-gradient-to-br from-gray-50 to-gray-200 min-h-screen transition-all duration-300">
+                    <div className="ml-64 p-8 bg-gray-50 min-h-screen w-full overflow-y-auto">
                         {user.role === 'admin' && (
                             <>
                                 {view === 'add_sv' && (
-                                    <div className="bg-white p-6 rounded-xl shadow-md mb-6 border border-gray-200 hover:shadow-lg transition-shadow duration-300">
-                                        <h2 className="text-xl font-semibold mb-4">Add Supervisor</h2>
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Add Supervisor</h2>
                                         <input
                                             type="text"
                                             placeholder="Supervisor Name"
                                             value={newSvName}
                                             onChange={(e) => setNewSvName(e.target.value)}
-                                            className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading}
                                         />
                                         <button
@@ -2003,46 +2063,46 @@
                                     </div>
                                 )}
                                 {view === 'sv_list' && (
-                                    <div className="bg-white p-6 rounded-xl shadow-md mb-6 border border-gray-200 hover:shadow-lg transition-shadow duration-300">
-                                        <div className="flex justify-between items-center mb-4">
-                                            <h2 className="text-xl font-semibold">Supervisors</h2>
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <div className="flex justify-between items-center mb-6">
+                                            <h2 className="text-2xl font-semibold text-gray-800">Supervisors</h2>
                                             <button
                                                 onClick={generateWeeklyReport}
-                                                className={`bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                                 disabled={isLoading}
                                             >
                                                 {isLoading ? 'Generating...' : 'Generate Report'}
                                             </button>
                                         </div>
                                         {isAdminDataLoading ? (
-                                            <p className="text-center">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading...</p>
                                         ) : svList.length === 0 ? (
-                                            <p className="text-center">No supervisors found.</p>
+                                            <p className="text-center text-gray-600">No supervisors found.</p>
                                         ) : (
-                                            <div className="overflow-x-auto">
-                                                <table className="min-w-full bg-white border-collapse">
-                                                    <thead>
-                                                        <tr className="bg-gray-100">
-                                                            <th className="p-3 border-b text-left">Name</th>
-                                                            <th className="p-3 border-b text-left">ID</th>
-                                                            <th className="p-3 border-b text-left">Table URL</th>
-                                                            <th className="p-3 border-b text-left">Actions</th>
+                                            <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                                <table className="min-w-full divide-y divide-gray-200">
+                                                    <thead className="bg-gray-50">
+                                                        <tr>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Table URL</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody>
+                                                    <tbody className="bg-white divide-y divide-gray-200">
                                                         {svList.map(sv => (
                                                             <tr key={sv.id} className="hover:bg-gray-50 transition-colors duration-200">
-                                                                <td className="p-3 border-b">{sv.name}</td>
-                                                                <td className="p-3 border-b">{sv.id}</td>
-                                                                <td className="p-3 border-b">
+                                                                <td className="px-6 py-4 whitespace-nowrap">{sv.name}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap">{sv.id}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap">
                                                                     {sv.table ? (
-                                                                        <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View Table</a>
+                                                                        <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">View Table</a>
                                                                     ) : 'No table'}
                                                                 </td>
-                                                                <td className="p-3 border-b space-x-2">
+                                                                <td className="px-6 py-4 whitespace-nowrap space-x-2">
                                                                     <button
                                                                         onClick={() => removeSv(sv.id)}
-                                                                        className="bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 text-sm"
+                                                                        className="bg-red-600 text-white px-3 py-1 rounded-lg hover:bg-red-700 text-sm transition-all duration-200"
                                                                         disabled={isLoading}
                                                                     >
                                                                         Remove
@@ -2052,7 +2112,7 @@
                                                                             setCurrentSvForTableChange(sv);
                                                                             setShowChangeTableForm(true);
                                                                         }}
-                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                        className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
                                                                         disabled={isLoading}
                                                                     >
                                                                         Change Table
@@ -2067,20 +2127,20 @@
                                     </div>
                                 )}
                                 {showChangeTableForm && currentSvForTableChange && (
-                                    <div className="bg-white p-6 rounded-xl shadow-md mb-6 border border-gray-200 hover:shadow-lg transition-shadow duration-300">
-                                        <h2 className="text-xl font-semibold mb-4">Change Table for {currentSvForTableChange.name}</h2>
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Change Table for {currentSvForTableChange.name}</h2>
                                         <input
                                             type="text"
                                             placeholder="New Google Sheets URL"
                                             value={newTableUrl}
                                             onChange={(e) => setNewTableUrl(e.target.value)}
-                                            className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading}
                                         />
                                         <div className="flex justify-between">
                                             <button
                                                 onClick={() => changeSvTable(currentSvForTableChange.id, newTableUrl)}
-                                                className={`bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                                 disabled={isLoading}
                                             >
                                                 {isLoading ? 'Updating...' : 'Update Table'}
@@ -2091,7 +2151,7 @@
                                                     setCurrentSvForTableChange(null);
                                                     setNewTableUrl('');
                                                 }}
-                                                className="bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600 transition-all duration-200"
+                                                className="bg-gray-600 text-white px-6 py-3 rounded-lg hover:bg-gray-700 transition-all duration-200"
                                             >
                                                 Cancel
                                             </button>
@@ -2099,12 +2159,12 @@
                                     </div>
                                 )}
                                 {view === 'view_scores' && (
-                                    <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 hover:shadow-lg transition-shadow duration-300">
-                                        <h2 className="text-xl font-semibold mb-4">View Operator Scores</h2>
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">View Operator Scores</h2>
                                         <select
                                             value={selectedSvId}
                                             onChange={(e) => setSelectedSvId(e.target.value)}
-                                            className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading || isAdminDataLoading}
                                         >
                                             <option value="">Select Supervisor</option>
@@ -2113,21 +2173,21 @@
                                             ))}
                                         </select>
                                         {isAdminDataLoading ? (
-                                            <p className="text-center">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading...</p>
                                         ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
-                                            <div className="overflow-x-auto">
-                                                <table className="min-w-full bg-white border-collapse">
-                                                    <thead>
-                                                        <tr className="bg-gray-100">
-                                                            <th className="p-3 border-b text-left">Name</th>
-                                                            <th className="p-3 border-b text-left">Calls</th>
-                                                            <th className="p-3 border-b text-left">Expected</th>
-                                                            <th className="p-3 border-b text-left">Avg Score</th>
-                                                            <th className="p-3 border-b text-left">Link</th>
-                                                            <th className="p-3 border-b text-left">Actions</th>
+                                            <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                                <table className="min-w-full divide-y divide-gray-200">
+                                                    <thead className="bg-gray-50">
+                                                        <tr>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Calls</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Expected</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg Score</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Link</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody>
+                                                    <tbody className="bg-white divide-y divide-gray-200">
                                                         {selectedSvData.operators.map((op, index) => {
                                                             const currentWeek = getCurrentWeekOfMonth();
                                                             const expectedCalls = getExpectedCalls(currentWeek);
@@ -2135,26 +2195,26 @@
                                                             const hasIssue = callCount < expectedCalls;
                                                             return (
                                                                 <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
-                                                                    <td className="p-3 border-b">{op.name}</td>
-                                                                    <td className={`p-3 border-b ${getCallCountColor(callCount, expectedCalls)}`}>
+                                                                    <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
+                                                                    <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, expectedCalls)}`}>
                                                                         {callCount}
                                                                     </td>
-                                                                    <td className="p-3 border-b">{expectedCalls}</td>
-                                                                    <td className="p-3 border-b">
+                                                                    <td className="px-6 py-4 whitespace-nowrap">{expectedCalls}</td>
+                                                                    <td className="px-6 py-4 whitespace-nowrap">
                                                                         <span className={getScoreColor(op.avg_score)}>
                                                                             {op.avg_score ? op.avg_score.toFixed(2) : '-'}
                                                                         </span>
                                                                     </td>
-                                                                    <td className="p-3 border-b">
+                                                                    <td className="px-6 py-4 whitespace-nowrap">
                                                                         {op.link ? (
-                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
+                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">View</a>
                                                                         ) : '-'}
                                                                     </td>
-                                                                    <td className="p-3 border-b space-x-2">
+                                                                    <td className="px-6 py-4 whitespace-nowrap space-x-2">
                                                                         {hasIssue && (
                                                                             <button
                                                                                 onClick={() => notifySupervisor(selectedSvId, op.name)}
-                                                                                className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
+                                                                                className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm transition-all duration-200"
                                                                                 disabled={isLoading}
                                                                             >
                                                                                 Notify
@@ -2176,7 +2236,7 @@
                                                                                 const token = safeBtoa(JSON.stringify(tokenData));
                                                                                 window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
                                                                             }}
-                                                                            className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                            className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
                                                                             title="Listen to operator calls"
                                                                         >
                                                                             Listen Calls
@@ -2189,7 +2249,7 @@
                                                 </table>
                                             </div>
                                         ) : selectedSvId ? (
-                                            <p className="text-center">No operators found for this supervisor.</p>
+                                            <p className="text-center text-gray-600">No operators found for this supervisor.</p>
                                         ) : null}
                                         {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
                                         {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
@@ -2205,38 +2265,38 @@
                                     />
                                 )}
                                 {view === 'manage_users' && (
-                                    <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 hover:shadow-lg transition-shadow duration-300">
-                                        <h2 className="text-xl font-semibold mb-4">Manage Users</h2>
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Manage Users</h2>
                                         {isAdminDataLoading ? (
-                                            <p className="text-center">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading...</p>
                                         ) : users.length === 0 ? (
-                                            <p className="text-center">No users found.</p>
+                                            <p className="text-center text-gray-600">No users found.</p>
                                         ) : (
-                                            <div className="overflow-x-auto">
-                                                <table className="min-w-full bg-white border-collapse">
-                                                    <thead>
-                                                        <tr className="bg-gray-100">
-                                                            <th className="p-3 border-b text-left">Name</th>
-                                                            <th className="p-3 border-b text-left">ID</th>
-                                                            <th className="p-3 border-b text-left">Direction</th>
-                                                            <th className="p-3 border-b text-left">Supervisor</th>
-                                                            <th className="p-3 border-b text-left">Actions</th>
+                                            <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                                <table className="min-w-full divide-y divide-gray-200">
+                                                    <thead className="bg-gray-50">
+                                                        <tr>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Direction</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Supervisor</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody>
+                                                    <tbody className="bg-white divide-y divide-gray-200">
                                                         {users.map(u => (
                                                             <tr key={u.id} className="hover:bg-gray-50 transition-colors duration-200">
-                                                                <td className="p-3 border-b">{u.name}</td>
-                                                                <td className="p-3 border-b">{u.id}</td>
-                                                                <td className="p-3 border-b">{u.direction || '-'}</td>
-                                                                <td className="p-3 border-b">{u.supervisor_name || '-'}</td>
-                                                                <td className="p-3 border-b">
+                                                                <td className="px-6 py-4 whitespace-nowrap">{u.name}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap">{u.id}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap">{u.direction || '-'}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap">{u.supervisor_name || '-'}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap">
                                                                     <button
                                                                         onClick={() => {
                                                                             setUserToEdit(u);
                                                                             setShowUserEditModal(true);
                                                                         }}
-                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                        className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
                                                                     >
                                                                         Edit
                                                                     </button>
@@ -2254,19 +2314,19 @@
                         {user.role === 'sv' && (
                             <>
                                 {view === 'update_table' && (
-                                    <div className="bg-white p-6 rounded-xl shadow-md mb-6 border border-gray-200 hover:shadow-lg transition-shadow duration-300">
-                                        <h2 className="text-xl font-semibold mb-4">Update Table</h2>
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Update Table</h2>
                                         <input
                                             type="text"
                                             placeholder="Enter Google Sheets URL"
                                             value={newTableUrl}
                                             onChange={(e) => setNewTableUrl(e.target.value)}
-                                            className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading}
                                         />
                                         <button
                                             onClick={updateTable}
-                                            className={`w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                            className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                             disabled={isLoading}
                                         >
                                             {isLoading ? 'Updating...' : 'Update Table'}
@@ -2274,34 +2334,34 @@
                                     </div>
                                 )}
                                 {view === 'manage_operators' && (
-                                    <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200 hover:shadow-lg transition-shadow duration-300">
-                                        <h2 className="text-xl font-semibold mb-4">Manage Your Operators</h2>
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Manage Your Operators</h2>
                                         {isLoading ? (
-                                            <p className="text-center">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading...</p>
                                         ) : svData?.operators?.length > 0 ? ( 
-                                            <div className="overflow-x-auto">
-                                                <table className="min-w-full bg-white border-collapse">
-                                                    <thead>
-                                                        <tr className="bg-gray-100">
-                                                            <th className="p-3 border-b text-left">Name</th>
-                                                            <th className="p-3 border-b text-left">ID</th>
-                                                            <th className="p-3 border-b text-left">Direction</th>
-                                                            <th className="p-3 border-b text-left">Actions</th>
+                                            <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                                <table className="min-w-full divide-y divide-gray-200">
+                                                    <thead className="bg-gray-50">
+                                                        <tr>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Direction</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                                                         </tr>
                                                     </thead>
-                                                    <tbody>
+                                                    <tbody className="bg-white divide-y divide-gray-200">
                                                         {svData.operators.map(op => (
                                                             <tr key={op.id} className="hover:bg-gray-50 transition-colors duration-200">
-                                                                <td className="p-3 border-b">{op.name}</td>
-                                                                <td className="p-3 border-b">{op.id}</td>
-                                                                <td className="p-3 border-b">{op.direction_id ? directions.find(d => d.id === op.direction_id)?.name || '-' : '-'}</td>
-                                                                <td className="p-3 border-b">
+                                                                <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap">{op.id}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap">{op.direction_id ? directions.find(d => d.id === op.direction_id)?.name || '-' : '-'}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap">
                                                                     <button
                                                                         onClick={() => {
                                                                             setUserToEdit({ ...op, supervisor_id: user.id });  // Fix supervisor to themselves
                                                                             setShowUserEditModal(true);
                                                                         }}
-                                                                        className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600 text-sm"
+                                                                        className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
                                                                     >
                                                                         Edit
                                                                     </button>
@@ -2312,76 +2372,76 @@
                                                 </table>
                                             </div>
                                         ) : (
-                                            <p className="text-center">No operators found.</p>
+                                            <p className="text-center text-gray-600">No operators found.</p>
                                         )}
                                     </div>
                                 )}
                                 {view === 'operators' && (
-                                    <div className="bg-white p-6 rounded-xl shadow-md mb-6 border border-gray-200 hover:shadow-lg transition-shadow duration-300">
-                                        <h2 className="text-xl font-semibold mb-4">Your Operators</h2>
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Operators</h2>
                                         {isLoading ? (
-                                            <p className="text-center">Loading...</p>
+                                            <p className="text-center text-gray-600">Loading...</p>
                                         ) : svData && svData.operators && svData.operators.length > 0 ? (
-                                            <div className="overflow-x-auto">
-                                                <table className="min-w-full bg-white border-collapse">
-                                                <thead>
-                                                    <tr className="bg-gray-100">
-                                                    <th className="p-3 border-b text-left">Name</th>
-                                                    <th className="p-3 border-b text-left">Calls</th>
-                                                    <th className="p-3 border-b text-left">Avg Score</th>
-                                                    <th className="p-3 border-b text-left">Link</th>
-                                                    <th className="p-3 border-b text-left">Actions</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {svData.operators.map((op, index) => {
-                                                    const callCount = parseInt(op.call_count) || 0;
-                                                    return (
-                                                        <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
-                                                        <td className="p-3 border-b">{op.name}</td>
-                                                        <td className={`p-3 border-b ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
-                                                            {callCount}
-                                                        </td>
-                                                        <td className="p-3 border-b">
-                                                            <span className={getScoreColor(op.avg_score)}>
-                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                            </span>
-                                                        </td>
-                                                        <td className="p-3 border-b">
-                                                            {op.link ? (
-                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">View</a>
-                                                            ) : '-'}
-                                                        </td>
-                                                        <td className="p-3 border-b space-x-2">
-                                                            <button
-                                                            onClick={() => {
-                                                                // Генерируем токен с данными оператора
-                                                                const tokenData = {
-                                                                apiKey: user.apiKey,
-                                                                userId: user.id,
-                                                                role: user.role,
-                                                                name: user.name,
-                                                                operatorId: op.id,
-                                                                operatorName: op.name,
-                                                                timestamp: Date.now()
-                                                                };
-                                                                const token = safeBtoa(JSON.stringify(tokenData));
-                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
-                                                            }}
-                                                            className="bg-blue-500 text-white px-3 py-1 rounded text-sm hover:bg-blue-600"
-                                                            title="Listen to operator calls"
-                                                            >
-                                                            Listen Calls
-                                                            </button>
-                                                        </td>
+                                            <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                                <table className="min-w-full divide-y divide-gray-200">
+                                                    <thead className="bg-gray-50">
+                                                        <tr>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Calls</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg Score</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Link</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                                                         </tr>
-                                                    );
-                                                    })}
-                                                </tbody>
+                                                    </thead>
+                                                    <tbody className="bg-white divide-y divide-gray-200">
+                                                        {svData.operators.map((op, index) => {
+                                                            const callCount = parseInt(op.call_count) || 0;
+                                                            return (
+                                                                <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
+                                                                    <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
+                                                                    <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
+                                                                        {callCount}
+                                                                    </td>
+                                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                                        <span className={getScoreColor(op.avg_score)}>
+                                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                                        {op.link ? (
+                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">View</a>
+                                                                        ) : '-'}
+                                                                    </td>
+                                                                    <td className="px-6 py-4 whitespace-nowrap space-x-2">
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                // Генерируем токен с данными оператора
+                                                                                const tokenData = {
+                                                                                    apiKey: user.apiKey,
+                                                                                    userId: user.id,
+                                                                                    role: user.role,
+                                                                                    name: user.name,
+                                                                                    operatorId: op.id,
+                                                                                    operatorName: op.name,
+                                                                                    timestamp: Date.now()
+                                                                                };
+                                                                                const token = safeBtoa(JSON.stringify(tokenData));
+                                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
+                                                                            }}
+                                                                            className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
+                                                                            title="Listen to operator calls"
+                                                                        >
+                                                                            Listen Calls
+                                                                        </button>
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        })}
+                                                    </tbody>
                                                 </table>
                                             </div>
                                         ) : (
-                                            <p className="text-center">No operators found.</p>
+                                            <p className="text-center text-gray-600">No operators found.</p>
                                         )}
                                         {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
                                         {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
@@ -2392,7 +2452,7 @@
                         {user.role === 'operator' && (
                             <>
                                 {view === 'profile' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 hover:shadow-lg transition-shadow duration-300">
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
                                         {isLoading ? (
                                             <p className="text-center text-gray-600">Loading...</p>
@@ -2462,7 +2522,7 @@
                                         <select
                                             value={selectedMonth}
                                             onChange={(e) => setSelectedMonth(e.target.value)}
-                                            className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                             disabled={isLoading}
                                         >
                                             {getMonthOptions()}
@@ -2470,7 +2530,7 @@
                                     </div>
                                 )}
                                 {view === 'hours' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-md border border-gray-200 hover:shadow-lg transition-shadow duration-300">
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
                                         {isLoading ? (
                                             <p className="text-center text-gray-600">Loading...</p>
@@ -2515,7 +2575,7 @@
                                     </div>
                                 )}
                                 {view === 'evaluation' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-md border border-gray-200 hover:shadow-lg transition-shadow duration-300">
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
                                         {isLoading ? (
                                             <p className="text-center text-gray-600">Loading...</p>
@@ -2537,20 +2597,20 @@
                                                         <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
                                                     </div>
                                                 </div>
-                                                <div className="overflow-x-auto rounded-lg shadow-sm">
-                                                    <table className="min-w-full bg-white border-collapse">
-                                                        <thead>
-                                                            <tr className="bg-blue-50">
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Call ID</th>
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Phone Number</th>
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Score</th>
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Comment</th>
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Month</th>
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Evaluation Date</th>
-                                                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Actions</th>
+                                                <div className="overflow-x-auto rounded-lg shadow-sm border border-gray-200">
+                                                    <table className="min-w-full divide-y divide-gray-200">
+                                                        <thead className="bg-blue-50">
+                                                            <tr>
+                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Call ID</th>
+                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone Number</th>
+                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Score</th>
+                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Comment</th>
+                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Month</th>
+                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Evaluation Date</th>
+                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                                                             </tr>
                                                         </thead>
-                                                        <tbody>
+                                                        <tbody className="bg-white divide-y divide-gray-200">
                                                         {operatorData.evaluations.map((eval1, index) => (
                                                             <React.Fragment key={index}>
                                                             <tr
@@ -2559,12 +2619,12 @@
                                                                 }`}
                                                                 onClick={() => handleEvaluationClick(eval1)}
                                                             >
-                                                                <td className="p-4 border-b text-sm">{eval1.id || '-'}</td>
-                                                                <td className="p-4 border-b text-sm">{eval1.phone_number || '-'}</td>
-                                                                <td className={`p-4 border-b text-sm font-medium ${getScoreColor(eval1.score)}`}>
+                                                                <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.id || '-'}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.phone_number || '-'}</td>
+                                                                <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${getScoreColor(eval1.score)}`}>
                                                                 {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
                                                                 </td>
-                                                                <td className="p-4 border-b text-sm">
+                                                                <td className="px-6 py-4 text-sm">
                                                                 {eval1.comment ? (
                                                                     <div className="space-y-1">
                                                                     {eval1.comment.split('\n').map((line, i) => {
@@ -2583,9 +2643,9 @@
                                                                     </div>
                                                                 ) : '-'}
                                                                 </td>
-                                                                <td className="p-4 border-b text-sm">{eval1.month || '-'}</td>
-                                                                <td className="p-4 border-b text-sm">{eval1.evaluation_date || '-'}</td>
-                                                                <td className="p-4 border-b text-sm">
+                                                                <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.month || '-'}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.evaluation_date || '-'}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                                 {eval1.score < 100 && (
                                                                     <button
                                                                     onClick={(e) => {
@@ -2593,7 +2653,7 @@
                                                                         setSelectedEvaluation(eval1);
                                                                         setShowDisputeModal(true);
                                                                     }}
-                                                                    className="bg-yellow-500 text-white px-2 py-1 rounded hover:bg-yellow-600 text-sm"
+                                                                    className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm transition-all duration-200"
                                                                     >
                                                                     Dispute
                                                                     </button>
@@ -2626,7 +2686,7 @@
                                     </div>
                                 )}
                                 {view === 'salary' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-md border border-gray-200 hover:shadow-lg transition-shadow duration-300">
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
                                         <div className="grid grid-cols-1 gap-6">
                                             <div className="form-group">
@@ -2634,7 +2694,7 @@
                                                 <select
                                                     value={salaryData.experience}
                                                     onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
                                                 >
                                                     <option value="">Select Experience</option>
@@ -2653,7 +2713,7 @@
                                                     min="0"
                                                     max="100"
                                                     step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
                                                 />
                                             </div>
@@ -2666,7 +2726,7 @@
                                                     min="0"
                                                     max="100"
                                                     step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
                                                 />
                                             </div>
@@ -2679,7 +2739,7 @@
                                                     min="0"
                                                     max="744"
                                                     step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
                                                 />
                                             </div>
@@ -2692,7 +2752,7 @@
                                                     min="0"
                                                     max="744"
                                                     step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
                                                 />
                                             </div>
@@ -2726,7 +2786,7 @@
                                                                 min="1"
                                                                 step="1"
                                                                 placeholder="Quantity"
-                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                 disabled={isLoading}
                                                             />
                                                         )}
@@ -2748,7 +2808,7 @@
                                                                 min="1"
                                                                 step="1"
                                                                 placeholder="Quantity"
-                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                 disabled={isLoading}
                                                             />
                                                         )}
