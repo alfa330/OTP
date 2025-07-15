@@ -358,7 +358,7 @@ def change_login():
         if requester[3] == 'operator' and requester_id != user_id:
             return jsonify({"error": "Operators can only change their own login"}), 403
 
-        if requester[3] == 'sv' and (target_user[3] != 'operator' or target_user[6] != requester_id):
+        if requester[3] == 'sv' and (target_user[3] != 'operator' or target_user[6] != requester_id) and requester_id != user_id:
             return jsonify({"error": "Supervisors can only change logins for their operators"}), 403
 
         # Admins can change any login
