@@ -742,21 +742,33 @@
           const [showTable, setShowTable] = useState(false);
 
           const validateForm = () => {
+            // Проверяем, что все обязательные поля не пустые
             if (
-            !experience ||
-            isNaN(quality) || quality < 0 || quality > 100 ||
-            isNaN(avgScore) || avgScore < 0 || avgScore > 5 ||
-            isNaN(responseTime) || responseTime < 0 || responseTime > 60 ||
-            isNaN(chatsPerHour) || chatsPerHour < 0 || chatsPerHour > 100 ||
-            isNaN(hoursNorm) || hoursNorm < 0 || hoursNorm > 744 ||
-            isNaN(totalHours) || totalHours < 0 || totalHours > 744 ||
-            (bonusRefer && (isNaN(bonusReferQuantity) || bonusReferQuantity < 1)) ||
-            (bonusFilming && (isNaN(bonusFilmingQuantity) || bonusFilmingQuantity < 1))
+              experience === '' ||
+              quality === '' ||
+              avgScore === '' ||
+              responseTime === '' ||
+              chatsPerHour === '' ||
+              hoursNorm === '' ||
+              totalHours === ''
             ) {
-            return false;
+              return false;
+            }
+            // Проверяем диапазоны и типы
+            if (
+              isNaN(quality) || quality < 0 || quality > 100 ||
+              isNaN(avgScore) || avgScore < 0 || avgScore > 5 ||
+              isNaN(responseTime) || responseTime < 0 || responseTime > 60 ||
+              isNaN(chatsPerHour) || chatsPerHour < 0 || chatsPerHour > 100 ||
+              isNaN(hoursNorm) || hoursNorm < 0 || hoursNorm > 744 ||
+              isNaN(totalHours) || totalHours < 0 || totalHours > 744 ||
+              (bonusRefer && (bonusReferQuantity === '' || isNaN(bonusReferQuantity) || bonusReferQuantity < 1)) ||
+              (bonusFilming && (bonusFilmingQuantity === '' || isNaN(bonusFilmingQuantity) || bonusFilmingQuantity < 1))
+            ) {
+              return false;
             }
             return true;
-            };
+          };
 
           const hasInput = () => {
             return (
