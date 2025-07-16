@@ -725,6 +725,495 @@
             );
         };
 
+        const SalaryCalculatorChat = () => {
+          const [experience, setExperience] = useState('');
+          const [quality, setQuality] = useState('');
+          const [avgScore, setAvgScore] = useState('');
+          const [responseTime, setResponseTime] = useState('');
+          const [chatsPerHour, setChatsPerHour] = useState('');
+          const [hoursNorm, setHoursNorm] = useState('');
+          const [totalHours, setTotalHours] = useState('');
+          const [bonusTraining, setBonusTraining] = useState(false);
+          const [bonusRefer, setBonusRefer] = useState(false);
+          const [bonusReferQuantity, setBonusReferQuantity] = useState('');
+          const [bonusFilming, setBonusFilming] = useState(false);
+          const [bonusFilmingQuantity, setBonusFilmingQuantity] = useState('');
+          const [result, setResult] = useState(null);
+          const [showTable, setShowTable] = useState(false);
+
+          const validateForm = () => {
+            if (!experience) return false;
+            if (isNaN(quality) || quality < 0 || quality > 100) return false;
+            if (isNaN(avgScore) || avgScore < 0 || avgScore > 5) return false;
+            if (isNaN(responseTime) || responseTime < 0 || responseTime > 60) return false;
+            if (isNaN(chatsPerHour) || chatsPerHour < 0 || chatsPerHour > 100) return false;
+            if (isNaN(hoursNorm) || hoursNorm < 0 || hoursNorm > 744) return false;
+            if (isNaN(totalHours) || totalHours < 0 || totalHours > 744) return false;
+            if (bonusRefer && (isNaN(bonusReferQuantity) || bonusReferQuantity < 1)) return false;
+            if (bonusFilming && (isNaN(bonusFilmingQuantity) || bonusFilmingQuantity < 1)) return false;
+            return true;
+          };
+
+          const hasInput = () => {
+            return (
+              experience !== '' ||
+              quality !== '' ||
+              avgScore !== '' ||
+              responseTime !== '' ||
+              chatsPerHour !== '' ||
+              hoursNorm !== '' ||
+              totalHours !== '' ||
+              bonusTraining ||
+              bonusRefer ||
+              bonusFilming
+            );
+          };
+
+          const calculateSalary = () => {
+            let points = 0;
+            let bonuses = 0;
+            let bonusDetails = [];
+
+            // Experience points
+            if (experience === '18+') points += 50;
+            else if (experience === '13-17') points += 35;
+            else if (experience === '10-12') points += 25;
+            else if (experience === '6-9') points += 15;
+            else if (experience === '3-5') points += 10;
+            else if (experience === '0-2') points += 5;
+
+            // Quality points
+            const qual = parseFloat(quality);
+            if (qual >= 97 && qual <= 100) points += 25;
+            else if (qual >= 94 && qual < 97) points += 20;
+            else if (qual >= 90 && qual < 94) points += 15;
+            else if (qual >= 86 && qual < 90) points += 10;
+            else if (qual >= 80 && qual < 86) points += 5;
+
+            // Avg score points
+            const score = parseFloat(avgScore);
+            if (score >= 4.9) points += 30;
+            else if (score >= 4.8) points += 25;
+            else if (score >= 4.7) points += 20;
+            else if (score >= 4.6) points += 10;
+            else if (score >= 4.5) points += 5;
+
+            // Response time points
+            const respTime = parseFloat(responseTime);
+            if (respTime <= 2) points += 20;
+            else if (respTime <= 3) points += 15;
+            else if (respTime <= 4) points += 10;
+            else if (respTime <= 4.5) points += 5;
+
+            // Chats per hour points
+            const cph = parseFloat(chatsPerHour);
+            if (cph >= 25) points += 25;
+            else if (cph >= 20) points += 15;
+            else if (cph >= 15) points += 10;
+            else if (cph >= 10) points += 5;
+
+            // Bonuses
+            if (bonusTraining) {
+              bonuses += 6000;
+              bonusDetails.push('Обучение: 6000 тг');
+            }
+            if (bonusRefer) {
+              const qty = parseInt(bonusReferQuantity) || 0;
+              const referBonus = 5000 * qty;
+              bonuses += referBonus;
+              bonusDetails.push(`Приведи друга: ${referBonus} тг (${qty} чел.)`);
+            }
+            if (bonusFilming) {
+              const qty = parseInt(bonusFilmingQuantity) || 0;
+              const filmingBonus = 5000 * qty;
+              bonuses += filmingBonus;
+              bonusDetails.push(`Съемки: ${filmingBonus} тг (${qty} съемок)`);
+            }
+
+            const hn = parseFloat(hoursNorm);
+            const th = parseFloat(totalHours);
+            const hoursPercentage = hn > 0 ? (th / hn * 100) : 0;
+            const premiumCoefficient = hoursPercentage >= 90 ? 1 : 0.75;
+            const pointsCoefficient = points / 100;
+            const baseSalary = 700 * th;
+            const premiumPart = baseSalary * pointsCoefficient * premiumCoefficient;
+            const finalSalary = baseSalary + premiumPart + bonuses;
+
+            setResult({
+              points,
+              premiumCoefficient,
+              hoursNorm: hn.toFixed(2),
+              hoursPercentage: hoursPercentage.toFixed(2),
+              baseSalary: baseSalary.toFixed(2),
+              premiumPart: premiumPart.toFixed(2),
+              bonuses,
+              bonusDetails: bonusDetails.join(', '),
+              finalSalary: finalSalary.toFixed(2),
+              tableData: { experience, quality: qual, avgScore: score, responseTime: respTime, chatsPerHour: cph }
+            });
+          };
+
+          const clearForm = () => {
+            setExperience('');
+            setQuality('');
+            setAvgScore('');
+            setResponseTime('');
+            setChatsPerHour('');
+            setHoursNorm('');
+            setTotalHours('');
+            setBonusTraining(false);
+            setBonusRefer(false);
+            setBonusReferQuantity('');
+            setBonusFilming(false);
+            setBonusFilmingQuantity('');
+            setResult(null);
+            setShowTable(false);
+          };
+
+          const togglePointsTable = () => {
+            setShowTable(!showTable);
+          };
+
+          const generatePointsTable = (data) => {
+            const { experience, quality, avgScore, responseTime, chatsPerHour } = data;
+
+            const experienceRanges = [
+              { range: '0-2 месяца', points: 5, selected: experience === '0-2', tooltip: 'Начальный стаж' },
+              { range: '3-5 месяцев', points: 10, selected: experience === '3-5', tooltip: 'Ранний опыт' },
+              { range: '6-9 месяцев', points: 15, selected: experience === '6-9', tooltip: 'Средний стаж' },
+              { range: '10-12 месяцев', points: 25, selected: experience === '10-12', tooltip: 'Продвинутый стаж' },
+              { range: '13-17 месяцев', points: 35, selected: experience === '13-17', tooltip: 'Высокий стаж' },
+              { range: '≥18 месяцев', points: 50, selected: experience === '18+', tooltip: 'Экспертный уровень' }
+            ];
+
+            const qualityRanges = [
+              { range: '80-85%', points: 5, selected: quality >= 80 && quality < 86, tooltip: 'Базовое качество' },
+              { range: '86-89%', points: 10, selected: quality >= 86 && quality < 90, tooltip: 'Хорошее качество' },
+              { range: '90-93%', points: 15, selected: quality >= 90 && quality < 94, tooltip: 'Высокое качество' },
+              { range: '94-96%', points: 20, selected: quality >= 94 && quality < 97, tooltip: 'Отличное качество' },
+              { range: '97-100%', points: 25, selected: quality >= 97 && quality <= 100, tooltip: 'Идеальное качество' }
+            ];
+
+            const scoreRanges = [
+              { range: '≥4.5', points: 5, selected: avgScore >= 4.5 && avgScore < 4.6, tooltip: 'Хороший балл' },
+              { range: '≥4.6', points: 10, selected: avgScore >= 4.6 && avgScore < 4.7, tooltip: 'Очень хороший балл' },
+              { range: '≥4.7', points: 20, selected: avgScore >= 4.7 && avgScore < 4.8, tooltip: 'Отличный балл' },
+              { range: '≥4.8', points: 25, selected: avgScore >= 4.8 && avgScore < 4.9, tooltip: 'Превосходный балл' },
+              { range: '≥4.9', points: 30, selected: avgScore >= 4.9, tooltip: 'Идеальный балл' }
+            ];
+
+            const responseTimeRanges = [
+              { range: '≤4.5 мин', points: 5, selected: responseTime <= 4.5 && responseTime > 4, tooltip: 'Приемлемое время' },
+              { range: '≤4 мин', points: 10, selected: responseTime <= 4 && responseTime > 3, tooltip: 'Хорошее время' },
+              { range: '≤3 мин', points: 15, selected: responseTime <= 3 && responseTime > 2, tooltip: 'Отличное время' },
+              { range: '≤2 мин', points: 20, selected: responseTime <= 2, tooltip: 'Идеальное время' }
+            ];
+
+            const chatsPerHourRanges = [
+              { range: '≥10', points: 5, selected: chatsPerHour >= 10 && chatsPerHour < 15, tooltip: 'Базовая производительность' },
+              { range: '≥15', points: 10, selected: chatsPerHour >= 15 && chatsPerHour < 20, tooltip: 'Хорошая производительность' },
+              { range: '≥20', points: 15, selected: chatsPerHour >= 20 && chatsPerHour < 25, tooltip: 'Высокая производительность' },
+              { range: '≥25', points: 25, selected: chatsPerHour >= 25, tooltip: 'Исключительная производительность' }
+            ];
+
+            return (
+              <table className="min-w-full bg-white border-collapse">
+                <thead>
+                  <tr className="bg-blue-50">
+                    <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Категория</th>
+                    <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Условие</th>
+                    <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Баллы</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="bg-gray-100 font-semibold">
+                    <td className="p-4 border-b" colSpan="3">Стаж</td>
+                  </tr>
+                  {experienceRanges.map((row, idx) => (
+                    <tr key={`exp-${idx}`} className={row.selected ? 'bg-blue-100' : ''}>
+                      <td className="p-4 border-b"></td>
+                      <td className="p-4 border-b" title={row.tooltip}>{row.range}</td>
+                      <td className="p-4 border-b">{row.points}</td>
+                    </tr>
+                  ))}
+                  <tr className="bg-gray-100 font-semibold">
+                    <td className="p-4 border-b" colSpan="3">Качество</td>
+                  </tr>
+                  {qualityRanges.map((row, idx) => (
+                    <tr key={`qual-${idx}`} className={row.selected ? 'bg-blue-100' : ''}>
+                      <td className="p-4 border-b"></td>
+                      <td className="p-4 border-b" title={row.tooltip}>{row.range}</td>
+                      <td className="p-4 border-b">{row.points}</td>
+                    </tr>
+                  ))}
+                  <tr className="bg-gray-100 font-semibold">
+                    <td className="p-4 border-b" colSpan="3">Средний балл по чатам</td>
+                  </tr>
+                  {scoreRanges.map((row, idx) => (
+                    <tr key={`score-${idx}`} className={row.selected ? 'bg-blue-100' : ''}>
+                      <td className="p-4 border-b"></td>
+                      <td className="p-4 border-b" title={row.tooltip}>{row.range}</td>
+                      <td className="p-4 border-b">{row.points}</td>
+                    </tr>
+                  ))}
+                  <tr className="bg-gray-100 font-semibold">
+                    <td className="p-4 border-b" colSpan="3">Время ответа</td>
+                  </tr>
+                  {responseTimeRanges.map((row, idx) => (
+                    <tr key={`resp-${idx}`} className={row.selected ? 'bg-blue-100' : ''}>
+                      <td className="p-4 border-b"></td>
+                      <td className="p-4 border-b" title={row.tooltip}>{row.range}</td>
+                      <td className="p-4 border-b">{row.points}</td>
+                    </tr>
+                  ))}
+                  <tr className="bg-gray-100 font-semibold">
+                    <td className="p-4 border-b" colSpan="3">Количество чатов в час</td>
+                  </tr>
+                  {chatsPerHourRanges.map((row, idx) => (
+                    <tr key={`cph-${idx}`} className={row.selected ? 'bg-blue-100' : ''}>
+                      <td className="p-4 border-b"></td>
+                      <td className="p-4 border-b" title={row.tooltip}>{row.range}</td>
+                      <td className="p-4 border-b">{row.points}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            );
+          };
+
+          const SalaryCalculationResultChat = ({ result }) => {
+            if (!result) return null;
+
+            return (
+              <div className="mt-6 p-6 bg-gray-50 rounded-lg">
+                <h3 className="text-xl font-semibold mb-4">Calculation Result</h3>
+                <div className="space-y-2">
+                  <div className="flex justify-between">
+                    <span className="font-medium">Direction:</span>
+                    <span>Chat</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">Points:</span>
+                    <span>{result.points}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">Premium Coefficient:</span>
+                    <span>{result.premiumCoefficient}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">Monthly Hours Norm:</span>
+                    <span>{result.hoursNorm}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">Hours Percentage:</span>
+                    <span>{result.hoursPercentage}%</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">Base Salary:</span>
+                    <span>{result.baseSalary} KZT</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">Premium Part:</span>
+                    <span>{result.premiumPart} KZT</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">Bonuses:</span>
+                    <span>{result.bonuses} KZT {result.bonusDetails ? `(${result.bonusDetails})` : ''}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-medium">Total Salary:</span>
+                    <span className="text-green-600 font-semibold">
+                      {result.finalSalary} KZT
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          };
+
+          return (
+        <div>
+          <div className="grid grid-cols-1 gap-6">
+            <div>
+              <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
+              <select
+                value={experience}
+                onChange={(e) => setExperience(e.target.value)}
+                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">Select Experience</option>
+                <option value="0-2">0-2 months</option>
+                <option value="3-5">3-5 months</option>
+                <option value="6-9">6-9 months</option>
+                <option value="10-12">10-12 months</option>
+                <option value="13-17">13-17 months</option>
+                <option value="18+">≥18 months</option>
+              </select>
+            </div>
+            <div>
+              <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
+              <input
+                type="number"
+                value={quality}
+                onChange={(e) => setQuality(e.target.value)}
+                min="0"
+                max="100"
+                step="0.01"
+                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block mb-2 font-semibold text-gray-700">Average Score per Chat:</label>
+              <input
+                type="number"
+                value={avgScore}
+                onChange={(e) => setAvgScore(e.target.value)}
+                min="0"
+                max="5"
+                step="0.1"
+                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block mb-2 font-semibold text-gray-700">Average Response Time (minutes):</label>
+              <input
+                type="number"
+                value={responseTime}
+                onChange={(e) => setResponseTime(e.target.value)}
+                min="0"
+                max="60"
+                step="0.01"
+                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block mb-2 font-semibold text-gray-700">Chats per Hour:</label>
+              <input
+                type="number"
+                value={chatsPerHour}
+                onChange={(e) => setChatsPerHour(e.target.value)}
+                min="0"
+                max="100"
+                step="0.01"
+                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
+              <input
+                type="number"
+                value={hoursNorm}
+                onChange={(e) => setHoursNorm(e.target.value)}
+                min="0"
+                max="744"
+                step="0.01"
+                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
+              <input
+                type="number"
+                value={totalHours}
+                onChange={(e) => setTotalHours(e.target.value)}
+                min="0"
+                max="744"
+                step="0.01"
+                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
+              <div className="space-y-4">
+                <div className="flex items-center gap-4">
+                  <input
+                    type="checkbox"
+                    checked={bonusTraining}
+                    onChange={(e) => setBonusTraining(e.target.checked)}
+                    className="w-5 h-5"
+                  />
+                  <label className="text-sm">Training (6000 KZT)</label>
+                </div>
+                <div className="flex items-center gap-4">
+                  <input
+                    type="checkbox"
+                    checked={bonusRefer}
+                    onChange={(e) => setBonusRefer(e.target.checked)}
+                    className="w-5 h-5"
+                  />
+                  <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
+                  {bonusRefer && (
+                    <input
+                      type="number"
+                      value={bonusReferQuantity}
+                      onChange={(e) => setBonusReferQuantity(e.target.value)}
+                      min="1"
+                      step="1"
+                      placeholder="Quantity"
+                      className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  )}
+                </div>
+                <div className="flex items-center gap-4">
+                  <input
+                    type="checkbox"
+                    checked={bonusFilming}
+                    onChange={(e) => setBonusFilming(e.target.checked)}
+                    className="w-5 h-5"
+                  />
+                  <label className="text-sm">Filming (5000 KZT per session)</label>
+                  {bonusFilming && (
+                    <input
+                      type="number"
+                      value={bonusFilmingQuantity}
+                      onChange={(e) => setBonusFilmingQuantity(e.target.value)}
+                      min="1"
+                      step="1"
+                      placeholder="Quantity"
+                      className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="flex justify-center gap-4 mt-6">
+            <button
+              onClick={calculateSalary}
+              className={`px-6 py-3 rounded-lg font-semibold text-lg bg-green-500 text-white hover:bg-green-600 transition-all duration-200 ${
+                !validateForm() ? 'opacity-50 cursor-not-allowed' : ''
+              }`}
+              disabled={!validateForm()}
+            >
+              Calculate
+            </button>
+            <button
+              onClick={togglePointsTable}
+              className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
+                !result ? 'opacity-50 cursor-not-allowed' : ''
+              }`}
+              disabled={!result}
+            >
+              {showTable ? 'Hide Points Table' : 'Show Points Table'}
+            </button>
+            <button
+              onClick={clearForm}
+              className={`px-6 py-3 rounded-lg font-semibold text-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200 ${
+                !hasInput() ? 'opacity-50 cursor-not-allowed' : ''
+              }`}
+              disabled={!hasInput()}
+            >
+              Clear
+            </button>
+          </div>
+          <SalaryCalculationResultChat result={result} />
+          <div className={`mt-6 ${showTable ? '' : 'hidden'}`}>
+            {result && generatePointsTable(result.tableData)}
+          </div>
+                </div>
+            );
+        };
+
         const App = () => {
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
@@ -785,6 +1274,7 @@
             const [showUserEditModal, setShowUserEditModal] = useState(false);
             const [userToEdit, setUserToEdit] = useState(null);
             const [svOperators, setSvOperators] = useState([]);
+            const [calculatorType, setCalculatorType] = useState('call');
 
             const getMonthOptions = () => {
                 const options = [];
@@ -2585,310 +3075,330 @@
                                                     <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-2">
                                                         <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
                                                             <p className="text-sm font-medium text-gray-500 mb-2">Total Evaluated Calls</p>
-                                                            <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
-                                                            <p className={`text-lg font-medium mt-2 ${
-                                                                (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
-                                                            }`}>
-                                                                {20 - operatorData.evaluations.length} calls remaining out of 20
-                                                            </p>
-                                                        </div>
-                                                    </div>
-                                                    <div className="col-span-1 flex justify-center items-center">
-                                                        <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
-                                                    </div>
-                                                </div>
-                                                <div className="overflow-x-auto rounded-lg shadow-sm border border-gray-200">
-                                                    <table className="min-w-full divide-y divide-gray-200">
-                                                        <thead className="bg-blue-50">
-                                                            <tr>
-                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Call ID</th>
-                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone Number</th>
-                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Score</th>
-                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Comment</th>
-                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Month</th>
-                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Evaluation Date</th>
-                                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-                                                            </tr>
-                                                        </thead>
-                                                        <tbody className="bg-white divide-y divide-gray-200">
-                                                        {operatorData.evaluations.map((eval1, index) => (
-                                                            <React.Fragment key={index}>
-                                                            <tr
-                                                                className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${
-                                                                expandedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''
-                                                                }`}
-                                                                onClick={() => handleEvaluationClick(eval1)}
-                                                            >
-                                                                <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.id || '-'}</td>
-                                                                <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.phone_number || '-'}</td>
-                                                                <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${getScoreColor(eval1.score)}`}>
-                                                                {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
-                                                                </td>
-                                                                <td className="px-6 py-4 text-sm">
-                                                                {eval1.comment ? (
-                                                                    <div className="space-y-1">
-                                                                    {eval1.comment.split('\n').map((line, i) => {
-                                                                        const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
-                                                                        const match = cleanLine.match(/^(.*?):\s*(.*)$/);
-                                                                        if (match) {
-                                                                        return (
-                                                                            <p key={i} className="text-sm">
-                                                                            <span className="font-semibold">{match[1]}:</span>{' '}
-                                                                            <span className="italic">{match[2]}</span>
-                                                                            </p>
-                                                                        );
-                                                                        }
-                                                                        return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
-                                                                    })}
-                                                                    </div>
-                                                                ) : '-'}
-                                                                </td>
-                                                                <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.month || '-'}</td>
-                                                                <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.evaluation_date || '-'}</td>
-                                                                <td className="px-6 py-4 whitespace-nowrap text-sm">
-                                                                {eval1.score < 100 && (
-                                                                    <button
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        setSelectedEvaluation(eval1);
-                                                                        setShowDisputeModal(true);
-                                                                    }}
-                                                                    className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm transition-all duration-200"
-                                                                    >
-                                                                    Dispute
-                                                                    </button>
-                                                                )}
-                                                                </td>
-                                                            </tr>
+                    <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
+                    <p className={`text-lg font-medium mt-2 ${
+                        (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
+                    }`}>
+                        {20 - operatorData.evaluations.length} calls remaining out of 20
+                    </p>
+                </div>
+            </div>
+            <div className="col-span-1 flex justify-center items-center">
+                <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
+            </div>
+        </div>
+        <div className="overflow-x-auto rounded-lg shadow-sm border border-gray-200">
+            <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-blue-50">
+                    <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Call ID</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone Number</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Score</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Comment</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Month</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Evaluation Date</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                    </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                {operatorData.evaluations.map((eval1, index) => (
+                    <React.Fragment key={index}>
+                    <tr
+                        className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${
+                        expandedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''
+                        }`}
+                        onClick={() => handleEvaluationClick(eval1)}
+                    >
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.id || '-'}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.phone_number || '-'}</td>
+                        <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${getScoreColor(eval1.score)}`}>
+                        {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
+                        </td>
+                        <td className="px-6 py-4 text-sm">
+                        {eval1.comment ? (
+                            <div className="space-y-1">
+                            {eval1.comment.split('\n').map((line, i) => {
+                                const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
+                                const match = cleanLine.match(/^(.*?):\s*(.*)$/);
+                                if (match) {
+                                return (
+                                    <p key={i} className="text-sm">
+                                    <span className="font-semibold">{match[1]}:</span>{' '}
+                                    <span className="italic">{match[2]}</span>
+                                    </p>
+                                );
+                                }
+                                return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
+                            })}
+                            </div>
+                        ) : '-'}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.month || '-'}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.evaluation_date || '-'}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                        {eval1.score < 100 && (
+                            <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedEvaluation(eval1);
+                                setShowDisputeModal(true);
+                            }}
+                            className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm transition-all duration-200"
+                            >
+                            Dispute
+                            </button>
+                        )}
+                        </td>
+                    </tr>
 
-                                                            {expandedEvaluation?.id === eval1.id && (
-                                                                <tr>
-                                                                <td colSpan={7} className="p-4 bg-gray-50 border-t text-sm">
-                                                                    {loadingAudioId === eval1.id ? (
-                                                                    <p className="text-gray-500 italic">Loading audio...</p>
-                                                                    ) : audioUrl ? (
-                                                                    <audio controls src={audioUrl} className="w-full" />
-                                                                    ) : (
-                                                                    <p className="text-red-500">Audio not available</p>
-                                                                    )}
-                                                                </td>
-                                                                </tr>
-                                                            )}
-                                                            </React.Fragment>
-                                                        ))}
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                            </div>
-                                        ) : (
-                                            <p className="text-center text-gray-600">No evaluations found for this period.</p>
-                                        )}
-                                    </div>
+                    {expandedEvaluation?.id === eval1.id && (
+                        <tr>
+                        <td colSpan={7} className="p-4 bg-gray-50 border-t text-sm">
+                            {loadingAudioId === eval1.id ? (
+                            <p className="text-gray-500 italic">Loading audio...</p>
+                            ) : audioUrl ? (
+                            <audio controls src={audioUrl} className="w-full" />
+                            ) : (
+                            <p className="text-red-500">Audio not available</p>
+                            )}
+                        </td>
+                        </tr>
+                    )}
+                    </React.Fragment>
+                ))}
+                </tbody>
+            </table>
+        </div>
+    </div>
+) : (
+    <p className="text-center text-gray-600">No evaluations found for this period.</p>
+)}
+</div>
+)}
+{view === 'salary' && (
+    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
+        <div className="flex mb-4">
+            <button
+                className={`px-4 py-2 mr-2 rounded ${calculatorType === 'call' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                onClick={() => setCalculatorType('call')}
+            >
+                Call
+            </button>
+            <button
+                className={`px-4 py-2 rounded ${calculatorType === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                onClick={() => setCalculatorType('chat')}
+            >
+                Chat
+            </button>
+        </div>
+        {calculatorType === 'call' ? (
+            <>
+                <div className="grid grid-cols-1 gap-6">
+                    <div className="form-group">
+                        <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
+                        <select
+                            value={salaryData.experience}
+                            onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
+                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            disabled={isLoading}
+                        >
+                            <option value="">Select Experience</option>
+                            <option value="0-3">0-3 months</option>
+                            <option value="4-9">4-9 months</option>
+                            <option value="10-15">10-15 months</option>
+                            <option value="16+">≥16 months</option>
+                        </select>
+                    </div>
+                    <div className="form-group">
+                        <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
+                        <input
+                            type="number"
+                            value={salaryData.quality}
+                            onChange={(e) => setSalaryData({ ...salaryData, quality: e.target.value })}
+                            min="0"
+                            max="100"
+                            step="0.01"
+                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            disabled={isLoading}
+                        />
+                    </div>
+                    <div className="form-group">
+                        <label className="block mb-2 font-semibold text-gray-700">Calls per Hour:</label>
+                        <input
+                            type="number"
+                            value={salaryData.callsPerHour}
+                            onChange={(e) => setSalaryData({ ...salaryData, callsPerHour: e.target.value })}
+                            min="0"
+                            max="100"
+                            step="0.01"
+                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            disabled={isLoading}
+                        />
+                    </div>
+                    <div className="form-group">
+                        <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
+                        <input
+                            type="number"
+                            value={salaryData.hoursNorm}
+                            onChange={(e) => setSalaryData({ ...salaryData, hoursNorm: e.target.value })}
+                            min="0"
+                            max="744"
+                            step="0.01"
+                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            disabled={isLoading}
+                        />
+                    </div>
+                    <div className="form-group">
+                        <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
+                        <input
+                            type="number"
+                            value={salaryData.totalHours}
+                            onChange={(e) => setSalaryData({ ...salaryData, totalHours: e.target.value })}
+                            min="0"
+                            max="744"
+                            step="0.01"
+                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            disabled={isLoading}
+                        />
+                    </div>
+                    <div className="form-group">
+                        <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
+                        <div className="space-y-4">
+                            <div className="flex items-center gap-4">
+                                <input
+                                    type="checkbox"
+                                    checked={salaryData.bonusTraining}
+                                    onChange={(e) => setSalaryData({ ...salaryData, bonusTraining: e.target.checked })}
+                                    className="w-5 h-5"
+                                    disabled={isLoading}
+                                />
+                                <label className="text-sm">Training (6000 KZT)</label>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <input
+                                    type="checkbox"
+                                    checked={salaryData.bonusRefer}
+                                    onChange={(e) => setSalaryData({ ...salaryData, bonusRefer: e.target.checked })}
+                                    className="w-5 h-5"
+                                    disabled={isLoading}
+                                />
+                                <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
+                                {salaryData.bonusRefer && (
+                                    <input
+                                        type="number"
+                                        value={salaryData.bonusReferQuantity}
+                                        onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
+                                        min="1"
+                                        step="1"
+                                        placeholder="Quantity"
+                                        className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        disabled={isLoading}
+                                    />
                                 )}
-                                {view === 'salary' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
-                                        <div className="grid grid-cols-1 gap-6">
-                                            <div className="form-group">
-                                                <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
-                                                <select
-                                                    value={salaryData.experience}
-                                                    onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                    disabled={isLoading}
-                                                >
-                                                    <option value="">Select Experience</option>
-                                                    <option value="0-3">0-3 months</option>
-                                                    <option value="4-9">4-9 months</option>
-                                                    <option value="10-15">10-15 months</option>
-                                                    <option value="16+">≥16 months</option>
-                                                </select>
-                                            </div>
-                                            <div className="form-group">
-                                                <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
-                                                <input
-                                                    type="number"
-                                                    value={salaryData.quality}
-                                                    onChange={(e) => setSalaryData({ ...salaryData, quality: e.target.value })}
-                                                    min="0"
-                                                    max="100"
-                                                    step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                    disabled={isLoading}
-                                                />
-                                            </div>
-                                            <div className="form-group">
-                                                <label className="block mb-2 font-semibold text-gray-700">Calls per Hour:</label>
-                                                <input
-                                                    type="number"
-                                                    value={salaryData.callsPerHour}
-                                                    onChange={(e) => setSalaryData({ ...salaryData, callsPerHour: e.target.value })}
-                                                    min="0"
-                                                    max="100"
-                                                    step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                    disabled={isLoading}
-                                                />
-                                            </div>
-                                            <div className="form-group">
-                                                <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
-                                                <input
-                                                    type="number"
-                                                    value={salaryData.hoursNorm}
-                                                    onChange={(e) => setSalaryData({ ...salaryData, hoursNorm: e.target.value })}
-                                                    min="0"
-                                                    max="744"
-                                                    step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                    disabled={isLoading}
-                                                />
-                                            </div>
-                                            <div className="form-group">
-                                                <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
-                                                <input
-                                                    type="number"
-                                                    value={salaryData.totalHours}
-                                                    onChange={(e) => setSalaryData({ ...salaryData, totalHours: e.target.value })}
-                                                    min="0"
-                                                    max="744"
-                                                    step="0.01"
-                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                    disabled={isLoading}
-                                                />
-                                            </div>
-                                            <div className="form-group">
-                                                <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
-                                                <div className="space-y-4">
-                                                    <div className="flex items-center gap-4">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={salaryData.bonusTraining}
-                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusTraining: e.target.checked })}
-                                                            className="w-5 h-5"
-                                                            disabled={isLoading}
-                                                        />
-                                                        <label className="text-sm">Training (6000 KZT)</label>
-                                                    </div>
-                                                    <div className="flex items-center gap-4">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={salaryData.bonusRefer}
-                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusRefer: e.target.checked })}
-                                                            className="w-5 h-5"
-                                                            disabled={isLoading}
-                                                        />
-                                                        <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
-                                                        {salaryData.bonusRefer && (
-                                                            <input
-                                                                type="number"
-                                                                value={salaryData.bonusReferQuantity}
-                                                                onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
-                                                                min="1"
-                                                                step="1"
-                                                                placeholder="Quantity"
-                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                                disabled={isLoading}
-                                                            />
-                                                        )}
-                                                    </div>
-                                                    <div className="flex items-center gap-4">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={salaryData.bonusFilming}
-                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusFilming: e.target.checked })}
-                                                            className="w-5 h-5"
-                                                            disabled={isLoading}
-                                                        />
-                                                        <label className="text-sm">Filming (5000 KZT per session)</label>
-                                                        {salaryData.bonusFilming && (
-                                                            <input
-                                                                type="number"
-                                                                value={salaryData.bonusFilmingQuantity}
-                                                                onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
-                                                                min="1"
-                                                                step="1"
-                                                                placeholder="Quantity"
-                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                                disabled={isLoading}
-                                                            />
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div className="flex justify-center gap-4 mt-6">
-                                            <button
-                                                onClick={calculateSalary}
-                                                className={`px-6 py-3 rounded-lg font-semibold text-lg bg-green-500 text-white hover:bg-green-600 transition-all duration-200 ${
-                                                    isLoading ||
-                                                    !salaryData.experience ||
-                                                    !salaryData.quality ||
-                                                    !salaryData.callsPerHour ||
-                                                    !salaryData.hoursNorm ||
-                                                    !salaryData.totalHours ||
-                                                    (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
-                                                    (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
-                                                        ? 'opacity-50 cursor-not-allowed'
-                                                        : ''
-                                                }`}
-                                                disabled={
-                                                    isLoading ||
-                                                    !salaryData.experience ||
-                                                    !salaryData.quality ||
-                                                    !salaryData.callsPerHour ||
-                                                    !salaryData.hoursNorm ||
-                                                    !salaryData.totalHours ||
-                                                    (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
-                                                    (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
-                                                }
-                                            >
-                                                Calculate
-                                            </button>
-                                            <button
-                                                onClick={() => setShowPointsTable(!showPointsTable)}
-                                                className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
-                                                    !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
-                                                }`}
-                                                disabled={!salaryResult}
-                                            >
-                                                {showPointsTable ? 'Hide Points Table' : 'Show Points Table'}
-                                            </button>
-                                            <button
-                                                onClick={clearSalaryForm}
-                                                className={`px-6 py-3 rounded-lg font-semibold text-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200 ${
-                                                    !salaryData.experience &&
-                                                    !salaryData.quality &&
-                                                    !salaryData.callsPerHour &&
-                                                    !salaryData.hoursNorm &&
-                                                    !salaryData.totalHours &&
-                                                    !salaryData.bonusTraining &&
-                                                    !salaryData.bonusRefer &&
-                                                    !salaryData.bonusFilming
-                                                        ? 'opacity-50 cursor-not-allowed'
-                                                        : ''
-                                                }`}
-                                                disabled={
-                                                    !salaryData.experience &&
-                                                    !salaryData.quality &&
-                                                    !salaryData.callsPerHour &&
-                                                    !salaryData.hoursNorm &&
-                                                    !salaryData.totalHours &&
-                                                    !salaryData.bonusTraining &&
-                                                    !salaryData.bonusRefer &&
-                                                    !salaryData.bonusFilming
-                                                }
-                                            >
-                                                Clear
-                                            </button>
-                                        </div>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <input
+                                    type="checkbox"
+                                    checked={salaryData.bonusFilming}
+                                    onChange={(e) => setSalaryData({ ...salaryData, bonusFilming: e.target.checked })}
+                                    className="w-5 h-5"
+                                    disabled={isLoading}
+                                />
+                                <label className="text-sm">Filming (5000 KZT per session)</label>
+                                {salaryData.bonusFilming && (
+                                    <input
+                                        type="number"
+                                        value={salaryData.bonusFilmingQuantity}
+                                        onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
+                                        min="1"
+                                        step="1"
+                                        placeholder="Quantity"
+                                        className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        disabled={isLoading}
+                                    />
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div className="flex justify-center gap-4 mt-6">
+                    <button
+                        onClick={calculateSalary}
+                        className={`px-6 py-3 rounded-lg font-semibold text-lg bg-green-500 text-white hover:bg-green-600 transition-all duration-200 ${
+                            isLoading ||
+                            !salaryData.experience ||
+                            !salaryData.quality ||
+                            !salaryData.callsPerHour ||
+                            !salaryData.hoursNorm ||
+                            !salaryData.totalHours ||
+                            (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
+                            (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
+                                ? 'opacity-50 cursor-not-allowed'
+                                : ''
+                        }`}
+                        disabled={
+                            isLoading ||
+                            !salaryData.experience ||
+                            !salaryData.quality ||
+                            !salaryData.callsPerHour ||
+                            !salaryData.hoursNorm ||
+                            !salaryData.totalHours ||
+                            (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
+                            (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
+                        }
+                    >
+                        Calculate
+                    </button>
+                    <button
+                        onClick={() => setShowPointsTable(!showPointsTable)}
+                        className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
+                            !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
+                        }`}
+                        disabled={!salaryResult}
+                    >
+                        {showPointsTable ? 'Hide Points Table' : 'Show Points Table'}
+                    </button>
+                    <button
+                        onClick={clearSalaryForm}
+                        className={`px-6 py-3 rounded-lg font-semibold text-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200 ${
+                            !salaryData.experience &&
+                            !salaryData.quality &&
+                            !salaryData.callsPerHour &&
+                            !salaryData.hoursNorm &&
+                            !salaryData.totalHours &&
+                            !salaryData.bonusTraining &&
+                            !salaryData.bonusRefer &&
+                            !salaryData.bonusFilming
+                                ? 'opacity-50 cursor-not-allowed'
+                                : ''
+                        }`}
+                        disabled={
+                            !salaryData.experience &&
+                            !salaryData.quality &&
+                            !salaryData.callsPerHour &&
+                            !salaryData.hoursNorm &&
+                            !salaryData.totalHours &&
+                            !salaryData.bonusTraining &&
+                            !salaryData.bonusRefer &&
+                            !salaryData.bonusFilming
+                        }
+                    >
+                        Clear
+                    </button>
+                </div>
 
-                                        <SalaryCalculationResult salaryResult={salaryResult} />
-                                        
-                                        <div id="points-table" className={`mt-6 ${showPointsTable ? 'block' : 'hidden'}`}>
-                                            {salaryResult && generatePointsTable()}
-                                        </div>
-                                    </div>
-                                )}
+                <SalaryCalculationResult salaryResult={salaryResult} />
+                
+                <div className={`mt-6 ${showPointsTable ? '' : 'hidden'}`}>
+                    {generatePointsTable()}
+                </div>
+            </>
+        ) : (
+            <SalaryCalculatorChat />
+        )}
+    </div>
+)}
                             </>
                         )}
                         {showDisputeModal && (
