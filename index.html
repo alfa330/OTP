@@ -742,17 +742,21 @@
           const [showTable, setShowTable] = useState(false);
 
           const validateForm = () => {
-            if (!experience) return false;
-            if (isNaN(quality) || quality < 0 || quality > 100) return false;
-            if (isNaN(avgScore) || avgScore < 0 || avgScore > 5) return false;
-            if (isNaN(responseTime) || responseTime < 0 || responseTime > 60) return false;
-            if (isNaN(chatsPerHour) || chatsPerHour < 0 || chatsPerHour > 100) return false;
-            if (isNaN(hoursNorm) || hoursNorm < 0 || hoursNorm > 744) return false;
-            if (isNaN(totalHours) || totalHours < 0 || totalHours > 744) return false;
-            if (bonusRefer && (isNaN(bonusReferQuantity) || bonusReferQuantity < 1)) return false;
-            if (bonusFilming && (isNaN(bonusFilmingQuantity) || bonusFilmingQuantity < 1)) return false;
+            if (
+            !experience ||
+            isNaN(quality) || quality < 0 || quality > 100 ||
+            isNaN(avgScore) || avgScore < 0 || avgScore > 5 ||
+            isNaN(responseTime) || responseTime < 0 || responseTime > 60 ||
+            isNaN(chatsPerHour) || chatsPerHour < 0 || chatsPerHour > 100 ||
+            isNaN(hoursNorm) || hoursNorm < 0 || hoursNorm > 744 ||
+            isNaN(totalHours) || totalHours < 0 || totalHours > 744 ||
+            (bonusRefer && (isNaN(bonusReferQuantity) || bonusReferQuantity < 1)) ||
+            (bonusFilming && (isNaN(bonusFilmingQuantity) || bonusFilmingQuantity < 1))
+            ) {
+            return false;
+            }
             return true;
-          };
+            };
 
           const hasInput = () => {
             return (
