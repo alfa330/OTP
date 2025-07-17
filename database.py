@@ -556,7 +556,7 @@ class Database:
                     UPDATE users SET login = %s
                     WHERE id = %s
                     RETURNING id
-                """, (new_login, operator_id, supervisor_id))
+                """, (new_login, operator_id))
                 return cursor.fetchone() is not None
     
     def update_operator_password(self, operator_id, supervisor_id, new_password):
