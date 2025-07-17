@@ -542,13 +542,22 @@ class Database:
     
     def update_operator_login(self, operator_id, supervisor_id, new_login):
         """Обновить логин оператора с проверкой принадлежности"""
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                UPDATE users SET login = %s
-                WHERE id = %s AND supervisor_id = %s
-                RETURNING id
-            """, (new_login, operator_id, supervisor_id))
-            return cursor.fetchone() is not None
+        if supervisor_id:
+            with self._get_cursor() as cursor:
+                cursor.execute("""
+                    UPDATE users SET login = %s
+                    WHERE id = %s AND supervisor_id = %s
+                    RETURNING id
+                """, (new_login, operator_id, supervisor_id))
+                return cursor.fetchone() is not None
+        else:
+            with self._get_cursor() as cursor:
+                cursor.execute("""
+                    UPDATE users SET login = %s
+                    WHERE id = %s
+                    RETURNING id
+                """, (new_login, operator_id, supervisor_id))
+                return cursor.fetchone() is not None
     
     def update_operator_password(self, operator_id, supervisor_id, new_password):
         """Обновить пароль оператора с проверкой принадлежности"""
