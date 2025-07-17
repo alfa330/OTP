@@ -545,7 +545,7 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute("""
                 UPDATE users SET login = %s
-                WHERE id = %s AND role = 'operator' AND supervisor_id = %s
+                WHERE id = %s AND supervisor_id = %s
                 RETURNING id
             """, (new_login, operator_id, supervisor_id))
             return cursor.fetchone() is not None
