@@ -257,7 +257,7 @@ def admin_update_user():
 
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
-        if not requester or requester[3] != 'admin':
+        if not requester or requester[3] != 'admin' or requester[3] != 'sv':
             return jsonify({"error": "Only admins can update users"}), 403
 
         success = db.update_user(user_id, field, value)
