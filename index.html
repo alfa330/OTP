@@ -2222,7 +2222,7 @@
                 clearMessages();
                 try {
                     const response = await axios.post(`${API_BASE_URL}/api/admin/remove_sv`, {
-                        telegram_id: svId
+                        id: svId
                     }, {
                         headers: { 'X-API-Key': user.apiKey }
                     });
