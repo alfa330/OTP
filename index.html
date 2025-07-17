@@ -1291,7 +1291,11 @@
             const [userToEdit, setUserToEdit] = useState(null);
             const [svOperators, setSvOperators] = useState([]);
             const [calculatorType, setCalculatorType] = useState('call');
-
+            const [tableUrl, setTableUrl] = useState(''); // URL таблицы
+            const [previewData, setPreviewData] = useState(null); // Данные предпросмотра (sheet_name, operators)
+            const [selectedDirection, setSelectedDirection] = useState(''); // Выбранное направление
+            const [showPreview, setShowPreview] = useState(false); // Показывать ли предпросмотр
+            
             const getMonthOptions = () => {
                 const options = [];
                 const today = new Date();
@@ -1511,6 +1515,71 @@
                     setIsLoading(false);
                 }
             };        
+
+            const handlePreviewTable = async () => {
+                if (!tableUrl) {
+                    setError('Введите URL таблицы');
+                    return;
+                }
+                setIsLoading(true);
+                setError('');
+                try {
+                    const response = await axios.post(`${API_BASE_URL}/api/sv/preview_table`, { table_url: tableUrl }, {
+                        headers: { 
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
+                    });
+                    const data = response.data;
+                    if (data.status === 'success') {
+                        setPreviewData(data);
+                        setShowPreview(true);
+                    } else {
+                        setError(data.error || 'Ошибка предпросмотра таблицы');
+                    }
+                } catch (err) {
+                    setError(err.response?.data?.error || 'Ошибка сервера');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+            
+            const handleSaveTable = async () => {
+                if (!selectedDirection || !previewData) {
+                    setError('Выберите направление и подтвердите данные');
+                    return;
+                }
+                setIsLoading(true);
+                setError('');
+                try {
+                    const response = await axios.post(`${API_BASE_URL}/api/sv/save_table`, { 
+                        table_url: tableUrl,
+                        direction_id: selectedDirection,
+                        operators: previewData.operators // Список operators из preview
+                    }, {
+                        headers: { 
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
+                    });
+                    const data = response.data;
+                    if (data.status === 'success') {
+                        setSuccess('Таблица успешно обновлена и операторы сохранены');
+                        setShowPreview(false);
+                        setPreviewData(null);
+                        setTableUrl('');
+                        setSelectedDirection('');
+                        // Обновите данные SV после сохранения
+                        fetchSvData();
+                    } else {
+                        setError(data.error || 'Ошибка сохранения таблицы');
+                    }
+                } catch (err) {
+                    setError(err.response?.data?.error || 'Ошибка сервера');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
             
             const SalaryCalculationResult = ({ salaryResult }) => {
             if (!salaryResult) return null;
@@ -2822,21 +2891,69 @@
                                 {view === 'update_table' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Update Table</h2>
-                                        <input
-                                            type="text"
-                                            placeholder="Enter Google Sheets URL"
-                                            value={newTableUrl}
-                                            onChange={(e) => setNewTableUrl(e.target.value)}
-                                            className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                            disabled={isLoading}
-                                        />
-                                        <button
-                                            onClick={updateTable}
-                                            className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                            disabled={isLoading}
-                                        >
-                                            {isLoading ? 'Updating...' : 'Update Table'}
-                                        </button>
+                                        {!showPreview ? (
+                                            <>
+                                                <input
+                                                    type="text"
+                                                    placeholder="Enter Google Sheets URL"
+                                                    value={tableUrl}
+                                                    onChange={(e) => setTableUrl(e.target.value)}
+                                                    className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                    disabled={isLoading}
+                                                />
+                                                <button
+                                                    onClick={handlePreviewTable}
+                                                    className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                    disabled={isLoading || !tableUrl}
+                                                >
+                                                    {isLoading ? 'Previewing...' : 'Preview Table'}
+                                                </button>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <h3 className="text-xl font-semibold mb-4">Preview Data</h3>
+                                                <p className="mb-4">Sheet Name: {previewData.sheet_name}</p>
+                                                <h4 className="font-medium mb-2">Operators:</h4>
+                                                <ul className="mb-4 list-disc pl-5">
+                                                    {previewData.operators.map((op, idx) => (
+                                                        <li key={idx}>{op.name}</li>
+                                                    ))}
+                                                </ul>
+                                                <label className="block mb-2 font-semibold text-gray-700">Select Direction:</label>
+                                                <select
+                                                    value={selectedDirection}
+                                                    onChange={(e) => setSelectedDirection(e.target.value)}
+                                                    className="w-full p-3 mb-6 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    disabled={isLoading}
+                                                >
+                                                    <option value="">Select Direction</option>
+                                                    {directions.map(dir => (
+                                                        <option key={dir.id} value={dir.id}>{dir.name}</option>
+                                                    ))}
+                                                </select>
+                                                <div className="flex justify-between">
+                                                    <button
+                                                        onClick={handleSaveTable}
+                                                        className={`bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200 ${isLoading || !selectedDirection ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                        disabled={isLoading || !selectedDirection}
+                                                    >
+                                                        {isLoading ? 'Saving...' : 'Confirm and Save'}
+                                                    </button>
+                                                    <button
+                                                        onClick={() => {
+                                                            setShowPreview(false);
+                                                            setPreviewData(null);
+                                                            setSelectedDirection('');
+                                                        }}
+                                                        className="bg-gray-600 text-white px-6 py-3 rounded-lg hover:bg-gray-700 transition-all duration-200"
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                </div>
+                                            </>
+                                        )}
+                                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
+                                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                                     </div>
                                 )}
                                 {view === 'manage_operators' && (
