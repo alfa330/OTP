@@ -257,7 +257,7 @@ def admin_update_user():
 
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
-        if not requester or requester[3] != 'admin':
+        if not requester or requester[3] != 'admin' and requester[3] != 'sv':
             return jsonify({"error": "Only admins can update users"}), 403
 
         success = db.update_user(user_id, field, value)
@@ -296,7 +296,7 @@ def change_password():
         if requester[3] == 'operator' and requester_id != user_id:
             return jsonify({"error": "Operators can only change their own password"}), 403
 
-        if requester[3] == 'sv' and (target_user[3] != 'operator' or target_user[6] != requester_id):
+        if requester[3] == 'sv' and (target_user[3] != 'operator' or target_user[6] != requester_id) and requester_id != user_id:
             return jsonify({"error": "Supervisors can only change passwords for their operators"}), 403
 
         # Admins can change any password
@@ -325,6 +325,88 @@ def change_password():
 
     except Exception as e:
         logging.error(f"Error changing password: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/sv/preview_table', methods=['POST'])
+@require_api_key
+def preview_table():
+    try:
+        data = request.get_json()
+        if not data or 'table_url' not in data:
+            return jsonify({"error": "Missing table_url"}), 400
+
+        table_url = data['table_url']
+        user_id = int(request.headers.get('X-User-Id'))
+        user = db.get_user(id=user_id)
+        if not user or user[3] != 'sv':
+            return jsonify({"error": "Unauthorized: Only supervisors can preview tables"}), 403
+
+        sheet_name, operators, error = extract_fio_and_links(table_url)
+        if error:
+            return jsonify({"error": error}), 400
+
+        return jsonify({
+            "status": "success",
+            "sheet_name": sheet_name,
+            "operators": operators
+        }), 200
+    except Exception as e:
+        logging.error(f"Error previewing table: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/sv/save_table', methods=['POST'])
+@require_api_key
+def save_table():
+    try:
+        data = request.get_json()
+        required_fields = ['table_url', 'direction_id', 'operators']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields: table_url, direction_id, operators"}), 400
+
+        table_url = data['table_url']
+        direction_id = int(data['direction_id'])
+        operators = data['operators']  # List of dicts with 'name'
+
+        user_id = int(request.headers.get('X-User-Id'))
+        user = db.get_user(id=user_id)
+        if not user or user[3] != 'sv':
+            return jsonify({"error": "Unauthorized: Only supervisors can save tables"}), 403
+
+        # Validate direction
+        directions = db.get_directions()
+        if not any(d['id'] == direction_id for d in directions):
+            return jsonify({"error": "Invalid direction_id"}), 400
+
+        # Update supervisor's hours table
+        db.update_user_table(user_id=user_id, hours_table_url=table_url)
+
+        # Create/update operators with direction and supervisor
+        for op in operators:
+            db.create_user(
+                telegram_id=None,
+                name=op['name'],
+                role='operator',
+                direction_id=direction_id,
+                supervisor_id=user_id
+            )
+
+        # Optional: Send Telegram notification to supervisor
+        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": user[1],
+            "text": f"Таблица часов успешно обновлена и операторы сохранены с направлением ID {direction_id} ✅",
+            "parse_mode": "HTML"
+        }
+        response = requests.post(telegram_url, json=payload, timeout=10)
+        if response.status_code != 200:
+            logging.error(f"Telegram notification failed: {response.json().get('description')}")
+
+        return jsonify({
+            "status": "success",
+            "message": "Table updated, operators saved with selected direction"
+        }), 200
+    except Exception as e:
+        logging.error(f"Error saving table: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/user/change_login', methods=['POST'])
