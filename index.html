@@ -679,9 +679,6 @@
                     Отмена
                   </button>
                 </div>
-                
-                {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
               </div>
             </div>
           );
@@ -2439,8 +2436,6 @@
                             >
                                 {isLoading ? 'Logging in...' : 'Login'}
                             </button>
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                         </div>
                     </div>
                 );
@@ -2507,8 +2502,6 @@
                                     Cancel
                                 </button>
                             </div>
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                         </div>
                     </div>
                 );
@@ -2552,8 +2545,6 @@
                                     Cancel
                                 </button>
                             </div>
-                            {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                            {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                         </div>
                     </div>
                 );
@@ -2872,9 +2863,6 @@
                                         ) : selectedSvId ? (
                                             <p className="text-center text-gray-600">No operators found for this supervisor.</p>
                                         ) : null}
-                                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
-
                                     </div>
                                 )}
                                 {showMonitoringScaleModal && (
@@ -2998,8 +2986,6 @@
                                                 </div>
                                             </>
                                         )}
-                                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                                     </div>
                                 )}
                                 {view === 'manage_operators' && (
@@ -3112,8 +3098,6 @@
                                         ) : (
                                             <p className="text-center text-gray-600">No operators found.</p>
                                         )}
-                                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                                     </div>
                                 )}
                             </>
@@ -3671,14 +3655,11 @@
                                             Cancel
                                         </button>
                                     </div>
-                                    {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                                    {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                                 </div>
                             </div>
                         )}
-                        {error && <p className="text-red-500 mt-4 text-center">{error}</p>}
-                        {success && <p className="text-green-500 mt-4 text-center">{success}</p>}
                     </div>
+                    <ToastContainer toasts={toasts} removeToast={removeToast} />
                 </div>
             );
         };
