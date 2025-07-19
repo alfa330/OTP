@@ -1254,6 +1254,7 @@
             const [showAccountMenu, setShowAccountMenu] = useState(false);
             const [showChangeLoginForm, setShowChangeLoginForm] = useState(false);
             const [showChangePasswordForm, setShowChangePasswordForm] = useState(false);
+            const [newCredentials, setNewCredentials] = useState(null);
             const [loginData, setLoginData] = useState({
                 new_login: '',
                 confirm_login: ''
@@ -2201,8 +2202,8 @@
                         );
                         const data = response.data;
                         if (data.status === 'success' && isMounted.current) {
-                            setSuccess(data.message);
-                            alert(`Supervisor added successfully!\nLogin: ${data.login}\nPassword: ${data.password}`);  // Show credentials to admin
+                            setSuccess('Supervisor added successfully');
+                            setNewCredentials({ login: data.login, password: data.password });
                             fetchSvList();
                             setNewSvName('');
                         } else {
@@ -2635,6 +2636,14 @@
                                         >
                                             {isLoading ? 'Adding...' : 'Add Supervisor'}
                                         </button>
+                                        {newCredentials && (
+                                            <div className="mt-4 p-4 bg-green-100 rounded-lg">
+                                                <p className="font-bold mb-2">New Supervisor Credentials:</p>
+                                                <p className="mb-1">Login: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.login}</span></p>
+                                                <p>Password: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.password}</span></p>
+                                                <p className="text-sm text-gray-600 mt-2 italic">Note: These credentials are shown only once. Please record them securely.</p>
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                                 {view === 'sv_list' && (
