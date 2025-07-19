@@ -48,6 +48,106 @@
             }
         };
     </script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/themes/material_green.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        .date-input {
+            margin-bottom: 30px;
+            position: relative;
+        }
+        .date-input input {
+            padding: 14px 45px 14px 14px;
+            width: 100%;
+            max-width: 300px;
+            border: none;
+            border-radius: 8px;
+            background-color: #f0f4f8;
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            font-size: 16px;
+            cursor: pointer;
+            transition: box-shadow 0.3s ease;
+        }
+        .date-input input:focus {
+            box-shadow: 0 0 0 2px #27ae60;
+            outline: none;
+        }
+        .date-input::after {
+            content: '\1F4C5'; /* Calendar emoji as icon */
+            position: absolute;
+            right: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 22px;
+            color: #27ae60;
+            pointer-events: none;
+        }
+        .selected-range {
+            margin-top: 25px;
+            padding: 14px;
+            background-color: #e8f5e9;
+            border: 1px solid #2e7d32;
+            border-radius: 8px;
+            font-weight: 500;
+            color: #1b5e20;
+            font-size: 16px;
+            transition: background-color 0.3s ease;
+        }
+        .range-visual {
+            margin-top: 30px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .range-bar {
+            width: 450px;
+            height: 35px;
+            background-color: #e0e0e0;
+            position: relative;
+            border-radius: 18px;
+            overflow: hidden;
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        .range-fill {
+            height: 100%;
+            background: linear-gradient(to right, #27ae60, #2ecc71, #27ae60);
+            border-radius: 18px;
+            transition: width 0.6s ease-in-out;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 14px;
+            font-weight: bold;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+        }
+        .range-labels {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            font-size: 14px;
+            color: #555;
+            font-weight: 500;
+        }
+        @media (max-width: 480px) {
+            .range-bar {
+                width: 100%;
+            }
+            .date-input input {
+                max-width: 100%;
+            }
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .selected-range, .range-visual, .range-labels {
+            animation: fadeIn 0.5s ease forwards;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
 </head>
 <body class="bg-background min-h-screen font-sans antialiased">
     <div id="root"></div>
@@ -265,7 +365,7 @@
                 const newScores = [...scores];
                 newScores[index] = value;
                 setScores(newScores);
-                if (value !== 'Error') {
+                if (value === 'Correct' || value === 'N/A') {
                     const newComments = [...criterionComments];
                     newComments[index] = '';
                     setCriterionComments(newComments);
@@ -307,7 +407,7 @@
                 phoneNumber.length !== 11 ||
                 !phoneNumber.startsWith('7') ||
                 (directions[0]?.hasFileUpload && !callFile && !audioUrl) ||
-                scores.some((score, index) => score === 'Error' && !criterionComments[index].trim());
+                scores.some((score, index) => (score === 'Error' || score === 'Incorrect') && !criterionComments[index].trim());
 
             const handleSubmit = async (saveAsDraft = false) => {
                 setIsSubmitting(true);
@@ -487,14 +587,18 @@
                                                 <select
                                                     value={scores[index] || 'Correct'}
                                                     onChange={(e) => handleScoreChange(index, e.target.value)}
-                                                    className={`w-full p-4 border border-muted/20 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary transition-all duration-300 ${scores[index] === 'Error' ? 'bg-red-50' : 'bg-green-50'}`}
+                                                    className={`w-full p-4 border border-muted/20 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary transition-all duration-300 ${scores[index] === 'Correct' || scores[index] === 'N/A' ? 'bg-green-50' : 'bg-red-50'}`}
                                                 >
                                                     <option value="Correct" className="bg-green-50">Correct</option>
                                                     <option value="N/A" className="bg-green-50">N/A</option>
-                                                    <option value="Error" className="bg-red-50">Error</option>
+                                                    {criterion.isCritical ? (
+                                                        <option value="Error" className="bg-red-50">Error</option>
+                                                    ) : (
+                                                        <option value="Incorrect" className="bg-red-50">Incorrect</option>
+                                                    )}
                                                 </select>
                                                 <svg
-                                                    className={`w-7 h-7 ${scores[index] === 'Error' ? 'text-red-500' : 'text-secondary'}`}
+                                                    className={`w-7 h-7 ${scores[index] === 'Correct' || scores[index] === 'N/A' ? 'text-secondary' : 'text-red-500'}`}
                                                     fill="none"
                                                     stroke="currentColor"
                                                     viewBox="0 0 24 24"
@@ -504,11 +608,11 @@
                                                         strokeLinecap="round"
                                                         strokeLinejoin="round"
                                                         strokeWidth="2"
-                                                        d={scores[index] === 'Error' ? 'M6 18L18 6M6 6l12 12' : 'M5 13l4 4L19 7'}
+                                                        d={scores[index] === 'Correct' || scores[index] === 'N/A' ? 'M5 13l4 4L19 7' : 'M6 18L18 6M6 6l12 12'}
                                                     />
                                                 </svg>
                                             </div>
-                                            {scores[index] === 'Error' && (
+                                            {(scores[index] === 'Error' || scores[index] === 'Incorrect') && (
                                                 <textarea
                                                     value={criterionComments[index] || ''}
                                                     onChange={(e) => handleCommentChange(index, e.target.value)}
@@ -604,6 +708,89 @@
             </tr>
         );
 
+        const DateRangePicker = ({ minDate, maxDate, setFromDate, setToDate }) => {
+            const [selectedDates, setSelectedDates] = React.useState([]);
+            const inputRef = React.useRef(null);
+
+            React.useEffect(() => {
+                if (inputRef.current) {
+                    flatpickr(inputRef.current, {
+                        mode: "range",
+                        dateFormat: "Y-m-d",
+                        minDate,
+                        maxDate,
+                        onChange: function(dates) {
+                            setSelectedDates(dates);
+                            if (dates.length === 2) {
+                                const start = new Date(dates[0]);
+                                const end = new Date(dates[1]);
+                                // Make end date inclusive by adding 1 day minus 1 ms
+                                end.setDate(end.getDate() + 1);
+                                end.setMilliseconds(end.getMilliseconds() - 1);
+                                setFromDate(start.toISOString());
+                                setToDate(end.toISOString());
+                            } else {
+                                setFromDate(null);
+                                setToDate(null);
+                            }
+                        }
+                    });
+                }
+            }, [minDate, maxDate]);
+
+            const isValidRange = selectedDates.length === 2;
+
+            let rangeText = 'Select date range';
+            let rangePercentage = 0;
+            let startDate = '';
+            let endDate = '';
+            let diffDays = 0;
+            if (isValidRange) {
+                const start = selectedDates[0];
+                const end = selectedDates[1];
+                // Make end date inclusive by adding 1 day minus 1 ms
+                end.setDate(end.getDate() + 1);
+                end.setMilliseconds(end.getMilliseconds() - 1);
+                startDate = start.toISOString().split('T')[0];
+                endDate = end.toISOString().split('T')[0];
+                rangeText = `From ${startDate} to ${endDate}`;
+                // Make diffDays inclusive
+                const diffTime = selectedDates[1] - selectedDates[0];
+                diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24)) + 1;
+                const maxDiffDays = Math.floor((new Date(maxDate) - new Date(minDate)) / (1000 * 60 * 60 * 24)) + 1;
+                rangePercentage = Math.min((diffDays / maxDiffDays) * 100, 100);
+            }
+
+            return (
+                <div className="flex flex-col space-y-2">
+                    <label className="font-semibold text-text text-lg">Date Range:</label>
+                    <div className="date-input">
+                        <input 
+                            ref={inputRef}
+                            type="text" 
+                            placeholder="Select period" 
+                            readOnly={true}
+                        />
+                    </div>
+                    {isValidRange && (
+                        <div className="range-visual">
+                            <div className="range-bar">
+                                <div className="range-fill" style={{ width: `${rangePercentage}%` }}>
+                                    {diffDays} days
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    {isValidRange && (
+                        <div className="range-labels">
+                            <span>{startDate}</span>
+                            <span>{endDate}</span>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
         const App = () => {
             const [userName, setUserName] = useState(null);
             const [calls, setCalls] = useState([]);
@@ -625,6 +812,9 @@
             const [selectedSupervisor, setSelectedSupervisor] = useState(null);
             const [showVersionsModal, setShowVersionsModal] = useState(false);
             const [versionHistory, setVersionHistory] = useState([]);
+            const [fromDate, setFromDate] = useState(null);
+            const [toDate, setToDate] = useState(null);
+            const [viewMode, setViewMode] = useState('normal');
             const MAX_EVALUATIONS = 20;
 
             const getLast12Months = () => {
@@ -756,6 +946,7 @@
             useEffect(() => {
                 if (!apiKey || !userId || !selectedOperator) {
                     setCalls([]);
+                    setCalls([]);
                     return;
                 }
 
@@ -780,7 +971,7 @@
                                     id: evaluation.id,
                                     fileName: `Call ${evaluation.phone_number}`,
                                     totalScore: evaluation.score.toFixed(2),
-                                    date: evaluation.evaluation_date,
+                                    date: evaluation.evaluation_date.split('T')[0],
                                     phoneNumber: evaluation.phone_number,
                                     combinedComment: evaluation.comment,
                                     selectedDirection: evaluation.direction?.name || selectedOperator.direction,
@@ -815,6 +1006,18 @@
                 };
             }, [apiKey, userId, selectedOperator, directions]);
 
+            useEffect(() => {
+                setFromDate(null);
+                setToDate(null);
+            }, [selectedMonth]);
+
+            useEffect(() => {
+                const extraCount = calls.filter(call => call.assignedMonth === selectedMonth && call.date.slice(0,7) !== selectedMonth).length;
+                if (viewMode === 'extra' && extraCount === 0) {
+                    setViewMode('normal');
+                }
+            }, [calls, selectedMonth, viewMode]);
+
             const handleLogin = (key, id, role, name) => {
                 setApiKey(key);
                 setUserId(id);
@@ -837,7 +1040,7 @@
                 criterionComments: evaluationData.criterionComments,
                 combinedComment: evaluationData.comment,
                 totalScore: evaluationData.totalScore,
-                date: new Date().toLocaleDateString(),
+                date: new Date().toISOString().slice(0,10),
                 audioUrl: evaluationData.audioUrl,
                 isDraft: evaluationData.isDraft,
                 selectedDirection: evaluationData.selectedDirection,
@@ -901,7 +1104,7 @@
                         id: evaluation.id,
                         fileName: `Call ${evaluation.phone_number}`,
                         totalScore: evaluation.score.toFixed(2),
-                        date: evaluation.evaluation_date,
+                        date: evaluation.evaluation_date.split('T')[0],
                         phoneNumber: evaluation.phone_number,
                         combinedComment: evaluation.comment,
                         selectedDirection:
@@ -990,13 +1193,24 @@
                 setIsLoading(true);
             };
 
+            const monthStart = `${selectedMonth}-01`;
+            const lastDay = new Date(parseInt(selectedMonth.slice(0,4)), parseInt(selectedMonth.slice(5,7)), 0).getDate();
+            const monthEnd = `${selectedMonth}-${lastDay.toString().padStart(2,'0')}`;
+
             const callsByMonth = calls.filter(call => call.assignedMonth === selectedMonth);
+            let displayedCalls = callsByMonth;
+            if (viewMode === 'normal') {
+                displayedCalls = displayedCalls.filter(call => (!fromDate || call.date >= fromDate) && (!toDate || call.date <= toDate));
+            } else {
+                displayedCalls = displayedCalls.filter(call => call.date.slice(0,7) !== selectedMonth);
+            }
+            const hasExtra = callsByMonth.filter(call => call.date.slice(0,7) !== selectedMonth).length > 0;
             const isMaxEvaluationsReached = callsByMonth.filter(c => !c.isDraft).length >= MAX_EVALUATIONS;
-            const evaluationCount = callsByMonth.filter(c => !c.isDraft).length;
-            const averageScore = callsByMonth.length > 0 
-                ? callsByMonth
+            const evaluationCount = displayedCalls.filter(c => !c.isDraft).length;
+            const averageScore = evaluationCount > 0 
+                ? displayedCalls
                     .filter(c => !c.isDraft)
-                    .reduce((sum, call) => sum + parseFloat(call.totalScore), 0) / evaluationCount || 0
+                    .reduce((sum, call) => sum + parseFloat(call.totalScore), 0) / evaluationCount
                 : 0;
 
             return (
@@ -1019,9 +1233,9 @@
                     <main className="bg-card p-10 rounded-xl shadow-card border border-primary/10">
                         <div className="flex justify-between items-center mb-10">
                             <h2 className="text-3xl font-bold text-text">Call Evaluations Overview</h2>
-                            <div className="flex space-x-6 items-center">
+                            <div className="flex flex-wrap items-center gap-6">
                                 {userRole === 'admin' && (
-                                    <div className="flex items-center space-x-3">
+                                    <div className="flex flex-col space-y-2">
                                         <label className="font-semibold text-text text-lg">Supervisor:</label>
                                         <select
                                             value={selectedSupervisor || ''}
@@ -1035,7 +1249,7 @@
                                         </select>
                                     </div>
                                 )}
-                                <div className="flex items-center space-x-3">
+                                <div className="flex flex-col space-y-2">
                                     <label className="font-semibold text-text text-lg">Operator:</label>
                                     <select
                                         value={selectedOperator?.id || ''}
@@ -1048,7 +1262,7 @@
                                         ))}
                                     </select>
                                 </div>
-                                <div className="flex items-center space-x-3">
+                                <div className="flex flex-col space-y-2">
                                     <label className="font-semibold text-text text-lg">Month:</label>
                                     <select
                                         value={selectedMonth}
@@ -1062,6 +1276,9 @@
                                         ))}
                                     </select>
                                 </div>
+                                {userRole === 'admin' && (
+                                    <DateRangePicker minDate={monthStart} maxDate={monthEnd} setFromDate={setFromDate} setToDate={setToDate} />
+                                )}
                             </div>
                         </div>
                         {selectedOperator && (
@@ -1080,7 +1297,7 @@
                                 />
                             </div>
                         )}
-                        {callsByMonth.length === 0 ? isLoading ? (
+                        {displayedCalls.length === 0 ? isLoading ? (
                             <div className="overflow-x-auto rounded-xl shadow-card border border-muted/20">
                                 <table className="min-w-full bg-white border-collapse">
                                     <thead>
@@ -1119,7 +1336,7 @@
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {callsByMonth.map((call, index) => (
+                                        {displayedCalls.map((call, index) => (
                                             <React.Fragment key={call.id}>
                                                 <tr 
                                                     className={`hover:bg-background transition-all duration-300 cursor-pointer ${call.isDraft ? 'bg-yellow-50' : 'bg-green-50'} ${expandedDetails === call.id ? 'bg-primary/20' : ''}`}
@@ -1209,7 +1426,7 @@
                                                                                         <td className="p-4 border-b text-base text-text">{criterion.name}</td>
                                                                                         <td className="p-4 border-b text-base text-text">{criterion.isCritical ? '(Critical)' : `${criterion.weight}%`}</td>
                                                                                         <td className="p-4 border-b text-base">
-                                                                                            <span className={`${call.scores[critIndex] === 'Error' ? 'text-red-500' : 'text-secondary'} font-medium`}>
+                                                                                            <span className={`${call.scores[critIndex] === 'Correct' || call.scores[critIndex] === 'N/A' ? 'text-secondary' : 'text-red-500'} font-medium`}>
                                                                                                 {call.scores[critIndex] || 'Correct'}
                                                                                             </span>
                                                                                         </td>
@@ -1247,19 +1464,31 @@
                         <div className="mt-8 flex justify-between items-center">
                             {selectedOperator && (
                                 <p className="text-base text-muted">
-                                    Showing {callsByMonth.length} evaluations for {selectedOperator.name} in {monthOptions.find(m => m.value === selectedMonth)?.label || selectedMonth}
+                                    Showing {displayedCalls.length} {viewMode === 'extra' ? 'extra ' : ''}evaluations for {selectedOperator.name} in {monthOptions.find(m => m.value === selectedMonth)?.label || selectedMonth}
                                 </p>
                             )}
-                            <button
-                                onClick={() => {
-                                    setEditingEvaluation(null);
-                                    setShowEvaluationModal(true);
-                                }}
-                                className={`bg-secondary text-white px-6 py-3 rounded-full hover:bg-secondary/90 text-base font-bold transition-all duration-300 ${!selectedOperator || isMaxEvaluationsReached ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                disabled={!selectedOperator || isMaxEvaluationsReached}
-                            >
-                                + Add New Evaluation
-                            </button>
+                            <div className="flex items-center space-x-4">
+                                {userRole === 'admin' && (viewMode === 'extra' || hasExtra) && (
+                                    <button
+                                        onClick={() => setViewMode(viewMode === 'normal' ? 'extra' : 'normal')}
+                                        className="bg-accent text-white px-6 py-3 rounded-full hover:bg-accent/90 text-base font-bold transition-all duration-300"
+                                    >
+                                        Show {viewMode === 'normal' ? 'Extra' : 'Normal'}
+                                    </button>
+                                )}
+                                {viewMode === 'normal' && (
+                                    <button
+                                        onClick={() => {
+                                            setEditingEvaluation(null);
+                                            setShowEvaluationModal(true);
+                                        }}
+                                        className={`bg-secondary text-white px-6 py-3 rounded-full hover:bg-secondary/90 text-base font-bold transition-all duration-300 ${!selectedOperator || isMaxEvaluationsReached ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                        disabled={!selectedOperator || isMaxEvaluationsReached}
+                                    >
+                                        + Add New Evaluation
+                                    </button>
+                                )}
+                            </div>
                         </div>
                     </main>
 
@@ -1292,7 +1521,7 @@
                                         <div key={idx} className="border border-muted/20 p-6 rounded-lg shadow-card bg-white">
                                             <div className="flex justify-between items-center mb-4">
                                                 <span className="font-bold text-text text-lg">Version {versionHistory.length - idx}</span>
-                                                <span className="text-base text-muted">{version.evaluation_date}</span>
+                                                <span className="text-base text-muted">{version.evaluation_date.split('T')[0]}</span>
                                             </div>
                                             <div className="grid grid-cols-2 gap-4 text-base">
                                                 <div><span className="font-semibold text-text">Score:</span> {version.score}</div>
