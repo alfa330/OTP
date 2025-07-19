@@ -36,7 +36,39 @@
                     .filter(criterion => !criterion.isCritical)
                     .reduce((sum, c) => sum + Number(c.weight), 0) || 0;
             };
-        
+            
+            const ToastContainer = ({ toasts, removeToast }) => {
+                        return (
+                            <div className="fixed bottom-4 right-4 space-y-2 z-50">
+                                {toasts.map(toast => (
+                                    <div
+                                        key={toast.id}
+                                        className={`p-4 rounded-lg shadow-lg text-white transition-all duration-300 transform ${toast.type === 'success' ? 'bg-green-500' : 'bg-red-500'} animate-slide-in`}
+                                        onClick={() => removeToast(toast.id)}
+                                    >
+                                        {toast.message}
+                                    </div>
+                                ))}
+                            </div>
+                        );
+                    };
+
+            tailwind.config = {
+                        theme: {
+                            extend: {
+                                keyframes: {
+                                    'slide-in': {
+                                        '0%': { transform: 'translateX(100%)', opacity: '0' },
+                                        '100%': { transform: 'translateX(0)', opacity: '1' },
+                                    },
+                                },
+                                animation: {
+                                    'slide-in': 'slide-in 0.3s ease-out',
+                                },
+                            },
+                        },
+                    };
+
             const handleAddDirection = () => {
                 if (!newDirectionName) {
                     alert('Please enter a direction name.');
@@ -1234,8 +1266,7 @@
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
             const [password, setPassword] = useState('');
-            const [error, setError] = useState('');
-            const [success, setSuccess] = useState('');
+            const [toasts, setToasts] = useState([]);
             const [svList, setSvList] = useState([]);
             const [svData, setSvData] = useState(null);
             const [operatorData, setOperatorData] = useState(null);
@@ -1314,13 +1345,25 @@
                 return options;
             };
 
+            const showToast = (message, type = 'success') => {
+                            const id = Date.now();
+                            setToasts(prev => [...prev, { id, message, type }]);
+                            setTimeout(() => removeToast(id), 5000);
+                            if (type === 'error') {
+                                console.error(message, 'error');
+                            }
+                        };
+            
+            const removeToast = (id) => {
+                            setToasts(prev => prev.filter(toast => toast.id !== id));
+                        };
+
             const fetchDirections = async () => {
                 if (!user || !user.id) {
-                    setError('User not authenticated. Please log in again.');
+                    showToast('User not authenticated. Please log in again.', 'error');
                     return;
                 }
                 setIsLoading(true);
-                clearMessages();
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/admin/directions`, {
                         headers: { 
@@ -1332,11 +1375,11 @@
                     if (data.status === 'success' && isMounted.current) {
                         setDirections(data.directions.filter(d => d.isActive !== false));
                     } else {
-                        setError(data.error || 'Failed to fetch directions');
+                        showToast(data.error || 'Failed to fetch directions', 'error');
                     }
                 } catch (err) {
                     console.error('Fetch directions error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch directions');
+                    showToast(err.response?.data?.error || 'Failed to fetch directions', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -1344,7 +1387,6 @@
             
             const saveDirections = async (newDirections) => {
                 setIsLoading(true);
-                clearMessages();
                 try {
                     const response = await axios.post(
                         `${API_BASE_URL}/api/admin/save_directions`,
@@ -1360,13 +1402,13 @@
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
                         setDirections(newDirections);
-                        setSuccess('Directions saved successfully');
+                        showToast('Directions saved successfully', 'success');
                     } else {
-                        setError(data.error || 'Failed to save directions');
+                        showToast(data.error || 'Failed to save directions', 'error');
                     }
                 } catch (err) {
                     console.error('Save directions error:', err);
-                    setError(err.response?.data?.error || 'Failed to save directions');
+                    showToast(err.response?.data?.error || 'Failed to save directions', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -1374,7 +1416,7 @@
 
             const fetchUsers = async () => {
                 setIsAdminDataLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/admin/users`, {
                         headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
@@ -1383,11 +1425,11 @@
                     if (data.status === 'success' && isMounted.current) {
                         setUsers(data.users.filter(u => u.role === 'operator') || []);
                     } else {
-                        setError(data.error || 'Failed to fetch users');
+                        showToast(data.error || 'Failed to fetch users', 'error');
                     }
                 } catch (err) {
                     console.error('Fetch users error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch users');
+                    showToast(err.response?.data?.error || 'Failed to fetch users', 'error');
                 } finally {
                     if (isMounted.current) setIsAdminDataLoading(false);
                 }
@@ -1395,7 +1437,7 @@
 
             const saveUserChanges = async (editedUser) => {
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     // Change direction
                     if (editedUser.direction) {
@@ -1435,12 +1477,12 @@
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
                     }
-                    setSuccess('User updated successfully');
+                    showToast('User updated successfully', 'success');
                     fetchUsers();
                     setShowUserEditModal(false);
                 } catch (err) {
                     console.error('Update user error:', err);
-                    setError(err.response?.data?.error || 'Failed to update user');
+                    showToast(err.response?.data?.error || 'Failed to update user', 'error');
                 } finally {
                     setIsLoading(false);
                 }
@@ -1453,7 +1495,7 @@
                         fn();
                     } catch (err) {
                         console.error('Debounced fetch error:', err);
-                        setError('An error occurred while fetching data');
+                        showToast('An error occurred while fetching data', 'error');
                     }
                 }
             }, 300), []);
@@ -1464,13 +1506,6 @@
                 };
             }, []);
 
-            const clearMessages = () => {
-                if (isMounted.current) {
-                    setError('');
-                    setSuccess('');
-                }
-            };
-
             const validateUrl = (url) => {
                 const googleSheetsRegex = /^https:\/\/docs\.google\.com\/spreadsheets\/d\/[a-zA-Z0-9_-]+/;
                 return googleSheetsRegex.test(url);
@@ -1478,12 +1513,11 @@
 
             const handleSubmitDispute = async () => {
                 if (!selectedEvaluation || !disputeText.trim()) {
-                    setError('Please enter dispute text');
+                    showToast('Please enter dispute text', 'error');
                     return;
                 }
                 
                 setIsLoading(true);
-                clearMessages();
                 try {
                     const response = await axios.post(
                         `${API_BASE_URL}/api/call_evaluation/dispute`,
@@ -1503,15 +1537,15 @@
                     );
                     
                     if (response.data.status === 'success') {
-                        setSuccess('Dispute submitted successfully');
+                        showToast('Dispute submitted successfully', 'success');
                         setShowDisputeModal(false);
                         setDisputeText('');
                     } else {
-                        setError(response.data.error || 'Failed to submit dispute');
+                        showToast(response.data.error || 'Failed to submit dispute', 'error');
                     }
                 } catch (err) {
                     console.error('Submit dispute error:', err);
-                    setError(err.response?.data?.error || 'Failed to submit dispute');
+                    showToast(err.response?.data?.error || 'Failed to submit dispute', 'error');
                 } finally {
                     setIsLoading(false);
                 }
@@ -1519,11 +1553,11 @@
 
             const handlePreviewTable = async () => {
                 if (!tableUrl) {
-                    setError('Введите URL таблицы');
+                    showToast('Введите URL таблицы', 'error');
                     return;
                 }
                 setIsLoading(true);
-                setError('');
+                showToast('');
                 try {
                     const response = await axios.post(`${API_BASE_URL}/api/sv/preview_table`, { table_url: tableUrl }, {
                         headers: { 
@@ -1536,10 +1570,10 @@
                         setPreviewData(data);
                         setShowPreview(true);
                     } else {
-                        setError(data.error || 'Ошибка предпросмотра таблицы');
+                        showToast(data.error || 'Ошибка предпросмотра таблицы', 'error');
                     }
                 } catch (err) {
-                    setError(err.response?.data?.error || 'Ошибка сервера');
+                    showToast(err.response?.data?.error || 'Ошибка сервера', 'error');
                 } finally {
                     setIsLoading(false);
                 }
@@ -1547,11 +1581,11 @@
             
             const handleSaveTable = async () => {
                 if (!selectedDirection || !previewData) {
-                    setError('Выберите направление и подтвердите данные');
+                    showToast('Выберите направление и подтвердите данные', 'error');
                     return;
                 }
                 setIsLoading(true);
-                setError('');
+                showToast('');
                 try {
                     const response = await axios.post(`${API_BASE_URL}/api/sv/save_table`, { 
                         table_url: tableUrl,
@@ -1565,7 +1599,7 @@
                     });
                     const data = response.data;
                     if (data.status === 'success') {
-                        setSuccess('Таблица успешно обновлена и операторы сохранены');
+                        showToast('Таблица успешно обновлена и операторы сохранены', 'success');
                         setShowPreview(false);
                         setPreviewData(null);
                         setTableUrl('');
@@ -1573,10 +1607,10 @@
                         // Обновите данные SV после сохранения
                         fetchSvData();
                     } else {
-                        setError(data.error || 'Ошибка сохранения таблицы');
+                        showToast(data.error || 'Ошибка сохранения таблицы', 'error');
                     }
                 } catch (err) {
-                    setError(err.response?.data?.error || 'Ошибка сервера');
+                    showToast(err.response?.data?.error || 'Ошибка сервера', 'error');
                 } finally {
                     setIsLoading(false);
                 }
@@ -1863,19 +1897,19 @@
 
             const handleChangeLogin = async () => {
                 if (!loginData.new_login || !loginData.confirm_login) {
-                    setError('Please fill in both login fields');
+                    showToast('Please fill in both login fields', 'error');
                     return;
                 }
                 if (loginData.new_login !== loginData.confirm_login) {
-                    setError('Logins do not match');
+                    showToast('Logins do not match', 'error');
                     return;
                 }
                 if (loginData.new_login.length < 4) {
-                    setError('Login must be at least 4 characters long');
+                    showToast('Login must be at least 4 characters long', 'error');
                     return;
                 }
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.post(
                         `${API_BASE_URL}/api/user/change_login`,
@@ -1893,18 +1927,18 @@
                     );
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'Login updated successfully');
+                        showToast(data.message || 'Login updated successfully', 'success');
                         setLoginData({
                             new_login: '',
                             confirm_login: ''
                         });
                         setShowChangeLoginForm(false);
                     } else {
-                        setError(data.error || 'Failed to update login');
+                        showToast(data.error || 'Failed to update login' , 'error');
                     }
                 } catch (err) {
                     console.error('Change login error:', err);
-                    setError(err.response?.data?.error || 'Failed to update login');
+                    showToast(err.response?.data?.error || 'Failed to update login', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -1918,19 +1952,19 @@
 
             const handleChangePassword = async () => {
                 if (!passwordData.new_password || !passwordData.confirm_password) {
-                    setError('Please fill in both password fields');
+                    showToast('Please fill in both password fields', 'error');
                     return;
                 }
                 if (passwordData.new_password !== passwordData.confirm_password) {
-                    setError('Passwords do not match');
+                    showToast('Passwords do not match', 'error');
                     return;
                 }
                 if (passwordData.new_password.length < 6) {
-                    setError('Password must be at least 6 characters long');
+                    showToast('Password must be at least 6 characters long', 'error');
                     return;
                 }
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.post(
                         `${API_BASE_URL}/api/user/change_password`,
@@ -1948,7 +1982,7 @@
                     );
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess(data.message || 'Password updated successfully');
+                        showToast(data.message || 'Password updated successfully', 'success');
                         setPasswordData({
                             user_id: '',
                             new_password: '',
@@ -1956,11 +1990,11 @@
                         });
                         setShowChangePasswordForm(false);
                     } else {
-                        setError(data.error || 'Failed to update password');
+                        showToast(data.error || 'Failed to update password', 'error');
                     }
                 } catch (err) {
                     console.error('Change password error:', err);
-                    setError(err.response?.data?.error || 'Failed to update password');
+                    showToast(err.response?.data?.error || 'Failed to update password', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -1968,11 +2002,11 @@
 
             const handleLogin = async () => {
                 if (!login.trim() || !password.trim()) {
-                    setError('Please enter both login and password');
+                    showToast('Please enter both login and password', 'error');
                     return;
                 }
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.post(`${API_BASE_URL}/api/login`, {
                         login: login.trim(),
@@ -1991,13 +2025,13 @@
                         });
                         setLogin('');
                         setPassword('');
-                        setSuccess('Logged in successfully');
+                        showToast('Logged in successfully', 'success');
                     } else {
-                        setError(data.error || 'Invalid login or password');
+                        showToast(data.error || 'Invalid login or password', 'error');
                     }
                 } catch (err) {
                     console.error('Login error:', err);
-                    setError(err.response?.data?.error || 'Failed to connect to server');
+                    showToast(err.response?.data?.error || 'Failed to connect to server', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -2041,13 +2075,13 @@
                         bonusFilmingQuantity: ''
                     });
                     setSalaryResult(null);
-                    clearMessages();
+                    
                 }
             };
 
             const fetchSvList = async () => {
                 setIsAdminDataLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
                         headers: { 'X-API-Key': user.apiKey }
@@ -2056,11 +2090,13 @@
                     if (data.status === 'success' && isMounted.current) {
                         setSvList(data.sv_list || []);
                     } else {
-                        setError(data.error || 'Failed to fetch supervisor list');
+                        showToast(data.error || 'Failed to fetch supervisor list', 'error');
+                        console.error(data.error || 'Failed to fetch supervisor list', 'error');
                     }
                 } catch (err) {
                     console.error('Fetch SV list error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch supervisor list');
+                    showToast(err.response?.data?.error || 'Failed to fetch supervisor list', 'error');
+                    console.error(err.response?.data?.error || 'Failed to fetch supervisor list', 'error');
                 } finally {
                     if (isMounted.current) setIsAdminDataLoading(false);
                 }
@@ -2068,18 +2104,19 @@
 
             const fetchSvData = async () => {
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/sv/data?id=${user.id}`);
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
                         setSvData(data);
                     } else {
-                        setError(data.error || 'Failed to fetch supervisor data');
+                        showToast(data.error || 'Failed to fetch supervisor data', 'error');
                     }
                 } catch (err) {
                     console.error('Fetch SV data error:', err);
-                    setError('Failed to fetch supervisor data');
+                    showToast('Failed to fetch supervisor data', 'error');
+                    console.error('Failed to fetch supervisor data', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -2087,7 +2124,7 @@
 
             const fetchOperatorData = async () => {
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.get(
                         `${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}&month=${selectedMonth}`,
@@ -2099,11 +2136,11 @@
                     if (data.status === 'success' && isMounted.current) {
                         setOperatorData(data);
                     } else {
-                        setError(data.error || 'Failed to fetch operator data');
+                        showToast(data.error || 'Failed to fetch operator data');
                     }
                 } catch (err) {
                     console.error('Fetch operator data error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch operator data');
+                    showToast(err.response?.data?.error || 'Failed to fetch operator data');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -2111,7 +2148,7 @@
 
             const fetchProfileData = async () => {
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/user/profile?user_id=${user.id}`, {
                         headers: { 'X-API-Key': user.apiKey }
@@ -2120,11 +2157,11 @@
                     if (data.status === 'success' && isMounted.current) {
                         setProfileData(data.profile);
                     } else {
-                        setError(data.error || 'Failed to fetch profile data');
+                        showToast(data.error || 'Failed to fetch profile data', 'error');
                     }
                 } catch (err) {
                     console.error('Fetch profile data error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch profile data');
+                    showToast(err.response?.data?.error || 'Failed to fetch profile data', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -2132,7 +2169,7 @@
 
             const fetchHoursData = async () => {
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.get(
                         `${API_BASE_URL}/api/user/hours?operator_id=${user.id}&month=${selectedMonth}`,
@@ -2144,11 +2181,11 @@
                     if (data.status === 'success' && isMounted.current) {
                         setHoursData(data.hours);
                     } else {
-                        setError(data.error || 'Failed to fetch hours data');
+                        showToast(data.error || 'Failed to fetch hours data', 'error');
                     }
                 } catch (err) {
                     console.error('Fetch hours data error:', err);
-                    setError(err.response?.data?.error || 'Failed to fetch hours data');
+                    showToast(err.response?.data?.error || 'Failed to fetch hours data', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -2160,7 +2197,7 @@
                     return;
                 }
                 setIsAdminDataLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/sv/data?id=${svId}`, {
                         headers: { 'X-API-Key': user.apiKey }
@@ -2169,11 +2206,11 @@
                     if (data.status === 'success' && isMounted.current) {
                         setSelectedSvData(data);
                     } else {
-                        setError(data.error || 'Failed to fetch supervisor data');
+                        showToast(data.error || 'Failed to fetch supervisor data', 'error');
                     }
                 } catch (err) {
                     console.error('Fetch selected SV data error:', err);
-                    setError('Failed to fetch supervisor data');
+                    showToast('Failed to fetch supervisor data', 'error');
                 } finally {
                     if (isMounted.current) setIsAdminDataLoading(false);
                 }
@@ -2181,11 +2218,11 @@
 
             const addSv = async () => {
                     if (!newSvName.trim()) {
-                        setError('Please enter supervisor name');
+                        showToast('Please enter supervisor name', 'error');
                         return;
                     }
                     setIsLoading(true);
-                    clearMessages();
+                    
                     try {
                         const response = await axios.post(
                             `${API_BASE_URL}/api/admin/add_sv`,
@@ -2202,16 +2239,16 @@
                         );
                         const data = response.data;
                         if (data.status === 'success' && isMounted.current) {
-                            setSuccess('Supervisor added successfully');
+                            showToast('Supervisor added successfully', 'success');
                             setNewCredentials({ login: data.login, password: data.password });
                             fetchSvList();
                             setNewSvName('');
                         } else {
-                            setError(data.error || 'Failed to add supervisor');
+                            showToast(data.error || 'Failed to add supervisor', 'error');
                         }
                     } catch (err) {
                         console.error('Add SV error:', err);
-                        setError(err.response?.data?.error || 'Failed to add supervisor');
+                        showToast(err.response?.data?.error || 'Failed to add supervisor', 'error');
                     } finally {
                         if (isMounted.current) setIsLoading(false);
                     }
@@ -2220,7 +2257,7 @@
             const removeSv = async (svId) => {
                 if (!confirm('Are you sure you want to remove this supervisor?')) return;
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.post(`${API_BASE_URL}/api/admin/remove_sv`, {
                         id: svId
@@ -2229,14 +2266,14 @@
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Supervisor removed successfully');
+                        showToast('Supervisor removed successfully', 'success');
                         fetchSvList();
                     } else {
-                        setError(data.error || 'Failed to remove supervisor');
+                        showToast(data.error || 'Failed to remove supervisor', 'error');
                     }
                 } catch (err) {
                     console.error('Remove SV error:', err);
-                    setError(err.response?.data?.error || 'Failed to remove supervisor');
+                    showToast(err.response?.data?.error || 'Failed to remove supervisor', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -2244,11 +2281,11 @@
 
             const changeSvTable = async (svId, url) => {
                 if (!validateUrl(url)) {
-                    setError('Invalid Google Sheets URL');
+                    showToast('Invalid Google Sheets URL', 'error');
                     return;
                 }
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.post(`${API_BASE_URL}/api/admin/change_sv_table`, {
                         telegram_id: svId,
@@ -2258,17 +2295,17 @@
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Table updated successfully');
+                        showToast('Table updated successfully', 'success');
                         setNewTableUrl('');
                         setShowChangeTableForm(false);
                         setCurrentSvForTableChange(null);
                         fetchSvList();
                     } else {
-                        setError(data.error || 'Failed to update table');
+                        showToast(data.error || 'Failed to update table', 'error');
                     }
                 } catch (err) {
                     console.error('Change SV table error:', err);
-                    setError(err.response?.data?.error || 'Failed to update table');
+                    showToast(err.response?.data?.error || 'Failed to update table', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -2276,11 +2313,11 @@
 
             const updateTable = async () => {
                 if (!validateUrl(newTableUrl)) {
-                    setError('Invalid Google Sheets URL');
+                    showToast('Invalid Google Sheets URL', 'error');
                     return;
                 }
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.post(`${API_BASE_URL}/api/sv/update_table`, {
                         table_url: newTableUrl
@@ -2289,15 +2326,15 @@
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Table updated successfully');
+                        showToast('Table updated successfully', 'success');
                         setNewTableUrl('');
                         fetchSvData();
                     } else {
-                        setError(data.error || 'Failed to update table');
+                        showToast(data.error || 'Failed to update table', 'error');
                     }
                 } catch (err) {
                     console.error('Update table error:', err);
-                    setError(err.response?.data?.error || 'Failed to update table');
+                    showToast(err.response?.data?.error || 'Failed to update table', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -2305,20 +2342,20 @@
 
             const generateWeeklyReport = async () => {
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.get(`${API_BASE_URL}/api/admin/weekly_report`, {
                         headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Report generated and sent successfully');
+                        showToast('Report generated and sent successfully', 'success');
                     } else {
-                        setError(data.error || 'Failed to generate report');
+                        showToast(data.error || 'Failed to generate report', 'error');
                     }
                 } catch (err) {
                     console.error('Generate report error:', err);
-                    setError(err.response?.data?.error || 'Failed to generate report');
+                    showToast(err.response?.data?.error || 'Failed to generate report', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
@@ -2326,7 +2363,7 @@
 
             const notifySupervisor = async (svId, operatorName) => {
                 setIsLoading(true);
-                clearMessages();
+                
                 try {
                     const response = await axios.post(`${API_BASE_URL}/api/admin/notify_sv`, {
                         sv_id: svId,
@@ -2336,13 +2373,13 @@
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSuccess('Notification sent successfully');
+                        showToast('Notification sent successfully', 'success');
                     } else {
-                        setError(data.error || 'Failed to send notification');
+                        showToast(data.error || 'Failed to send notification', 'error');
                     }
                 } catch (err) {
                     console.error('Notify SV error:', err);
-                    setError(err.response?.data?.error || 'Failed to send notification');
+                    showToast(err.response?.data?.error || 'Failed to send notification', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
