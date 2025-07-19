@@ -16,6 +16,38 @@
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef } = React;
+        const ToastContainer = ({ toasts, removeToast }) => {
+            return (
+                <div className="fixed bottom-4 right-4 space-y-2 z-50">
+                    {toasts.map(toast => (
+                        <div
+                            key={toast.id}
+                            className={`p-4 rounded-lg shadow-lg text-white transition-all duration-300 transform ${toast.type === 'success' ? 'bg-green-500' : 'bg-red-500'} animate-slide-in`}
+                            onClick={() => removeToast(toast.id)}
+                        >
+                            {toast.message}
+                        </div>
+                    ))}
+                </div>
+            );
+        };
+
+        tailwind.config = {
+            theme: {
+                extend: {
+                    keyframes: {
+                        'slide-in': {
+                            '0%': { transform: 'translateX(100%)', opacity: '0' },
+                            '100%': { transform: 'translateX(0)', opacity: '1' },
+                        },
+                    },
+                    animation: {
+                        'slide-in': 'slide-in 0.3s ease-out',
+                    },
+                },
+            },
+        };
+        
         const MonitoringScaleModal = ({ isOpen, onClose, onSave, initialDirections }) => {
             const [directions, setDirections] = useState(initialDirections || []);
             const [newDirectionName, setNewDirectionName] = useState('');
@@ -37,38 +69,6 @@
                     .reduce((sum, c) => sum + Number(c.weight), 0) || 0;
             };
             
-            const ToastContainer = ({ toasts, removeToast }) => {
-                        return (
-                            <div className="fixed bottom-4 right-4 space-y-2 z-50">
-                                {toasts.map(toast => (
-                                    <div
-                                        key={toast.id}
-                                        className={`p-4 rounded-lg shadow-lg text-white transition-all duration-300 transform ${toast.type === 'success' ? 'bg-green-500' : 'bg-red-500'} animate-slide-in`}
-                                        onClick={() => removeToast(toast.id)}
-                                    >
-                                        {toast.message}
-                                    </div>
-                                ))}
-                            </div>
-                        );
-                    };
-
-            tailwind.config = {
-                        theme: {
-                            extend: {
-                                keyframes: {
-                                    'slide-in': {
-                                        '0%': { transform: 'translateX(100%)', opacity: '0' },
-                                        '100%': { transform: 'translateX(0)', opacity: '1' },
-                                    },
-                                },
-                                animation: {
-                                    'slide-in': 'slide-in 0.3s ease-out',
-                                },
-                            },
-                        },
-                    };
-
             const handleAddDirection = () => {
                 if (!newDirectionName) {
                     alert('Please enter a direction name.');
