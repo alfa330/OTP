@@ -17,15 +17,37 @@
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef } = React;
         const ToastContainer = ({ toasts, removeToast }) => {
+            const handleClose = (id) => {
+                setToasts(prev => prev.map(toast => 
+                    toast.id === id ? { ...toast, closing: true } : toast
+                ));
+                setTimeout(() => removeToast(id), 300); // Match animation duration
+            };
+
             return (
-                <div className="fixed bottom-4 right-4 space-y-2 z-50">
+                <div className="fixed bottom-4 right-4 space-y-3 z-50" aria-live="polite">
                     {toasts.map(toast => (
                         <div
                             key={toast.id}
-                            className={`p-4 rounded-lg shadow-lg text-white transition-all duration-300 transform ${toast.type === 'success' ? 'bg-green-500' : 'bg-red-500'} animate-slide-in`}
-                            onClick={() => removeToast(toast.id)}
+                            className={`flex items-center p-4 rounded-md shadow-md text-white transition-all duration-300 transform hover:scale-105 hover:shadow-lg border border-opacity-20
+                                ${toast.type === 'success' ? 'bg-green-600 border-green-400' : 'bg-red-600 border-red-400'}
+                                ${toast.closing ? 'animate-slide-out opacity-0' : 'animate-slide-in'}`}
                         >
-                            {toast.message}
+                            <i className={`fas ${toast.type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'} mr-3 text-lg`}></i>
+                            <span className="flex-grow text-sm font-medium">{toast.message}</span>
+                            <button 
+                                onClick={() => handleClose(toast.id)} 
+                                className="ml-4 text-white hover:text-gray-200 focus:outline-none"
+                            >
+                                <i className="fas fa-times"></i>
+                            </button>
+                            {/* Progress bar */}
+                            <div className="absolute bottom-0 left-0 h-1 bg-white bg-opacity-30 w-full">
+                                <div 
+                                    className="h-full bg-white transition-all duration-[5000ms] ease-linear"
+                                    style={{ width: toast.closing ? '0%' : '0%', animation: 'progress 5s linear forwards' }}
+                                ></div>
+                            </div>
                         </div>
                     ))}
                 </div>
@@ -40,9 +62,19 @@
                             '0%': { transform: 'translateX(100%)', opacity: '0' },
                             '100%': { transform: 'translateX(0)', opacity: '1' },
                         },
+                        'slide-out': {
+                            '0%': { transform: 'translateX(0)', opacity: '1' },
+                            '100%': { transform: 'translateX(100%)', opacity: '0' },
+                        },
+                        progress: {
+                            '0%': { width: '100%' },
+                            '100%': { width: '0%' },
+                        },
                     },
                     animation: {
                         'slide-in': 'slide-in 0.3s ease-out',
+                        'slide-out': 'slide-out 0.3s ease-in',
+                        progress: 'progress 5s linear forwards',
                     },
                 },
             },
@@ -1343,13 +1375,13 @@
             };
 
             const showToast = (message, type = 'success') => {
-                            const id = Date.now();
-                            setToasts(prev => [...prev, { id, message, type }]);
-                            setTimeout(() => removeToast(id), 5000);
-                            if (type === 'error') {
-                                console.error(message, 'error');
-                            }
-                        };
+                const id = Date.now();
+                setToasts(prev => [...prev, { id, message, type, closing: false }]);
+                setTimeout(() => {
+                    setToasts(prev => prev.map(t => t.id === id ? { ...t, closing: true } : t));
+                    setTimeout(() => removeToast(id), 300);
+                }, 5000);
+            };
             
             const removeToast = (id) => {
                             setToasts(prev => prev.filter(toast => toast.id !== id));
