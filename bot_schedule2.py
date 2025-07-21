@@ -2990,8 +2990,10 @@ def sync_generate_weekly_report():
             
         logging.info("Starting weekly report generation")
         
+        current_date = datetime.now()
+        current_month = current_date.strftime('%Y-%m')
         current_week = get_current_week_of_month()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = current_date.strftime("%Y-%m-%d %H:%M:%S")
         output = BytesIO()
         workbook = xlsxwriter.Workbook(output, {'in_memory': True})
         header_format = workbook.add_format({
@@ -3002,56 +3004,56 @@ def sync_generate_weekly_report():
         cell_format_int = workbook.add_format({'border': 1, 'num_format': '0'})
         cell_format_float = workbook.add_format({'border': 1, 'num_format': '0.00'})
         
+        # Определение недель текущего месяца
+        first_day = current_date.replace(day=1)
+        weeks = []
+        for w in range(1, current_week + 1):
+            start_day = (w - 1) * 7 + 1
+            start_date = first_day + timedelta(days=start_day - 1)
+            start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_day = min(start_day + 6, current_date.day)
+            end_date = first_day + timedelta(days=end_day - 1)
+            end_date = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+            weeks.append((w, start_date, end_date))
+        
         # Get supervisors from the database
         svs = db.get_supervisors()
         
-        for sv_id, sv_name, table_url, _ in svs:
-            if not table_url:
-                logging.warning(f"No table URL for supervisor {sv_name}")
-                continue
-                
-            sheet_name, operators, error = extract_fio_and_links(table_url)
-            if error:
-                logging.error(f"Error processing table for SV {sv_name}: {error}")
-                continue
-                
+        for sv_id, sv_name, _, _ in svs:
+            operators = db.get_operators_by_supervisor(sv_id)
+            
             safe_sheet_name = sv_name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
             worksheet = workbook.add_worksheet(safe_sheet_name)
-            headers = ['ФИО', 'Количество звонков', 'Средний балл']
+            
+            # Headers
+            headers = ['ФИО']
+            for w, _, _ in weeks:
+                headers.append(f'Неделя {w} Количество звонков')
+                headers.append(f'Неделя {w} Средний балл')
+            
             for col, header in enumerate(headers):
                 worksheet.write(0, col, header, header_format)
-                
-            for row, op in enumerate(operators, start=1):
-                name = op.get('name', '')
-                call_count = op.get('call_count', 0)
-                avg_score = op.get('avg_score', None)
-                
-                if call_count in [None, "#DIV/0!"]:
-                    call_count = 0
-                else:
-                    try:
-                        call_count = int(call_count)
-                    except (ValueError, TypeError):
-                        call_count = 0
-                
-                try:
-                    score_val = float(avg_score) if avg_score else None
-                except (ValueError, TypeError):
-                    score_val = ''
-                
-                worksheet.write(row, 0, name, cell_format_int)
-                worksheet.write(row, 1, call_count, cell_format_int)
-                worksheet.write(row, 2, score_val, cell_format_float)
+            
+            for row_idx, op in enumerate(operators, start=1):
+                op_name = op['name']
+                worksheet.write(row_idx, 0, op_name, cell_format_int)
+                col = 1
+                for w, start_date, end_date in weeks:
+                    call_count, avg_score = db.get_week_call_stats(op['id'], start_date, end_date)
+                    worksheet.write(row_idx, col, call_count, cell_format_int)
+                    col += 1
+                    worksheet.write(row_idx, col, avg_score, cell_format_float)
+                    col += 1
             
             worksheet.set_column('A:A', 30)
-            worksheet.set_column('B:B', 20)
-            worksheet.set_column('C:C', 15)
+            for i in range(1, len(headers)):
+                worksheet.set_column(i, i, 20)
         
         workbook.close()
         output.seek(0)
         
         if output.getvalue():
-            filename = f"Weekly_Report_Week{current_week}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+            filename = f"Weekly_Report_{current_month}_{current_date.strftime('%Y%m%d')}.xlsx"
             telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendDocument"
             
             # Fetch admins from the database
@@ -3067,7 +3069,7 @@ def sync_generate_weekly_report():
             # Send report to all admins
             for admin_id in admins:
                 files = {'document': (filename, output.getvalue(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
-                data = {'chat_id': admin_id, 'caption': f"[{now}] 📊 Еженедельный отчет за {current_week}-ю неделю"}
+                data = {'chat_id': admin_id, 'caption': f"[{now}] 📊 Отчет по неделям за {current_month} (до {current_week}-й недели)"}
                 response = requests.post(telegram_url, files=files, data=data)
                 
                 if response.status_code != 200:
