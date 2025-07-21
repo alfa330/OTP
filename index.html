@@ -2498,46 +2498,67 @@
                 );
             }
 
-            if (showChangeLoginForm) {
-                return (
-                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                            <h2 className="text-xl font-semibold mb-4">Change Login</h2>
-                            <input
-                                type="text"
-                                placeholder="New Login"
-                                value={loginData.new_login}
-                                onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            />
-                            <input
-                                type="text"
-                                placeholder="Confirm New Login"
-                                value={loginData.confirm_login}
-                                onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
-                                className="w-full p-2 mb-4 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                disabled={isLoading}
-                            />
-                            <div className="flex justify-between">
+            {showChangeLoginForm && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 transition-opacity duration-300">
+                    <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md transform transition-all duration-300 scale-100">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-2xl font-bold text-center flex-grow">Change Login</h2>
+                            <button onClick={() => setShowChangeLoginForm(false)} className="text-gray-500 hover:text-gray-700">
+                                <i className="fas fa-times text-xl"></i>
+                            </button>
+                        </div>
+                        <form className="space-y-6">
+                            <div className="relative">
+                                <label htmlFor="new-login" className="block text-sm font-medium text-gray-700 mb-2">New Login</label>
+                                <div className="absolute inset-y-0 left-0 flex items-center pl-3 mt-6">
+                                    <i className="fas fa-user text-gray-400"></i>
+                                </div>
+                                <input
+                                    id="new-login"
+                                    type="text"
+                                    placeholder="Enter new login"
+                                    value={loginData.new_login}
+                                    onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
+                                    className="w-full pl-10 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                    disabled={isLoading}
+                                />
+                            </div>
+                            <div className="relative">
+                                <label htmlFor="confirm-login" className="block text-sm font-medium text-gray-700 mb-2">Confirm New Login</label>
+                                <div className="absolute inset-y-0 left-0 flex items-center pl-3 mt-6">
+                                    <i className="fas fa-user-check text-gray-400"></i>
+                                </div>
+                                <input
+                                    id="confirm-login"
+                                    type="text"
+                                    placeholder="Confirm new login"
+                                    value={loginData.confirm_login}
+                                    onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
+                                    className="w-full pl-10 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                    disabled={isLoading}
+                                />
+                            </div>
+                            <div className="flex justify-between gap-4">
                                 <button
+                                    type="button"
                                     onClick={handleChangeLogin}
-                                    className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                    className={`flex-1 bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-600 transition-all duration-200 flex items-center justify-center gap-2 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                     disabled={isLoading}
                                 >
-                                    {isLoading ? 'Updating...' : 'Update Login'}
+                                    <i className="fas fa-save"></i> {isLoading ? 'Updating...' : 'Update Login'}
                                 </button>
                                 <button
+                                    type="button"
                                     onClick={() => setShowChangeLoginForm(false)}
-                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                                    className="flex-1 bg-gray-500 text-white py-3 rounded-lg hover:bg-gray-600 transition-all duration-200 flex items-center justify-center gap-2"
                                 >
-                                    Cancel
+                                    <i className="fas fa-times"></i> Cancel
                                 </button>
                             </div>
-                        </div>
+                        </form>
                     </div>
-                );
-            }
+                </div>
+            )}
             const averageScore = operatorData?.evaluations?.length > 0
                     ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
                     : 0;
