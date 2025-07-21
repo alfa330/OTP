@@ -1096,5 +1096,41 @@ class Database:
             """)
             return cursor.fetchall()
 
+    def get_week_call_stats(self, operator_id, start_date, end_date):
+        with self._get_cursor() as cursor:
+            query = """
+                WITH latest_versions AS (
+                    SELECT 
+                        phone_number,
+                        month,
+                        MAX(created_at) as latest_date
+                    FROM calls
+                    WHERE operator_id = %s
+                    AND created_at >= %s
+                    AND created_at <= %s
+                    AND is_draft = FALSE
+                    GROUP BY phone_number, month
+                ),
+                latest_calls AS (
+                    SELECT 
+                        c.id,
+                        c.score
+                    FROM calls c
+                    JOIN latest_versions lv ON 
+                        c.phone_number = lv.phone_number AND 
+                        c.month = lv.month AND 
+                        c.created_at = lv.latest_date
+                    WHERE c.operator_id = %s
+                    AND c.is_draft = FALSE
+                )
+                SELECT COUNT(*), AVG(score)::float
+                FROM latest_calls
+            """
+            cursor.execute(query, (operator_id, start_date, end_date, operator_id))
+            result = cursor.fetchone()
+            count = result[0] or 0
+            avg = result[1] or 0.0
+            return count, avg
+
 # Initialize database
 db = Database()
