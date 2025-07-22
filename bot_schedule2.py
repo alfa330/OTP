@@ -1187,7 +1187,7 @@ def receive_call_evaluation():
             requester_id = int(request.headers.get('X-User-Id'))
             requester = db.get_user(id=requester_id)
             if not requester or requester[3] != 'admin':
-                return jsonify({"error": "Only admins can perform re-evaluations"}), 403
+                return jupytext({"error": "Only admins can perform re-evaluations"}), 403
 
         # Handle audio file upload to GCS
         audio_path = None
@@ -1208,13 +1208,7 @@ def receive_call_evaluation():
                     blob = bucket.blob(blob_path)
                     blob.upload_from_file(file.stream, content_type='audio/mpeg')
                     audio_path = "my-app-audio-uploads/" + blob_path  # Store the object path
-                    # Generate a signed URL for Telegram (valid for 15 minutes)
-                    expiration = datetime.utcnow() + timedelta(minutes=15)
-                    audio_signed_url = blob.generate_signed_url(
-                        expiration=expiration,
-                        method='GET',
-                        version='v4'
-                    )
+                    # Generate signed URL only if not draft (moved to notification for optimization)
                 except Exception as e:
                     logging.error(f"Error uploading file to GCS: {e}")
                     return jsonify({"error": f"Failed to upload audio file: {str(e)}"}), 500
@@ -1246,65 +1240,79 @@ def receive_call_evaluation():
             previous_version_id=previous_version_id if previous_version_id else None
         )
 
-        # Send Telegram notification for non-draft evaluations
+        # Send Telegram notification in background for non-draft evaluations
         if not is_draft:
-            message = (
-                f"👤 Оценивающий: <b>{evaluator[2]}</b>\n"
-                f"📋 Оператор: <b>{operator[2]}</b>\n"
-                f"📄 За месяц: <b>{month}</b>\n"
-                f"📱 Номер телефона: <b>{phone_number}</b>\n"
-                f"💯 Оценка: <b>{score}</b>\n"
-            )
-            if is_correction:
-                message += f"🔄 <b>Переоценка звонка (ID предыдущей версии: {previous_version_id})</b>\n"
-            if score < 100 and comment:
-                message += f"\n💬 Комментарий: \n{comment}\n"
-                
-            if admin:
-                telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendAudio" if audio_signed_url or audio_path else f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-                payload = {
-                    "chat_id": admin,
-                    "parse_mode": "HTML"
-                }
-                if audio_signed_url:
-                    payload["audio"] = audio_signed_url
-                    payload["caption"] = f"📞 <b>{'Переоценка звонка' if is_correction else 'Оценка звонка'}</b>\n" + message
-                elif audio_path:
-                    # Generate signed URL for existing audio_path if no new file was uploaded
-                    try:
-                        client = get_gcs_client()
-                        path_parts = audio_path.split('/', 1)
-                        if len(path_parts) == 2:
-                            bucket_name, blob_path = path_parts
-                            bucket = client.bucket(bucket_name)
-                            blob = bucket.blob(blob_path)
-                            if blob.exists():
-                                audio_signed_url = blob.generate_signed_url(
-                                    expiration=datetime.utcnow() + timedelta(minutes=15),
-                                    method='GET',
-                                    version='v4'
-                                )
-                                payload["audio"] = audio_signed_url
-                                payload["caption"] = f"📞 <b>{'Переоценка звонка' if is_correction else 'Оценка звонка'}</b>\n" + message
-                            else:
-                                payload["text"] = f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n" + message
-                        else:
-                            payload["text"] = f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n" + message
-                    except Exception as e:
-                        logging.error(f"Error generating signed URL for existing audio: {e}")
-                        payload["text"] = f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n" + message
-                else:
-                    payload["text"] = f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n" + message
-
-                response = requests.post(telegram_url, json=payload, timeout=10)
-                if response.status_code != 200:
-                    error_detail = response.json().get('description', 'Unknown error')
-                    logging.error(f"Telegram API error: {error_detail}")
+            threading.Thread(target=send_telegram_notification, args=(
+                evaluator[2], operator[2], month, phone_number, score, comment,
+                is_correction, previous_version_id, audio_path
+            )).start()
 
         return jsonify({"status": "success", "evaluation_id": evaluation_id}), 200
     except Exception as e:
         logging.error(f"Error processing call evaluation: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+def send_telegram_notification(evaluator_name, operator_name, month, phone_number, score, comment, is_correction, previous_version_id, audio_path):
+    try:
+        API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+        admin = os.getenv('TELEGRAM_ADMIN_CHAT_ID')
+        if not admin:
+            return  # No admin chat, skip silently
+
+        message = (
+            f"👤 Оценивающий: <b>{evaluator_name}</b>\n"
+            f"📋 Оператор: <b>{operator_name}</b>\n"
+            f"📄 За месяц: <b>{month}</b>\n"
+            f"📱 Номер телефона: <b>{phone_number}</b>\n"
+            f"💯 Оценка: <b>{score}</b>\n"
+        )
+        if is_correction:
+            message += f"🔄 <b>Переоценка звонка (ID предыдущей версии: {previous_version_id})</b>\n"
+        if score < 100 and comment:
+            message += f"\n💬 Комментарий: \n{comment}\n"
+
+        audio_signed_url = None
+        if audio_path:
+            try:
+                client = get_gcs_client()
+                path_parts = audio_path.split('/', 1)
+                if len(path_parts) == 2:
+                    bucket_name, blob_path = path_parts
+                    bucket = client.bucket(bucket_name)
+                    blob = bucket.blob(blob_path)
+                    if blob.exists():
+                        expiration = datetime.utcnow() + timedelta(minutes=15)
+                        audio_signed_url = blob.generate_signed_url(
+                            expiration=expiration,
+                            method='GET',
+                            version='v4'
+                        )
+            except Exception as e:
+                logging.error(f"Error generating signed URL for audio: {e}")
+                audio_signed_url = None
+
+        if audio_signed_url:
+            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendAudio"
+            payload = {
+                "chat_id": admin,
+                "audio": audio_signed_url,
+                "caption": f"📞 <b>{'Переоценка звонка' if is_correction else 'Оценка звонка'}</b>\n" + message,
+                "parse_mode": "HTML"
+            }
+        else:
+            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": admin,
+                "text": f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n" + message,
+                "parse_mode": "HTML"
+            }
+
+        response = requests.post(telegram_url, json=payload, timeout=10)
+        if response.status_code != 200:
+            error_detail = response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error: {error_detail}")
+    except Exception as e:
+        logging.error(f"Error sending Telegram notification: {e}")
 
 @app.route('/api/admin/add_operator', methods=['POST'])
 @require_api_key
