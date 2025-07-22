@@ -14,8 +14,27 @@ import io
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import gc
+from psycopg2.pool import ThreadedConnectionPool  # Added for connection pooling
 
 logging.basicConfig(level=logging.INFO)
+
+# Global connection pool
+MIN_CONN = 1
+MAX_CONN = 20  # Adjust based on expected load
+POOL = None
+
+def get_pool():
+    global POOL
+    if POOL is None:
+        conn_params = {
+            'dbname': os.getenv('POSTGRES_DB'),
+            'user': os.getenv('POSTGRES_USER'),
+            'password': os.getenv('POSTGRES_PASSWORD'),
+            'host': os.getenv('POSTGRES_HOST'),
+            'port': os.getenv('POSTGRES_PORT', 5432)
+        }
+        POOL = ThreadedConnectionPool(MIN_CONN, MAX_CONN, **conn_params)
+    return POOL
 
 def process_timesheet(file_url, supervisor_id):
     """
@@ -55,6 +74,7 @@ def process_timesheet(file_url, supervisor_id):
         prev_month = datetime.now().replace(day=1) - timedelta(days=1)
         prev_month_str = prev_month.strftime('%Y-%m')
         
+        db = Database()  # Assuming db is global or accessible
         with db._get_cursor() as cursor:
             cursor.execute("""
                 SELECT sheet_name FROM processed_sheets 
@@ -198,22 +218,16 @@ def process_timesheet(file_url, supervisor_id):
 
 class Database:
     def __init__(self):
-        self.conn_params = {
-            'dbname': os.getenv('POSTGRES_DB'),
-            'user': os.getenv('POSTGRES_USER'),
-            'password': os.getenv('POSTGRES_PASSWORD'),
-            'host': os.getenv('POSTGRES_HOST'),
-            'port': os.getenv('POSTGRES_PORT', 5432)
-        }
         self._init_db()
 
     @contextmanager
     def _get_connection(self):
-        conn = psycopg2.connect(**self.conn_params)
+        pool = get_pool()
+        conn = pool.getconn()
         try:
             yield conn
         finally:
-            conn.close()
+            pool.putconn(conn)
 
     @contextmanager
     def _get_cursor(self):
@@ -319,14 +333,22 @@ class Database:
                 );
             """)
 
-            # Indexes
+            # Optimized Indexes (added more based on query patterns)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
                 CREATE INDEX IF NOT EXISTS idx_calls_operator_id ON calls(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_calls_operator_month ON calls(operator_id, month);
+                CREATE INDEX IF NOT EXISTS idx_calls_phone_number ON calls(phone_number);
+                CREATE INDEX IF NOT EXISTS idx_calls_created_at ON calls(created_at);
+                CREATE INDEX IF NOT EXISTS idx_calls_evaluator_id ON calls(evaluator_id);
+                CREATE INDEX IF NOT EXISTS idx_calls_is_draft ON calls(is_draft);
                 CREATE INDEX IF NOT EXISTS idx_work_hours_operator_id ON work_hours(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_work_hours_month ON work_hours(month);
-                CREATE INDEX IF NOT EXISTS idx_calls_operator_month ON calls(operator_id, month);
-                CREATE INDEX IF NOT EXISTS idx_directions_name ON directions(name);           
+                CREATE INDEX IF NOT EXISTS idx_directions_name ON directions(name);
+                CREATE INDEX IF NOT EXISTS idx_directions_is_active ON directions(is_active);
+                CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+                CREATE INDEX IF NOT EXISTS idx_users_supervisor_id ON users(supervisor_id);
+                CREATE INDEX IF NOT EXISTS idx_users_login ON users(login);
             """)
 
     def create_user(self, telegram_id, name, role, direction_id=None, hire_date=None, supervisor_id=None, login=None, password=None, scores_table_url=None):
@@ -407,6 +429,7 @@ class Database:
             cursor.execute("""
                 SELECT id, name, has_file_upload, criteria, is_active
                 FROM directions
+                WHERE is_active = TRUE  -- Added filter for performance
                 ORDER BY name
             """)
             return [
@@ -440,7 +463,6 @@ class Database:
             new_direction_names = {d['name'] for d in directions}
             directions_to_deactivate = []
             insert_values = []
-            update_values = []
             
             # 2. Подготовка данных для пакетной обработки
             for direction in directions:
@@ -627,7 +649,7 @@ class Database:
         with self._get_cursor() as cursor:
             # Проверка существования direction_id одним запросом
             if direction_id:
-                cursor.execute("SELECT 1 FROM directions WHERE id = %s", (direction_id,))
+                cursor.execute("SELECT 1 FROM directions WHERE id = %s AND is_active = TRUE", (direction_id,))  # Added is_active filter
                 if not cursor.fetchone():
                     direction_id = None
 
@@ -878,35 +900,35 @@ class Database:
             # Получаем текущий месяц
             current_month = datetime.now().strftime('%Y-%m')
             
-            # Получаем данные о часах
+            # Получаем данные о часах и оценках в одном запросе для оптимизации
             cursor.execute("""
-                SELECT regular_hours, training_hours, fines, norm_hours 
-                FROM work_hours 
-                WHERE operator_id = %s AND month = %s
-            """, (operator_id, current_month))
-            hours_data = cursor.fetchone()
+                SELECT 
+                    wh.regular_hours, 
+                    wh.training_hours, 
+                    wh.fines, 
+                    wh.norm_hours,
+                    (SELECT COUNT(*) FROM calls WHERE operator_id = %s AND month = %s AND is_draft = FALSE) AS call_count,
+                    (SELECT AVG(score) FROM calls WHERE operator_id = %s AND month = %s AND is_draft = FALSE) AS avg_score
+                FROM work_hours wh
+                WHERE wh.operator_id = %s AND wh.month = %s
+            """, (operator_id, current_month, operator_id, current_month, operator_id, current_month))
+            row = cursor.fetchone()
             
-            # Получаем данные об оценках
-            cursor.execute("""
-                SELECT COUNT(*), AVG(score) 
-                FROM calls 
-                WHERE operator_id = %s AND month = %s
-            """, (operator_id, current_month))
-            evaluations_data = cursor.fetchone()
+            if row:
+                regular_hours, training_hours, fines, norm_hours, call_count, avg_score = row
+            else:
+                regular_hours = training_hours = fines = norm_hours = call_count = avg_score = 0
             
-            # Рассчитываем процент выполнения нормы
-            norm_hours = hours_data[3] if hours_data and hours_data[3] else 0
-            regular_hours = hours_data[0] if hours_data and hours_data[0] else 0
             percent_complete = (regular_hours / norm_hours * 100) if norm_hours > 0 else 0
             
             return {
-                'regular_hours': hours_data[0] if hours_data else 0,
-                'training_hours': hours_data[1] if hours_data else 0,
-                'fines': hours_data[2] if hours_data else 0,
+                'regular_hours': regular_hours,
+                'training_hours': training_hours,
+                'fines': fines,
                 'norm_hours': norm_hours,
                 'percent_complete': round(percent_complete, 2),
-                'call_count': evaluations_data[0] or 0,
-                'avg_score': float(evaluations_data[1]) if evaluations_data[1] else 0
+                'call_count': call_count,
+                'avg_score': float(avg_score) if avg_score else 0
             }
 
     def get_operators_by_supervisor(self, supervisor_id):
@@ -1043,7 +1065,7 @@ class Database:
                 u.name as evaluator_name
             FROM calls c
             JOIN latest_calls lc ON c.id = lc.id
-            LEFT JOIN directions d ON c.direction_id = d.id
+            LEFT JOIN directions d ON c.direction_id = d.id AND d.is_active = TRUE  -- Added is_active filter
             LEFT JOIN users u ON c.evaluator_id = u.id
             WHERE c.operator_id = %s
         """
@@ -1095,6 +1117,42 @@ class Database:
                 WHERE role = 'operator'
             """)
             return cursor.fetchall()
+
+    def get_week_call_stats(self, operator_id, start_date, end_date):
+        with self._get_cursor() as cursor:
+            query = """
+                WITH latest_versions AS (
+                    SELECT 
+                        phone_number,
+                        month,
+                        MAX(created_at) as latest_date
+                    FROM calls
+                    WHERE operator_id = %s
+                    AND created_at >= %s
+                    AND created_at <= %s
+                    AND is_draft = FALSE
+                    GROUP BY phone_number, month
+                ),
+                latest_calls AS (
+                    SELECT 
+                        c.id,
+                        c.score
+                    FROM calls c
+                    JOIN latest_versions lv ON 
+                        c.phone_number = lv.phone_number AND 
+                        c.month = lv.month AND 
+                        c.created_at = lv.latest_date
+                    WHERE c.operator_id = %s
+                    AND c.is_draft = FALSE
+                )
+                SELECT COUNT(*), AVG(score)::float
+                FROM latest_calls
+            """
+            cursor.execute(query, (operator_id, start_date, end_date, operator_id))
+            result = cursor.fetchone()
+            count = result[0] or 0
+            avg = result[1] or 0.0
+            return count, avg
 
 # Initialize database
 db = Database()
