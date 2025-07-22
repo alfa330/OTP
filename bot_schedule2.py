@@ -1160,9 +1160,9 @@ def receive_call_evaluation():
             return jsonify({"error": "Missing form data"}), 400
 
         required_fields = ['evaluator', 'operator', 'phone_number', 'score', 'comment', 'month', 'is_draft']
-        for field in required_fields:
-            if field not in request.form:
-                return jsonify({"error": f"Missing required field: {field}"}), 400
+        missing_fields = [field for field in required_fields if field not in request.form]
+        if missing_fields:
+            return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
 
         evaluator_name = request.form['evaluator']
         operator_name = request.form['operator']
@@ -1182,38 +1182,34 @@ def receive_call_evaluation():
         if not evaluator or not operator:
             return jsonify({"error": "Evaluator or operator not found"}), 404
 
-        # Authorization check for re-evaluation
         if is_correction:
             requester_id = int(request.headers.get('X-User-Id'))
             requester = db.get_user(id=requester_id)
             if not requester or requester[3] != 'admin':
-                return jupytext({"error": "Only admins can perform re-evaluations"}), 403
+                return jsonify({"error": "Only admins can perform re-evaluations"}), 403
 
-        # Handle audio file upload to GCS
         audio_path = None
-        audio_signed_url = None
+        audio_data = None
+        blob_path = None
+        bucket_name = None
+        has_new_audio = False
+
         if 'audio_file' in request.files:
             file = request.files['audio_file']
             if file and file.filename:
-                # Generate a unique filename
+                has_new_audio = True
+                try:
+                    audio_data = file.read()
+                except Exception as e:
+                    logging.error(f"Error reading audio file: {e}")
+                    return jsonify({"error": f"Failed to process audio file: {str(e)}"}), 500
                 filename = secure_filename(f"{uuid.uuid4()}.mp3")
                 bucket_name = os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
                 upload_folder = os.getenv('UPLOAD_FOLDER', 'Uploads/')
                 blob_path = f"{upload_folder}{filename}"
+                audio_path = "my-app-audio-uploads/" + blob_path
 
-                try:
-                    # Upload to Google Cloud Storage
-                    client = get_gcs_client()
-                    bucket = client.bucket(bucket_name)
-                    blob = bucket.blob(blob_path)
-                    blob.upload_from_file(file.stream, content_type='audio/mpeg')
-                    audio_path = "my-app-audio-uploads/" + blob_path  # Store the object path
-                    # Generate signed URL only if not draft (moved to notification for optimization)
-                except Exception as e:
-                    logging.error(f"Error uploading file to GCS: {e}")
-                    return jsonify({"error": f"Failed to upload audio file: {str(e)}"}), 500
         elif is_correction and previous_version_id:
-            # Retrieve audio_path from previous version if this is a correction and no new audio is provided
             try:
                 with db._get_cursor() as cursor:
                     cursor.execute("SELECT audio_path FROM calls WHERE id = %s", (previous_version_id,))
@@ -1240,11 +1236,16 @@ def receive_call_evaluation():
             previous_version_id=previous_version_id if previous_version_id else None
         )
 
-        # Send Telegram notification in background for non-draft evaluations
-        if not is_draft:
+        if has_new_audio or (not is_draft and audio_path):
+            threading.Thread(target=background_upload_and_notify, args=(
+                audio_data, bucket_name, blob_path, evaluation_id, is_draft,
+                evaluator[2], operator[2], month, phone_number, score, comment,
+                is_correction, previous_version_id, audio_path if not has_new_audio else None
+            )).start()
+        elif not is_draft:
             threading.Thread(target=send_telegram_notification, args=(
                 evaluator[2], operator[2], month, phone_number, score, comment,
-                is_correction, previous_version_id, audio_path
+                is_correction, previous_version_id, None
             )).start()
 
         return jsonify({"status": "success", "evaluation_id": evaluation_id}), 200
@@ -1252,12 +1253,38 @@ def receive_call_evaluation():
         logging.error(f"Error processing call evaluation: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+def background_upload_and_notify(audio_data, bucket_name, blob_path, evaluation_id, is_draft,
+                                 evaluator_name, operator_name, month, phone_number, score, comment,
+                                 is_correction, previous_version_id, existing_audio_path):
+    audio_path = existing_audio_path or ("my-app-audio-uploads/" + blob_path if blob_path else None)
+    upload_success = False
+    if audio_data:
+        try:
+            client = get_gcs_client()
+            bucket = client.bucket(bucket_name)
+            blob = bucket.blob(blob_path)
+            blob.upload_from_string(audio_data, content_type='audio/mpeg')
+            upload_success = True
+        except Exception as e:
+            logging.error(f"Error uploading file to GCS in background: {e}")
+            try:
+                with db._get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("UPDATE calls SET audio_path = NULL WHERE id = %s", (evaluation_id,))
+                        conn.commit()
+            except Exception as update_e:
+                logging.error(f"Error updating DB after failed upload: {update_e}")
+            audio_path = None
+    if not is_draft:
+        send_telegram_notification(evaluator_name, operator_name, month, phone_number, score, comment,
+                                   is_correction, previous_version_id, audio_path if (upload_success or existing_audio_path) else None)
+
 def send_telegram_notification(evaluator_name, operator_name, month, phone_number, score, comment, is_correction, previous_version_id, audio_path):
     try:
         API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
         admin = os.getenv('TELEGRAM_ADMIN_CHAT_ID')
         if not admin:
-            return  # No admin chat, skip silently
+            return
 
         message = (
             f"👤 Оценивающий: <b>{evaluator_name}</b>\n"
@@ -1289,23 +1316,17 @@ def send_telegram_notification(evaluator_name, operator_name, month, phone_numbe
                         )
             except Exception as e:
                 logging.error(f"Error generating signed URL for audio: {e}")
-                audio_signed_url = None
 
+        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendAudio" if audio_signed_url else f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": admin,
+            "parse_mode": "HTML"
+        }
         if audio_signed_url:
-            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendAudio"
-            payload = {
-                "chat_id": admin,
-                "audio": audio_signed_url,
-                "caption": f"📞 <b>{'Переоценка звонка' if is_correction else 'Оценка звонка'}</b>\n" + message,
-                "parse_mode": "HTML"
-            }
+            payload["audio"] = audio_signed_url
+            payload["caption"] = f"📞 <b>{'Переоценка звонка' if is_correction else 'Оценка звонка'}</b>\n" + message
         else:
-            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": admin,
-                "text": f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n" + message,
-                "parse_mode": "HTML"
-            }
+            payload["text"] = f"💬 <b>{'Переоценка чата' if is_correction else 'Оценка чата'}</b>\n" + message
 
         response = requests.post(telegram_url, json=payload, timeout=10)
         if response.status_code != 200:
