@@ -27,6 +27,10 @@ from werkzeug.utils import secure_filename
 from google.cloud import storage as gcs_storage
 import tempfile
 from datetime import datetime, timedelta
+import time
+
+os.environ['TZ'] = 'Asia/Almaty'
+time.tzset()
 
 # === Логирование =====================================================================================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
