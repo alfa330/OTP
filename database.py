@@ -290,6 +290,14 @@ class Database:
             """)
             # Calls table
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS operator_activity_logs (
+                    id SERIAL PRIMARY KEY,
+                    operator_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    is_active BOOLEAN NOT NULL,
+                    change_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS calls (
                     id SERIAL PRIMARY KEY,
                     evaluator_id INTEGER NOT NULL REFERENCES users(id),
@@ -1175,5 +1183,19 @@ class Database:
                 ORDER BY name
             """)
             return [{"id": row[0], "name": row[1]} for row in cursor.fetchall()]
+    
+    def log_activity(self, operator_id, is_active):
+        try:
+            with self._get_cursor() as cursor:  # Предполагая, что 'connection' — это ваша psycopg2-соединение
+                cursor.execute("""
+                    INSERT INTO operator_activity_logs (operator_id, is_active)
+                    VALUES (%s, %s)
+                """, (operator_id, is_active))
+                self.connection.commit()
+            return True
+        except Exception as e:
+            logging.error(f"Error logging activity: {e}")
+            self.connection.rollback()
+            return False
 # Initialize database
 db = Database()

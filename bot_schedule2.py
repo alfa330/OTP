@@ -1389,11 +1389,23 @@ def toggle_user_active():
         if not user or user[3] != 'operator':
             return jsonify({"error": "Only operators can toggle active status"}), 403
 
-        success = db.set_user_active(user_id, data['is_active'])
+        current_active = user[10]  # Предполагая, что user — это кортеж и is_active на позиции 10
+        new_active = data['is_active']
+
+        if current_active == new_active:
+            return jsonify({"status": "unchanged", "message": "Active status is already set to the requested value"})
+
+        success = db.set_user_active(user_id, new_active)
         if not success:
             return jsonify({"error": "Failed to update active status"}), 500
 
-        return jsonify({"status": "success", "message": "Active status updated"})
+        log_success = db.log_activity(user_id, new_active)
+        if not log_success:
+            # Опционально: можно откатить обновление, если лог не удался, но для простоты продолжаем с предупреждением
+            logging.warning("Active status updated but logging failed")
+            return jsonify({"status": "partial_success", "message": "Active status updated, but logging failed"}), 500
+
+        return jsonify({"status": "success", "message": "Active status updated and logged"})
     except Exception as e:
         logging.error(f"Error toggling active status: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
