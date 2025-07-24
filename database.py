@@ -614,7 +614,7 @@ class Database:
                 params.append(value)
         
         query = f"""
-            SELECT u.id, u.telegram_id, u.name, u.role, d.name, u.hire_date, u.supervisor_id, u.login, u.hours_table_url, u.scores_table_url
+            SELECT u.id, u.telegram_id, u.name, u.role, d.name, u.hire_date, u.supervisor_id, u.login, u.hours_table_url, u.scores_table_url, u.is_active
             FROM users u
             LEFT JOIN directions d ON u.direction_id = d.id
             WHERE {' AND '.join(conditions)}
