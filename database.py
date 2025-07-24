@@ -257,6 +257,7 @@ class Database:
                     supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     hours_table_url TEXT,
                     scores_table_url TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT FALSE,
                     CONSTRAINT unique_name_role UNIQUE (name, role)
                 );
             """)
@@ -349,6 +350,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
                 CREATE INDEX IF NOT EXISTS idx_users_supervisor_id ON users(supervisor_id);
                 CREATE INDEX IF NOT EXISTS idx_users_login ON users(login);
+                CREATE INDEX IF NOT EXISTS idx_users_is_active ON users(is_active);
             """)
 
     def create_user(self, telegram_id, name, role, direction_id=None, hire_date=None, supervisor_id=None, login=None, password=None, scores_table_url=None):
@@ -1154,5 +1156,24 @@ class Database:
             avg = result[1] or 0.0
             return count, avg
 
+    def set_user_active(self, user_id, is_active):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE users 
+                SET is_active = %s
+                WHERE id = %s AND role = 'operator'
+                RETURNING id
+            """, (is_active, user_id))
+            return cursor.fetchone() is not None
+    
+    def get_active_operators(self):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, name 
+                FROM users 
+                WHERE role = 'operator' AND is_active = TRUE
+                ORDER BY name
+            """)
+            return [{"id": row[0], "name": row[1]} for row in cursor.fetchall()]
 # Initialize database
 db = Database()

@@ -1375,6 +1375,38 @@ def add_operator():
     except Exception as e:
         logging.error(f"Error adding operator: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    
+@app.route('/api/user/toggle_active', methods=['POST'])
+@require_api_key
+def toggle_user_active():
+    try:
+        data = request.get_json()
+        if not data or 'is_active' not in data:
+            return jsonify({"error": "Missing is_active field"}), 400
+
+        user_id = int(request.headers.get('X-User-Id'))
+        user = db.get_user(id=user_id)
+        if not user or user[3] != 'operator':
+            return jsonify({"error": "Only operators can toggle active status"}), 403
+
+        success = db.set_user_active(user_id, data['is_active'])
+        if not success:
+            return jsonify({"error": "Failed to update active status"}), 500
+
+        return jsonify({"status": "success", "message": "Active status updated"})
+    except Exception as e:
+        logging.error(f"Error toggling active status: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/active_operators', methods=['GET'])
+@require_api_key
+def get_active_operators():
+    try:
+        operators = db.get_active_operators()
+        return jsonify({"status": "success", "operators": operators})
+    except Exception as e:
+        logging.error(f"Error fetching active operators: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False, use_reloader=False)
