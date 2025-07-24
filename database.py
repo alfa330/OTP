@@ -15,8 +15,12 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import gc
 from psycopg2.pool import ThreadedConnectionPool  # Added for connection pooling
+import time
 
 logging.basicConfig(level=logging.INFO)
+
+os.environ['TZ'] = 'Asia/Almaty'
+time.tzset()
 
 # Global connection pool
 MIN_CONN = 1
