@@ -1186,16 +1186,14 @@ class Database:
     
     def log_activity(self, operator_id, is_active):
         try:
-            with self._get_cursor() as cursor:  # Предполагая, что 'connection' — это ваша psycopg2-соединение
+            with self._get_cursor() as cursor:
                 cursor.execute("""
                     INSERT INTO operator_activity_logs (operator_id, is_active)
                     VALUES (%s, %s)
                 """, (operator_id, is_active))
-                self.connection.commit()
             return True
         except Exception as e:
             logging.error(f"Error logging activity: {e}")
-            self.connection.rollback()
             return False
 # Initialize database
 db = Database()
