@@ -1262,7 +1262,7 @@ class Database:
                         raise ValueError("Invalid month")
                 except:
                     raise ValueError("Invalid month format. Use YYYY-MM")
-
+            logging.info(f"Generating report for supervisor {supervisor_id} for month {year}-{mon:02d}")
             month_str = f"{year}-{mon:02d}"
             filename = f"monthly_report_supervisor_{supervisor_id}_{month_str}.xlsx"
 
@@ -1272,7 +1272,7 @@ class Database:
             month_end = date(year, mon, days_in_month)
             end_date = min(month_end, current_date)
             dates = [month_start_date + timedelta(days=i) for i in range((end_date - month_start_date).days + 1)]
-
+            logging.info(f"Generating report for supervisor {supervisor_id} for month {month_str} until {end_date}")
             # Определяем end_time как конец последнего дня периода
             end_time = datetime.combine(end_date, time(23, 59, 59))
 
@@ -1307,7 +1307,7 @@ class Database:
             logs_per_op = defaultdict(list)
             counts_per_op = defaultdict(lambda: defaultdict(lambda: {'act': 0, 'deact': 0}))
             total_counts_per_op = defaultdict(lambda: {'act': 0, 'deact': 0})
-            
+            logging.info(f"Processing {len(all_logs)} logs for {len(operators)} operators")
             for log in all_logs:
                 op_id, change_time, is_active = log
                 dt = change_time.date()
@@ -1331,7 +1331,7 @@ class Database:
                 ws_summary.cell(1, col).value = dt.strftime("%Y-%m-%d")
             ws_summary.cell(1, len(dates) + 2).value = "Итого активаций"
             ws_summary.cell(1, len(dates) + 3).value = "Итого деактиваций"
-
+            logging.info("Filling summary sheet")
             # Стили для текста
             green_font = InlineFont(color="00FF00")
             red_font = InlineFont(color="FF0000")
@@ -1391,7 +1391,7 @@ class Database:
             # Создаём листы для операторов
             green_fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
             red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
-
+            logging.info("Creating individual operator sheets")
             for op_id, name in operators_dict.items():
                 ws = wb.create_sheet(title=name[:31])
 
@@ -1461,7 +1461,7 @@ class Database:
                     ws.cell(current_row, 4).value = dur_str
 
                     current_row += 1
-
+                logging.info(f"Processed {len(logs)} logs for operator {name}")
                 # Добавляем итого для последнего дня
                 if current_day is not None:
                     ws.cell(current_row, 1).value = current_day.strftime("%Y-%m-%d")
@@ -1493,7 +1493,7 @@ class Database:
                 # Авто-подгонка ширины столбцов
                 for col in ['A', 'B', 'C', 'D']:
                     ws.column_dimensions[col].auto_size = True
-
+            logging.info("All operator sheets created successfully")
             # Сохраняем в BytesIO
             output = BytesIO()
             wb.save(output)
