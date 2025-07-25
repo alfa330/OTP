@@ -12,7 +12,7 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.dispatcher import FSMContext
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from functools import wraps
 from openpyxl import load_workbook
@@ -1450,7 +1450,7 @@ def get_monthly_report():
         if not filename or not content:
             return jsonify({"error": "Failed to generate report"}), 500
 
-        return os.send_file(
+        return send_file(
             BytesIO(content),
             as_attachment=True,
             download_name=filename,
