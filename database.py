@@ -3,7 +3,7 @@ import logging
 import psycopg2
 from contextlib import contextmanager
 from passlib.hash import pbkdf2_sha256
-from datetime import datetime, timedelta, date, time
+from datetime import datetime, timedelta, date, time as dt_time
 import time
 import uuid
 import requests
@@ -1274,7 +1274,7 @@ class Database:
             dates = [month_start_date + timedelta(days=i) for i in range((end_date - month_start_date).days + 1)]
             logging.info(f"Generating report for supervisor {supervisor_id} for month {month_str} until {end_date}")
             # Определяем end_time как конец последнего дня периода
-            end_time = datetime.combine(end_date, time(23, 59, 59))
+            end_time = datetime.combine(end_date, dt_time(23, 59, 59))
             logging.info(f"End time for logs: {end_time}")
             # Получаем данные с использованием курсора класса
             with self._get_cursor() as cursor:
