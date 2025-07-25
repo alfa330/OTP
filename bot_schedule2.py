@@ -1430,23 +1430,27 @@ def get_monthly_report():
     try:
         supervisor_id = request.args.get('supervisor_id')
         month = request.args.get('month')
-        if not supervisor_id:
-            return jsonify({"error": "Missing supervisor_id parameter"}), 400
-
-        supervisor_id = int(supervisor_id)
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 404
 
-        if requester[3] != 'admin' and (requester[3] != 'sv' or requester_id != supervisor_id):
+        if not supervisor_id:
+            if requester[3] == 'sv':
+                supervisor_id = requester_id
+            else:
+                return jsonify({"error": "supervisor_id required"}), 400
+        else:
+            supervisor_id = int(supervisor_id)
+
+        if requester[3] != 'admin' and (requester[3] != 'sv' or supervisor_id != requester_id):
             return jsonify({"error": "Unauthorized to access this report"}), 403
 
         filename, content = db.generate_monthly_report(supervisor_id, month)
         if not filename or not content:
             return jsonify({"error": "Failed to generate report"}), 500
 
-        return send_file(
+        return os.send_file(
             BytesIO(content),
             as_attachment=True,
             download_name=filename,
