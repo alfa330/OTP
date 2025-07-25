@@ -1449,7 +1449,7 @@ def get_monthly_report():
         filename, content = db.generate_monthly_report(supervisor_id, month)
         if not filename or not content:
             return jsonify({"error": "Failed to generate report"}), 500
-
+        logging.info(f"Monthly report generated for supervisor {supervisor_id} for month {month}: {filename}")
         return send_file(
             BytesIO(content),
             as_attachment=True,
