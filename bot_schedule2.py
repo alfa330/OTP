@@ -1446,10 +1446,12 @@ def get_monthly_report():
         if requester[3] != 'admin' and (requester[3] != 'sv' or supervisor_id != requester_id):
             return jsonify({"error": "Unauthorized to access this report"}), 403
 
+        logging.info("Начало генерации отчета")
+
         filename, content = db.generate_monthly_report(supervisor_id, month)
         if not filename or not content:
             return jsonify({"error": "Failed to generate report"}), 500
-        logging.info(f"Monthly report generated for supervisor {supervisor_id} for month {month}: {filename}")
+        
         return send_file(
             BytesIO(content),
             as_attachment=True,
