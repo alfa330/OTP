@@ -1275,7 +1275,7 @@ class Database:
             logging.info(f"Generating report for supervisor {supervisor_id} for month {month_str} until {end_date}")
             # Определяем end_time как конец последнего дня периода
             end_time = datetime.combine(end_date, time(23, 59, 59))
-
+            logging.info(f"End time for logs: {end_time}")
             # Получаем данные с использованием курсора класса
             with self._get_cursor() as cursor:
                 # Получаем список операторов супервайзера
@@ -1302,7 +1302,7 @@ class Database:
                     ORDER BY o.operator_id, o.change_time
                 """, (supervisor_id, month_start, end_date))
                 all_logs = cursor.fetchall()
-
+            logging.info(f"Fetched {len(all_logs)} logs for supervisor {supervisor_id} from {month_start} to {end_date}")
             # Группируем логи по операторам и вычисляем counts для summary
             logs_per_op = defaultdict(list)
             counts_per_op = defaultdict(lambda: defaultdict(lambda: {'act': 0, 'deact': 0}))
