@@ -1347,37 +1347,38 @@ class Database:
                     cell = ws_summary.cell(row, col)
                     rt = CellRichText([
                         TextBlock(green_font, str(activations)),
-                        TextBlock(InlineFont(), " | "),
+                        " | ",
                         TextBlock(red_font, str(deactivations))
                     ])
                     cell.value = rt
                     cell.alignment = Alignment(horizontal='center', vertical='center', wrapText=True)
 
+                # Итоговые столбцы
+                cell_act = ws_summary.cell(row, len(dates) + 2)
+                cell_act.value = CellRichText([TextBlock(green_font, str(total_counts_per_op[op_id]['act']))])
+                cell_act.alignment = Alignment(horizontal='center', vertical='center')
 
-            # Итоговые столбцы (use plain string and set font color)
-            cell_act = ws_summary.cell(row, len(dates) + 2)
-            cell_act.value = str(total_counts_per_op[op_id]['act'])
-            cell_act.font = Font(color="00FF00")
-            cell_act.alignment = Alignment(horizontal='center', vertical='center')
+                cell_deact = ws_summary.cell(row, len(dates) + 3)
+                cell_deact.value = CellRichText([TextBlock(red_font, str(total_counts_per_op[op_id]['deact']))])
+                cell_deact.alignment = Alignment(horizontal='center', vertical='center')
 
-            cell_deact = ws_summary.cell(row, len(dates) + 3)
-            cell_deact.value = str(total_counts_per_op[op_id]['deact'])
-            cell_deact.font = Font(color="FF0000")
-            cell_deact.alignment = Alignment(horizontal='center', vertical='center')
-
-            row += 1
+                row += 1
 
             # Легенда
             ws_summary.cell(row + 1, 1).value = "Легенда:"
-            ws_summary.cell(row + 2, 1).value = "Зелёный - Количество активаций"
-            ws_summary.cell(row + 2, 1).font = Font(color="00FF00")
-            ws_summary.cell(row + 3, 1).value = "Красный - Количество деактиваций"
-            ws_summary.cell(row + 3, 1).font = Font(color="FF0000")
+            ws_summary.cell(row + 2, 1).value = CellRichText([
+                TextBlock(green_font, "Зелёный"),
+                " - Количество активаций"
+            ])
+            ws_summary.cell(row + 3, 1).value = CellRichText([
+                TextBlock(red_font, "Красный"),
+                " - Количество деактиваций"
+            ])
 
             # Добавляем таблицу в Summary
             tab = Table(displayName="SummaryTable", ref=f"A1:{ws_summary.cell(row=row-1, column=len(dates)+3).coordinate}")
             style = TableStyleInfo(name="TableStyleMedium2", showFirstColumn=True,
-                                   showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+                                showLastColumn=False, showRowStripes=True, showColumnStripes=False)
             tab.tableStyleInfo = style
             ws_summary.add_table(tab)
 
@@ -1421,7 +1422,7 @@ class Database:
                         deacts = counts_per_op[op_id][current_day]['deact']
                         rt = CellRichText([
                             TextBlock(green_font, str(acts)),
-                            TextBlock(InlineFont(), " | "),
+                            " | ",
                             TextBlock(red_font, str(deacts))
                         ])
                         ws.cell(current_row, 3).value = rt
@@ -1469,7 +1470,7 @@ class Database:
                     deacts = counts_per_op[op_id][current_day]['deact']
                     rt = CellRichText([
                         TextBlock(green_font, str(acts)),
-                        TextBlock(InlineFont(), " | "),
+                        " | ",
                         TextBlock(red_font, str(deacts))
                     ])
                     ws.cell(current_row, 3).value = rt
@@ -1485,7 +1486,7 @@ class Database:
                     sanitized_name = sanitize_table_name(f"{name}_{op_id}")
                     tab_op = Table(displayName=f"Table_{sanitized_name}", ref=f"A1:D{current_row-1}")
                     style_op = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False,
-                                              showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+                                            showLastColumn=False, showRowStripes=True, showColumnStripes=False)
                     tab_op.tableStyleInfo = style_op
                     ws.add_table(tab_op)
 
