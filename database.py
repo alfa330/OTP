@@ -1267,7 +1267,7 @@ class Database:
             filename = f"monthly_report_supervisor_{supervisor_id}_{month_str}.xlsx"
 
             month_start_date = date(year, mon, 1)
-            month_start = datetime.datetime(year, mon, 1, 0, 0, 0)
+            month_start = datetime(year, mon, 1, 0, 0, 0)
             days_in_month = calendar.monthrange(year, mon)[1]
             month_end = date(year, mon, days_in_month)
             end_date = min(month_end, current_date)
