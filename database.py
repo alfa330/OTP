@@ -1483,7 +1483,7 @@ class Database:
 
                 # Добавляем таблицу
                 if current_row > 2:
-                    sanitized_name = sanitize_table_name(name[:10])
+                    sanitized_name = sanitize_table_name(f"{name}_{op_id}")
                     tab_op = Table(displayName=f"Table_{sanitized_name}", ref=f"A1:D{current_row-1}")
                     style_op = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False,
                                               showLastColumn=False, showRowStripes=True, showColumnStripes=False)
