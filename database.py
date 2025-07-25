@@ -1262,7 +1262,7 @@ class Database:
                         raise ValueError("Invalid month")
                 except:
                     raise ValueError("Invalid month format. Use YYYY-MM")
-            logging.info(f"Generating report for supervisor {supervisor_id} for month {year}-{mon:02d}")
+
             month_str = f"{year}-{mon:02d}"
             filename = f"monthly_report_supervisor_{supervisor_id}_{month_str}.xlsx"
 
@@ -1272,10 +1272,10 @@ class Database:
             month_end = date(year, mon, days_in_month)
             end_date = min(month_end, current_date)
             dates = [month_start_date + timedelta(days=i) for i in range((end_date - month_start_date).days + 1)]
-            logging.info(f"Generating report for supervisor {supervisor_id} for month {month_str} until {end_date}")
+
             # Определяем end_time как конец последнего дня периода
             end_time = datetime.combine(end_date, dt_time(23, 59, 59))
-            logging.info(f"End time for logs: {end_time}")
+
             # Получаем данные с использованием курсора класса
             with self._get_cursor() as cursor:
                 # Получаем список операторов супервайзера
@@ -1302,12 +1302,12 @@ class Database:
                     ORDER BY o.operator_id, o.change_time
                 """, (supervisor_id, month_start, end_date))
                 all_logs = cursor.fetchall()
-            logging.info(f"Fetched {len(all_logs)} logs for supervisor {supervisor_id} from {month_start} to {end_date}")
+
             # Группируем логи по операторам и вычисляем counts для summary
             logs_per_op = defaultdict(list)
             counts_per_op = defaultdict(lambda: defaultdict(lambda: {'act': 0, 'deact': 0}))
             total_counts_per_op = defaultdict(lambda: {'act': 0, 'deact': 0})
-            logging.info(f"Processing {len(all_logs)} logs for {len(operators)} operators")
+
             for log in all_logs:
                 op_id, change_time, is_active = log
                 dt = change_time.date()
@@ -1331,7 +1331,7 @@ class Database:
                 ws_summary.cell(1, col).value = dt.strftime("%Y-%m-%d")
             ws_summary.cell(1, len(dates) + 2).value = "Итого активаций"
             ws_summary.cell(1, len(dates) + 3).value = "Итого деактиваций"
-            logging.info("Filling summary sheet")
+
             # Стили для текста
             green_font = InlineFont(color="00FF00")
             red_font = InlineFont(color="FF0000")
@@ -1347,7 +1347,7 @@ class Database:
                     cell = ws_summary.cell(row, col)
                     rt = CellRichText([
                         TextBlock(green_font, str(activations)),
-                        " | ",
+                        TextBlock(InlineFont(), " | "),
                         TextBlock(red_font, str(deactivations))
                     ])
                     cell.value = rt
@@ -1368,17 +1368,17 @@ class Database:
             ws_summary.cell(row + 1, 1).value = "Легенда:"
             ws_summary.cell(row + 2, 1).value = CellRichText([
                 TextBlock(green_font, "Зелёный"),
-                " - Количество активаций"
+                TextBlock(InlineFont(), " - Количество активаций")
             ])
             ws_summary.cell(row + 3, 1).value = CellRichText([
                 TextBlock(red_font, "Красный"),
-                " - Количество деактиваций"
+                TextBlock(InlineFont(), " - Количество деактиваций")
             ])
 
             # Добавляем таблицу в Summary
             tab = Table(displayName="SummaryTable", ref=f"A1:{ws_summary.cell(row=row-1, column=len(dates)+3).coordinate}")
             style = TableStyleInfo(name="TableStyleMedium2", showFirstColumn=True,
-                                showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+                                   showLastColumn=False, showRowStripes=True, showColumnStripes=False)
             tab.tableStyleInfo = style
             ws_summary.add_table(tab)
 
@@ -1391,7 +1391,7 @@ class Database:
             # Создаём листы для операторов
             green_fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
             red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
-            logging.info("Creating individual operator sheets")
+
             for op_id, name in operators_dict.items():
                 ws = wb.create_sheet(title=name[:31])
 
@@ -1422,7 +1422,7 @@ class Database:
                         deacts = counts_per_op[op_id][current_day]['deact']
                         rt = CellRichText([
                             TextBlock(green_font, str(acts)),
-                            " | ",
+                            TextBlock(InlineFont(), " | "),
                             TextBlock(red_font, str(deacts))
                         ])
                         ws.cell(current_row, 3).value = rt
@@ -1461,7 +1461,7 @@ class Database:
                     ws.cell(current_row, 4).value = dur_str
 
                     current_row += 1
-                logging.info(f"Processed {len(logs)} logs for operator {name}")
+
                 # Добавляем итого для последнего дня
                 if current_day is not None:
                     ws.cell(current_row, 1).value = current_day.strftime("%Y-%m-%d")
@@ -1470,7 +1470,7 @@ class Database:
                     deacts = counts_per_op[op_id][current_day]['deact']
                     rt = CellRichText([
                         TextBlock(green_font, str(acts)),
-                        " | ",
+                        TextBlock(InlineFont(), " | "),
                         TextBlock(red_font, str(deacts))
                     ])
                     ws.cell(current_row, 3).value = rt
@@ -1486,14 +1486,14 @@ class Database:
                     sanitized_name = sanitize_table_name(f"{name}_{op_id}")
                     tab_op = Table(displayName=f"Table_{sanitized_name}", ref=f"A1:D{current_row-1}")
                     style_op = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False,
-                                            showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+                                              showLastColumn=False, showRowStripes=True, showColumnStripes=False)
                     tab_op.tableStyleInfo = style_op
                     ws.add_table(tab_op)
 
                 # Авто-подгонка ширины столбцов
                 for col in ['A', 'B', 'C', 'D']:
                     ws.column_dimensions[col].auto_size = True
-            logging.info("All operator sheets created successfully")
+
             # Сохраняем в BytesIO
             output = BytesIO()
             wb.save(output)
