@@ -1423,6 +1423,38 @@ def get_active_operators():
     except Exception as e:
         logging.error(f"Error fetching active operators: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    
+@app.route('/api/report/monthly', methods=['GET'])
+@require_api_key
+def get_monthly_report():
+    try:
+        supervisor_id = request.args.get('supervisor_id')
+        month = request.args.get('month')
+        if not supervisor_id:
+            return jsonify({"error": "Missing supervisor_id parameter"}), 400
+
+        supervisor_id = int(supervisor_id)
+        requester_id = int(request.headers.get('X-User-Id'))
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+
+        if requester[3] != 'admin' and (requester[3] != 'sv' or requester_id != supervisor_id):
+            return jsonify({"error": "Unauthorized to access this report"}), 403
+
+        filename, content = db.generate_monthly_report(supervisor_id, month)
+        if not filename or not content:
+            return jsonify({"error": "Failed to generate report"}), 500
+
+        return send_file(
+            BytesIO(content),
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except Exception as e:
+        logging.error(f"Error generating monthly report: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False, use_reloader=False)
