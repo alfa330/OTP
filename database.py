@@ -1353,27 +1353,26 @@ class Database:
                     cell.value = rt
                     cell.alignment = Alignment(horizontal='center', vertical='center', wrapText=True)
 
-                # Итоговые столбцы
-                cell_act = ws_summary.cell(row, len(dates) + 2)
-                cell_act.value = CellRichText([TextBlock(green_font, str(total_counts_per_op[op_id]['act']))])
-                cell_act.alignment = Alignment(horizontal='center', vertical='center')
 
-                cell_deact = ws_summary.cell(row, len(dates) + 3)
-                cell_deact.value = CellRichText([TextBlock(red_font, str(total_counts_per_op[op_id]['deact']))])
-                cell_deact.alignment = Alignment(horizontal='center', vertical='center')
+            # Итоговые столбцы (use plain string and set font color)
+            cell_act = ws_summary.cell(row, len(dates) + 2)
+            cell_act.value = str(total_counts_per_op[op_id]['act'])
+            cell_act.font = Font(color="00FF00")
+            cell_act.alignment = Alignment(horizontal='center', vertical='center')
 
-                row += 1
+            cell_deact = ws_summary.cell(row, len(dates) + 3)
+            cell_deact.value = str(total_counts_per_op[op_id]['deact'])
+            cell_deact.font = Font(color="FF0000")
+            cell_deact.alignment = Alignment(horizontal='center', vertical='center')
+
+            row += 1
 
             # Легенда
             ws_summary.cell(row + 1, 1).value = "Легенда:"
-            ws_summary.cell(row + 2, 1).value = CellRichText([
-                TextBlock(green_font, "Зелёный"),
-                TextBlock(InlineFont(), " - Количество активаций")
-            ])
-            ws_summary.cell(row + 3, 1).value = CellRichText([
-                TextBlock(red_font, "Красный"),
-                TextBlock(InlineFont(), " - Количество деактиваций")
-            ])
+            ws_summary.cell(row + 2, 1).value = "Зелёный - Количество активаций"
+            ws_summary.cell(row + 2, 1).font = Font(color="00FF00")
+            ws_summary.cell(row + 3, 1).value = "Красный - Количество деактиваций"
+            ws_summary.cell(row + 3, 1).font = Font(color="FF0000")
 
             # Добавляем таблицу в Summary
             tab = Table(displayName="SummaryTable", ref=f"A1:{ws_summary.cell(row=row-1, column=len(dates)+3).coordinate}")
