@@ -298,7 +298,7 @@ class Database:
                     id SERIAL PRIMARY KEY,
                     operator_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
                     is_active BOOLEAN NOT NULL,
-                    change_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    change_time TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
             cursor.execute("""
