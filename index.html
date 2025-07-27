@@ -1319,6 +1319,7 @@
                 new_login: '',
                 confirm_login: ''
             });
+            const [selectedReportMonth, setSelectedReportMonth] = useState(new Date().toISOString().slice(0, 7));
             const [expandedEvaluation, setExpandedEvaluation] = useState(null);  
             const [audioUrl, setAudioUrl] = useState(null);
             const [loadingAudioId, setLoadingAudioId] = useState(null);
@@ -2369,11 +2370,11 @@
                 }
             };
 
-            const generateWeeklyReport = async () => {
+            const generateMonthlyReport = async () => {
                 setIsLoading(true);
                 
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/admin/weekly_report`, {
+                    const response = await axios.get(`${API_BASE_URL}/api/admin/monthly_report?month=${selectedReportMonth}`, {
                         headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
@@ -2691,8 +2692,20 @@
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <div className="flex justify-between items-center mb-6">
                                             <h2 className="text-2xl font-semibold text-gray-800">Supervisors</h2>
+                                            <div className="mb-6">
+                                                <label className="block mb-2 font-semibold text-gray-700">Select Month for Report:</label>
+                                                <select
+                                                    value={selectedReportMonth}
+                                                    onChange={(e) => setSelectedReportMonth(e.target.value)}
+                                                    className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    disabled={isAdminDataLoading}
+                                                >
+                                                    {getMonthOptions()}
+                                                </select>
+                                            </div>
+
                                             <button
-                                                onClick={generateWeeklyReport}
+                                                onClick={generateMonthlyReport}
                                                 className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                                 disabled={isLoading}
                                             >
