@@ -1000,6 +1000,11 @@ def handle_monthly_report():
             end_date = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
             weeks.append((w, start_date, end_date))
         
+        svs = db.get_supervisors()
+        
+        if not svs:
+            return jsonify({"error": "No supervisors found"}), 404
+        
         output = BytesIO()
         workbook = xlsxwriter.Workbook(output, {'in_memory': True})
         header_format = workbook.add_format({
@@ -1009,9 +1014,6 @@ def handle_monthly_report():
         })
         cell_format_int = workbook.add_format({'border': 1, 'num_format': '0'})
         cell_format_float = workbook.add_format({'border': 1, 'num_format': '0.00'})
-        
-        # Get supervisors from the database
-        svs = db.get_supervisors()
         
         for sv_id, sv_name, _, _ in svs:
             operators = db.get_operators_by_supervisor(sv_id)
