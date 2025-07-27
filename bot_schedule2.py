@@ -967,17 +967,98 @@ def get_sv_operators():
         logging.error(f"Error fetching SV operators: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/admin/generate_report', methods=['GET'])
+@app.route('/api/admin/monthly_report', methods=['GET'])
 @require_api_key
-def handle_generate_report():
+def handle_monthly_report():
     try:
-        if not report_lock.acquire(blocking=False):
-            return jsonify({"error": "Report generation is already in progress"}), 429
+        month = request.args.get('month')
+        if not month:
+            month = datetime.now().strftime('%Y-%m')
+        
+        # Validate month format
+        try:
+            month_start = datetime.strptime(month + '-01', '%Y-%m-%d')
+        except ValueError:
+            return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
+        
+        logging.info(f"Generating monthly report for {month}")
+        
+        # Compute last day of the month
+        next_month = month_start + timedelta(days=31)
+        last_day = (next_month - timedelta(days=next_month.day)).day
+        
+        # Compute weeks
+        num_weeks = math.ceil(last_day / 7)
+        weeks = []
+        for w in range(1, num_weeks + 1):
+            start_day = (w - 1) * 7 + 1
+            start_date = month_start + timedelta(days=start_day - 1)
+            start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_day = min(start_day + 6, last_day)
+            end_date = month_start + timedelta(days=end_day - 1)
+            end_date = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+            weeks.append((w, start_date, end_date))
+        
+        output = BytesIO()
+        workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+        header_format = workbook.add_format({
+            'bold': True,
+            'bg_color': '#D3D3D3',
+            'border': 1
+        })
+        cell_format_int = workbook.add_format({'border': 1, 'num_format': '0'})
+        cell_format_float = workbook.add_format({'border': 1, 'num_format': '0.00'})
+        
+        # Get supervisors from the database
+        svs = db.get_supervisors()
+        
+        for sv_id, sv_name, _, _ in svs:
+            operators = db.get_operators_by_supervisor(sv_id)
             
-        executor_pool.submit(sync_generate_weekly_report)
-        return jsonify({"status": "success", "message": "Report generation started"})
+            safe_sheet_name = sv_name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
+            worksheet = workbook.add_worksheet(safe_sheet_name)
+            
+            # Headers
+            headers = ['ФИО']
+            for w, _, _ in weeks:
+                headers.append(f'Неделя {w} Количество звонков')
+                headers.append(f'Неделя {w} Средний балл')
+            
+            for col, header in enumerate(headers):
+                worksheet.write(0, col, header, header_format)
+            
+            for row_idx, op in enumerate(operators, start=1):
+                op_name = op['name']
+                worksheet.write(row_idx, 0, op_name, cell_format_int)
+                col = 1
+                for w, start_date, end_date in weeks:
+                    call_count, avg_score = db.get_week_call_stats(op['id'], start_date, end_date)
+                    worksheet.write(row_idx, col, call_count, cell_format_int)
+                    col += 1
+                    worksheet.write(row_idx, col, avg_score, cell_format_float)
+                    col += 1
+            
+            worksheet.set_column('A:A', 30)
+            for i in range(1, len(headers)):
+                worksheet.set_column(i, i, 20)
+        
+        workbook.close()
+        output.seek(0)
+        
+        if output.getvalue():
+            filename = f"Monthly_Report_{month}.xlsx"
+            return send_file(
+                output,
+                as_attachment=True,
+                download_name=filename,
+                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+        else:
+            logging.error("Report is empty")
+            return jsonify({"error": "Generated report is empty"}), 500
+            
     except Exception as e:
-        logging.error(f"Error in generate_report: {e}")
+        logging.error(f"Error in monthly_report: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/sv/update_table', methods=['POST'])
