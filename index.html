@@ -2381,11 +2381,29 @@
                     if (data.status === 'success' && isMounted.current) {
                         showToast('Report generated and sent successfully', 'success');
                     } else {
-                        showToast(data.error || 'Failed to generate report', 'error');
+                        // Add more details for debugging
+                        console.error('Monthly report error:', data);
+                        showToast(
+                            `Failed to generate report: ${data.error || 'Unknown error'} (status: ${data.status})`,
+                            'error'
+                        );
                     }
                 } catch (err) {
-                    console.error('Generate report error:', err);
-                    showToast(err.response?.data?.error || 'Failed to generate report', 'error');
+                    // Add more details for debugging
+                    if (err.response) {
+                        console.error('Generate report error:', {
+                            status: err.response.status,
+                            data: err.response.data,
+                            headers: err.response.headers
+                        });
+                        showToast(
+                            `Failed to generate report: ${err.response.data?.error || err.message} (HTTP ${err.response.status})`,
+                            'error'
+                        );
+                    } else {
+                        console.error('Generate report error:', err);
+                        showToast(`Failed to generate report: ${err.message}`, 'error');
+                    }
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
