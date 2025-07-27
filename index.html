@@ -2372,24 +2372,30 @@
 
             const generateMonthlyReport = async () => {
                 setIsLoading(true);
-                
+
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/admin/monthly_report?month=${selectedReportMonth}`, {
-                        headers: { 'X-API-Key': user.apiKey }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success' && isMounted.current) {
-                        showToast('Report generated and sent successfully', 'success');
+                    const response = await axios.get(
+                        `${API_BASE_URL}/api/admin/monthly_report?month=${selectedReportMonth}`,
+                        {
+                            headers: { 'X-API-Key': user.apiKey },
+                            responseType: 'blob' // <-- Важно для бинарных файлов (xlsx)
+                        }
+                    );
+                    if (response.status === 200 && response.data) {
+                        // Создаем ссылку для скачивания файла
+                        const url = window.URL.createObjectURL(new Blob([response.data]));
+                        const link = document.createElement('a');
+                        link.href = url;
+                        link.setAttribute('download', `monthly_report_${selectedReportMonth}.xlsx`);
+                        document.body.appendChild(link);
+                        link.click();
+                        link.remove();
+                        window.URL.revokeObjectURL(url);
+                        showToast('Report generated and downloaded successfully', 'success');
                     } else {
-                        // Add more details for debugging
-                        console.error('Monthly report error:', data);
-                        showToast(
-                            `Failed to generate report: ${data.error || 'Unknown error'} (status: ${data.status})`,
-                            'error'
-                        );
+                        showToast('Failed to generate report: No file received', 'error');
                     }
                 } catch (err) {
-                    // Add more details for debugging
                     if (err.response) {
                         console.error('Generate report error:', {
                             status: err.response.status,
