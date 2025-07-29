@@ -991,14 +991,25 @@ def handle_monthly_report():
         
         output = BytesIO()
         workbook = xlsxwriter.Workbook(output, {'in_memory': True})
+
+        # Styles
         header_format = workbook.add_format({
             'bold': True,
             'bg_color': '#D3D3D3',
-            'border': 1
+            'border': 1,
+            'align': 'center'
         })
-        cell_format_int = workbook.add_format({'border': 1, 'num_format': '0'})
-        cell_format_float = workbook.add_format({'border': 1, 'num_format': '0.00'})
-        
+        fio_format = workbook.add_format({'border': 1, 'bold': True, 'align': 'left'})
+        int_format = workbook.add_format({'border': 1, 'num_format': '0', 'align': 'center'})
+        float_format = workbook.add_format({'border': 1, 'num_format': '0.00', 'align': 'center'})
+        # Score color formats
+        red_format = workbook.add_format({'border': 1, 'num_format': '0.00', 'bg_color': '#FFCCCC', 'align': 'center'})
+        yellow_format = workbook.add_format({'border': 1, 'num_format': '0.00', 'bg_color': '#FFFACD', 'align': 'center'})
+        green_format = workbook.add_format({'border': 1, 'num_format': '0.00', 'bg_color': '#C6EFCE', 'align': 'center'})
+        # Итоговые колонки
+        total_format = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#E2EFDA', 'num_format': '0.00', 'align': 'center'})
+        total_int_format = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#E2EFDA', 'num_format': '0', 'align': 'center'})
+
         for sv_id, sv_name, _, _ in svs:
             operators = db.get_operators_by_supervisor(sv_id)
             
@@ -1037,21 +1048,33 @@ def handle_monthly_report():
                 
                 count = len(scores)
                 avg_score = sum(scores) / count if count > 0 else 0.0
+
+                # ФИО
+                worksheet.write(row_idx, 0, op_name, fio_format)
                 
-                worksheet.write(row_idx, 0, op_name, cell_format_int)
-                
+                # Оценки с цветом
                 for col in range(1, 21):
                     if col-1 < count:
-                        worksheet.write(row_idx, col, scores[col-1], cell_format_float)
+                        score = scores[col-1]
+                        if score < 80:
+                            fmt = red_format
+                        elif score < 95:
+                            fmt = yellow_format
+                        else:
+                            fmt = green_format
+                        worksheet.write(row_idx, col, score, fmt)
                     else:
-                        worksheet.write(row_idx, col, '', cell_format_float)
+                        worksheet.write(row_idx, col, '', float_format)
                 
-                worksheet.write(row_idx, 21, avg_score, cell_format_float)
-                worksheet.write(row_idx, 22, count, cell_format_int)
+                # Итоговые колонки
+                worksheet.write(row_idx, 21, avg_score, total_format)
+                worksheet.write(row_idx, 22, count, total_int_format)
             
             worksheet.set_column('A:A', 30)
-            for i in range(1, 23):
-                worksheet.set_column(i, i, 15)
+            for i in range(1, 21):
+                worksheet.set_column(i, i, 12)
+            worksheet.set_column(21, 21, 15)
+            worksheet.set_column(22, 22, 20)
         
         workbook.close()
         output.seek(0)
