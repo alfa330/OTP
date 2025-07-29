@@ -984,22 +984,6 @@ def handle_monthly_report():
         
         logging.info(f"Generating monthly report for {month}")
         
-        # Compute last day of the month
-        next_month = month_start + timedelta(days=31)
-        last_day = (next_month - timedelta(days=next_month.day)).day
-        
-        # Compute weeks
-        num_weeks = math.ceil(last_day / 7)
-        weeks = []
-        for w in range(1, num_weeks + 1):
-            start_day = (w - 1) * 7 + 1
-            start_date = month_start + timedelta(days=start_day - 1)
-            start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
-            end_day = min(start_day + 6, last_day)
-            end_date = month_start + timedelta(days=end_day - 1)
-            end_date = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
-            weeks.append((w, start_date, end_date))
-        
         svs = db.get_supervisors()
         
         if not svs:
@@ -1023,27 +1007,51 @@ def handle_monthly_report():
             
             # Headers
             headers = ['ФИО']
-            for w, _, _ in weeks:
-                headers.append(f'Неделя {w} Количество звонков')
-                headers.append(f'Неделя {w} Средний балл')
+            for i in range(1, 21):
+                headers.append(f'Оценка {i}')
+            headers.append('Средний балл')
+            headers.append('Кол-во оцененных звонков')
             
             for col, header in enumerate(headers):
                 worksheet.write(0, col, header, header_format)
             
             for row_idx, op in enumerate(operators, start=1):
+                op_id = op['id']
                 op_name = op['name']
+                
+                # Get scores
+                with db._get_cursor() as cursor:
+                    cursor.execute("""
+                        SELECT c.score
+                        FROM calls c
+                        JOIN (
+                            SELECT phone_number, MAX(created_at) as max_date
+                            FROM calls 
+                            WHERE operator_id = %s AND month = %s AND is_draft = FALSE 
+                            GROUP BY phone_number
+                        ) lv ON c.phone_number = lv.phone_number AND c.created_at = lv.max_date
+                        WHERE c.is_draft = FALSE
+                        ORDER BY c.created_at ASC
+                    """, (op_id, month))
+                    scores = [row[0] for row in cursor.fetchall()]
+                
+                count = len(scores)
+                avg_score = sum(scores) / count if count > 0 else 0.0
+                
                 worksheet.write(row_idx, 0, op_name, cell_format_int)
-                col = 1
-                for w, start_date, end_date in weeks:
-                    call_count, avg_score = db.get_week_call_stats(op['id'], start_date, end_date)
-                    worksheet.write(row_idx, col, call_count, cell_format_int)
-                    col += 1
-                    worksheet.write(row_idx, col, avg_score, cell_format_float)
-                    col += 1
+                
+                for col in range(1, 21):
+                    if col-1 < count:
+                        worksheet.write(row_idx, col, scores[col-1], cell_format_float)
+                    else:
+                        worksheet.write(row_idx, col, '', cell_format_float)
+                
+                worksheet.write(row_idx, 21, avg_score, cell_format_float)
+                worksheet.write(row_idx, 22, count, cell_format_int)
             
             worksheet.set_column('A:A', 30)
-            for i in range(1, len(headers)):
-                worksheet.set_column(i, i, 20)
+            for i in range(1, 23):
+                worksheet.set_column(i, i, 15)
         
         workbook.close()
         output.seek(0)
