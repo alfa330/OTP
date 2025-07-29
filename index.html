@@ -1357,7 +1357,8 @@
             const [previewData, setPreviewData] = useState(null); // Данные предпросмотра (sheet_name, operators)
             const [selectedDirection, setSelectedDirection] = useState(''); // Выбранное направление
             const [showPreview, setShowPreview] = useState(false); // Показывать ли предпросмотр
-            
+            const [searchQuery, setSearchQuery] = useState('');
+
             const getMonthOptions = () => {
                 const options = [];
                 const today = new Date();
@@ -2176,6 +2177,12 @@
                 }
             };
 
+            const filteredUsers = users.filter(u => 
+                (u.name || '').toLowerCase().includes(searchQuery) ||
+                (u.direction || '').toLowerCase().includes(searchQuery) ||
+                (u.supervisor_name || '').toLowerCase().includes(searchQuery)
+            );
+
             const fetchProfileData = async () => {
                 setIsLoading(true);
                 
@@ -2930,8 +2937,17 @@
                                             <p className="text-center text-gray-600">Loading...</p>
                                         ) : users.length === 0 ? (
                                             <p className="text-center text-gray-600">No users found.</p>
-                                        ) : (
+                                        ) : (                                        
                                             <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                                <div className="mb-4">
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Search by name, direction, or supervisor..."
+                                                        value={searchQuery}
+                                                        onChange={(e) => setSearchQuery(e.target.value.toLowerCase())}
+                                                        className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                    />
+                                                </div>
                                                 <table className="min-w-full divide-y divide-gray-200">
                                                     <thead className="bg-gray-50">
                                                         <tr>
@@ -2943,10 +2959,9 @@
                                                         </tr>
                                                     </thead>
                                                     <tbody className="bg-white divide-y divide-gray-200">
-                                                        {users.map(u => (
+                                                        {filteredUsers.map(u => (
                                                             <tr key={u.id} className="hover:bg-gray-50 transition-colors duration-200">
                                                                 <td className="px-6 py-4 whitespace-nowrap">{u.name}</td>
-                                                                <td className="px-6 py-4 whitespace-nowrap">{u.id}</td>
                                                                 <td className="px-6 py-4 whitespace-nowrap">{u.direction || '-'}</td>
                                                                 <td className="px-6 py-4 whitespace-nowrap">{u.supervisor_name || '-'}</td>
                                                                 <td className="px-6 py-4 whitespace-nowrap">
