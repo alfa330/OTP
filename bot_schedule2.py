@@ -1019,7 +1019,7 @@ def handle_monthly_report():
             # Headers
             headers = ['ФИО']
             for i in range(1, 21):
-                headers.append(f'Оценка {i}')
+                headers.append(f'{i}')
             headers.append('Средний балл')
             headers.append('Кол-во оцененных звонков')
             
