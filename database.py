@@ -272,6 +272,8 @@ class Database:
                     hours_table_url TEXT,
                     scores_table_url TEXT,
                     is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                    status VARCHAR(20) NOT NULL DEFAULT 'working' CHECK(status IN ('working', 'fired')),  
+                    rate DECIMAL(3,2) NOT NULL DEFAULT 1.00 CHECK(rate IN (1.00, 0.75, 0.50)),  
                     CONSTRAINT unique_name_role UNIQUE (name, role)
                 );
             """)
@@ -356,6 +358,17 @@ class Database:
                 );
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_history (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    changed_by INTEGER REFERENCES users(id),  -- Who made the change (e.g., admin or sv ID)
+                    field_changed VARCHAR(50) NOT NULL,
+                    old_value TEXT,
+                    new_value TEXT,
+                    changed_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
             # Optimized Indexes (added more based on query patterns)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
@@ -373,6 +386,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_users_supervisor_id ON users(supervisor_id);
                 CREATE INDEX IF NOT EXISTS idx_users_login ON users(login);
                 CREATE INDEX IF NOT EXISTS idx_users_is_active ON users(is_active);
+                CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+                CREATE INDEX IF NOT EXISTS idx_users_rate ON users(rate);
+                CREATE INDEX IF NOT EXISTS idx_user_history_user_id ON user_history(user_id);
+                CREATE INDEX IF NOT EXISTS idx_user_history_changed_at ON user_history(changed_at);
             """)
 
     def create_user(self, telegram_id, name, role, direction_id=None, hire_date=None, supervisor_id=None, login=None, password=None, scores_table_url=None):
@@ -628,7 +645,7 @@ class Database:
                 params.append(value)
         
         query = f"""
-            SELECT u.id, u.telegram_id, u.name, u.role, d.name, u.hire_date, u.supervisor_id, u.login, u.hours_table_url, u.scores_table_url, u.is_active
+            SELECT u.id, u.telegram_id, u.name, u.role, d.name, u.hire_date, u.supervisor_id, u.login, u.hours_table_url, u.scores_table_url, u.is_active, u.status, u.rate  -- Add status and rate
             FROM users u
             LEFT JOIN directions d ON u.direction_id = d.id
             WHERE {' AND '.join(conditions)}
@@ -1124,14 +1141,29 @@ class Database:
                 } for row in cursor.fetchall()
             ]
         
-    def update_user(self, user_id, field, value):
-        allowed_fields = ['direction_id', 'supervisor_id']
+    def update_user(self, user_id, field, value, changed_by=None):
+        allowed_fields = ['direction_id', 'supervisor_id', 'status', 'rate']  # Add new fields
         if field not in allowed_fields:
             raise ValueError("Invalid field to update")
         
         with self._get_cursor() as cursor:
+            # Fetch old value
+            cursor.execute(f"SELECT {field} FROM users WHERE id = %s", (user_id,))
+            old_value = cursor.fetchone()
+            old_value = str(old_value[0]) if old_value and old_value[0] is not None else None
+            
+            # Update
             cursor.execute(f"UPDATE users SET {field} = %s WHERE id = %s RETURNING id", (value, user_id))
-            return cursor.fetchone() is not None
+            updated = cursor.fetchone() is not None
+            
+            # Log history if updated
+            if updated:
+                cursor.execute("""
+                    INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (user_id, changed_by, field, old_value, str(value)))
+            
+            return updated
 
     def get_all_operators(self):
         with self._get_cursor() as cursor:
@@ -1505,5 +1537,24 @@ class Database:
         except Exception as e:
             logging.error(f"Error generating report: {e}")
             return None, None
+    def get_user_history(self, user_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT uh.id, uh.field_changed, uh.old_value, uh.new_value, uh.changed_at, u.name AS changed_by_name
+                FROM user_history uh
+                LEFT JOIN users u ON uh.changed_by = u.id
+                WHERE uh.user_id = %s
+                ORDER BY uh.changed_at DESC
+            """, (user_id,))
+            return [
+                {
+                    "id": row[0],
+                    "field": row[1],
+                    "old_value": row[2],
+                    "new_value": row[3],
+                    "changed_at": row[4].strftime('%Y-%m-%d %H:%M:%S'),
+                    "changed_by": row[5] or "System"
+                } for row in cursor.fetchall()
+            ]
 # Initialize database
 db = Database()

@@ -716,6 +716,47 @@
           );
         };
 
+        const HistoryModal = ({ isOpen, onClose, history }) => {
+            if (!isOpen) return null;
+
+            return (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-4xl max-h-[80vh] overflow-y-auto">
+                        <h2 className="text-xl font-semibold mb-4">User Change History</h2>
+                        {history && history.length > 0 ? (
+                            <table className="min-w-full divide-y divide-gray-200">
+                                <thead className="bg-gray-50">
+                                    <tr>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Field</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Old Value</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">New Value</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Changed By</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                    {history.map((entry, index) => (
+                                        <tr key={index}>
+                                            <td className="px-6 py-4 whitespace-nowrap">{entry.field}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap">{entry.old_value || '-'}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap">{entry.new_value || '-'}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap">{entry.changed_by}</td>
+                                            <td className="px-6 py-4 whitespace-nowrap">{entry.changed_at}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        ) : (
+                            <p className="text-center text-gray-600">No history available.</p>
+                        )}
+                        <div className="flex justify-end mt-4">
+                            <button onClick={onClose} className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600">Close</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+        
         const UserEditModal = ({ isOpen, onClose, userToEdit, svList, directions, onSave, user }) => {
             const [editedUser, setEditedUser] = useState(userToEdit || {});
 
@@ -743,21 +784,46 @@
                                     ))}
                                 </select>
                             </div>
-                            {user.role === 'admin' && ( 
-                                <div>
-                                    <label className="block mb-2 font-medium">Supervisor</label>
-                                    <select
-                                        value={editedUser.supervisor_id || ''}
-                                        onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
-                                        className="w-full p-2 border rounded-lg"
-                                    >
-                                        <option value="">Select Supervisor</option>
-                                        {svList.map(sv => (
-                                            <option key={sv.id} value={sv.id}>{sv.name}</option>
-                                        ))}
-                                    </select>
-                                </div>
+                            {user.role === 'admin' && (
+                                <>
+                                    <div>
+                                        <label className="block mb-2 font-medium">Status</label>
+                                        <select
+                                            value={editedUser.status || 'working'}
+                                            onChange={(e) => setEditedUser({ ...editedUser, status: e.target.value })}
+                                            className="w-full p-2 border rounded-lg"
+                                        >
+                                            <option value="working">Working</option>
+                                            <option value="fired">Fired</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block mb-2 font-medium">Supervisor</label>
+                                        <select
+                                            value={editedUser.supervisor_id || ''}
+                                            onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
+                                            className="w-full p-2 border rounded-lg"
+                                        >
+                                            <option value="">Select Supervisor</option>
+                                            {svList.map(sv => (
+                                                <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                </>
                             )}
+                            <div>
+                                <label className="block mb-2 font-medium">Rate</label>
+                                <select
+                                    value={editedUser.rate || 1.0}
+                                    onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
+                                    className="w-full p-2 border rounded-lg"
+                                >
+                                    <option value={1.0}>1.00</option>
+                                    <option value={0.75}>0.75</option>
+                                    <option value={0.5}>0.50</option>
+                                </select>
+                            </div>
                             <div>
                                 <label className="block mb-2 font-medium">New Login</label>
                                 <input
@@ -1358,6 +1424,9 @@
             const [selectedDirection, setSelectedDirection] = useState(''); // Выбранное направление
             const [showPreview, setShowPreview] = useState(false); // Показывать ли предпросмотр
             const [searchQuery, setSearchQuery] = useState('');
+            const [showHistoryModal, setShowHistoryModal] = useState(false);
+            const [userHistory, setUserHistory] = useState([]);
+            const [selectedUserForHistory, setSelectedUserForHistory] = useState(null);
 
             const getMonthOptions = () => {
                 const options = [];
@@ -1507,6 +1576,12 @@
                         }, {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
+                    }
+                    if (editedUser.status && editedUser.status !== userToEdit.status) {
+                        await updateUserField(editedUser.id, 'status', editedUser.status);
+                    }
+                    if (editedUser.rate && editedUser.rate !== userToEdit.rate) {
+                        await updateUserField(editedUser.id, 'rate', editedUser.rate);
                     }
                     showToast('User updated successfully', 'success');
                     fetchUsers();
@@ -2031,6 +2106,28 @@
                 }
             };
 
+            const fetchUserHistory = async (userId) => {
+                try {
+                    setIsLoading(true);
+                    const response = await axios.get(`${API_BASE_URL}/api/user/history?user_id=${userId}`, {
+                        headers: {
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
+                    });
+                    if (response.data.status === 'success') {
+                        setUserHistory(response.data.history);
+                        setShowHistoryModal(true);
+                    } else {
+                        addToast('Failed to fetch history', 'error');
+                    }
+                } catch (error) {
+                    addToast('Error fetching history', 'error');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+            
             const handleLogin = async () => {
                 if (!login.trim() || !password.trim()) {
                     showToast('Please enter both login and password', 'error');
@@ -2954,6 +3051,8 @@
                                                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
                                                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Direction</th>
                                                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Supervisor</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Rate</th>
                                                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                                                         </tr>
                                                     </thead>
@@ -2963,16 +3062,29 @@
                                                                 <td className="px-6 py-4 whitespace-nowrap">{u.name}</td>
                                                                 <td className="px-6 py-4 whitespace-nowrap">{u.direction || '-'}</td>
                                                                 <td className="px-6 py-4 whitespace-nowrap">{u.supervisor_name || '-'}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap">{u.status || 'working'}</td> {/* NEW */}
+                                                                <td className="px-6 py-4 whitespace-nowrap">{u.rate || 1.0}</td> {/* NEW */}
                                                                 <td className="px-6 py-4 whitespace-nowrap">
-                                                                    <button
-                                                                        onClick={() => {
-                                                                            setUserToEdit(u);
-                                                                            setShowUserEditModal(true);
-                                                                        }}
-                                                                        className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
-                                                                    >
-                                                                        Edit
-                                                                    </button>
+                                                                    <div className="flex space-x-2"> {/* Ensure horizontal alignment */}
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                setUserToEdit(u);
+                                                                                setShowUserEditModal(true);
+                                                                            }}
+                                                                            className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
+                                                                        >
+                                                                            <i className="fas fa-edit"></i> Edit
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                setSelectedUserForHistory(u);
+                                                                                fetchUserHistory(u.id);
+                                                                            }}
+                                                                            className="bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700 text-sm transition-all duration-200 flex items-center gap-1"
+                                                                        >
+                                                                            <i className="fas fa-history"></i> History
+                                                                        </button>
+                                                                    </div>
                                                                 </td>
                                                             </tr>
                                                         ))}
@@ -3649,6 +3761,13 @@
                                 directions={directions}
                                 user={user}
                                 onSave={saveUserChanges}
+                            />
+                        )}
+                        {showHistoryModal && (
+                            <HistoryModal
+                                isOpen={showHistoryModal}
+                                onClose={() => setShowHistoryModal(false)}
+                                history={userHistory}
                             />
                         )}
                         {showAccountMenu && (
