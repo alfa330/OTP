@@ -157,13 +157,6 @@ def get_user_profile():
             logging.error(f"Invalid user_id format: {user_id}")
             return jsonify({"error": "Invalid user_id format"}), 400
 
-        try:
-            with db._get_cursor() as cursor:
-                cursor.execute("SELECT 1")
-        except Exception as e:
-            logging.error(f"Database connectivity check failed: {str(e)}")
-            return jsonify({"error": "Database connectivity issue"}), 500
-
         user = db.get_user(id=user_id)
         if not user:
             logging.warning(f"User not found with ID: {user_id}")
@@ -185,7 +178,9 @@ def get_user_profile():
             "supervisor_name": supervisor_name,
             "telegram_id": user[1] or None,
             "scores_table_url": user[9] or None,
-            "hours_table_url": user[8] or None
+            "hours_table_url": user[8] or None,
+            "status": user[11],  # Adjust index based on query
+            "rate": float(user[12]) if user[12] else 1.0
         }
 
         logging.info(f"Profile data fetched successfully for user_id: {user_id}")
@@ -203,7 +198,7 @@ def get_admin_users():
         if requester[3] == 'admin':
             with db._get_cursor() as cursor:
                 cursor.execute("""
-                    SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role
+                    SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role, u.status, u.rate
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -218,12 +213,14 @@ def get_admin_users():
                         "supervisor_name": row[3],
                         "direction_id": row[4],
                         "supervisor_id": row[5],
-                        "role": row[6]
+                        "role": row[6],
+                        "status": row[7],
+                        "rate": float(row[8])
                     })
         if requester[3] == 'sv':
             with db._get_cursor() as cursor:
                 cursor.execute("""
-                    SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role
+                    SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role, u.status
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -238,7 +235,9 @@ def get_admin_users():
                         "supervisor_name": row[3],
                         "direction_id": row[4],
                         "supervisor_id": row[5],
-                        "role": row[6]
+                        "role": row[6],
+                        "status": row[7],
+                        "rate": float(row[8])
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
@@ -259,19 +258,59 @@ def admin_update_user():
         value = data['value']
         if field in ['direction_id', 'supervisor_id']:
             value = int(value) if value else None
+        elif field == 'status':
+            if value not in ['working', 'fired']:
+                return jsonify({"error": "Invalid status value"}), 400
+        elif field == 'rate':
+            try:
+                value = float(value)
+                if value not in [1.0, 0.75, 0.5]:
+                    return jsonify({"error": "Invalid rate value"}), 400
+            except ValueError:
+                return jsonify({"error": "Invalid rate format"}), 400
+        else:
+            return jsonify({"error": "Invalid field"}), 400
 
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
         if not requester or requester[3] != 'admin' and requester[3] != 'sv':
             return jsonify({"error": "Only admins can update users"}), 403
 
-        success = db.update_user(user_id, field, value)
+        success = db.update_user(user_id, field, value, changed_by=requester_id)  # Pass changed_by
         if not success:
             return jsonify({"error": "Failed to update user"}), 500
 
         return jsonify({"status": "success", "message": "User updated"}), 200
     except Exception as e:
         logging.error(f"Error updating user: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    
+@app.route('/api/user/history', methods=['GET'])
+@require_api_key
+def get_user_history():
+    try:
+        user_id = request.args.get('user_id')
+        if not user_id:
+            return jsonify({"error": "Missing user_id parameter"}), 400
+        user_id = int(user_id)
+
+        requester_id = int(request.headers.get('X-User-Id'))
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+
+        target_user = db.get_user(id=user_id)
+        if not target_user:
+            return jsonify({"error": "User not found"}), 404
+
+        # Permissions: Admin can view any, SV only their operators
+        if requester[3] != 'admin' and (requester[3] != 'sv' or target_user[6] != requester_id):
+            return jsonify({"error": "Unauthorized to view this user's history"}), 403
+
+        history = db.get_user_history(user_id)
+        return jsonify({"status": "success", "history": history}), 200
+    except Exception as e:
+        logging.error(f"Error fetching user history: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/user/change_password', methods=['POST'])
