@@ -772,32 +772,19 @@
                         <h2 className="text-xl font-semibold mb-4">Edit User {editedUser.name}</h2>
                         <div className="space-y-4">
                             <div>
-                                <label className="block mb-2 font-medium">Direction</label>
+                                <label className="block mb-2 font-medium">Status</label>
                                 <select
-                                    value={editedUser.direction_id || ''}
-                                    onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value })}
+                                    value={editedUser.status || 'working'}
+                                    onChange={(e) => setEditedUser({ ...editedUser, status: e.target.value })}
                                     className="w-full p-2 border rounded-lg"
                                 >
-                                    <option value="">Select Direction</option>
-                                    {directions.map((dir) => (
-                                        <option key={dir.id} value={dir.id}>{dir.name}</option>
-                                    ))}
+                                    <option value="working">Working</option>
+                                    <option value="fired">Fired</option>
+                                    <option value="unpaid_leave">Unpaid leave</option>
                                 </select>
                             </div>
                             {user.role === 'admin' && (
                                 <>
-                                    <div>
-                                        <label className="block mb-2 font-medium">Rate</label>
-                                        <select
-                                            value={editedUser.rate || 1.0}
-                                            onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
-                                            className="w-full p-2 border rounded-lg"
-                                        >
-                                            <option value={1.0}>1.00</option>
-                                            <option value={0.75}>0.75</option>
-                                            <option value={0.5}>0.50</option>
-                                        </select>
-                                    </div>
                                     <div>
                                         <label className="block mb-2 font-medium">Supervisor</label>
                                         <select
@@ -811,18 +798,31 @@
                                             ))}
                                         </select>
                                     </div>
+                                    <div>
+                                        <label className="block mb-2 font-medium">Rate</label>
+                                        <select
+                                            value={editedUser.rate || 1.0}
+                                            onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
+                                            className="w-full p-2 border rounded-lg"
+                                        >
+                                            <option value={1.0}>1.00</option>
+                                            <option value={0.75}>0.75</option>
+                                            <option value={0.5}>0.50</option>
+                                        </select>
+                                    </div>
                                 </>
                             )}
                             <div>
-                                <label className="block mb-2 font-medium">Status</label>
+                                <label className="block mb-2 font-medium">Direction</label>
                                 <select
-                                    value={editedUser.status || 'working'}
-                                    onChange={(e) => setEditedUser({ ...editedUser, status: e.target.value })}
+                                    value={editedUser.direction_id || ''}
+                                    onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value })}
                                     className="w-full p-2 border rounded-lg"
                                 >
-                                    <option value="working">Working</option>
-                                    <option value="fired">Fired</option>
-                                    <option value="unpaid_leave">Unpaid leave</option>
+                                    <option value="">Select Direction</option>
+                                    {directions.map((dir) => (
+                                        <option key={dir.id} value={dir.id}>{dir.name}</option>
+                                    ))}
                                 </select>
                             </div>
                             <div>
