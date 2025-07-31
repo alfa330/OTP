@@ -195,7 +195,7 @@ def get_admin_users():
     try:
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
-        if requester[3] == 'admin':
+        if requester[3] == 'admin' or requester[3] == 'sv':
             with db._get_cursor() as cursor:
                 cursor.execute("""
                     SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role, u.status, u.rate
@@ -204,28 +204,6 @@ def get_admin_users():
                     LEFT JOIN users s ON u.supervisor_id = s.id
                     WHERE u.role = 'operator'
                 """)
-                users = []
-                for row in cursor.fetchall():
-                    users.append({
-                        "id": row[0],
-                        "name": row[1],
-                        "direction": row[2],
-                        "supervisor_name": row[3],
-                        "direction_id": row[4],
-                        "supervisor_id": row[5],
-                        "role": row[6],
-                        "status": row[7],
-                        "rate": float(row[8])
-                    })
-        if requester[3] == 'sv':
-            with db._get_cursor() as cursor:
-                cursor.execute("""
-                    SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role, u.status
-                    FROM users u
-                    LEFT JOIN directions d ON u.direction_id = d.id
-                    LEFT JOIN users s ON u.supervisor_id = s.id
-                    WHERE u.role = 'operator' AND u.supervisor_id = %s
-                """, (requester_id,))
                 users = []
                 for row in cursor.fetchall():
                     users.append({
