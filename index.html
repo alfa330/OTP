@@ -94,7 +94,8 @@
             const [editingCriterionIndex, setEditingCriterionIndex] = useState(null);
             const [isEditingCriterion, setIsEditingCriterion] = useState(false);
             const [activeTab, setActiveTab] = useState('directions');
-        
+            const [isLoading, setIsLoading] = useState(false);  // Added this line to fix the error
+
             const totalWeight = (directionIndex) => {
                 return directions[directionIndex]?.criteria
                     .filter(criterion => !criterion.isCritical)
@@ -113,7 +114,7 @@
                 setEditingDirectionIndex(null);
                 setSelectedDirectionIndex(directions.length);
             };
-        
+            
             const handleEditDirection = () => {
                 if (!newDirectionName) {
                     alert('Please enter a direction name.');
@@ -129,7 +130,7 @@
                 setIsEditingDirection(false);
                 setEditingDirectionIndex(null);
             };
-        
+            
             const handleStartEditDirection = (index) => {
                 setNewDirectionName(directions[index].name);
                 setNewDirectionFileUpload(directions[index].hasFileUpload);
@@ -137,7 +138,7 @@
                 setIsEditingDirection(true);
                 setSelectedDirectionIndex(index);
             };
-        
+            
             const handleDeleteDirection = (index) => {
                 setDirections(directions.filter((_, i) => i !== index));
                 if (selectedDirectionIndex === index) {
@@ -150,7 +151,7 @@
                     setEditingDirectionIndex(null);
                 }
             };
-        
+            
             const handleAddCriterion = () => {
                 if (!newCriterionName) {
                     alert('Please enter a criterion name.');
@@ -187,7 +188,7 @@
                 }));
                 resetCriterionForm();
             };
-        
+            
             const handleEditCriterion = () => {
                 if (!newCriterionName) {
                     alert('Please enter a criterion name.');
@@ -205,7 +206,7 @@
                     }
                     const newTotalWeight = totalWeight(selectedDirectionIndex) - 
                         (directions[selectedDirectionIndex].criteria[editingCriterionIndex]?.isCritical ? 0 : 
-                         directions[selectedDirectionIndex].criteria[editingCriterionIndex]?.weight || 0) + weight;
+                        directions[selectedDirectionIndex].criteria[editingCriterionIndex]?.weight || 0) + weight;
                     if (newTotalWeight > 100) {
                         alert('Total weight of non-critical criteria cannot exceed 100.');
                         return;
@@ -229,7 +230,7 @@
                 }));
                 resetCriterionForm();
             };
-        
+            
             const handleStartEditCriterion = (index) => {
                 const criterion = directions[selectedDirectionIndex].criteria[index];
                 setNewCriterionName(criterion.name);
@@ -239,7 +240,7 @@
                 setEditingCriterionIndex(index);
                 setIsEditingCriterion(true);
             };
-        
+            
             const handleDeleteCriterion = (index) => {
                 setDirections(directions.map((direction, i) => {
                     if (i === selectedDirectionIndex) {
@@ -254,7 +255,7 @@
                     resetCriterionForm();
                 }
             };
-        
+            
             const resetCriterionForm = () => {
                 setNewCriterionName('');
                 setNewCriterionWeight('');
@@ -263,8 +264,8 @@
                 setEditingCriterionIndex(null);
                 setIsEditingCriterion(false);
             };
-        
-            const handleSave = () => {
+            
+            const handleSave = async () => {
                 const invalidDirection = directions.find((direction, index) => 
                     direction.criteria.some(c => !c.isCritical) && totalWeight(index) !== 100
                 );
@@ -272,12 +273,20 @@
                     alert(`Total weight of non-critical criteria in "${invalidDirection.name}" must equal 100. Current: ${totalWeight(directions.indexOf(invalidDirection))}/100`);
                     return;
                 }
-                onSave(directions);
-                onClose();
+                setIsLoading(true);
+                try {
+                    await onSave(directions);
+                    onClose();
+                } catch (error) {
+                    console.error('Error saving directions:', error);
+                    alert('Failed to save. Please try again.');
+                } finally {
+                    setIsLoading(false);
+                }
             };
-        
+            
             if (!isOpen) return null;
-        
+            
             return (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
                     <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-4xl max-h-[90vh] overflow-y-auto">
@@ -297,7 +306,7 @@
                                 Criteria
                             </button>
                         </div>
-        
+            
                         {activeTab === 'directions' && (
                             <div>
                                 <div className="mb-4">
@@ -346,7 +355,7 @@
                                         </div>
                                     </div>
                                 </div>
-        
+            
                                 <div className="mb-4">
                                     <h3 className="text-lg font-medium mb-2">Directions</h3>
                                     {directions.length === 0 ? (
@@ -404,7 +413,7 @@
                                 </div>
                             </div>
                         )}
-        
+            
                         {activeTab === 'criteria' && (
                             <div>
                                 <div className="mb-4">
@@ -424,7 +433,7 @@
                                         )}
                                     </select>
                                 </div>
-        
+            
                                 <div className="mb-4">
                                     <label className="block mb-2 font-medium">
                                         {isEditingCriterion ? `Editing Criterion: ${directions[selectedDirectionIndex]?.criteria[editingCriterionIndex]?.name}` : 'New Criterion'}
@@ -491,7 +500,7 @@
                                         </div>
                                     </div>
                                 </div>
-        
+            
                                 <div className="mb-4 max-h-80 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100">
                                     <h3 className="text-lg font-medium mb-2">Criteria</h3>
                                     {directions.length === 0 || directions[selectedDirectionIndex].criteria.length === 0 ? (
@@ -554,16 +563,16 @@
                                 </div>
                             </div>
                         )}
-        
+            
                         <div className="flex justify-between">
                             <button
                                 onClick={handleSave}
                                 disabled={isLoading}
                                 className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition-all duration-200 flex items-center justify-center gap-2 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                >
+                            >
                                 {isLoading ? (
                                     <>
-                                    <i className="fas fa-spinner fa-spin"></i> Saving...
+                                        <i className="fas fa-spinner fa-spin"></i> Saving...
                                     </>
                                 ) : (
                                     'Save'
@@ -766,10 +775,24 @@
         
         const UserEditModal = ({ isOpen, onClose, userToEdit, svList, directions, onSave, user }) => {
             const [editedUser, setEditedUser] = useState(userToEdit || {});
+            const [isLoading, setIsLoading] = useState(false); // Added to fix the error
 
             useEffect(() => {
                 setEditedUser(userToEdit);
             }, [userToEdit]);
+
+            const handleSave = async () => {
+                setIsLoading(true);
+                try {
+                    await onSave(editedUser);
+                    onClose();
+                } catch (error) {
+                    console.error('Error saving user:', error);
+                    alert('Failed to save user. Please try again.');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
 
             if (!isOpen) return null;
 
@@ -853,13 +876,13 @@
                             <div className="flex justify-end space-x-2">
                                 <button onClick={onClose} className="bg-gray-500 text-white px-4 py-2 rounded">Cancel</button>
                                 <button
-                                    onClick={() => onSave(editedUser)}
+                                    onClick={handleSave}
                                     disabled={isLoading}
                                     className={`bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition-all duration-200 flex items-center justify-center gap-2 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                    >
+                                >
                                     {isLoading ? (
                                         <>
-                                        <i className="fas fa-spinner fa-spin"></i> Saving...
+                                            <i className="fas fa-spinner fa-spin"></i> Saving...
                                         </>
                                     ) : (
                                         'Save'
