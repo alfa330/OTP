@@ -863,7 +863,7 @@ def get_sv_data():
             current_month = datetime.now().strftime('%Y-%m')
             
             for operator in operators:
-                operator_id, operator_name, direction_id, hire_date, hours_table_url, scores_table_url, supervisor_name =[operator[kkk] for kkk in operator]
+                operator_id, operator_name, direction_id, hire_date, hours_table_url, scores_table_url, supervisor_name, status, rate =[operator[kkk] for kkk in operator]
                 # Get direction name from direction_id
                 
                 # Get call evaluations for the operator
@@ -877,7 +877,9 @@ def get_sv_data():
                     "direction_id": direction_id,
                     "call_count": call_count,
                     "avg_score": round(avg_score, 2) if call_count > 0 else None,
-                    "scores_table_url": scores_table_url
+                    "scores_table_url": scores_table_url,
+                    "status": status,
+                    "rate": rate
                 })
         
         return jsonify(response_data), 200

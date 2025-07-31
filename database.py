@@ -975,7 +975,7 @@ class Database:
     def get_operators_by_supervisor(self, supervisor_id):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.name, u.direction_id, u.hire_date, u.hours_table_url, u.scores_table_url, s.name as supervisor_name
+                SELECT u.id, u.name, u.direction_id, u.hire_date, u.hours_table_url, u.scores_table_url, s.name as supervisor_name, u.status, u.rate
                 FROM users u
                 LEFT JOIN directions d ON u.direction_id = d.id
                 LEFT JOIN users s ON u.supervisor_id = s.id
@@ -989,7 +989,9 @@ class Database:
                     'hire_date': row[3],
                     'hours_table_url': row[4],
                     'scores_table_url': row[5],
-                    'supervisor_name': row[6]
+                    'supervisor_name': row[6],
+                    'status': row[7],
+                    'rate': row[8]
                 } for row in cursor.fetchall()
             ]
 
