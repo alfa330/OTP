@@ -320,6 +320,7 @@ class Database:
                     operator_id INTEGER NOT NULL REFERENCES users(id),
                     month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
                     phone_number VARCHAR(255) NOT NULL,
+                    appeal_date TIMESTAMP,
                     score FLOAT NOT NULL,
                     comment TEXT,
                     audio_path TEXT,
@@ -680,7 +681,7 @@ class Database:
     def add_call_evaluation(self, evaluator_id, operator_id, phone_number, score, 
                             comment=None, month=None, audio_path=None, is_draft=False, 
                             scores=None, criterion_comments=None, direction_id=None, 
-                            is_correction=False, previous_version_id=None):
+                            is_correction=False, previous_version_id=None, appeal_date=None):
         month = month or datetime.now().strftime('%Y-%m')
         
         # Подготовка JSON данных один раз
@@ -777,14 +778,14 @@ class Database:
                 INSERT INTO calls (
                     evaluator_id, operator_id, month, phone_number, score, comment,
                     audio_path, is_draft, is_correction, previous_version_id,
-                    scores, criterion_comments, direction_id
+                    scores, criterion_comments, direction_id, appeal_date
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 evaluator_id, operator_id, month, phone_number, score, comment,
                 audio_path, is_draft, is_correction, previous_version_id,
-                scores_json, criterion_comments_json, direction_id
+                scores_json, criterion_comments_json, direction_id, appeal_date
             ))
             call_id = cursor.fetchone()[0]
             
@@ -1093,6 +1094,7 @@ class Database:
                 c.id,
                 c.month, 
                 c.phone_number, 
+                c.appeal_date,
                 c.score, 
                 c.comment,
                 c.audio_path,
@@ -1125,21 +1127,22 @@ class Database:
                     "id": row[0],
                     "month": row[1],
                     "phone_number": row[2],
-                    "score": float(row[3]),
-                    "comment": row[4],
-                    "audio_path": row[5],
-                    "is_draft": row[6],
-                    "is_correction": row[7],
-                    "evaluation_date": row[8],
-                    "scores": row[9] if row[9] else [],
-                    "criterion_comments": row[10] if row[10] else [],
+                    "appeal_date": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None,
+                    "score": float(row[4]),
+                    "comment": row[5],
+                    "audio_path": row[6],
+                    "is_draft": row[7],
+                    "is_correction": row[8],
+                    "evaluation_date": row[9],
+                    "scores": row[10] if row[10] else [],
+                    "criterion_comments": row[11] if row[11] else [],
                     "direction": {
-                        "id": row[11],
-                        "name": row[12],
-                        "criteria": row[13] if row[13] else [],
-                        "hasFileUpload": row[14] if row[14] is not None else True
+                        "id": row[12],
+                        "name": row[13],
+                        "criteria": row[14] if row[14] else [],
+                        "hasFileUpload": row[15] if row[15] is not None else True
                     } if row[12] else None,
-                    "evaluator": row[15] if row[15] else None
+                    "evaluator": row[16] if row[16] else None
                 } for row in cursor.fetchall()
             ]
         
