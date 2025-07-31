@@ -3264,13 +3264,13 @@
                                                                         </button>
                                                                         <button
                                                                             onClick={() => {
-                                                                                setSelectedUserForHistory(u);
-                                                                                fetchUserHistory(u.id);
+                                                                                setSelectedUserForHistory(op);
+                                                                                fetchUserHistory(op.id);
                                                                             }}
-                                                                            disabled={loadingHistoryId === u.id}
-                                                                            className={`bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700 text-sm transition-all duration-200 flex items-center gap-1 ${loadingHistoryId === u.id ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                                                            disabled={loadingHistoryId === op.id}
+                                                                            className={`bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700 text-sm transition-all duration-200 flex items-center gap-1 ${loadingHistoryId === op.id ? 'opacity-50 cursor-not-allowed' : ''}`}
                                                                             >
-                                                                            {loadingHistoryId === u.id ? (
+                                                                            {loadingHistoryId === op.id ? (
                                                                                 <>
                                                                                 <i className="fas fa-spinner fa-spin"></i> Loading...
                                                                                 </>

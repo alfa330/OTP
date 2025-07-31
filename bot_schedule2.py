@@ -652,6 +652,7 @@ def dispute_call_evaluation():
             f"👤 Оператор: <b>{operator[2]}</b>\n"
             f"📞 Звонок ID: {call['id']}\n"
             f"📱 Номер: {call['phone_number']}\n"
+            f"📅 Дата обращения: {call['appeal_date']}\n"
             f"💯 Оценка: {call['score']}\n"
             f"📅 Месяц: {call['month']}\n\n"
             f"📝 <b>Сообщение от оператора:</b>\n"
@@ -664,6 +665,7 @@ def dispute_call_evaluation():
             f"💬 Супервайзер: <b>{supervisor[2]}</b>\n"
             f"👤 Оператор: <b>{operator[2]}</b>\n"
             f"📞 Звонок ID: {call['id']}\n"
+            f"📅 Дата обращения: {call['appeal_date']}\n"
             f"📱 Номер: {call['phone_number']}\n"
             f"💯 Оценка: {call['score']}\n"
             f"📅 Месяц: {call['month']}\n\n"
@@ -1297,7 +1299,7 @@ def receive_call_evaluation():
         if not request.form:
             return jsonify({"error": "Missing form data"}), 400
 
-        required_fields = ['evaluator', 'operator', 'phone_number', 'score', 'comment', 'month', 'is_draft']
+        required_fields = ['evaluator', 'operator', 'phone_number', 'appeal_date', 'score', 'comment', 'month', 'is_draft']
         missing_fields = [field for field in required_fields if field not in request.form]
         if missing_fields:
             return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
@@ -1305,6 +1307,7 @@ def receive_call_evaluation():
         evaluator_name = request.form['evaluator']
         operator_name = request.form['operator']
         phone_number = request.form['phone_number']
+        appeal_date = request.form['appeal_date']
         score = float(request.form['score'])
         comment = request.form['comment']
         month = request.form['month'] or datetime.now().strftime('%Y-%m')
@@ -1371,19 +1374,21 @@ def receive_call_evaluation():
             criterion_comments=criterion_comments,
             direction_id=direction_id,
             is_correction=is_correction,
-            previous_version_id=previous_version_id if previous_version_id else None
+            previous_version_id=previous_version_id if previous_version_id else None,
+            appeal_date=appeal_date
         )
 
         if has_new_audio or (not is_draft and audio_path):
             threading.Thread(target=background_upload_and_notify, args=(
                 audio_data, bucket_name, blob_path, evaluation_id, is_draft,
                 evaluator[2], operator[2], month, phone_number, score, comment,
-                is_correction, previous_version_id, audio_path if not has_new_audio else None
+                is_correction, previous_version_id, audio_path if not has_new_audio else None,
+                appeal_date
             )).start()
         elif not is_draft:
             threading.Thread(target=send_telegram_notification, args=(
                 evaluator[2], operator[2], month, phone_number, score, comment,
-                is_correction, previous_version_id, None
+                is_correction, previous_version_id, None, appeal_date
             )).start()
 
         return jsonify({"status": "success", "evaluation_id": evaluation_id}), 200
@@ -1393,7 +1398,7 @@ def receive_call_evaluation():
 
 def background_upload_and_notify(audio_data, bucket_name, blob_path, evaluation_id, is_draft,
                                  evaluator_name, operator_name, month, phone_number, score, comment,
-                                 is_correction, previous_version_id, existing_audio_path):
+                                 is_correction, previous_version_id, existing_audio_path, appeal_date):
     audio_path = existing_audio_path or ("my-app-audio-uploads/" + blob_path if blob_path else None)
     upload_success = False
     if audio_data:
@@ -1415,9 +1420,9 @@ def background_upload_and_notify(audio_data, bucket_name, blob_path, evaluation_
             audio_path = None
     if not is_draft:
         send_telegram_notification(evaluator_name, operator_name, month, phone_number, score, comment,
-                                   is_correction, previous_version_id, audio_path if (upload_success or existing_audio_path) else None)
+                                   is_correction, previous_version_id, audio_path if (upload_success or existing_audio_path) else None, appeal_date)
 
-def send_telegram_notification(evaluator_name, operator_name, month, phone_number, score, comment, is_correction, previous_version_id, audio_path):
+def send_telegram_notification(evaluator_name, operator_name, month, phone_number, score, comment, is_correction, previous_version_id, audio_path, appeal_date):
     try:
         API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
         admin = os.getenv('TELEGRAM_ADMIN_CHAT_ID')
@@ -1429,6 +1434,7 @@ def send_telegram_notification(evaluator_name, operator_name, month, phone_numbe
             f"📋 Оператор: <b>{operator_name}</b>\n"
             f"📄 За месяц: <b>{month}</b>\n"
             f"📱 Номер телефона: <b>{phone_number}</b>\n"
+            f"📅 Дата обращения: <b>{appeal_date}</b>\n"
             f"💯 Оценка: <b>{score}</b>\n"
         )
         if is_correction:
