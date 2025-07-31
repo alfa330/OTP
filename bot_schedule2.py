@@ -237,7 +237,7 @@ def admin_update_user():
         if field in ['direction_id', 'supervisor_id']:
             value = int(value) if value else None
         elif field == 'status':
-            if value not in ['working', 'fired']:
+            if value not in ['working', 'fired', 'unpaid_leave']:
                 return jsonify({"error": "Invalid status value"}), 400
         elif field == 'rate':
             try:
