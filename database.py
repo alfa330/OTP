@@ -272,8 +272,8 @@ class Database:
                     hours_table_url TEXT,
                     scores_table_url TEXT,
                     is_active BOOLEAN NOT NULL DEFAULT FALSE,
-                    status VARCHAR(20) NOT NULL DEFAULT 'working' CHECK(status IN ('working', 'fired')),  
-                    rate DECIMAL(3,2) NOT NULL DEFAULT 1.00 CHECK(rate IN (1.00, 0.75, 0.50)),  
+                    status VARCHAR(20) NOT NULL DEFAULT 'working' CHECK(status IN ('working', 'fired', 'unpaid_leave')),
+                    rate DECIMAL(3,2) NOT NULL DEFAULT 1.00 CHECK(rate IN (1.00, 0.75, 0.50)),
                     CONSTRAINT unique_name_role UNIQUE (name, role)
                 );
             """)
