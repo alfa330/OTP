@@ -3492,337 +3492,338 @@
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Call Evaluations</h2>
                                         {isLoading ? (
-                                            <p className="text-center text-gray-600">Loading...</p>
+                                        <p className="text-center text-gray-600">Loading...</p>
                                         ) : operatorData && operatorData.evaluations && operatorData.evaluations.length > 0 ? (
-                                            <div>
-                                                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                                                    <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-2">
-                                                        <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                            <p className="text-sm font-medium text-gray-500 mb-2">Total Evaluated Calls</p>
-                    <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
-                    <p className={`text-lg font-medium mt-2 ${
-                        (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
-                    }`}>
-                        {20 - operatorData.evaluations.length} calls remaining out of 20
-                    </p>
-                </div>
-            </div>
-            <div className="col-span-1 flex justify-center items-center">
-                <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
-            </div>
-        </div>
-        <div className="overflow-x-auto rounded-lg shadow-sm border border-gray-200">
-            <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-blue-50">
-                    <tr>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Call ID</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone Number</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Score</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Comment</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Month</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Evaluation Date</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-                    </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                {operatorData.evaluations.map((eval1, index) => (
-                    <React.Fragment key={index}>
-                    <tr
-                        className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${
-                        expandedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''
-                        }`}
-                        onClick={() => handleEvaluationClick(eval1)}
-                    >
-                        <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.id || '-'}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.phone_number || '-'}</td>
-                        <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${getScoreColor(eval1.score)}`}>
-                        {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
-                        </td>
-                        <td className="px-6 py-4 text-sm">
-                        {eval1.comment ? (
-                            <div className="space-y-1">
-                            {eval1.comment.split('\n').map((line, i) => {
-                                const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
-                                const match = cleanLine.match(/^(.*?):\s*(.*)$/);
-                                if (match) {
-                                return (
-                                    <p key={i} className="text-sm">
-                                    <span className="font-semibold">{match[1]}:</span>{' '}
-                                    <span className="italic">{match[2]}</span>
-                                    </p>
-                                );
-                                }
-                                return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
-                            })}
-                            </div>
-                        ) : '-'}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.month || '-'}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.evaluation_date || '-'}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm">
-                        {eval1.score < 100 && (
-                            <button
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                setSelectedEvaluation(eval1);
-                                setShowDisputeModal(true);
-                            }}
-                            className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm transition-all duration-200"
-                            >
-                            Dispute
-                            </button>
-                        )}
-                        </td>
-                    </tr>
+                                        <div>
+                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                                            <div className="col-span-1 md:col-span-2 grid grid-cols-1 gap-2">
+                                                <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
+                                                <p className="text-sm font-medium text-gray-500 mb-2">Total Evaluated Calls</p>
+                                                <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
+                                                <p className={`text-lg font-medium mt-2 ${
+                                                    (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
+                                                }`}>
+                                                    {20 - operatorData.evaluations.length} calls remaining out of 20
+                                                </p>
+                                                </div>
+                                            </div>
+                                            <div className="col-span-1 flex justify-center items-center">
+                                                <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" />
+                                            </div>
+                                            </div>
+                                            <div className="overflow-x-auto rounded-lg shadow-sm border border-gray-200">
+                                            <table className="min-w-full divide-y divide-gray-200">
+                                                <thead className="bg-blue-50">
+                                                <tr>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">No.</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone Number</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Appeal Date</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Score</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Comment</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Month</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Evaluation Date</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                                </tr>
+                                                </thead>
+                                                <tbody className="bg-white divide-y divide-gray-200">
+                                                {operatorData.evaluations.map((eval1, index) => (
+                                                    <React.Fragment key={index}>
+                                                    <tr
+                                                        className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${
+                                                        expandedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''
+                                                        }`}
+                                                        onClick={() => handleEvaluationClick(eval1)}
+                                                    >
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">{index + 1}</td>
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.phone_number || '-'}</td>
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.appeal_date || '-'}</td>
+                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${getScoreColor(eval1.score)}`}>
+                                                        {eval1.score !== null ? eval1.score.toFixed(2) : '-'}
+                                                        </td>
+                                                        <td className="px-6 py-4 text-sm">
+                                                        {eval1.comment ? (
+                                                            <div className="space-y-1">
+                                                            {eval1.comment.split('\n').map((line, i) => {
+                                                                const cleanLine = line.replace(/<\/?(b|i)>/g, '').trim();
+                                                                const match = cleanLine.match(/^(.*?):\s*(.*)$/);
+                                                                if (match) {
+                                                                return (
+                                                                    <p key={i} className="text-sm">
+                                                                    <span className="font-semibold">{match[1]}:</span>{' '}
+                                                                    <span className="italic">{match[2]}</span>
+                                                                    </p>
+                                                                );
+                                                                }
+                                                                return <p key={i} className="text-sm">{cleanLine || '-'}</p>;
+                                                            })}
+                                                            </div>
+                                                        ) : '-'}
+                                                        </td>
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.month || '-'}</td>
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">{eval1.evaluation_date || '-'}</td>
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                        {eval1.score < 100 && (
+                                                            <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                setSelectedEvaluation(eval1);
+                                                                setShowDisputeModal(true);
+                                                            }}
+                                                            className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm transition-all duration-200"
+                                                            >
+                                                            Dispute
+                                                            </button>
+                                                        )}
+                                                        </td>
+                                                    </tr>
+                                                        {expandedEvaluation?.id === eval1.id && (
+                                                            <tr>
+                                                            <td colSpan={8} className="p-4 bg-gray-50 border-t text-sm">
+                                                                {loadingAudioId === eval1.id ? (
+                                                                <p className="text-gray-500 italic">Loading audio...</p>
+                                                                ) : audioUrl ? (
+                                                                <audio controls src={audioUrl} className="w-full" />
+                                                                ) : (
+                                                                <p className="text-red-500">Audio not available</p>
+                                                                )}
+                                                            </td>
+                                                            </tr>
+                                                        )}
+                                                        </React.Fragment>
+                                                    ))}
+                                                    </tbody>
+                                                </table>
+                                                </div>
+                                            </div>
+                                            ) : (
+                                            <p className="text-center text-gray-600">No evaluations found for this period.</p>
+                                            )}
+                                        </div>
+                                        )}
+                                        {view === 'salary' && (
+                                            <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                                <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
+                                                <div className="flex mb-4">
+                                                    <button
+                                                        className={`px-4 py-2 mr-2 rounded ${calculatorType === 'call' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                                        onClick={() => setCalculatorType('call')}
+                                                    >
+                                                        Call
+                                                    </button>
+                                                    <button
+                                                        className={`px-4 py-2 rounded ${calculatorType === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                                        onClick={() => setCalculatorType('chat')}
+                                                    >
+                                                        Chat
+                                                    </button>
+                                                </div>
+                                                {calculatorType === 'call' ? (
+                                                    <>
+                                                        <div className="grid grid-cols-1 gap-6">
+                                                            <div className="form-group">
+                                                                <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
+                                                                <select
+                                                                    value={salaryData.experience}
+                                                                    onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
+                                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                    disabled={isLoading}
+                                                                >
+                                                                    <option value="">Select Experience</option>
+                                                                    <option value="0-3">0-3 months</option>
+                                                                    <option value="4-9">4-9 months</option>
+                                                                    <option value="10-15">10-15 months</option>
+                                                                    <option value="16+">≥16 months</option>
+                                                                </select>
+                                                            </div>
+                                                            <div className="form-group">
+                                                                <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
+                                                                <input
+                                                                    type="number"
+                                                                    value={salaryData.quality}
+                                                                    onChange={(e) => setSalaryData({ ...salaryData, quality: e.target.value })}
+                                                                    min="0"
+                                                                    max="100"
+                                                                    step="0.01"
+                                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                    disabled={isLoading}
+                                                                />
+                                                            </div>
+                                                            <div className="form-group">
+                                                                <label className="block mb-2 font-semibold text-gray-700">Calls per Hour:</label>
+                                                                <input
+                                                                    type="number"
+                                                                    value={salaryData.callsPerHour}
+                                                                    onChange={(e) => setSalaryData({ ...salaryData, callsPerHour: e.target.value })}
+                                                                    min="0"
+                                                                    max="100"
+                                                                    step="0.01"
+                                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                    disabled={isLoading}
+                                                                />
+                                                            </div>
+                                                            <div className="form-group">
+                                                                <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
+                                                                <input
+                                                                    type="number"
+                                                                    value={salaryData.hoursNorm}
+                                                                    onChange={(e) => setSalaryData({ ...salaryData, hoursNorm: e.target.value })}
+                                                                    min="0"
+                                                                    max="744"
+                                                                    step="0.01"
+                                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                    disabled={isLoading}
+                                                                />
+                                                            </div>
+                                                            <div className="form-group">
+                                                                <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
+                                                                <input
+                                                                    type="number"
+                                                                    value={salaryData.totalHours}
+                                                                    onChange={(e) => setSalaryData({ ...salaryData, totalHours: e.target.value })}
+                                                                    min="0"
+                                                                    max="744"
+                                                                    step="0.01"
+                                                                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                    disabled={isLoading}
+                                                                />
+                                                            </div>
+                                                            <div className="form-group">
+                                                                <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
+                                                                <div className="space-y-4">
+                                                                    <div className="flex items-center gap-4">
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={salaryData.bonusTraining}
+                                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusTraining: e.target.checked })}
+                                                                            className="w-5 h-5"
+                                                                            disabled={isLoading}
+                                                                        />
+                                                                        <label className="text-sm">Training (6000 KZT)</label>
+                                                                    </div>
+                                                                    <div className="flex items-center gap-4">
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={salaryData.bonusRefer}
+                                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusRefer: e.target.checked })}
+                                                                            className="w-5 h-5"
+                                                                            disabled={isLoading}
+                                                                        />
+                                                                        <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
+                                                                        {salaryData.bonusRefer && (
+                                                                            <input
+                                                                                type="number"
+                                                                                value={salaryData.bonusReferQuantity}
+                                                                                onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
+                                                                                min="1"
+                                                                                step="1"
+                                                                                placeholder="Quantity"
+                                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                                disabled={isLoading}
+                                                                            />
+                                                                        )}
+                                                                    </div>
+                                                                    <div className="flex items-center gap-4">
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={salaryData.bonusFilming}
+                                                                            onChange={(e) => setSalaryData({ ...salaryData, bonusFilming: e.target.checked })}
+                                                                            className="w-5 h-5"
+                                                                            disabled={isLoading}
+                                                                        />
+                                                                        <label className="text-sm">Filming (5000 KZT per session)</label>
+                                                                        {salaryData.bonusFilming && (
+                                                                            <input
+                                                                                type="number"
+                                                                                value={salaryData.bonusFilmingQuantity}
+                                                                                onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
+                                                                                min="1"
+                                                                                step="1"
+                                                                                placeholder="Quantity"
+                                                                                className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                                disabled={isLoading}
+                                                                            />
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex justify-center gap-4 mt-6">
+                                                            <button
+                                                                onClick={calculateSalary}
+                                                                className={`px-6 py-3 rounded-lg font-semibold text-lg bg-green-500 text-white hover:bg-green-600 transition-all duration-200 ${
+                                                                    isLoading ||
+                                                                    !salaryData.experience ||
+                                                                    !salaryData.quality ||
+                                                                    !salaryData.callsPerHour ||
+                                                                    !salaryData.hoursNorm ||
+                                                                    !salaryData.totalHours ||
+                                                                    (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
+                                                                    (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
+                                                                        ? 'opacity-50 cursor-not-allowed'
+                                                                        : ''
+                                                                }`}
+                                                                disabled={
+                                                                    isLoading ||
+                                                                    !salaryData.experience ||
+                                                                    !salaryData.quality ||
+                                                                    !salaryData.callsPerHour ||
+                                                                    !salaryData.hoursNorm ||
+                                                                    !salaryData.totalHours ||
+                                                                    (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
+                                                                    (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
+                                                                }
+                                                            >
+                                                                Calculate
+                                                            </button>
+                                                            <button
+                                                                onClick={() => setShowPointsTable(!showPointsTable)}
+                                                                className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
+                                                                    !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
+                                                                }`}
+                                                                disabled={!salaryResult}
+                                                            >
+                                                                {showPointsTable ? 'Hide Points Table' : 'Show Points Table'}
+                                                            </button>
+                                                            <button
+                                                                onClick={clearSalaryForm}
+                                                                className={`px-6 py-3 rounded-lg font-semibold text-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200 ${
+                                                                    !salaryData.experience &&
+                                                                    !salaryData.quality &&
+                                                                    !salaryData.callsPerHour &&
+                                                                    !salaryData.hoursNorm &&
+                                                                    !salaryData.totalHours &&
+                                                                    !salaryData.bonusTraining &&
+                                                                    !salaryData.bonusRefer &&
+                                                                    !salaryData.bonusFilming
+                                                                        ? 'opacity-50 cursor-not-allowed'
+                                                                        : ''
+                                                                }`}
+                                                                disabled={
+                                                                    !salaryData.experience &&
+                                                                    !salaryData.quality &&
+                                                                    !salaryData.callsPerHour &&
+                                                                    !salaryData.hoursNorm &&
+                                                                    !salaryData.totalHours &&
+                                                                    !salaryData.bonusTraining &&
+                                                                    !salaryData.bonusRefer &&
+                                                                    !salaryData.bonusFilming
+                                                                }
+                                                            >
+                                                                Clear
+                                                            </button>
+                                                        </div>
 
-                    {expandedEvaluation?.id === eval1.id && (
-                        <tr>
-                        <td colSpan={7} className="p-4 bg-gray-50 border-t text-sm">
-                            {loadingAudioId === eval1.id ? (
-                            <p className="text-gray-500 italic">Loading audio...</p>
-                            ) : audioUrl ? (
-                            <audio controls src={audioUrl} className="w-full" />
-                            ) : (
-                            <p className="text-red-500">Audio not available</p>
-                            )}
-                        </td>
-                        </tr>
-                    )}
-                    </React.Fragment>
-                ))}
-                </tbody>
-            </table>
-        </div>
-    </div>
-) : (
-    <p className="text-center text-gray-600">No evaluations found for this period.</p>
-)}
-</div>
-)}
-{view === 'salary' && (
-    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
-        <div className="flex mb-4">
-            <button
-                className={`px-4 py-2 mr-2 rounded ${calculatorType === 'call' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                onClick={() => setCalculatorType('call')}
-            >
-                Call
-            </button>
-            <button
-                className={`px-4 py-2 rounded ${calculatorType === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                onClick={() => setCalculatorType('chat')}
-            >
-                Chat
-            </button>
-        </div>
-        {calculatorType === 'call' ? (
-            <>
-                <div className="grid grid-cols-1 gap-6">
-                    <div className="form-group">
-                        <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
-                        <select
-                            value={salaryData.experience}
-                            onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
-                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            disabled={isLoading}
-                        >
-                            <option value="">Select Experience</option>
-                            <option value="0-3">0-3 months</option>
-                            <option value="4-9">4-9 months</option>
-                            <option value="10-15">10-15 months</option>
-                            <option value="16+">≥16 months</option>
-                        </select>
-                    </div>
-                    <div className="form-group">
-                        <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
-                        <input
-                            type="number"
-                            value={salaryData.quality}
-                            onChange={(e) => setSalaryData({ ...salaryData, quality: e.target.value })}
-                            min="0"
-                            max="100"
-                            step="0.01"
-                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            disabled={isLoading}
-                        />
-                    </div>
-                    <div className="form-group">
-                        <label className="block mb-2 font-semibold text-gray-700">Calls per Hour:</label>
-                        <input
-                            type="number"
-                            value={salaryData.callsPerHour}
-                            onChange={(e) => setSalaryData({ ...salaryData, callsPerHour: e.target.value })}
-                            min="0"
-                            max="100"
-                            step="0.01"
-                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            disabled={isLoading}
-                        />
-                    </div>
-                    <div className="form-group">
-                        <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
-                        <input
-                            type="number"
-                            value={salaryData.hoursNorm}
-                            onChange={(e) => setSalaryData({ ...salaryData, hoursNorm: e.target.value })}
-                            min="0"
-                            max="744"
-                            step="0.01"
-                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            disabled={isLoading}
-                        />
-                    </div>
-                    <div className="form-group">
-                        <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
-                        <input
-                            type="number"
-                            value={salaryData.totalHours}
-                            onChange={(e) => setSalaryData({ ...salaryData, totalHours: e.target.value })}
-                            min="0"
-                            max="744"
-                            step="0.01"
-                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            disabled={isLoading}
-                        />
-                    </div>
-                    <div className="form-group">
-                        <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
-                        <div className="space-y-4">
-                            <div className="flex items-center gap-4">
-                                <input
-                                    type="checkbox"
-                                    checked={salaryData.bonusTraining}
-                                    onChange={(e) => setSalaryData({ ...salaryData, bonusTraining: e.target.checked })}
-                                    className="w-5 h-5"
-                                    disabled={isLoading}
-                                />
-                                <label className="text-sm">Training (6000 KZT)</label>
-                            </div>
-                            <div className="flex items-center gap-4">
-                                <input
-                                    type="checkbox"
-                                    checked={salaryData.bonusRefer}
-                                    onChange={(e) => setSalaryData({ ...salaryData, bonusRefer: e.target.checked })}
-                                    className="w-5 h-5"
-                                    disabled={isLoading}
-                                />
-                                <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
-                                {salaryData.bonusRefer && (
-                                    <input
-                                        type="number"
-                                        value={salaryData.bonusReferQuantity}
-                                        onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
-                                        min="1"
-                                        step="1"
-                                        placeholder="Quantity"
-                                        className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    />
-                                )}
-                            </div>
-                            <div className="flex items-center gap-4">
-                                <input
-                                    type="checkbox"
-                                    checked={salaryData.bonusFilming}
-                                    onChange={(e) => setSalaryData({ ...salaryData, bonusFilming: e.target.checked })}
-                                    className="w-5 h-5"
-                                    disabled={isLoading}
-                                />
-                                <label className="text-sm">Filming (5000 KZT per session)</label>
-                                {salaryData.bonusFilming && (
-                                    <input
-                                        type="number"
-                                        value={salaryData.bonusFilmingQuantity}
-                                        onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
-                                        min="1"
-                                        step="1"
-                                        placeholder="Quantity"
-                                        className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isLoading}
-                                    />
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div className="flex justify-center gap-4 mt-6">
-                    <button
-                        onClick={calculateSalary}
-                        className={`px-6 py-3 rounded-lg font-semibold text-lg bg-green-500 text-white hover:bg-green-600 transition-all duration-200 ${
-                            isLoading ||
-                            !salaryData.experience ||
-                            !salaryData.quality ||
-                            !salaryData.callsPerHour ||
-                            !salaryData.hoursNorm ||
-                            !salaryData.totalHours ||
-                            (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
-                            (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
-                                ? 'opacity-50 cursor-not-allowed'
-                                : ''
-                        }`}
-                        disabled={
-                            isLoading ||
-                            !salaryData.experience ||
-                            !salaryData.quality ||
-                            !salaryData.callsPerHour ||
-                            !salaryData.hoursNorm ||
-                            !salaryData.totalHours ||
-                            (salaryData.bonusRefer && !salaryData.bonusReferQuantity) ||
-                            (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
-                        }
-                    >
-                        Calculate
-                    </button>
-                    <button
-                        onClick={() => setShowPointsTable(!showPointsTable)}
-                        className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
-                            !salaryResult ? 'opacity-50 cursor-not-allowed' : ''
-                        }`}
-                        disabled={!salaryResult}
-                    >
-                        {showPointsTable ? 'Hide Points Table' : 'Show Points Table'}
-                    </button>
-                    <button
-                        onClick={clearSalaryForm}
-                        className={`px-6 py-3 rounded-lg font-semibold text-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200 ${
-                            !salaryData.experience &&
-                            !salaryData.quality &&
-                            !salaryData.callsPerHour &&
-                            !salaryData.hoursNorm &&
-                            !salaryData.totalHours &&
-                            !salaryData.bonusTraining &&
-                            !salaryData.bonusRefer &&
-                            !salaryData.bonusFilming
-                                ? 'opacity-50 cursor-not-allowed'
-                                : ''
-                        }`}
-                        disabled={
-                            !salaryData.experience &&
-                            !salaryData.quality &&
-                            !salaryData.callsPerHour &&
-                            !salaryData.hoursNorm &&
-                            !salaryData.totalHours &&
-                            !salaryData.bonusTraining &&
-                            !salaryData.bonusRefer &&
-                            !salaryData.bonusFilming
-                        }
-                    >
-                        Clear
-                    </button>
-                </div>
-
-                <SalaryCalculationResult salaryResult={salaryResult} />
-                
-                <div className={`mt-6 ${showPointsTable ? '' : 'hidden'}`}>
-                    {generatePointsTable()}
-                </div>
-            </>
-        ) : (
-            <SalaryCalculatorChat />
-        )}
-    </div>
-)}
+                                                        <SalaryCalculationResult salaryResult={salaryResult} />
+                                                        
+                                                        <div className={`mt-6 ${showPointsTable ? '' : 'hidden'}`}>
+                                                            {generatePointsTable()}
+                                                        </div>
+                                                    </>
+                                                ) : (
+                                                    <SalaryCalculatorChat />
+                                                )}
+                                            </div>
+                                        )}
                             </>
                         )}
                         {showDisputeModal && (
