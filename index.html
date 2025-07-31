@@ -787,14 +787,15 @@
                             {user.role === 'admin' && (
                                 <>
                                     <div>
-                                        <label className="block mb-2 font-medium">Status</label>
+                                        <label className="block mb-2 font-medium">Rate</label>
                                         <select
-                                            value={editedUser.status || 'working'}
-                                            onChange={(e) => setEditedUser({ ...editedUser, status: e.target.value })}
+                                            value={editedUser.rate || 1.0}
+                                            onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
                                             className="w-full p-2 border rounded-lg"
                                         >
-                                            <option value="working">Working</option>
-                                            <option value="fired">Fired</option>
+                                            <option value={1.0}>1.00</option>
+                                            <option value={0.75}>0.75</option>
+                                            <option value={0.5}>0.50</option>
                                         </select>
                                     </div>
                                     <div>
@@ -813,15 +814,15 @@
                                 </>
                             )}
                             <div>
-                                <label className="block mb-2 font-medium">Rate</label>
+                                <label className="block mb-2 font-medium">Status</label>
                                 <select
-                                    value={editedUser.rate || 1.0}
-                                    onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
+                                    value={editedUser.status || 'working'}
+                                    onChange={(e) => setEditedUser({ ...editedUser, status: e.target.value })}
                                     className="w-full p-2 border rounded-lg"
                                 >
-                                    <option value={1.0}>1.00</option>
-                                    <option value={0.75}>0.75</option>
-                                    <option value={0.5}>0.50</option>
+                                    <option value="working">Working</option>
+                                    <option value="fired">Fired</option>
+                                    <option value="unpaid_leave">Unpaid leave</option>
                                 </select>
                             </div>
                             <div>
@@ -1539,8 +1540,7 @@
                 setIsLoading(true);
                 
                 try {
-                    // Change direction
-                    if (editedUser.direction) {
+                    if (editedUser.direction_id && editedUser.direction_id !== userToEdit.direction_id) {
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
                             user_id: editedUser.id,
                             field: 'direction_id',
@@ -1549,8 +1549,7 @@
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
                     }
-                    // Change supervisor
-                    if (editedUser.supervisor_id) {
+                    if (editedUser.supervisor_id && editedUser.supervisor_id !== userToEdit.supervisor_id) {
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
                             user_id: editedUser.id,
                             field: 'supervisor_id',
@@ -1559,8 +1558,7 @@
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
                     }
-                    // Change login
-                    if (editedUser.new_login) {
+                    if (editedUser.new_login && editedUser.new_login.trim() !== '') {
                         await axios.post(`${API_BASE_URL}/api/user/change_login`, {
                             user_id: editedUser.id,
                             new_login: editedUser.new_login
@@ -1568,8 +1566,7 @@
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
                     }
-                    // Change password
-                    if (editedUser.new_password) {
+                    if (editedUser.new_password && editedUser.new_password.trim() !== '') {
                         await axios.post(`${API_BASE_URL}/api/user/change_password`, {
                             user_id: editedUser.id,
                             new_password: editedUser.new_password
@@ -1578,10 +1575,22 @@
                         });
                     }
                     if (editedUser.status && editedUser.status !== userToEdit.status) {
-                        await updateUserField(editedUser.id, 'status', editedUser.status);
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'status',
+                            value: editedUser.status
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
                     }
                     if (editedUser.rate && editedUser.rate !== userToEdit.rate) {
-                        await updateUserField(editedUser.id, 'rate', editedUser.rate);
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'rate',
+                            value: editedUser.rate
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
                     }
                     showToast('User updated successfully', 'success');
                     fetchUsers();
