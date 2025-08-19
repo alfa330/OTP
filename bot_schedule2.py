@@ -665,8 +665,9 @@ def dispute_call_evaluation():
             f"📞 Звонок ID: {call['id']}\n"
             f"📱 Номер: {call['phone_number']}\n"
             f"📅 Дата обращения: {call['appeal_date']}\n"
+            f"📅 Дата оценки: {call['created_at']}\n"
             f"💯 Оценка: {call['score']}\n"
-            f"📅 Месяц: {call['month']}\n\n"
+            f"📅 За месяц: {call['month']}\n\n"
             f"📝 <b>Сообщение от оператора:</b>\n"
             f"{data['dispute_text']}"
         )
@@ -678,9 +679,10 @@ def dispute_call_evaluation():
             f"👤 Оператор: <b>{operator[2]}</b>\n"
             f"📞 Звонок ID: {call['id']}\n"
             f"📅 Дата обращения: {call['appeal_date']}\n"
+            f"📅 Дата оценки: {call['created_at']}\n"
             f"📱 Номер: {call['phone_number']}\n"
             f"💯 Оценка: {call['score']}\n"
-            f"📅 Месяц: {call['month']}\n\n"
+            f"📅 За месяц: {call['month']}\n\n"
             f"📝 <b>Сообщение от оператора:</b>\n"
             f"{data['dispute_text']}"
         )
