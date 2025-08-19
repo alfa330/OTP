@@ -1116,6 +1116,29 @@ def handle_monthly_report():
         logging.error(f"Error in monthly_report: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/admin/users_report', methods=['GET'])
+@require_api_key
+def get_users_report():
+    try:
+        requester_id = int(request.headers.get('X-User-Id'))
+        requester = db.get_user(id=requester_id)
+        if not requester or requester[3] != 'admin':
+            return jsonify({"error": "Only admins can generate users report"}), 403
+        
+        filename, content = db.generate_users_report()
+        if not filename or not content:
+            return jsonify({"error": "Failed to generate report"}), 500
+        
+        return send_file(
+            BytesIO(content),
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except Exception as e:
+        logging.error(f"Error generating users report: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/sv/update_table', methods=['POST'])
 def update_sv_table():
     try:
