@@ -1580,7 +1580,7 @@
             const handleGenerateReport = async () => {
                     try {
                         setIsLoading(true);
-                        const response = await axios.get(`${API_URL}/api/admin/users_report`, {
+                        const response = await axios.get(`${API_BASE_URL}/api/admin/users_report`, {
                             headers: getAuthHeaders(),
                             responseType: 'blob'
                         });
