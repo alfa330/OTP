@@ -249,8 +249,6 @@ def admin_update_user():
                     return jsonify({"error": "Invalid rate value"}), 400
             except ValueError:
                 return jsonify({"error": "Invalid rate format"}), 400
-        else:
-            return jsonify({"error": "Invalid field"}), 400
         elif field == 'hire_date':
             if value:
                 try:
@@ -259,6 +257,8 @@ def admin_update_user():
                     return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
             else:
                 value = None  # Allow clearing the date
+        else:
+            return jsonify({"error": "Invalid field"}), 400
 
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
