@@ -200,7 +200,7 @@ def get_admin_users():
         if requester[3] == 'admin' or requester[3] == 'sv':
             with db._get_cursor() as cursor:
                 cursor.execute("""
-                    SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role, u.status, u.rate
+                    SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role, u.status, u.rate, u.hire_date
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -217,7 +217,8 @@ def get_admin_users():
                         "supervisor_id": row[5],
                         "role": row[6],
                         "status": row[7],
-                        "rate": float(row[8])
+                        "rate": float(row[8]),
+                        "hire_date": row[9].strftime('%Y-%m-%d') if row[9] else None  # Add this line
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
@@ -250,6 +251,14 @@ def admin_update_user():
                 return jsonify({"error": "Invalid rate format"}), 400
         else:
             return jsonify({"error": "Invalid field"}), 400
+        elif field == 'hire_date':
+            if value:
+                try:
+                    datetime.strptime(value, '%Y-%m-%d')
+                except ValueError:
+                    return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+            else:
+                value = None  # Allow clearing the date
 
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
