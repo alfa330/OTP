@@ -1147,7 +1147,7 @@ class Database:
             ]
         
     def update_user(self, user_id, field, value, changed_by=None):
-        allowed_fields = ['direction_id', 'supervisor_id', 'status', 'rate']  # Add new fields
+        allowed_fields = ['direction_id', 'supervisor_id', 'status', 'rate', 'hire_date']  # Add new fields
         if field not in allowed_fields:
             raise ValueError("Invalid field to update")
         
