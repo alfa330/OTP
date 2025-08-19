@@ -1670,6 +1670,15 @@
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
                     }
+                    if (editedUser.hire_date && editedUser.hire_date !== userToEdit.hire_date) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'hire_date',
+                            value: editedUser.rate
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
                     showToast('User updated successfully', 'success');
                     fetchUsers();
                     setShowUserEditModal(false);
