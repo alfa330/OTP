@@ -208,6 +208,7 @@ def get_admin_users():
                 """)
                 users = []
                 for row in cursor.fetchall():
+                    logging.log(row[9]);
                     users.append({
                         "id": row[0],
                         "name": row[1],
@@ -218,7 +219,7 @@ def get_admin_users():
                         "role": row[6],
                         "status": row[7],
                         "rate": float(row[8]),
-                        "hire_date": row[9].strftime('%Y-%m-%d') if row[9] else None  # Add this line
+                        "hire_date": row[9].strftime('%d-%m-%Y') if row[9] else None  # Add this line
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
