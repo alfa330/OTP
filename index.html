@@ -1594,11 +1594,10 @@
                         link.click();
                         document.body.removeChild(link);
                         window.URL.revokeObjectURL(url);
-                        
-                        addToast('success', 'Report generated and downloaded successfully');
+                        showToast('Report generated and downloaded successfully', 'success');
                     } catch (error) {
                         console.error('Error generating report:', error);
-                        addToast('error', 'Failed to generate report');
+                        showToast(''Failed to generate report', 'error');
                     } finally {
                         setIsLoading(false);
                     }
