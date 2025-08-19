@@ -1674,7 +1674,7 @@
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
                             user_id: editedUser.id,
                             field: 'hire_date',
-                            value: editedUser.rate
+                            value: editedUser.hire_date
                         }, {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
