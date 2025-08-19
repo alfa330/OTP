@@ -3109,18 +3109,21 @@
                                 {view === 'manage_users' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Manage Users</h2>
+                                        
+                                        {/* Generate Report Button */}
+                                        <button
+                                            onClick={handleGenerateReport}
+                                            className={`mb-6 px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                            disabled={isLoading}
+                                        >
+                                            {isLoading ? 'Generating...' : 'Generate Report'}
+                                        </button>
+                                
                                         {isAdminDataLoading ? (
                                             <p className="text-center text-gray-600">Loading...</p>
                                         ) : users.length === 0 ? (
                                             <p className="text-center text-gray-600">No users found.</p>
-                                        ) : ( 
-                                            <button
-                                                onClick={handleGenerateReport}
-                                                className={`mb-4 px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                                disabled={isLoading}
-                                            >
-                                                {isLoading ? 'Generating...' : 'Generate Report'}
-                                            </button>
+                                        ) : (
                                             <div className="overflow-x-auto rounded-lg border border-gray-200">
                                                 <div className="mb-4">
                                                     <input
@@ -3148,10 +3151,10 @@
                                                                 <td className="px-6 py-4 whitespace-nowrap">{u.name}</td>
                                                                 <td className="px-6 py-4 whitespace-nowrap">{u.direction || '-'}</td>
                                                                 <td className="px-6 py-4 whitespace-nowrap">{u.supervisor_name || '-'}</td>
-                                                                <td className="px-6 py-4 whitespace-nowrap">{u.status || 'working'}</td> {/* NEW */}
-                                                                <td className="px-6 py-4 whitespace-nowrap">{u.rate || 1.0}</td> {/* NEW */}
+                                                                <td className="px-6 py-4 whitespace-nowrap">{u.status || 'working'}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap">{u.rate || 1.0}</td>
                                                                 <td className="px-6 py-4 whitespace-nowrap">
-                                                                    <div className="flex space-x-2"> {/* Ensure horizontal alignment */}
+                                                                    <div className="flex space-x-2">
                                                                         <button
                                                                             onClick={() => {
                                                                                 setUserToEdit(u);
@@ -3168,14 +3171,14 @@
                                                                             }}
                                                                             disabled={loadingHistoryId === u.id}
                                                                             className={`bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700 text-sm transition-all duration-200 flex items-center gap-1 ${loadingHistoryId === u.id ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                                                            >
+                                                                        >
                                                                             {loadingHistoryId === u.id ? (
                                                                                 <>
-                                                                                <i className="fas fa-spinner fa-spin"></i> Loading...
+                                                                                    <i className="fas fa-spinner fa-spin"></i> Loading...
                                                                                 </>
                                                                             ) : (
                                                                                 <>
-                                                                                <i className="fas fa-history"></i> History
+                                                                                    <i className="fas fa-history"></i> History
                                                                                 </>
                                                                             )}
                                                                         </button>
@@ -3187,6 +3190,8 @@
                                                 </table>
                                             </div>
                                         )}
+                                    </div>
+                                )}
                                     </div>
                                 )}
                             </>
