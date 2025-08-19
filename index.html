@@ -619,7 +619,35 @@
                 return this.props.children;
             }
         }
-
+        
+        const RateCircle = ({ rate }) => {
+            const percentage = rate * 100;
+            const color = rate === 1 ? '#16a34a' : rate === 0.75 ? '#eab308' : '#dc2626'; // Green for 1, yellow for 0.75, red for 0.5
+        
+            return (
+                <div className="relative w-10 h-10 mx-auto">
+                    <svg className="w-full h-full" viewBox="0 0 36 36">
+                        <path
+                            d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                            fill="none"
+                            stroke="#e5e7eb" // Background circle color (gray)
+                            strokeWidth="3"
+                        />
+                        <path
+                            d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                            fill="none"
+                            stroke={color}
+                            strokeWidth="3"
+                            strokeDasharray={`${percentage}, 100`}
+                        />
+                    </svg>
+                    <div className="absolute inset-0 flex items-center justify-center text-sm font-medium text-gray-800">
+                        {rate}
+                    </div>
+                </div>
+            );
+        };
+                
         // SemiCircle Progress Component
         const SemiCircleProgress = ({ percentage, label }) => {
             const canvasRef = useRef(null);
@@ -3192,7 +3220,7 @@
                                                                     <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{u.status}</span>
                                                                   )}
                                                                 </td>
-                                                                <td className="px-6 py-4 whitespace-nowrap">{u.rate || 1.0}</td>
+                                                                <td className="px-6 py-4 whitespace-nowrap"><RateCircle rate={u.rate || 1.0} /></td>
                                                                 <td className="px-6 py-4 whitespace-nowrap">
                                                                     <div className="flex space-x-2">
                                                                         <button
@@ -3335,7 +3363,7 @@
                                                                     <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{op.status}</span>
                                                                   )}
                                                                 </td>
-                                                                <td className="px-6 py-4 whitespace-nowrap">{op.rate || 1.0}</td> 
+                                                                <td className="px-6 py-4 whitespace-nowrap"><RateCircle rate={op.rate || 1.0} /></td>
                                                                 <td className="px-6 py-4 whitespace-nowrap">
                                                                     <div className="flex space-x-2"> 
                                                                         <button
