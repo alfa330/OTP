@@ -208,7 +208,7 @@ def get_admin_users():
                 """)
                 users = []
                 for row in cursor.fetchall():
-                    logging.log(row[9]);
+                    logging.info(row[9]);
                     users.append({
                         "id": row[0],
                         "name": row[1],
