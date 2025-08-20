@@ -3398,7 +3398,6 @@ if __name__ == '__main__':
         logging.info("Admin user created")
     if not db.get_user(name='Kronos'):
         db.create_user(
-            telegram_id=admin,
             name='Kronos',
             role='admin',
             login=ADMIN_LOGIN_K,
