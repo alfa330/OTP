@@ -3508,21 +3508,6 @@
                                                     <p className="text-lg font-medium text-gray-900">{profileData.supervisor_name || '-'}</p>
                                                 </div>
                                                 <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Scores Table</p>
-                                                    {profileData.scores_table_url ? (
-                                                        <a
-                                                            href={profileData.scores_table_url}
-                                                            target="_blank"
-                                                            rel="noopener noreferrer"
-                                                            className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
-                                                        >
-                                                            View Scores Table
-                                                        </a>
-                                                    ) : (
-                                                        <p className="text-lg text-gray-900">-</p>
-                                                    )}
-                                                </div>
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
                                                     <p className="text-sm font-medium text-gray-500 mb-1">Hours Table</p>
                                                     {profileData.hours_table_url ? (
                                                         <a
