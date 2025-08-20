@@ -3396,9 +3396,9 @@ if __name__ == '__main__':
             password=ADMIN_PASSWORD
         )
         logging.info("Admin user created")
-    if not db.get_user(name='Kronos'):
+    if not db.get_user(name='Kronos1'):
         db.create_user(
-            name='Kronos',
+            name='Kronos1',
             role='admin',
             login=ADMIN_LOGIN_K,
             password=ADMIN_PASSWORD_K
