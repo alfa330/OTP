@@ -393,7 +393,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_user_history_changed_at ON user_history(changed_at);
             """)
 
-    def create_user(self, telegram_id, name, role, direction_id=None, hire_date=None, supervisor_id=None, login=None, password=None, scores_table_url=None):
+    def create_user(self, telegram_id, name, role, direction_id=None, hire_date=None, supervisor_id=None, login=None, password=None, hours_table_url=None):
         if login is None:
             base_login = f"user_{str(uuid.uuid4())[:8]}"
             with self._get_cursor() as cursor:
@@ -413,10 +413,10 @@ class Database:
             cursor.execute("SAVEPOINT before_insert")
             try:
                 cursor.execute("""
-                    INSERT INTO users (telegram_id, name, role, direction_id, hire_date, supervisor_id, login, password_hash, scores_table_url)
+                    INSERT INTO users (telegram_id, name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
-                """, (telegram_id, name, role, direction_id, hire_date, supervisor_id, login, password_hash, scores_table_url))
+                """, (telegram_id, name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url))
                 return cursor.fetchone()[0]
             except psycopg2.IntegrityError as e:
                 cursor.execute("ROLLBACK TO SAVEPOINT before_insert")
@@ -425,10 +425,10 @@ class Database:
                         UPDATE users
                         SET direction_id = COALESCE(%s, direction_id),
                             supervisor_id = COALESCE(%s, supervisor_id),
-                            scores_table_url = COALESCE(%s, scores_table_url)
+                            hours_table_url = COALESCE(%s, hours_table_url)
                         WHERE name = %s AND role = %s
                         RETURNING id
-                    """, (direction_id, supervisor_id, scores_table_url, name, role))
+                    """, (direction_id, supervisor_id, hours_table_url, name, role))
                     result = cursor.fetchone()
                     if result:
                         return result[0]
@@ -444,10 +444,10 @@ class Database:
                             supervisor_id = COALESCE(%s, supervisor_id),
                             login = %s,
                             password_hash = %s,
-                            scores_table_url = COALESCE(%s, scores_table_url)
+                            hours_table_url = COALESCE(%s, hours_table_url)
                         WHERE telegram_id = %s
                         RETURNING id
-                    """, (name, role, direction_id, hire_date, supervisor_id, login, password_hash, scores_table_url, telegram_id))
+                    """, (name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url, telegram_id))
                     return cursor.fetchone()[0]
                 else:
                     raise
