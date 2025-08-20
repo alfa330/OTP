@@ -40,6 +40,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 API_TOKEN = os.getenv('BOT_TOKEN')
 FLASK_API_KEY = os.getenv('FLASK_API_KEY')
 admin = int(os.getenv('ADMIN_ID', '0'))
+admin2 = int(os.getenv('ADMIN_ID_2', '0'))
 ADMIN_LOGIN = os.getenv('ADMIN_LOGIN', 'admin')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'admin123')
 ADMIN_LOGIN_K = os.getenv('ADMIN_LOGIN_K', 'admin2')
@@ -3398,6 +3399,7 @@ if __name__ == '__main__':
         logging.info("Admin user created")
     if not db.get_user(name='Kronos1'):
         db.create_user(
+            telegram_id=admin2,
             name='Kronos1',
             role='admin',
             login=ADMIN_LOGIN_K,
