@@ -422,7 +422,8 @@ def save_table():
                 name=op['name'],
                 role='operator',
                 direction_id=direction_id,
-                supervisor_id=user_id
+                supervisor_id=user_id,
+                hours_table_url=table_url
             )
 
         # Optional: Send Telegram notification to supervisor
