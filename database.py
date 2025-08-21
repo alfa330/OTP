@@ -284,7 +284,6 @@ class Database:
                     name VARCHAR(255) NOT NULL,
                     has_file_upload BOOLEAN NOT NULL DEFAULT TRUE,
                     criteria JSONB NOT NULL DEFAULT '[]',
-                    created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     is_active BOOLEAN NOT NULL DEFAULT TRUE,
                     version INTEGER NOT NULL DEFAULT 1,
@@ -484,20 +483,20 @@ class Database:
                 } for row in cursor.fetchall()
             ]
 
-    def save_directions(self, directions, admin_id):
+    def save_directions(self, directions):
         """Сохранить направления в таблицу directions, создавая новые версии при изменениях."""
         with self._get_cursor() as cursor:
             # 1. Получаем текущие активные направления (только нужные поля)
             cursor.execute("""
                 SELECT id, name, has_file_upload, criteria, version
                 FROM directions
-                WHERE created_by = %s AND is_active = TRUE
-            """, (admin_id,))
+                WHERE is_active = TRUE
+            """)
             existing_directions = {
                 row[1]: {
-                    "id": row[0], 
-                    "has_file_upload": row[2], 
-                    "criteria": row[3], 
+                    "id": row[0],
+                    "has_file_upload": row[2],
+                    "criteria": row[3],
                     "version": row[4]
                 } for row in cursor.fetchall()
             }
@@ -514,18 +513,18 @@ class Database:
                 
                 if name in existing_directions:
                     existing = existing_directions[name]
-                    if (existing['has_file_upload'] == has_file_upload and 
+                    if (existing['has_file_upload'] == has_file_upload and
                         existing['criteria'] == criteria):
                         continue  # Ничего не изменилось, пропускаем
                     
                     directions_to_deactivate.append(existing['id'])
                     insert_values.append((
-                        name, has_file_upload, criteria, admin_id,
+                        name, has_file_upload, criteria,
                         existing['version'] + 1, existing['id']
                     ))
                 else:
                     insert_values.append((
-                        name, has_file_upload, criteria, admin_id,
+                        name, has_file_upload, criteria,
                         1, None  # version=1, no previous version
                     ))
             
@@ -541,10 +540,10 @@ class Database:
             if insert_values:
                 cursor.executemany("""
                     INSERT INTO directions (
-                        name, has_file_upload, criteria, created_by, 
+                        name, has_file_upload, criteria,
                         version, previous_version_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s)
                 """, insert_values)
             
             # 5. Деактивируем направления, которых нет в новом списке
@@ -552,14 +551,14 @@ class Database:
                 cursor.execute("""
                     UPDATE directions
                     SET is_active = FALSE
-                    WHERE created_by = %s AND is_active = TRUE AND name NOT IN %s
-                """, (admin_id, tuple(new_direction_names)))
+                    WHERE is_active = TRUE AND name NOT IN %s
+                """, (tuple(new_direction_names),))
             else:
                 cursor.execute("""
                     UPDATE directions
                     SET is_active = FALSE
-                    WHERE created_by = %s AND is_active = TRUE
-                """, (admin_id,))
+                    WHERE is_active = TRUE
+                """)
             
             # 6. Оптимизированное обновление direction_id в users
             cursor.execute("""
@@ -568,9 +567,9 @@ class Database:
                 SET direction_id = latest.id
                 FROM directions current
                 JOIN (
-                    SELECT name, id, 
+                    SELECT name, id,
                         ROW_NUMBER() OVER (PARTITION BY name ORDER BY version DESC) as rn
-                    FROM directions 
+                    FROM directions
                     WHERE is_active = TRUE
                 ) latest ON current.name = latest.name AND latest.rn = 1
                 WHERE u.direction_id = current.id AND current.is_active = FALSE;
