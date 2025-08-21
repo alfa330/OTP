@@ -804,7 +804,7 @@ def save_directions():
             return jsonify({"error": "Missing directions data"}), 400
 
         directions = data['directions']
-        db.save_directions(directions, requester_id)
+        db.save_directions(directions)
 
         # Получаем обновлённый список направлений с id
         updated_directions = db.get_directions()
