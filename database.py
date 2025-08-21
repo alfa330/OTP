@@ -1106,7 +1106,8 @@ class Database:
                 d.name as direction_name,
                 d.criteria as direction_criteria,
                 d.has_file_upload as direction_has_file_upload,
-                u.name as evaluator_name
+                u.name as evaluator_name,
+                c.created_at
             FROM calls c
             JOIN latest_calls lc ON c.id = lc.id
             LEFT JOIN directions d ON c.direction_id = d.id AND d.is_active = TRUE  -- Added is_active filter
@@ -1141,7 +1142,8 @@ class Database:
                         "criteria": row[14] if row[14] else [],
                         "hasFileUpload": row[15] if row[15] is not None else True
                     } if row[12] else None,
-                    "evaluator": row[16] if row[16] else None
+                    "evaluator": row[16] if row[16] else None,
+                    "created_at":row[17]
                 } for row in cursor.fetchall()
             ]
         
