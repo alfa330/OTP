@@ -100,7 +100,6 @@ def process_timesheet(file_url, supervisor_id):
         # Extract data
         data = []
         fio_col, hours_col, training_col, norm_col = None, None, None, None
-        day_map = {}  # col_idx: day_num
         # First pass - find headers in the main table (only check first row)
         for row_idx, row in enumerate(last_sheet.iter_rows(max_row=1, max_col=MAX_COLS, values_only=True), 1):
             headers = [str(cell).strip().replace('"', '').replace('\n', '').replace(' ', ' ') if cell else '' for cell in row]
@@ -127,12 +126,7 @@ def process_timesheet(file_url, supervisor_id):
         
         # Identify day columns between norm_col and hours_col
         if norm_col is not None and hours_col is not None and norm_col < hours_col - 1:
-            for idx in range(norm_col + 1, hours_col):
-                header = headers[idx] if idx < len(headers) else ''
-                if header.isdigit():
-                    day_num = int(header)
-                    if 1 <= day_num <= 31:
-                        day_map[idx] = day_num
+            day_map = {day: idx for idx, day in enumerate(range(norm_col + 1, hours_col), start=1)}
         
         # Find the end of main data (first empty cell in ФИО column after header)
         main_data_end_row = None
@@ -1024,7 +1018,7 @@ class Database:
         
         # Добавить группировку, если operator_id не указан
         if not operator_id:
-            query += " GROUP BY u.id, u.name, u.direction_id, wh.regular_hours, wh.training_hours, wh.fines, wh.norm_hours"
+            query += " GROUP BY u.id, u.name, u.direction_id, wh.regular_hours, wh.training_hours, wh.fines, wh.norm_hours, wh.daily_hours"
         
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
@@ -1036,7 +1030,8 @@ class Database:
                     "regular_hours": float(row[3]) if row[3] is not None else 0,
                     "training_hours": float(row[4]) if row[4] is not None else 0,
                     "fines": float(row[5]) if row[5] is not None else 0,
-                    "norm_hours": float(row[6]) if row[6] is not None else 0
+                    "norm_hours": float(row[6]) if row[6] is not None else 0,
+                    "daily_hours": row[7] if row[7] is not None else [0.0]*31
                 } for row in cursor.fetchall()
             ]
 
