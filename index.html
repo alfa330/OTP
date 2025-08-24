@@ -1445,7 +1445,7 @@
                 </div>
             );
         };
-        
+
         const App = () => {
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
@@ -1532,11 +1532,11 @@
             "ноября",
             "декабря",
             ];
-            
+
             function pad2(n) {
             return String(n).padStart(2, "0");
             }
-            
+
             function getCellColor(hours) {
             if (hours === 0) return "bg-gray-200";
             if (hours <= 2) return "bg-green-100 text-gray-900";
@@ -1544,81 +1544,102 @@
             if (hours <= 6) return "bg-green-500 text-white";
             return "bg-green-700 text-white";
             }
-            const WorkHoursCalendar = () => {
-                // Assume hoursData and selectedMonth are available from parent component or context
-                // If not, pass them as props: const WorkHoursCalendar = ({ hoursData, selectedMonth }) => {
-                // For demo, I'll use placeholders; integrate with your fetch logic.
-                const dailyHours = hoursData?.daily_hours || Array(31).fill(0); // Fallback to zeros
-                const monthStr = selectedMonth || new Date().toISOString().slice(0, 7); // e.g., "2025-08"
 
-                const [year, month] = monthStr.split('-').map(Number); // month is 1-based (January=1)
-                const numDays = new Date(year, month, 0).getDate(); // Days in month (28-31)
-                const firstDayOfWeek = new Date(year, month - 1, 1).getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+            const WorkHoursCalendar = ({ hoursData, selectedMonth }) => {
+            // selectedMonth приходит в формате "YYYY-MM"
+            const [yearStr, monthStr] = selectedMonth.split("-");
+            const year = Number(yearStr);
+            const monthIndex = Number(monthStr) - 1; // 0–11
 
-                // Generate calendar grid: array of weeks, each with 7 days
-                const calendar = [];
-                let currentDay = 1;
-                for (let week = 0; currentDay <= numDays; week++) {
-                    const weekRow = [];
-                    for (let dayOfWeek = 0; dayOfWeek < 7; dayOfWeek++) {
-                        if (week === 0 && dayOfWeek < firstDayOfWeek) {
-                            // Empty cells before first day
-                            weekRow.push(null);
-                        } else if (currentDay <= numDays) {
-                            weekRow.push(currentDay);
-                            currentDay++;
-                        } else {
-                            // Empty cells after last day
-                            weekRow.push(null);
-                        }
-                    }
-                    calendar.push(weekRow);
-                }
+            const startDate = new Date(year, monthIndex, 1);
+            const endDate = new Date(year, monthIndex + 1, 0);
+            const monthLabel = monthNames[monthIndex];
 
-                // Function to get color based on hours
-                const getDayColor = (hours) => {
-                    if (hours > 8) return 'bg-green-100 text-green-800';
-                    if (hours >= 4 && hours <= 8) return 'bg-yellow-100 text-yellow-800';
-                    if (hours > 0 && hours < 4) return 'bg-red-100 text-red-800';
-                    return 'bg-gray-100 text-gray-500';
-                };
+            // Индекс дня недели первого числа (0=Вс)
+            const firstWeekday = startDate.getDay();
+            const daysOfWeek = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
 
-                return (
-                    <div className="bg-white p-4 rounded-lg shadow-md border border-gray-200">
-                        <h3 className="text-lg font-semibold mb-4 text-center">
-                            {new Date(year, month - 1).toLocaleString('default', { month: 'long', year: 'numeric' })}
-                        </h3>
-                        <div className="grid grid-cols-7 gap-1 text-center text-sm font-medium text-gray-600 mb-2">
-                            <div>Sun</div>
-                            <div>Mon</div>
-                            <div>Tue</div>
-                            <div>Wed</div>
-                            <div>Thu</div>
-                            <div>Fri</div>
-                            <div>Sat</div>
-                        </div>
-                        <div className="grid grid-cols-7 gap-1">
-                            {calendar.map((week, weekIndex) => (
-                                week.map((day, dayIndex) => {
-                                    if (day === null) {
-                                        return <div key={`${weekIndex}-${dayIndex}`} className="h-10"></div>; // Empty cell
-                                    }
-                                    const hours = dailyHours[day - 1] || 0; // Index from 0
-                                    return (
-                                        <div
-                                            key={`${weekIndex}-${dayIndex}`}
-                                            className={`h-10 flex flex-col items-center justify-center rounded-md ${getDayColor(hours)} cursor-pointer hover:shadow-md transition-all duration-200`}
-                                            title={`Day ${day}: ${hours.toFixed(2)} hours`} // Tooltip
-                                        >
-                                            <span className="font-bold">{day}</span>
-                                            <span className="text-xs">{hours.toFixed(1)}</span>
-                                        </div>
-                                    );
-                                })
-                            ))}
-                        </div>
+            const dailyHours = hoursData?.hours?.daily_hours || [];
+
+            // Собираем массив ячеек
+            const cells = [];
+            for (let i = 0; i < firstWeekday; i++) cells.push(null);
+            for (let day = 1; day <= endDate.getDate(); day++) {
+                const dateStr = `${year}-${pad2(monthIndex + 1)}-${pad2(day)}`;
+                const hours = dailyHours[day - 1] ?? 0; // берем часы по индексу
+                cells.push({ day, dateStr, hours });
+            }
+
+            return (
+                <div className="bg-white p-6 rounded-lg shadow-lg">
+                <h2 className="text-2xl font-bold mb-4 text-center">
+                    Work Hours Calendar
+                </h2>
+
+                <div className="mb-2 text-center text-sm text-gray-600">
+                    {`Месяц: ${monthLabel} ${year}`}
+                </div>
+
+                {/* Сетка календаря */}
+                <div className="grid grid-cols-7 gap-1 overflow-visible">
+                    {/* Заголовки дней недели */}
+                    {daysOfWeek.map((d) => (
+                    <div
+                        key={d}
+                        className="text-center font-bold text-gray-600 text-sm"
+                    >
+                        {d}
                     </div>
-                );
+                    ))}
+
+                    {/* Ячейки */}
+                    {cells.map((cell, idx) =>
+                    cell ? (
+                        <div
+                        key={cell.dateStr}
+                        tabIndex={0}
+                        className={`group relative w-10 h-10 rounded flex items-center justify-center font-semibold transition-all duration-150 ${getCellColor(
+                            cell.hours
+                        )} hover:scale-110 hover:ring-2 hover:ring-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer`}
+                        aria-label={`${cell.day} ${monthLabel}: ${cell.hours} часов`}
+                        >
+                        {/* Показывать часы в ячейке только если > 0 */}
+                        {cell.hours > 0 ? Math.round(cell.hours) : ""}
+
+                        {/* Tooltip */}
+                        <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1 bg-gray-900 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 group-focus:opacity-100 z-50 transition-opacity">
+                            {`${cell.day} ${monthLabel}: ${cell.hours} ч.`}
+                            <span className="absolute left-1/2 top-full -translate-x-1/2 w-2 h-2 bg-gray-900 rotate-45" />
+                        </div>
+                        </div>
+                    ) : (
+                        <div key={`e-${idx}`} className="w-10 h-10" />
+                    )
+                    )}
+                </div>
+
+                {/* Легенда */}
+                <div className="mt-4 text-sm">
+                    <p className="flex items-center gap-3 flex-wrap">
+                    <span className="inline-flex items-center gap-1">
+                        <span className="inline-block w-4 h-4 bg-gray-200 rounded" /> 0 ч
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                        <span className="inline-block w-4 h-4 bg-green-100 rounded" /> 1–2 ч
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                        <span className="inline-block w-4 h-4 bg-green-300 rounded" /> 3–4 ч
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                        <span className="inline-block w-4 h-4 bg-green-500 rounded" /> 5–6 ч
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                        <span className="inline-block w-4 h-4 bg-green-700 rounded" /> 7+ ч
+                    </span>
+                    </p>
+                </div>
+                </div>
+            );
             };
 
             const getMonthOptions = () => {
