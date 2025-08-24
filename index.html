@@ -1446,119 +1446,113 @@
             );
         };
 
+        const workData = [
+          { date: "2025-08-01", hours: 2 },
+          { date: "2025-08-02", hours: 5 },
+          { date: "2025-08-03", hours: 8 },
+          { date: "2025-08-04", hours: 3 },
+          { date: "2025-08-05", hours: 0 },
+        ];
+        
+        const monthNames = [
+          "января",
+          "февраля",
+          "марта",
+          "апреля",
+          "мая",
+          "июня",
+          "июля",
+          "августа",
+          "сентября",
+          "октября",
+          "ноября",
+          "декабря",
+        ];
+        
         const WorkHoursCalendar = () => {
-          // Пример данных — можешь подставлять свои
-          const workData = [
-            { date: "2025-08-01", hours: 2 },
-            { date: "2025-08-02", hours: 5 },
-            { date: "2025-08-03", hours: 8 },
-            { date: "2025-08-04", hours: 3 },
-            { date: "2025-08-05", hours: 0 },
-          ];
+          const today = new Date("2025-08-20"); // можно заменить new Date()
+          const startDate = new Date(today.getFullYear(), today.getMonth(), 1);
+          const endDate = new Date(today.getFullYear(), today.getMonth() + 1, 0);
         
-          const monthNames = [
-            "января",
-            "февраля",
-            "марта",
-            "апреля",
-            "мая",
-            "июня",
-            "июля",
-            "августа",
-            "сентября",
-            "октября",
-            "ноября",
-            "декабря",
-          ];
+          const daysOfWeek = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
         
-          useEffect(() => {
-            generateCalendar();
-          }, []);
+          // Создаем массив дней месяца
+          const calendarDays = [];
+          const firstDay = startDate.getDay();
         
-          function generateCalendar() {
-            const calendar = document.getElementById("calendar");
-            if (!calendar) return;
-            calendar.innerHTML = "";
-        
-            const today = new Date("2025-08-20"); // можно заменить на new Date()
-            const startDate = new Date(today.getFullYear(), today.getMonth(), 1);
-            const endDate = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-        
-            // Заголовки дней
-            const days = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
-            days.forEach((day) => {
-              const dayHeader = document.createElement("div");
-              dayHeader.className = "text-center font-bold text-gray-600";
-              dayHeader.textContent = day;
-              calendar.appendChild(dayHeader);
-            });
-        
-            // Пустые ячейки перед 1-м числом
-            const firstDay = startDate.getDay();
-            for (let i = 0; i < firstDay; i++) {
-              const emptyCell = document.createElement("div");
-              emptyCell.className = "w-10 h-10 bg-gray-100 rounded";
-              calendar.appendChild(emptyCell);
-            }
-        
-            // Ячейки календаря
-            for (let day = 1; day <= endDate.getDate(); day++) {
-              const dateStr = `${today.getFullYear()}-${String(
-                today.getMonth() + 1
-              ).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-              const workEntry = workData.find((entry) => entry.date === dateStr);
-              const hours = workEntry ? workEntry.hours : 0;
-        
-              const cell = document.createElement("div");
-              cell.className =
-                "w-10 h-10 rounded tooltip flex items-center justify-center text-base font-semibold";
-        
-              if (hours === 0) {
-                cell.className += " bg-gray-200";
-              } else if (hours <= 2) {
-                cell.className += " bg-green-100 text-gray-900";
-              } else if (hours <= 4) {
-                cell.className += " bg-green-300 text-gray-900";
-              } else if (hours <= 6) {
-                cell.className += " bg-green-500 text-white";
-              } else {
-                cell.className += " bg-green-700 text-white";
-              }
-        
-              if (hours > 0) {
-                cell.textContent = hours;
-              }
-        
-              const monthName = monthNames[today.getMonth()];
-              cell.setAttribute("data-tooltip", `${day} ${monthName}: ${hours} часов`);
-        
-              calendar.appendChild(cell);
-            }
+          // Пустые ячейки до начала месяца
+          for (let i = 0; i < firstDay; i++) {
+            calendarDays.push(null);
           }
+        
+          // Дни месяца
+          for (let day = 1; day <= endDate.getDate(); day++) {
+            const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
+              2,
+              "0"
+            )}-${String(day).padStart(2, "0")}`;
+            const workEntry = workData.find((entry) => entry.date === dateStr);
+            calendarDays.push({ day, hours: workEntry ? workEntry.hours : 0 });
+          }
+        
+          const getCellColor = (hours) => {
+            if (hours === 0) return "bg-gray-200";
+            if (hours <= 2) return "bg-green-100 text-gray-900";
+            if (hours <= 4) return "bg-green-300 text-gray-900";
+            if (hours <= 6) return "bg-green-500 text-white";
+            return "bg-green-700 text-white";
+          };
         
           return (
             <div className="bg-white p-6 rounded-lg shadow-lg">
-              <h1 className="text-2xl font-bold mb-4 text-center">
-                Work Hours Calendar
-              </h1>
-              <div id="calendar" className="grid grid-cols-7 gap-1"></div>
+              <h1 className="text-2xl font-bold mb-4 text-center">Work Hours Calendar</h1>
+        
+              {/* Заголовки дней недели */}
+              <div className="grid grid-cols-7 gap-1">
+                {daysOfWeek.map((day) => (
+                  <div
+                    key={day}
+                    className="text-center font-bold text-gray-600 text-sm"
+                  >
+                    {day}
+                  </div>
+                ))}
+        
+                {/* Дни месяца */}
+                {calendarDays.map((cell, idx) =>
+                  cell ? (
+                    <div
+                      key={idx}
+                      className={`relative w-10 h-10 rounded flex items-center justify-center font-semibold transition-all duration-200 ${getCellColor(
+                        cell.hours
+                      )} hover:scale-110 hover:ring-2 hover:ring-blue-400 cursor-pointer`}
+                    >
+                      {cell.hours > 0 ? cell.hours : ""}
+                      {/* Tooltip */}
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block whitespace-nowrap bg-gray-900 text-white text-xs px-3 py-1 rounded-lg shadow-lg">
+                        {`${cell.day} ${monthNames[today.getMonth()]}: ${cell.hours} ч.`}
+                      </div>
+                    </div>
+                  ) : (
+                    <div key={idx} className="w-10 h-10" />
+                  )
+                )}
+              </div>
+        
+              {/* Легенда */}
               <div className="mt-4 text-sm">
                 <p>
-                  Legend:{" "}
-                  <span className="inline-block w-4 h-4 bg-gray-200"></span> 0 hours
-                  <span className="inline-block w-4 h-4 bg-green-100 ml-2"></span> 1-2
-                  hours
-                  <span className="inline-block w-4 h-4 bg-green-300 ml-2"></span> 3-4
-                  hours
-                  <span className="inline-block w-4 h-4 bg-green-500 ml-2"></span> 5-6
-                  hours
-                  <span className="inline-block w-4 h-4 bg-green-700 ml-2"></span> 7+
-                  hours
+                  Legend: <span className="inline-block w-4 h-4 bg-gray-200"></span> 0h
+                  <span className="inline-block w-4 h-4 bg-green-100 ml-2"></span> 1-2h
+                  <span className="inline-block w-4 h-4 bg-green-300 ml-2"></span> 3-4h
+                  <span className="inline-block w-4 h-4 bg-green-500 ml-2"></span> 5-6h
+                  <span className="inline-block w-4 h-4 bg-green-700 ml-2"></span> 7+h
                 </p>
               </div>
             </div>
           );
         };
+
 
         const App = () => {
             const [user, setUser] = useState(null);
@@ -3695,8 +3689,8 @@
                                                         <SemiCircleProgress
                                                             percentage={Math.min((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100, 100)}
                                                             label="Выполнение нормы"
-                                                            width={120}
-                                                            height={70}
+                                                            width={160}
+                                                            height={90}
                                                         />
                                                     </div>
                                                 </div>
@@ -3731,7 +3725,7 @@
                                                 </div>
                                             </div>
                                             <div className="col-span-1 flex justify-center items-center">
-                                                <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" width={120} height={70}/>
+                                                <SemiCircleProgress percentage={Math.min(averageScore, 100)} label="Average Score" width={200} height={120}/>
                                             </div>
                                             </div>
                                             <div className="overflow-x-auto rounded-lg shadow-sm border border-gray-200">
