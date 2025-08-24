@@ -3691,8 +3691,9 @@
                                                     {/* Полукруговая диаграмма сразу после Performance */}
                                                     <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md flex justify-center">
                                                         <SemiCircleProgress
-                                                            percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
-                                                            label="Выполнение нормы"
+                                                          percentage={Math.min(((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100), 100)}
+                                                          label="Выполнение нормы"
+                                                          style={{ width: "120px", height: "60px" }}
                                                         />
                                                     </div>
                                                 </div>
