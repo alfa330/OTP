@@ -1637,9 +1637,7 @@
 
                         {/* Tooltip */}
                         <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1 bg-gray-900 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 group-focus:opacity-100 z-50 transition-opacity">
-                            {`${cell.day} ${monthLabel}: ${cell.hours} ч.${
-                            cell.isToday ? " (Сегодня)" : ""
-                            }`}
+                            {`${cell.day} ${monthLabel}${cell.isToday ? " (Сегодня)" : ""}`}
                             <span className="absolute left-1/2 top-full -translate-x-1/2 w-2 h-2 bg-gray-900 rotate-45" />
                         </div>
                         </div>
