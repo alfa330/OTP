@@ -1611,7 +1611,7 @@
                             aria-label={`${cell.day} ${monthLabel}: ${cell.hours} часов`}
                             >
                             {/* Показывать часы в ячейке только если > 0 */}
-                            {cell.hours > 0 ? Math.round(cell.hours) : ""}
+                            {cell.hours > 0 ? cell.hours : ""}
 
                             {/* Tooltip */}
                             <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1 bg-gray-900 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 group-focus:opacity-100 z-50 transition-opacity">
