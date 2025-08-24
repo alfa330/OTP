@@ -56,11 +56,10 @@ def process_timesheet(file_url, supervisor_id):
     Args:
         file_url (str): Google Sheets URL (e.g., https://docs.google.com/spreadsheets/d/.../edit?gid=...).
     Returns:
-        list: List of dicts with ФИО, Кол-во часов, Кол-во часов тренинга, Штрафы, Год-Месяц.
+        list: List of dicts with ФИО, Кол-во часов, Кол-во часов тренинга, Штрафы, Год-Месяц, daily_hours.
     """
     # Set current year-month
     current_month = datetime.now().strftime('%Y-%m')
-
     # Convert Google Sheets URL to Excel export URL
     sheet_id_match = re.search(r'spreadsheets/d/([a-zA-Z0-9_-]+)', file_url)
     if not sheet_id_match:
@@ -77,7 +76,6 @@ def process_timesheet(file_url, supervisor_id):
             f.write(response.content)
     except Exception as e:
         return {"error": f"Failed to download file: {str(e)}"}
-
     try:
         # Load the Excel file and get the last sheet
         workbook = openpyxl.load_workbook(local_file, data_only=True)
@@ -88,23 +86,21 @@ def process_timesheet(file_url, supervisor_id):
         prev_month = datetime.now().replace(day=1) - timedelta(days=1)
         prev_month_str = prev_month.strftime('%Y-%m')
         
-        db = Database()  # Assuming db is global or accessible
+        db = Database() # Assuming db is global or accessible
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT sheet_name FROM processed_sheets 
+                SELECT sheet_name FROM processed_sheets
                 WHERE supervisor_id = %s AND processed_month = %s AND sheet_name = %s
             """, (supervisor_id, prev_month_str, current_sheet_name))
             if cursor.fetchone():
                 return {"error": f"Sheet '{current_sheet_name}' was already processed last month"}
-
         # Set limits (55 rows, 50 columns)
         MAX_ROWS = 55
         MAX_COLS = 50
-
         # Extract data
         data = []
-        fio_col, hours_col, training_col, norm_col  = None, None, None, None
-
+        fio_col, hours_col, training_col, norm_col = None, None, None, None
+        day_map = {}  # col_idx: day_num
         # First pass - find headers in the main table (only check first row)
         for row_idx, row in enumerate(last_sheet.iter_rows(max_row=1, max_col=MAX_COLS, values_only=True), 1):
             headers = [str(cell).strip().replace('"', '').replace('\n', '').replace(' ', ' ') if cell else '' for cell in row]
@@ -116,36 +112,44 @@ def process_timesheet(file_url, supervisor_id):
                     if fio_col is None:
                         fio_col = idx
                 elif 'итого' in header_lower or 'итоговые' in header_lower:
-                    if hours_col is None:  # Only set if not already found
+                    if hours_col is None: # Only set if not already found
                         hours_col = idx
                 elif 'часы тренинга' in header_lower or 'тренинг' in header_lower:
-                    if training_col is None:  # Only set if not already found
+                    if training_col is None: # Only set if not already found
                         training_col = idx
                 elif 'норма' in header_lower or 'норма часов' in header_lower:
-                    if norm_col is None:  # Only set if not already found
+                    if norm_col is None: # Only set if not already found
                         norm_col = idx
             
             if fio_col is None or hours_col is None:
                 os.remove(local_file)
                 return {"error": f"Required columns (ФИО, Итого) not found in sheet '{last_sheet.title}'."}
-
+        
+        # Identify day columns between norm_col and hours_col
+        if norm_col is not None and hours_col is not None and norm_col < hours_col - 1:
+            for idx in range(norm_col + 1, hours_col):
+                header = headers[idx] if idx < len(headers) else ''
+                if header.isdigit():
+                    day_num = int(header)
+                    if 1 <= day_num <= 31:
+                        day_map[idx] = day_num
+        
         # Find the end of main data (first empty cell in ФИО column after header)
         main_data_end_row = None
         for row_idx, row in enumerate(last_sheet.iter_rows(min_row=2, max_row=MAX_ROWS, max_col=MAX_COLS, values_only=True), 2):
-            if not row[fio_col]:  # Empty ФИО cell
+            if not row[fio_col]: # Empty ФИО cell
                 main_data_end_row = row_idx
                 break
-
         # Second pass - find fines section (look for "ФИО" again after main data)
         fines_start_row = None
         fines_fio_col = None
         fines_amount_col = None
         
-        for row_idx, row in enumerate(last_sheet.iter_rows(min_row=main_data_end_row+1 if main_data_end_row else 2, 
-                                                         max_row=MAX_ROWS, 
-                                                         max_col=MAX_COLS, 
-                                                         values_only=True), 
-                                 main_data_end_row+1 if main_data_end_row else 2):
+        for row_idx, row in enumerate(last_sheet.iter_rows(min_row=main_data_end_row+1 if main_data_end_row else 2,
+                                                          max_row=MAX_ROWS,
+                                                          max_col=MAX_COLS,
+                                                          values_only=True),
+                                  main_data_end_row+1 if main_data_end_row else 2):
             if not fines_start_row:
                 for idx, cell in enumerate(row):
                     if idx >= MAX_COLS:
@@ -158,14 +162,13 @@ def process_timesheet(file_url, supervisor_id):
                 if fines_fio_col is not None:
                     fines_start_row = row_idx
                     break
-
         # Create a mapping of operator names to fines
         fines_map = {}
         if fines_start_row and fines_fio_col is not None and fines_amount_col is not None:
-            for row in last_sheet.iter_rows(min_row=fines_start_row+1, 
-                                          max_row=MAX_ROWS, 
-                                          max_col=MAX_COLS, 
-                                          values_only=True):
+            for row in last_sheet.iter_rows(min_row=fines_start_row+1,
+                                           max_row=MAX_ROWS,
+                                           max_col=MAX_COLS,
+                                           values_only=True):
                 if fines_fio_col >= len(row) or fines_amount_col >= len(row):
                     continue
                     
@@ -177,12 +180,11 @@ def process_timesheet(file_url, supervisor_id):
                         fines_map[name] = float(fine)
                     except (ValueError, TypeError):
                         fines_map[name] = 0.0
-
         # Process main data rows (2 to main_data_end_row-1)
-        for row_idx, row in enumerate(last_sheet.iter_rows(min_row=2, 
-                                                         max_row=main_data_end_row-1 if main_data_end_row else MAX_ROWS, 
-                                                         max_col=MAX_COLS, 
-                                                         values_only=True), 2):
+        for row_idx, row in enumerate(last_sheet.iter_rows(min_row=2,
+                                                          max_row=main_data_end_row-1 if main_data_end_row else MAX_ROWS,
+                                                          max_col=MAX_COLS,
+                                                          values_only=True), 2):
             if fio_col >= len(row) or hours_col >= len(row):
                 continue
                 
@@ -200,14 +202,22 @@ def process_timesheet(file_url, supervisor_id):
                         norm_hours = float(row[norm_col])
                     except (ValueError, TypeError):
                         norm_hours = 0.0
-
+                # Extract daily hours
+                daily_hours = [0.0] * 31
+                for col, day in day_map.items():
+                    if col < len(row):
+                        try:
+                            daily_hours[day - 1] = float(row[col] or 0.0)
+                        except (ValueError, TypeError):
+                            daily_hours[day - 1] = 0.0
                 entry = {
                     'ФИО': operator_name,
                     'Кол-во часов': round(float(row[hours_col]) if row[hours_col] else 0.0, 2),
                     'Кол-во часов тренинга': round(training_hours, 2),
                     'Штрафы': round(fines_map.get(operator_name, 0.0), 2),
                     'Год-Месяц': current_month,
-                    'Норма часов': norm_hours
+                    'Норма часов': norm_hours,
+                    'daily_hours': daily_hours
                 }
                 data.append(entry)
        
@@ -215,18 +225,17 @@ def process_timesheet(file_url, supervisor_id):
             cursor.execute("""
                 INSERT INTO processed_sheets (supervisor_id, sheet_name, processed_month)
                 VALUES (%s, %s, %s)
-                ON CONFLICT (supervisor_id, processed_month) 
-                DO UPDATE SET 
+                ON CONFLICT (supervisor_id, processed_month)
+                DO UPDATE SET
                     sheet_name = EXCLUDED.sheet_name,
                     processed_at = CURRENT_TIMESTAMP
             """, (supervisor_id, current_sheet_name, current_month))
-
         # Clean up
         os.remove(local_file)
         return data
-
     except Exception as e:
-        os.remove(local_file) if os.path.exists(local_file) else None
+        if os.path.exists(local_file):
+            os.remove(local_file)
         return {"error": f"Error processing file: {str(e)}"}
 
 
@@ -343,6 +352,7 @@ class Database:
                     training_hours FLOAT NOT NULL DEFAULT 0,
                     fines FLOAT NOT NULL DEFAULT 0,
                     norm_hours FLOAT NOT NULL DEFAULT 0,
+                    daily_hours FLOAT[] NOT NULL DEFAULT ARRAY[]::FLOAT[],
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(operator_id, month)
                 );
@@ -831,11 +841,9 @@ class Database:
                 "total_skipped": 0,
                 "details": []
             }
-
         total_processed = 0
         total_skipped = 0
         results = []
-
         for supervisor in supervisors:
             supervisor_id, supervisor_name, _, hours_table_url = supervisor
             
@@ -851,7 +859,6 @@ class Database:
                     "skipped_operators": []
                 })
                 continue
-
             # Process the timesheet for this supervisor
             timesheet_data = process_timesheet(hours_table_url,supervisor_id)
             
@@ -868,11 +875,9 @@ class Database:
                     "skipped_operators": []
                 })
                 continue
-
             processed = 0
             skipped = 0
             skipped_operators = []
-
             with self._get_cursor() as cursor:
                 for entry in timesheet_data:
                     fio = entry['ФИО']
@@ -880,45 +885,44 @@ class Database:
                     training_hours = entry['Кол-во часов тренинга']
                     fines = entry['Штрафы']
                     month = entry['Год-Месяц']
-                    norm_hours = entry.get('Норма часов', 0.0)  # Use get() with default value
-
+                    norm_hours = entry.get('Норма часов', 0.0) # Use get() with default value
+                    daily_hours = entry.get('daily_hours', [0.0] * 31)
                     # Find operator by name who is under this supervisor
                     cursor.execute("""
-                        SELECT id FROM users 
-                        WHERE name = %s 
-                        AND role = 'operator' 
+                        SELECT id FROM users
+                        WHERE name = %s
+                        AND role = 'operator'
                         AND supervisor_id = %s
                     """, (fio, supervisor_id))
                     operator = cursor.fetchone()
-
                     if operator:
                         operator_id = operator[0]
                         cursor.execute("""
                             INSERT INTO work_hours (
-                                operator_id, 
-                                month, 
-                                regular_hours, 
-                                training_hours, 
+                                operator_id,
+                                month,
+                                regular_hours,
+                                training_hours,
                                 fines,
-                                norm_hours
+                                norm_hours,
+                                daily_hours
                             )
-                            VALUES (%s, %s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
                             ON CONFLICT (operator_id, month)
-                            DO UPDATE SET 
+                            DO UPDATE SET
                                 regular_hours = EXCLUDED.regular_hours,
                                 training_hours = EXCLUDED.training_hours,
                                 fines = EXCLUDED.fines,
-                                norm_hours = EXCLUDED.norm_hours
-                        """, (operator_id, month, regular_hours, training_hours, fines, norm_hours))
+                                norm_hours = EXCLUDED.norm_hours,
+                                daily_hours = EXCLUDED.daily_hours
+                        """, (operator_id, month, regular_hours, training_hours, fines, norm_hours, daily_hours))
                         processed += 1
                     else:
                         logging.warning(f"Operator {fio} not found under supervisor {supervisor_name}")
                         skipped += 1
                         skipped_operators.append(fio)
-
             total_processed += processed
             total_skipped += skipped
-
             results.append({
                 "supervisor_id": supervisor_id,
                 "supervisor_name": supervisor_name,
@@ -927,7 +931,6 @@ class Database:
                 "skipped": skipped,
                 "skipped_operators": skipped_operators
             })
-
         return {
             "status": "completed",
             "total_processed": total_processed,
@@ -1004,7 +1007,8 @@ class Database:
                 wh.regular_hours,
                 wh.training_hours,
                 wh.fines,
-                wh.norm_hours
+                wh.norm_hours,
+                wh.daily_hours
             FROM users u
             LEFT JOIN work_hours wh ON u.id = wh.operator_id
             WHERE u.role = 'operator'

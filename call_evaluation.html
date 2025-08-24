@@ -146,6 +146,26 @@
         .selected-range, .range-visual, .range-labels {
             animation: fadeIn 0.5s ease forwards;
         }
+        .appeal-date-input {
+            background-color: #f0f4f8;
+            border: 1px solid #d1d5db;
+            border-radius: 0.5rem;
+            padding: 0.75rem;
+            font-size: 1rem;
+            text-align: center;
+            width: 100%;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        .appeal-date-input:focus {
+            border-color: #4F46E5;
+            box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.2);
+            outline: none;
+        }
+        .appeal-separator {
+            font-size: 1.25rem;
+            color: #6B7280;
+            margin: 0 0.5rem;
+        }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
 </head>
@@ -153,7 +173,7 @@
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
-        const API_BASE_URL = 'https://otp-wif3.onrender.com';
+        const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
         const audioUrlCache = {};
         const getAudioUrlWithAuth = async (evaluationId, apiKey, userId) => {
             if (audioUrlCache[evaluationId]) {
@@ -314,6 +334,7 @@
             const [assignedMonth, setAssignedMonth] = useState(selectedMonth);
             const [isDraft, setIsDraft] = useState(false);
             const [isSubmitting, setIsSubmitting] = useState(false);
+            const [appealDate, setAppealDate] = useState('');
 
             useEffect(() => {
                 if (isOpen) {
@@ -325,6 +346,13 @@
                         setIsDraft(existingEvaluation.isDraft || false);
                         setAudioUrl(existingEvaluation.audioUrl || null);
                         setPhoneError('');
+                        if (existingEvaluation.appeal_date) {
+                            const date = new Date(existingEvaluation.appeal_date);
+                            const formatted = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`;
+                            setAppealDate(formatted);
+                        } else {
+                            setAppealDate('');
+                        }
                     } else {
                         setScores(directions[0]?.criteria.map(() => 'Correct') || []);
                         setCriterionComments(directions[0]?.criteria.map(() => '') || []);
@@ -333,6 +361,7 @@
                         setPhoneNumber('7');
                         setAssignedMonth(selectedMonth);
                         setIsDraft(false);
+                        setAppealDate('');
                         setPhoneError('');
                     }
                 }
@@ -398,6 +427,23 @@
                 }
             };
 
+            const formatAppealDate = (input) => {
+                let digits = input.replace(/\D/g, "");
+                if (digits.length > 14) digits = digits.slice(0, 14);
+                let formatted = "";
+                if (digits.length > 0) formatted += digits.slice(0, 4);
+                if (digits.length > 4) formatted += "-" + digits.slice(4, 6);
+                if (digits.length > 6) formatted += "-" + digits.slice(6, 8);
+                if (digits.length > 8) formatted += " " + digits.slice(8, 10);
+                if (digits.length > 10) formatted += ":" + digits.slice(10, 12);
+                if (digits.length > 12) formatted += ":" + digits.slice(12, 14);
+                return formatted;
+            };
+
+            const handleAppealDateChange = (e) => {
+                setAppealDate(formatAppealDate(e.target.value));
+            };
+
             const showCriterionValue = (index) => {
                 setShownCriterionIndex(shownCriterionIndex === index ? null : index);
             };
@@ -408,6 +454,13 @@
                 !phoneNumber.startsWith('7') ||
                 (directions[0]?.hasFileUpload && !callFile && !audioUrl) ||
                 scores.some((score, index) => (score === 'Error' || score === 'Incorrect') && !criterionComments[index].trim());
+
+            const getAppealDate = () => {
+                if (!appealDate) return null;
+                let digits = appealDate.replace(/\D/g, "");
+                if (digits.length !== 14) return null;
+                return `${digits.slice(0,4)}-${digits.slice(4,6)}-${digits.slice(6,8)}T${digits.slice(8,10)}:${digits.slice(10,12)}:${digits.slice(12,14)}`;
+            };
 
             const handleSubmit = async (saveAsDraft = false) => {
                 setIsSubmitting(true);
@@ -435,6 +488,10 @@
                 formData.append('scores', JSON.stringify(scores));
                 formData.append('criterion_comments', JSON.stringify(criterionComments));
                 formData.append('direction', operator.direction_id);
+                const appeal_date = getAppealDate();
+                if (appeal_date) {
+                    formData.append('appeal_date', appeal_date);
+                }
                 if (existingEvaluation?.isReevaluation) {
                     formData.append('previous_version_id', existingEvaluation.id);
                     formData.append('is_correction', true);
@@ -472,7 +529,8 @@
                             audioUrl: directions[0]?.hasFileUpload ? audioUrl : null,
                             isDraft: saveAsDraft,
                             assignedMonth,
-                            isCorrection: existingEvaluation?.isReevaluation || false
+                            isCorrection: existingEvaluation?.isReevaluation || false,
+                            appeal_date: appeal_date
                         });
                         onClose();
                     } else {
@@ -545,6 +603,14 @@
                             className={`w-full p-4 border rounded-lg focus:outline-none focus:ring-2 ${phoneNumber.length === 11 && phoneNumber.startsWith('7') ? 'focus:ring-primary border-muted/20' : 'focus:ring-red-500 border-red-300'} transition-all duration-300 bg-white text-text`}
                         />
                         {phoneError && <p className="text-red-500 mt-2 text-base">{phoneError}</p>}
+                        <label className="block mb-3 font-semibold text-text text-lg mt-8">Appeal Date (optional)</label>
+                        <input
+                            type="text"
+                            value={appealDate}
+                            onChange={handleAppealDateChange}
+                            placeholder="YYYY-MM-DD HH:MM:SS"
+                            className="w-full p-4 border border-muted/20 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary transition-all duration-300 bg-white text-text"
+                        />
                         <label className="block mb-3 font-semibold text-text text-lg mt-8">Criteria Evaluation</label>
                         {directions.length === 0 || directions[0]?.criteria.length === 0 ? (
                             <p className="text-red-500 text-base">No criteria defined for this direction.</p>
@@ -665,12 +731,6 @@
                                 </button>
                             )}
                             <button
-                                onClick={() => handleSubmit(true)}
-                                className="bg-accent text-white px-6 py-3 rounded-lg hover:bg-accent/90 transition-all duration-300 font-medium"
-                            >
-                                Save as Draft
-                            </button>
-                            <button
                                 onClick={() => handleSubmit(false)}
                                 className={`px-6 py-3 rounded-lg text-white transition-all duration-300 font-medium ${isSubmitDisabled ? 'bg-muted cursor-not-allowed' : 'bg-primary hover:bg-primary/90'}`}
                                 disabled={isSubmitDisabled || isSubmitting}
@@ -704,6 +764,7 @@
                 <td className="p-5 border-b"><div className="h-5 bg-background rounded w-1/2"></div></td>
                 <td className="p-5 border-b"><div className="h-5 bg-background rounded w-2/3"></div></td>
                 <td className="p-5 border-b"><div className="h-5 bg-background rounded w-1/4"></div></td>
+                <td className="p-5 border-b"><div className="h-5 bg-background rounded w-1/3"></div></td>
                 <td className="p-5 border-b"><div className="h-5 bg-background rounded w-1/3"></div></td>
             </tr>
         );
@@ -748,17 +809,14 @@
             if (isValidRange) {
                 const start = selectedDates[0];
                 const end = selectedDates[1];
-                // Make end date inclusive by adding 1 day minus 1 ms
-                end.setDate(end.getDate() + 1);
-                end.setMilliseconds(end.getMilliseconds() - 1);
-                startDate = start.toISOString().split('T')[0];
-                endDate = end.toISOString().split('T')[0];
-                rangeText = `From ${startDate} to ${endDate}`;
                 // Make diffDays inclusive
                 const diffTime = selectedDates[1] - selectedDates[0];
                 diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24)) + 1;
                 const maxDiffDays = Math.floor((new Date(maxDate) - new Date(minDate)) / (1000 * 60 * 60 * 24)) + 1;
                 rangePercentage = Math.min((diffDays / maxDiffDays) * 100, 100);
+                startDate = start.toISOString().split('T')[0];
+                endDate = end.toISOString().split('T')[0];
+                rangeText = `From ${startDate} to ${endDate}`;
             }
 
             return (
@@ -946,7 +1004,6 @@
             useEffect(() => {
                 if (!apiKey || !userId || !selectedOperator) {
                     setCalls([]);
-                    setCalls([]);
                     return;
                 }
 
@@ -974,6 +1031,7 @@
                                     date: evaluation.evaluation_date.split('T')[0],
                                     phoneNumber: evaluation.phone_number,
                                     combinedComment: evaluation.comment,
+                                    appeal_date: evaluation.appeal_date || '-', 
                                     selectedDirection: evaluation.direction?.name || selectedOperator.direction,
                                     directions: [{
                                         name: evaluation.direction?.name || selectedOperator.direction,
@@ -1049,6 +1107,7 @@
                 assignedMonth: evaluationData.assignedMonth,
                 direction_id: selectedOperator.direction_id,
                 isCorrection: evaluationData.isCorrection,
+                appeal_date: evaluationData.appeal_date 
                 };
 
                 // Если это переоценка, удаляем старую версию с тем же ID или связанную через previous_version_id
@@ -1107,6 +1166,7 @@
                         date: evaluation.evaluation_date.split('T')[0],
                         phoneNumber: evaluation.phone_number,
                         combinedComment: evaluation.comment,
+                        appeal_date: evaluation.appeal_date || '-', 
                         selectedDirection:
                         evaluation.direction?.name || selectedOperator.direction,
                         directions: [
@@ -1307,6 +1367,7 @@
                                             <th className="p-5 border-b text-left text-base font-bold text-text">Direction</th>
                                             <th className="p-5 border-b text-left text-base font-bold text-text">Phone Number</th>
                                             <th className="p-5 border-b text-left text-base font-bold text-text">Total Score</th>
+                                            <th className="p-5 border-b text-left text-base font-bold text-text">Appeal Date</th>
                                             <th className="p-5 border-b text-left text-base font-bold text-text">Date</th>
                                         </tr>
                                     </thead>
@@ -1332,6 +1393,7 @@
                                             <th className="p-5 border-b text-left text-base font-bold text-text">Direction</th>
                                             <th className="p-5 border-b text-left text-base font-bold text-text">Phone Number</th>
                                             <th className="p-5 border-b text-left text-base font-bold text-text">Total Score</th>
+                                            <th className="p-5 border-b text-left text-base font-bold text-text">Appeal Date</th>
                                             <th className="p-5 border-b text-left text-base font-bold text-text">Date</th>
                                         </tr>
                                     </thead>
@@ -1358,6 +1420,7 @@
                                                     <td className="p-5 border-b text-base text-text">{call.selectedDirection || '-'}</td>
                                                     <td className="p-5 border-b text-base text-text">{call.phoneNumber || '-'}</td>
                                                     <td className="p-5 border-b text-base text-text">{call.totalScore}</td>
+                                                    <td className="p-5 border-b text-base text-text">{call.appeal_date || '-'}</td>
                                                     <td className="p-5 border-b text-base flex items-center space-x-3">
                                                         {call.date}
                                                         {userRole === 'admin' && !call.isDraft && (
@@ -1405,7 +1468,7 @@
                                                 </tr>
                                                 {expandedDetails === call.id && (
                                                     <tr>
-                                                        <td colSpan="6" className="p-8 border-b bg-background">
+                                                        <td colSpan="7" className="p-8 border-b bg-background">
                                                             <div className="text-base">
                                                                 <h4 className="font-bold mb-4 text-text text-xl">Evaluation Details:</h4>
                                                                 {call.directions && call.directions.length > 0 ? (
@@ -1435,6 +1498,7 @@
                                                                                 ))}
                                                                             </tbody>
                                                                         </table>
+                                                                        <p className="mt-4 text-base text-text"><strong>Appeal Date:</strong> {call.appeal_date || '-'}</p>
                                                                         {call.audioUrl && call.directions[0]?.hasFileUpload && (
                                                                             <audio controls className="w-full max-w-[500px] mt-6">
                                                                                 <source src={call.audioUrl} type="audio/mpeg" />
@@ -1528,6 +1592,7 @@
                                                 <div><span className="font-semibold text-text">Evaluator:</span> {version.evaluator_name}</div>
                                                 <div><span className="font-semibold text-text">Phone:</span> {version.phone_number}</div>
                                                 <div><span className="font-semibold text-text">Month:</span> {version.month}</div>
+                                                <div><span className="font-semibold text-text">Appeal Date:</span> {version.appeal_date || '-'}</div>
                                             </div>
                                             {version.comment && (
                                                 <div className="mt-4">
