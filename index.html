@@ -1562,7 +1562,7 @@
             const endDate = new Date(year, monthIndex + 1, 0);
             const monthLabel = monthNames[monthIndex];
 
-            const firstWeekday = startDate.getDay(); // 0=Вс
+            const firstWeekday = (startDate.getDay() + 6) % 7; // 0 (Пн) - 6 (Вс)
             const daysOfWeek = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 
             const dailyHours = hoursData?.daily_hours || [];
