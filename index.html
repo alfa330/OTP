@@ -1446,110 +1446,6 @@
             );
         };
         
-        const monthNames = [
-          "января",
-          "февраля",
-          "марта",
-          "апреля",
-          "мая",
-          "июня",
-          "июля",
-          "августа",
-          "сентября",
-          "октября",
-          "ноября",
-          "декабря",
-        ];
-        
-        function pad2(n) {
-          return String(n).padStart(2, "0");
-        }
-        
-        function getCellColor(hours) {
-          if (hours === 0) return "bg-gray-200";
-          if (hours <= 2) return "bg-green-100 text-gray-900";
-          if (hours <= 4) return "bg-green-300 text-gray-900";
-          if (hours <= 6) return "bg-green-500 text-white";
-          return "bg-green-700 text-white";
-        }
-        const WorkHoursCalendar = () => {
-            // Assume hoursData and selectedMonth are available from parent component or context
-            // If not, pass them as props: const WorkHoursCalendar = ({ hoursData, selectedMonth }) => {
-            // For demo, I'll use placeholders; integrate with your fetch logic.
-            const dailyHours = hoursData?.daily_hours || Array(31).fill(0); // Fallback to zeros
-            const monthStr = selectedMonth || new Date().toISOString().slice(0, 7); // e.g., "2025-08"
-
-            const [year, month] = monthStr.split('-').map(Number); // month is 1-based (January=1)
-            const numDays = new Date(year, month, 0).getDate(); // Days in month (28-31)
-            const firstDayOfWeek = new Date(year, month - 1, 1).getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
-
-            // Generate calendar grid: array of weeks, each with 7 days
-            const calendar = [];
-            let currentDay = 1;
-            for (let week = 0; currentDay <= numDays; week++) {
-                const weekRow = [];
-                for (let dayOfWeek = 0; dayOfWeek < 7; dayOfWeek++) {
-                    if (week === 0 && dayOfWeek < firstDayOfWeek) {
-                        // Empty cells before first day
-                        weekRow.push(null);
-                    } else if (currentDay <= numDays) {
-                        weekRow.push(currentDay);
-                        currentDay++;
-                    } else {
-                        // Empty cells after last day
-                        weekRow.push(null);
-                    }
-                }
-                calendar.push(weekRow);
-            }
-
-            // Function to get color based on hours
-            const getDayColor = (hours) => {
-                if (hours > 8) return 'bg-green-100 text-green-800';
-                if (hours >= 4 && hours <= 8) return 'bg-yellow-100 text-yellow-800';
-                if (hours > 0 && hours < 4) return 'bg-red-100 text-red-800';
-                return 'bg-gray-100 text-gray-500';
-            };
-
-            return (
-                <div className="bg-white p-4 rounded-lg shadow-md border border-gray-200">
-                    <h3 className="text-lg font-semibold mb-4 text-center">
-                        {new Date(year, month - 1).toLocaleString('default', { month: 'long', year: 'numeric' })}
-                    </h3>
-                    <div className="grid grid-cols-7 gap-1 text-center text-sm font-medium text-gray-600 mb-2">
-                        <div>Sun</div>
-                        <div>Mon</div>
-                        <div>Tue</div>
-                        <div>Wed</div>
-                        <div>Thu</div>
-                        <div>Fri</div>
-                        <div>Sat</div>
-                    </div>
-                    <div className="grid grid-cols-7 gap-1">
-                        {calendar.map((week, weekIndex) => (
-                            week.map((day, dayIndex) => {
-                                if (day === null) {
-                                    return <div key={`${weekIndex}-${dayIndex}`} className="h-10"></div>; // Empty cell
-                                }
-                                const hours = dailyHours[day - 1] || 0; // Index from 0
-                                return (
-                                    <div
-                                        key={`${weekIndex}-${dayIndex}`}
-                                        className={`h-10 flex flex-col items-center justify-center rounded-md ${getDayColor(hours)} cursor-pointer hover:shadow-md transition-all duration-200`}
-                                        title={`Day ${day}: ${hours.toFixed(2)} hours`} // Tooltip
-                                    >
-                                        <span className="font-bold">{day}</span>
-                                        <span className="text-xs">{hours.toFixed(1)}</span>
-                                    </div>
-                                );
-                            })
-                        ))}
-                    </div>
-                </div>
-            );
-        };
-
-
         const App = () => {
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
@@ -1621,6 +1517,109 @@
             const [userHistory, setUserHistory] = useState([]);
             const [selectedUserForHistory, setSelectedUserForHistory] = useState(null);
             const [loadingHistoryId, setLoadingHistoryId] = useState(null);
+
+            const monthNames = [
+            "января",
+            "февраля",
+            "марта",
+            "апреля",
+            "мая",
+            "июня",
+            "июля",
+            "августа",
+            "сентября",
+            "октября",
+            "ноября",
+            "декабря",
+            ];
+            
+            function pad2(n) {
+            return String(n).padStart(2, "0");
+            }
+            
+            function getCellColor(hours) {
+            if (hours === 0) return "bg-gray-200";
+            if (hours <= 2) return "bg-green-100 text-gray-900";
+            if (hours <= 4) return "bg-green-300 text-gray-900";
+            if (hours <= 6) return "bg-green-500 text-white";
+            return "bg-green-700 text-white";
+            }
+            const WorkHoursCalendar = () => {
+                // Assume hoursData and selectedMonth are available from parent component or context
+                // If not, pass them as props: const WorkHoursCalendar = ({ hoursData, selectedMonth }) => {
+                // For demo, I'll use placeholders; integrate with your fetch logic.
+                const dailyHours = hoursData?.daily_hours || Array(31).fill(0); // Fallback to zeros
+                const monthStr = selectedMonth || new Date().toISOString().slice(0, 7); // e.g., "2025-08"
+
+                const [year, month] = monthStr.split('-').map(Number); // month is 1-based (January=1)
+                const numDays = new Date(year, month, 0).getDate(); // Days in month (28-31)
+                const firstDayOfWeek = new Date(year, month - 1, 1).getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+
+                // Generate calendar grid: array of weeks, each with 7 days
+                const calendar = [];
+                let currentDay = 1;
+                for (let week = 0; currentDay <= numDays; week++) {
+                    const weekRow = [];
+                    for (let dayOfWeek = 0; dayOfWeek < 7; dayOfWeek++) {
+                        if (week === 0 && dayOfWeek < firstDayOfWeek) {
+                            // Empty cells before first day
+                            weekRow.push(null);
+                        } else if (currentDay <= numDays) {
+                            weekRow.push(currentDay);
+                            currentDay++;
+                        } else {
+                            // Empty cells after last day
+                            weekRow.push(null);
+                        }
+                    }
+                    calendar.push(weekRow);
+                }
+
+                // Function to get color based on hours
+                const getDayColor = (hours) => {
+                    if (hours > 8) return 'bg-green-100 text-green-800';
+                    if (hours >= 4 && hours <= 8) return 'bg-yellow-100 text-yellow-800';
+                    if (hours > 0 && hours < 4) return 'bg-red-100 text-red-800';
+                    return 'bg-gray-100 text-gray-500';
+                };
+
+                return (
+                    <div className="bg-white p-4 rounded-lg shadow-md border border-gray-200">
+                        <h3 className="text-lg font-semibold mb-4 text-center">
+                            {new Date(year, month - 1).toLocaleString('default', { month: 'long', year: 'numeric' })}
+                        </h3>
+                        <div className="grid grid-cols-7 gap-1 text-center text-sm font-medium text-gray-600 mb-2">
+                            <div>Sun</div>
+                            <div>Mon</div>
+                            <div>Tue</div>
+                            <div>Wed</div>
+                            <div>Thu</div>
+                            <div>Fri</div>
+                            <div>Sat</div>
+                        </div>
+                        <div className="grid grid-cols-7 gap-1">
+                            {calendar.map((week, weekIndex) => (
+                                week.map((day, dayIndex) => {
+                                    if (day === null) {
+                                        return <div key={`${weekIndex}-${dayIndex}`} className="h-10"></div>; // Empty cell
+                                    }
+                                    const hours = dailyHours[day - 1] || 0; // Index from 0
+                                    return (
+                                        <div
+                                            key={`${weekIndex}-${dayIndex}`}
+                                            className={`h-10 flex flex-col items-center justify-center rounded-md ${getDayColor(hours)} cursor-pointer hover:shadow-md transition-all duration-200`}
+                                            title={`Day ${day}: ${hours.toFixed(2)} hours`} // Tooltip
+                                        >
+                                            <span className="font-bold">{day}</span>
+                                            <span className="text-xs">{hours.toFixed(1)}</span>
+                                        </div>
+                                    );
+                                })
+                            ))}
+                        </div>
+                    </div>
+                );
+            };
 
             const getMonthOptions = () => {
                 const options = [];
