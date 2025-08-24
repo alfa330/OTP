@@ -3392,7 +3392,7 @@ if __name__ == '__main__':
     if not db.get_user(role='admin'):
         db.create_user(
             telegram_id=admin,
-            name='Admin',
+            name='Omarova Aru',
             role='admin',
             login=ADMIN_LOGIN,
             password=ADMIN_PASSWORD
@@ -3406,7 +3406,7 @@ if __name__ == '__main__':
             login=ADMIN_LOGIN_K,
             password=ADMIN_PASSWORD_K
         )
-    logging.info("Admin kronos created")
+        logging.info("Admin kronos created")
     
     # Запускаем Flask в отдельном потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
