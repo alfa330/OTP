@@ -740,6 +740,7 @@ def send_request():
             return jsonify({"error": "Missing required fields: date, message"}), 400
 
         operator_id = int(request.headers.get('X-User-Id'))
+        hours = data.get('hours', 0)
         date = data['date']
         message = data['message']
 
@@ -757,6 +758,7 @@ def send_request():
             "text": (
                 f"⚠️ <b>Запрос по рабочим часам</b>\n\n"
                 f"👤 Оператор: <b>{operator[2]}</b>\n"
+                f"⏰ Часы: <b>{hours} ч</b>\n"
                 f"📅 Дата: <b>{date}</b>\n"
                 f"📝 <b>Сообщение:</b>\n{message}"
             ),

@@ -1615,7 +1615,8 @@
                     method: 'POST',
                     headers: {
                     'Content-Type': 'application/json',
-                    'X-User-Id': user.id, // Заменить на реальный ID оператора из контекста/props
+                    'X-User-Id': user.id, 
+                    'X-API-Key': user.apiKey
                     },
                     body: JSON.stringify({
                     date: selectedDay.dateStr,
