@@ -729,8 +729,8 @@ def dispute_call_evaluation():
     except Exception as e:
         logging.error(f"Error processing dispute: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-    
-@app.route('/api/send_request', methods=['POST'])
+
+@app.route('/api/hours/send_request', methods=['POST'])
 @require_api_key
 def send_request():
     try:

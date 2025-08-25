@@ -1611,21 +1611,23 @@
                 // Предполагаем, что есть API-эндпоинт /api/send_request
                 // с параметрами: operator_id (из контекста), date: selectedDay.dateStr, message: requestMessage
                 // Backend отправит сообщение супервайзеру в Telegram
-                const response = await fetch('/api/send_request', {
-                    method: 'POST',
-                    headers: {
-                    'Content-Type': 'application/json',
-                    'X-User-Id': user.id, 
-                    'X-API-Key': user.apiKey
+                const response = await axios.post(
+                    `${API_BASE_URL}/api/hours/send_request`, 
+                    {
+                        date: selectedDay.dateStr,
+                        hours: selectedDay.hours,
+                        message: requestMessage
                     },
-                    body: JSON.stringify({
-                    date: selectedDay.dateStr,
-                    hours: selectedDay.hours,
-                    message: requestMessage,
-                    }),
-                });
+                    {
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-User-Id': user.id, 
+                            'X-API-Key': user.apiKey
+                        }
+                    }
+                );
 
-                if (!response.ok) {
+                if (response.status !== 200) {
                     throw new Error('Ошибка отправки запроса');
                 }
 
