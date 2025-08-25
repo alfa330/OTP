@@ -1608,9 +1608,6 @@
 
                 setIsSending(true);
                 try {
-                // Предполагаем, что есть API-эндпоинт /api/send_request
-                // с параметрами: operator_id (из контекста), date: selectedDay.dateStr, message: requestMessage
-                // Backend отправит сообщение супервайзеру в Telegram
                 const response = await axios.post(
                     `${API_BASE_URL}/api/hours/send_request`, 
                     {
