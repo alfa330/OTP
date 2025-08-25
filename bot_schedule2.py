@@ -1603,6 +1603,56 @@ def add_operator():
         logging.error(f"Error adding operator: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
     
+@app.route('/api/activity_logs/current_day', methods=['GET'])
+@require_api_key
+def get_current_day_activity_logs():
+    try:
+        user_id = int(request.headers.get('X-User-Id'))
+        user = db.get_user(id=user_id)
+        if not user or user[3] != 'operator':
+            return jsonify({"error": "Only operators can access their activity logs"}), 403
+
+        current_date = datetime.now().date()
+        start_time = datetime.combine(current_date, dt_time(0, 0, 0))
+        end_time = datetime.combine(current_date, dt_time(23, 59, 59))
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT change_time, is_active 
+                FROM operator_activity_logs 
+                WHERE operator_id = %s 
+                AND change_time >= %s 
+                AND change_time <= %s 
+                ORDER BY change_time
+            """, (user_id, start_time, end_time))
+            logs = cursor.fetchall()
+
+        activities = []
+        for i, log in enumerate(logs):
+            change_time, is_active = log
+            start = change_time.strftime("%H:%M:%S")
+            status = "Активация" if is_active else "Деактивация"
+            duration = "N/A"
+            if i < len(logs) - 1:
+                duration_seconds = (logs[i + 1][0] - change_time).total_seconds()
+                hours = int(duration_seconds // 3600)
+                minutes = int((duration_seconds % 3600) // 60)
+                seconds = int(duration_seconds % 60)
+                duration_parts = []
+                if hours > 0:
+                    duration_parts.append(f"{hours}ч")
+                if minutes > 0:
+                    duration_parts.append(f"{minutes}м")
+                if seconds > 0 or not duration_parts:
+                    duration_parts.append(f"{seconds}с")
+                duration = " ".join(duration_parts)
+            activities.append({"start": start, "status": status, "duration": duration})
+
+        return jsonify({"status": "success", "activities": activities}), 200
+    except Exception as e:
+        logging.error(f"Error fetching current day activity logs: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/user/toggle_active', methods=['POST'])
 @require_api_key
 def toggle_user_active():
