@@ -1546,7 +1546,12 @@
             return "bg-green-700 text-white";
             };
 
-            const WorkHoursCalendar = ({ hoursData, selectedMonth }) => {
+            const WorkHoursCalendar = ({ hoursData, selectedMonth, user }) => {
+            const [selectedDay, setSelectedDay] = useState(null);
+            const [requestMessage, setRequestMessage] = useState('');
+            const [isSending, setIsSending] = useState(false);
+            const [showModal, setShowModal] = useState(false);
+
             const today = new Date();
             const fallbackMonth = `${today.getFullYear()}-${String(
                 today.getMonth() + 1
@@ -1587,6 +1592,52 @@
                 cells.push({ day, dateStr, hours, isPastDayWithZero, isToday });
             }
 
+            const handleDayClick = (cell) => {
+                if (cell) {
+                setSelectedDay(cell);
+                setShowModal(true);
+                setRequestMessage('');
+                }
+            };
+
+            const handleSendRequest = async () => {
+                if (!requestMessage.trim()) {
+                alert('Введите сообщение для запроса');
+                return;
+                }
+
+                setIsSending(true);
+                try {
+                // Предполагаем, что есть API-эндпоинт /api/send_request
+                // с параметрами: operator_id (из контекста), date: selectedDay.dateStr, message: requestMessage
+                // Backend отправит сообщение супервайзеру в Telegram
+                const response = await fetch('/api/send_request', {
+                    method: 'POST',
+                    headers: {
+                    'Content-Type': 'application/json',
+                    'X-User-Id': user.id, // Заменить на реальный ID оператора из контекста/props
+                    },
+                    body: JSON.stringify({
+                    date: selectedDay.dateStr,
+                    hours: selectedDay.hours,
+                    message: requestMessage,
+                    }),
+                });
+
+                if (!response.ok) {
+                    throw new Error('Ошибка отправки запроса');
+                }
+
+                showToast('Запрос успешно отправлен супервайзеру', 'success');
+                setShowModal(false);
+                setSelectedDay(null);
+                } catch (error) {
+                showToast(`Ошибка: ${error.message}`, 'error');
+                } finally {
+                setIsSending(false);
+                }
+            };
+
             return (
                 <div className="bg-white p-6 rounded-lg shadow-lg">
                 <h2 className="text-2xl font-bold mb-4 text-center">Work Hours Calendar</h2>
@@ -1612,6 +1663,7 @@
                     cell ? (
                         <div
                         key={cell.dateStr}
+                        onClick={() => handleDayClick(cell)}
                         tabIndex={0}
                         className={`group relative w-10 h-10 rounded flex items-center justify-center font-semibold transition-all duration-150 ${getCellColor(
                             cell.hours,
@@ -1667,6 +1719,44 @@
                     </span>
                     </p>
                 </div>
+
+                {/* Модальное окно для запроса */}
+                {showModal && selectedDay && (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                        <h3 className="text-xl font-semibold mb-4">
+                        Запрос по дню: {selectedDay.day} {monthLabel}
+                        </h3>
+                        <textarea
+                        value={requestMessage}
+                        onChange={(e) => setRequestMessage(e.target.value)}
+                        placeholder="Введите текст запроса..."
+                        className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
+                        rows={4}
+                        disabled={isSending}
+                        />
+                        <div className="flex justify-end gap-2">
+                        <button
+                            onClick={handleSendRequest}
+                            className={`px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 ${isSending ? 'opacity-50 cursor-not-allowed' : ''}`}
+                            disabled={isSending}
+                        >
+                            {isSending ? 'Отправка...' : 'Отправить запрос'}
+                        </button>
+                        <button
+                            onClick={() => {
+                            setShowModal(false);
+                            setSelectedDay(null);
+                            }}
+                            className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600"
+                            disabled={isSending}
+                        >
+                            Отмена
+                        </button>
+                        </div>
+                    </div>
+                    </div>
+                )}
                 </div>
             );
             };
@@ -3742,7 +3832,7 @@
                                 
                                                 {/* Календарь вместо диаграммы справа */}
                                                 <div className="col-span-1">
-                                                    <WorkHoursCalendar hoursData={hoursData} selectedMonth={selectedMonth} />
+                                                    <WorkHoursCalendar hoursData={hoursData} selectedMonth={selectedMonth} user={user} />
                                                 </div>
                                             </div>
                                         ) : (
