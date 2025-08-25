@@ -729,6 +729,49 @@ def dispute_call_evaluation():
     except Exception as e:
         logging.error(f"Error processing dispute: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    
+@app.route('/api/send_request', methods=['POST'])
+@require_api_key
+def send_request():
+    try:
+        data = request.get_json()
+        required_fields = ['date', 'message']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields: date, message"}), 400
+
+        operator_id = int(request.headers.get('X-User-Id'))
+        date = data['date']
+        message = data['message']
+
+        operator = db.get_user(id=operator_id)
+        if not operator:
+            return jsonify({"error": "Operator not found"}), 404
+
+        supervisor = db.get_user(id=operator[6]) if operator[6] else None
+        if not supervisor:
+            return jsonify({"error": "Supervisor not found for this operator"}), 404
+
+        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": supervisor[1],
+            "text": (
+                f"⚠️ <b>Запрос по рабочим часам</b>\n\n"
+                f"👤 Оператор: <b>{operator[2]}</b>\n"
+                f"📅 Дата: <b>{date}</b>\n"
+                f"📝 <b>Сообщение:</b>\n{message}"
+            ),
+            "parse_mode": "HTML"
+        }
+        response = requests.post(telegram_url, json=payload, timeout=10)
+        if response.status_code != 200:
+            error_detail = response.json().get('description', 'Unknown error')
+            logging.error(f"Telegram API error: {error_detail}")
+            return jsonify({"error": f"Failed to send request: {error_detail}"}), 500
+
+        return jsonify({"status": "success", "message": "Request sent to supervisor"}), 200
+    except Exception as e:
+        logging.error(f"Error sending request: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/admin/add_sv', methods=['POST'])
 @require_api_key
