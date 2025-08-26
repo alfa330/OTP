@@ -1638,34 +1638,37 @@ def get_activity_logs():
 def toggle_user_active():
     try:
         data = request.get_json()
-        if not data or 'is_active' not in data:
-            return jsonify({"error": "Missing is_active field"}), 400
+        if not data or 'status' not in data:
+            return jsonify({"error": "Missing status field"}), 400
+
+        new_status = data['status']
+        allowed_statuses = {"active", "break", "training", "inactive"}
+        if new_status not in allowed_statuses:
+            return jsonify({"error": f"Invalid status. Allowed: {', '.join(allowed_statuses)}"}), 400
 
         user_id = int(request.headers.get('X-User-Id'))
         user = db.get_user(id=user_id)
         if not user or user[3] != 'operator':
-            return jsonify({"error": "Only operators can toggle active status"}), 403
+            return jsonify({"error": "Only operators can change status"}), 403
 
-        current_active = user[10]  # Предполагая, что user — это кортеж и is_active на позиции 10
-        new_active = data['is_active']
+        current_status = user[10]  # ⚠️ заменить на правильный индекс поля status
+        if current_status == new_status:
+            return jsonify({"status": "unchanged", "message": "Status is already set to the requested value"})
 
-        if current_active == new_active:
-            return jsonify({"status": "unchanged", "message": "Active status is already set to the requested value"})
-
-        success = db.set_user_active(user_id, new_active)
+        success = db.set_user_status(user_id, new_status)
         if not success:
-            return jsonify({"error": "Failed to update active status"}), 500
+            return jsonify({"error": "Failed to update status"}), 500
 
-        log_success = db.log_activity(user_id, new_active)
+        log_success = db.log_activity(user_id, new_status)
         if not log_success:
-            # Опционально: можно откатить обновление, если лог не удался, но для простоты продолжаем с предупреждением
-            logging.warning("Active status updated but logging failed")
-            return jsonify({"status": "partial_success", "message": "Active status updated, but logging failed"}), 500
+            logging.warning("Status updated but logging failed")
+            return jsonify({"status": "partial_success", "message": "Status updated, but logging failed"}), 500
 
-        return jsonify({"status": "success", "message": "Active status updated and logged"})
+        return jsonify({"status": "success", "message": "Status updated and logged"})
     except Exception as e:
-        logging.error(f"Error toggling active status: {e}")
+        logging.error(f"Error toggling status: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 
 @app.route('/api/active_operators', methods=['GET'])
 @require_api_key
