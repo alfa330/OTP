@@ -1260,6 +1260,23 @@ class Database:
         except Exception as e:
             logging.error(f"Error logging activity: {e}")
             return False
+            
+    def get_last_activity_status(self, operator_id):
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute("""
+                    SELECT is_active
+                    FROM operator_activity_logs
+                    WHERE operator_id = %s
+                    ORDER BY change_time DESC
+                    LIMIT 1
+                """, (operator_id,))
+                row = cursor.fetchone()
+                return row[0] if row else None
+        except Exception as e:
+            logging.error(f"Error fetching last activity status: {e}")
+            return None
+
         
     def generate_monthly_report(self, supervisor_id, month=None, current_date=None):
         """
