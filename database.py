@@ -312,7 +312,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS operator_activity_logs (
                     id SERIAL PRIMARY KEY,
                     operator_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-                    status VARCHAR(20) NOT NULL,
+                    is_active VARCHAR(20) NOT NULL,
                     change_time TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
@@ -1217,7 +1217,15 @@ class Database:
             avg = result[1] or 0.0
             return count, avg
 
-    def set_user_active(self, user_id, is_active):
+    def set_user_active(self, user_id, status):
+        # допустимые статусы
+        allowed_statuses = {"active", "break", "training", "inactive"}
+        if status not in allowed_statuses:
+            return False  # неверный статус
+    
+        # преобразуем статус в boolean
+        is_active = True if status == "active" else False
+    
         with self._get_cursor() as cursor:
             cursor.execute("""
                 UPDATE users 
@@ -1238,10 +1246,14 @@ class Database:
             return [{"id": row[0], "name": row[1]} for row in cursor.fetchall()]
     
     def log_activity(self, operator_id, status):
+        allowed_statuses = {"active", "break", "training", "inactive"}
+        if status not in allowed_statuses:
+            return False
+    
         try:
             with self._get_cursor() as cursor:
                 cursor.execute("""
-                    INSERT INTO operator_activity_logs (operator_id, status)
+                    INSERT INTO operator_activity_logs (operator_id, is_active)
                     VALUES (%s, %s)
                 """, (operator_id, status))
             return True
