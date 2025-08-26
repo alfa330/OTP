@@ -308,10 +308,11 @@ class Database:
             """)
             # Calls table
             cursor.execute("""
+                DROP TABLE IF EXISTS operator_activity_logs CASCADE;
                 CREATE TABLE IF NOT EXISTS operator_activity_logs (
                     id SERIAL PRIMARY KEY,
                     operator_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-                    is_active BOOLEAN NOT NULL,
+                    status VARCHAR(20) NOT NULL,
                     change_time TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
@@ -1236,13 +1237,13 @@ class Database:
             """)
             return [{"id": row[0], "name": row[1]} for row in cursor.fetchall()]
     
-    def log_activity(self, operator_id, is_active):
+    def log_activity(self, operator_id, status):
         try:
             with self._get_cursor() as cursor:
                 cursor.execute("""
-                    INSERT INTO operator_activity_logs (operator_id, is_active)
+                    INSERT INTO operator_activity_logs (operator_id, status)
                     VALUES (%s, %s)
-                """, (operator_id, is_active))
+                """, (operator_id, status))
             return True
         except Exception as e:
             logging.error(f"Error logging activity: {e}")
