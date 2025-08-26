@@ -1651,20 +1651,33 @@ def toggle_user_active():
         if not user or user[3] != 'operator':
             return jsonify({"error": "Only operators can change status"}), 403
 
-        current_status = user[10]  # ⚠️ заменить на правильный индекс поля status
-        if current_status == new_status:
-            return jsonify({"status": "unchanged", "message": "Status is already set to the requested value"})
+        # здесь предполагаем, что user[10] хранит BOOLEAN (is_active)
+        current_active = user[10]
+        new_active_bool = True if new_status == "active" else False
 
-        success = db.set_user_status(user_id, new_status)
+        # если статус active ↔ True/False не меняется — нет смысла обновлять
+        if current_active == new_active_bool:
+            # но дополнительно можно проверить, не был ли изменён текстовый статус (например break/training)
+            last_log_status = db.get_last_activity_status(user_id)  # нужна функция в db
+            if last_log_status == new_status:
+                return jsonify({"status": "unchanged", "message": "Status is already set to the requested value"})
+
+        # обновляем users.is_active (bool)
+        success = db.set_user_active(user_id, new_status)
         if not success:
-            return jsonify({"error": "Failed to update status"}), 500
+            return jsonify({"error": "Failed to update user active flag"}), 500
 
+        # записываем строковый статус в логи
         log_success = db.log_activity(user_id, new_status)
         if not log_success:
-            logging.warning("Status updated but logging failed")
-            return jsonify({"status": "partial_success", "message": "Status updated, but logging failed"}), 500
+            logging.warning("User active flag updated but logging failed")
+            return jsonify({
+                "status": "partial_success",
+                "message": "User active flag updated, but logging failed"
+            }), 500
 
-        return jsonify({"status": "success", "message": "Status updated and logged"})
+        return jsonify({"status": "success", "message": f"Status updated to '{new_status}'"}), 200
+
     except Exception as e:
         logging.error(f"Error toggling status: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
