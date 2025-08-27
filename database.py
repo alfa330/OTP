@@ -308,7 +308,6 @@ class Database:
             """)
             # Calls table
             cursor.execute("""
-                DROP TABLE IF EXISTS operator_activity_logs CASCADE;
                 CREATE TABLE IF NOT EXISTS operator_activity_logs (
                     id SERIAL PRIMARY KEY,
                     operator_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -1219,7 +1218,7 @@ class Database:
 
     def set_user_active(self, user_id, status):
         # допустимые статусы
-        allowed_statuses = {"active", "break", "training", "inactive"}
+        allowed_statuses = {"active", "break", "training", "inactive", "tech"}
         if status not in allowed_statuses:
             return False  # неверный статус
     
@@ -1246,7 +1245,7 @@ class Database:
             return [{"id": row[0], "name": row[1]} for row in cursor.fetchall()]
     
     def log_activity(self, operator_id, status):
-        allowed_statuses = {"active", "break", "training", "inactive"}
+        allowed_statuses = {"active", "break", "training", "inactive","tech"}
         if status not in allowed_statuses:
             return False
     
