@@ -1642,7 +1642,7 @@ def toggle_user_active():
             return jsonify({"error": "Missing status field"}), 400
 
         new_status = data['status']
-        allowed_statuses = {"active", "break", "training", "inactive"}
+        allowed_statuses = {"active", "break", "training", "inactive", "tech"}
         if new_status not in allowed_statuses:
             return jsonify({"error": f"Invalid status. Allowed: {', '.join(allowed_statuses)}"}), 400
 
