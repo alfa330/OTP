@@ -911,12 +911,10 @@ def get_operator_activity():
         operator_id = int(operator_id)
         supervisor_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=supervisor_id)
-        if not requester or requester[3] != 'sv':
-            return jsonify({"error": "Unauthorized: Only supervisors can access this"}), 403
         
         # Проверка, что оператор принадлежит супервайзеру
         operator = db.get_user(id=operator_id)
-        if not operator or operator[6] != supervisor_id:  # operator[6] - supervisor_id
+        if requester[3]=="sv" and (not operator or operator[6] != supervisor_id):  # operator[6] - supervisor_id
             return jsonify({"error": "Unauthorized: This operator does not belong to you"}), 403
         
         logs = db.get_activity_logs(operator_id, date_str)
@@ -1642,25 +1640,6 @@ def add_operator():
         return jsonify({"status": "success", "message": f"Operator {name} added", "id": operator_id})
     except Exception as e:
         logging.error(f"Error adding operator: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-    
-@app.route('/api/user/activity_logs', methods=['GET'])
-@require_api_key
-def get_activity_logs():
-    try:
-        user_id = int(request.headers.get('X-User-Id'))
-        date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
-        # Validate date
-        try:
-            log_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-        except ValueError:
-            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
-            
-        activity_logs = db.get_activity_logs(user_id)
-        return jsonify({"status": "success", "logs": activity_logs}), 200
-        
-    except Exception as e:
-        logging.error(f"Error fetching activity logs: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/user/toggle_active', methods=['POST'])
