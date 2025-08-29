@@ -993,6 +993,29 @@ class Database:
                 } for row in cursor.fetchall()
             ]
 
+    def get_activity_logs(self, operator_id, date_str=None):
+        # Если date_str не указан, используем текущую дату
+        if date_str is None:
+            date_str = datetime.now().strftime('%Y-%m-%d')
+        try:
+            log_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            raise ValueError("Invalid date format. Use YYYY-MM-DD")
+        
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT change_time, is_active 
+                FROM operator_activity_logs 
+                WHERE operator_id = %s 
+                AND change_time::date = %s 
+                ORDER BY change_time ASC
+            """, (operator_id, log_date))
+            logs = cursor.fetchall()
+        return [
+            {"change_time": row[0].isoformat(), "is_active": row[1]}
+            for row in logs
+        ]
+    
     def get_hours_summary(self, operator_id=None, month=None):
         query = """
             SELECT 
