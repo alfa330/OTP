@@ -1456,8 +1456,11 @@ class Database:
                     ws_summary.cell(r, c).border = thin_border
     
             # Создаём листы для операторов
-            green_fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
-            red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+            green_fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")  # Active - зелёный
+            orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")  # Break - оранжевый
+            yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # Training - жёлтый
+            purple_fill = PatternFill(start_color="800080", end_color="800080", fill_type="solid")  # Tech - фиолетовый
+            red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")     # Inactive - красный
     
             for op_id, name in operators_dict.items():
                 ws = wb.create_sheet(title=name[:31])
@@ -1526,7 +1529,13 @@ class Database:
                     cell_status.value = status_text
                     if log['is_active'] == 'active':
                         cell_status.fill = green_fill
-                    else:
+                    elif log['is_active'] == 'break':
+                        cell_status.fill = orange_fill
+                    elif log['is_active'] == 'training':
+                        cell_status.fill = yellow_fill
+                    elif log['is_active'] == 'tech':
+                        cell_status.fill = purple_fill
+                    elif log['is_active'] == 'inactive':
                         cell_status.fill = red_fill
                     ws.cell(current_row, 4).value = dur_str
     
