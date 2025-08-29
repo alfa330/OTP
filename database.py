@@ -1294,7 +1294,7 @@ class Database:
             if not sanitized[0].isalpha() and sanitized[0] != '_':
                 sanitized = f"_{sanitized}"
             return sanitized[:255]
-
+    
         def format_duration(duration):
             """
             Formats a timedelta into a string like '1h 23m 45s', omitting zero parts.
@@ -1312,13 +1312,13 @@ class Database:
             if seconds > 0 or not parts:
                 parts.append(f"{seconds}s")
             return " ".join(parts)
-
+    
         try:
             if current_date is None:
                 current_date = date.today()
             else:
                 current_date = datetime.strptime(current_date, "%Y-%m-%d").date() if isinstance(current_date, str) else current_date
-
+    
             if month is None:
                 year = current_date.year
                 mon = current_date.month
@@ -1329,20 +1329,20 @@ class Database:
                         raise ValueError("Invalid month")
                 except:
                     raise ValueError("Invalid month format. Use YYYY-MM")
-
+    
             month_str = f"{year}-{mon:02d}"
             filename = f"monthly_report_supervisor_{supervisor_id}_{month_str}.xlsx"
-
+    
             month_start_date = date(year, mon, 1)
             month_start = datetime(year, mon, 1, 0, 0, 0)
             days_in_month = calendar.monthrange(year, mon)[1]
             month_end = date(year, mon, days_in_month)
             end_date = min(month_end, current_date)
             dates = [month_start_date + timedelta(days=i) for i in range((end_date - month_start_date).days + 1)]
-
+    
             # Определяем end_time как конец последнего дня периода
             end_time = datetime.combine(end_date, dt_time(23, 59, 59))
-
+    
             # Получаем данные с использованием курсора класса
             with self._get_cursor() as cursor:
                 # Получаем список операторов супервайзера
@@ -1352,12 +1352,12 @@ class Database:
                     WHERE supervisor_id = %s AND role = 'operator'
                 """, (supervisor_id,))
                 operators = cursor.fetchall()
-
+    
                 if not operators:
                     raise ValueError("No operators found for the given supervisor")
-
+    
                 operators_dict = {op[0]: op[1] for op in operators}
-
+    
                 # Получаем все логи за период для всех операторов супервайзера одним запросом
                 cursor.execute("""
                     SELECT o.operator_id, o.change_time, o.is_active 
@@ -1369,45 +1369,45 @@ class Database:
                     ORDER BY o.operator_id, o.change_time
                 """, (supervisor_id, month_start, end_date))
                 all_logs = cursor.fetchall()
-
+    
             # Группируем логи по операторам и вычисляем counts для summary
             logs_per_op = defaultdict(list)
             counts_per_op = defaultdict(lambda: defaultdict(lambda: {'act': 0, 'deact': 0}))
             total_counts_per_op = defaultdict(lambda: {'act': 0, 'deact': 0})
-
+    
             for log in all_logs:
                 op_id, change_time, is_active = log
                 dt = change_time.date()
                 log_dict = {'change_time': change_time, 'is_active': is_active, 'date': dt}
                 logs_per_op[op_id].append(log_dict)
-                if is_active:
+                if is_active == 'active':
                     counts_per_op[op_id][dt]['act'] += 1
                     total_counts_per_op[op_id]['act'] += 1
                 else:
                     counts_per_op[op_id][dt]['deact'] += 1
                     total_counts_per_op[op_id]['deact'] += 1
-
+    
             # Создаём workbook
             wb = Workbook()
             ws_summary = wb.active
             ws_summary.title = "Summary"
-
+    
             # Заголовки для summary листа
             ws_summary.cell(1, 1).value = "ФИО"
             for col, dt in enumerate(dates, start=2):
                 ws_summary.cell(1, col).value = dt.strftime("%Y-%m-%d")
             ws_summary.cell(1, len(dates) + 2).value = "Итого активаций"
             ws_summary.cell(1, len(dates) + 3).value = "Итого деактиваций"
-
+    
             # Стили для текста
             green_font = InlineFont(color="00FF00")
             red_font = InlineFont(color="FF0000")
-
+    
             # Заполняем summary
             row = 2
             for op_id, name in operators_dict.items():
                 ws_summary.cell(row, 1).value = name
-
+    
                 for col, dt in enumerate(dates, start=2):
                     activations = counts_per_op[op_id][dt]['act']
                     deactivations = counts_per_op[op_id][dt]['deact']
@@ -1419,18 +1419,18 @@ class Database:
                     ])
                     cell.value = rt
                     cell.alignment = Alignment(horizontal='center', vertical='center', wrapText=True)
-
+    
                 # Итоговые столбцы
                 cell_act = ws_summary.cell(row, len(dates) + 2)
                 cell_act.value = CellRichText([TextBlock(green_font, str(total_counts_per_op[op_id]['act']))])
                 cell_act.alignment = Alignment(horizontal='center', vertical='center')
-
+    
                 cell_deact = ws_summary.cell(row, len(dates) + 3)
                 cell_deact.value = CellRichText([TextBlock(red_font, str(total_counts_per_op[op_id]['deact']))])
                 cell_deact.alignment = Alignment(horizontal='center', vertical='center')
-
+    
                 row += 1
-
+    
             # Легенда
             ws_summary.cell(row + 1, 1).value = "Легенда:"
             ws_summary.cell(row + 2, 1).value = CellRichText([
@@ -1441,27 +1441,27 @@ class Database:
                 TextBlock(red_font, "Красный"),
                 TextBlock(InlineFont(), " - Количество деактиваций")
             ])
-
+    
             # Добавляем таблицу в Summary
             tab = Table(displayName="SummaryTable", ref=f"A1:{ws_summary.cell(row=row-1, column=len(dates)+3).coordinate}")
             style = TableStyleInfo(name="TableStyleMedium2", showFirstColumn=True,
                                    showLastColumn=False, showRowStripes=True, showColumnStripes=False)
             tab.tableStyleInfo = style
             ws_summary.add_table(tab)
-
+    
             # Устанавливаем границы
             thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
             for r in range(1, row):
                 for c in range(1, len(dates) + 4):
                     ws_summary.cell(r, c).border = thin_border
-
+    
             # Создаём листы для операторов
             green_fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
             red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
-
+    
             for op_id, name in operators_dict.items():
                 ws = wb.create_sheet(title=name[:31])
-
+    
                 # Заголовки
                 ws.cell(1, 1).value = "Дата"
                 ws.cell(1, 2).value = "Время"
@@ -1471,7 +1471,7 @@ class Database:
                 ws.cell(1, 2).font = Font(bold=True)
                 ws.cell(1, 3).font = Font(bold=True)
                 ws.cell(1, 4).font = Font(bold=True)
-
+    
                 # Заполняем события
                 logs = sorted(logs_per_op[op_id], key=lambda x: x['change_time'])
                 current_row = 2
@@ -1499,36 +1499,39 @@ class Database:
                         ws.cell(current_row, 3).font = Font(bold=True)
                         ws.cell(current_row, 4).font = Font(bold=True)
                         current_row += 1
-
+    
                         # Сбрасываем для нового дня
                         day_active_time = timedelta(0)
                         current_day = dt
-
+    
                     if i < len(logs) - 1:
                         next_time = logs[i + 1]['change_time']
                     else:
                         next_time = end_time
-
+    
                     duration = next_time - log['change_time']
-
+    
                     # Проверка на дубликат состояния
                     if i > 0 and log['is_active'] == logs[i - 1]['is_active']:
                         dur_str = "N/A (дубликат состояния)"
                     else:
                         dur_str = format_duration(duration)
-                        if log['is_active']:
+                        if log['is_active'] == 'active':
                             day_active_time += duration
-
+    
                     ws.cell(current_row, 1).value = dt.strftime("%Y-%m-%d")
                     ws.cell(current_row, 2).value = log['change_time'].strftime("%H:%M:%S")
-                    status_text = "Активация" if log['is_active'] else "Деактивация"
+                    status_text = log['is_active'].capitalize()
                     cell_status = ws.cell(current_row, 3)
                     cell_status.value = status_text
-                    cell_status.fill = green_fill if log['is_active'] else red_fill
+                    if log['is_active'] == 'active':
+                        cell_status.fill = green_fill
+                    else:
+                        cell_status.fill = red_fill
                     ws.cell(current_row, 4).value = dur_str
-
+    
                     current_row += 1
-
+    
                 # Добавляем итого для последнего дня
                 if current_day is not None:
                     ws.cell(current_row, 1).value = current_day.strftime("%Y-%m-%d")
@@ -1547,7 +1550,7 @@ class Database:
                     ws.cell(current_row, 3).font = Font(bold=True)
                     ws.cell(current_row, 4).font = Font(bold=True)
                     current_row += 1
-
+    
                 # Добавляем таблицу
                 if current_row > 2:
                     sanitized_name = sanitize_table_name(f"{name}_{op_id}")
@@ -1556,22 +1559,23 @@ class Database:
                                               showLastColumn=False, showRowStripes=True, showColumnStripes=False)
                     tab_op.tableStyleInfo = style_op
                     ws.add_table(tab_op)
-
+    
                 # Авто-подгонка ширины столбцов
                 for col in ['A', 'B', 'C', 'D']:
                     ws.column_dimensions[col].auto_size = True
-
+    
             # Сохраняем в BytesIO
             output = BytesIO()
             wb.save(output)
             output.seek(0)
             content = output.getvalue()
-
+    
             return filename, content
-
+    
         except Exception as e:
             logging.error(f"Error generating report: {e}")
             return None, None
+        
     def get_user_history(self, user_id):
         with self._get_cursor() as cursor:
             cursor.execute("""
