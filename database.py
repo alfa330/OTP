@@ -201,7 +201,7 @@ def process_timesheet(file_url, supervisor_id):
                 for col, day in day_map.items():
                     if col < len(row):
                         try:
-                            daily_hours[day - 1] = float(row[col] or 0.0)
+                            daily_hours[day - 1] = float(round(row[col],2) or 0.0)
                         except (ValueError, TypeError):
                             daily_hours[day - 1] = 0.0
                 entry = {
