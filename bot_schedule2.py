@@ -899,6 +899,47 @@ def remove_sv():
         logging.error(f"Error removing SV: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/operator/activity', methods=['GET'])
+@require_api_key
+def get_operator_activity():
+    try:
+        operator_id = request.args.get('operator_id')
+        date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+        if not operator_id:
+            return jsonify({"error": "Missing operator_id"}), 400
+        
+        operator_id = int(operator_id)
+        supervisor_id = int(request.headers.get('X-User-Id'))
+        requester = db.get_user(id=supervisor_id)
+        if not requester or requester[3] != 'sv':
+            return jsonify({"error": "Unauthorized: Only supervisors can access this"}), 403
+        
+        # Проверка, что оператор принадлежит супервайзеру
+        operator = db.get_user(id=operator_id)
+        if not operator or operator[6] != supervisor_id:  # operator[6] - supervisor_id
+            return jsonify({"error": "Unauthorized: This operator does not belong to you"}), 403
+        
+        logs = db.get_activity_logs(operator_id, date_str)
+        return jsonify({"status": "success", "logs": logs}), 200
+    except Exception as e:
+        logging.error(f"Error fetching operator activity: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/sv/operators', methods=['GET'])
+@require_api_key
+def get_sv_operators():
+    try:
+        supervisor_id = int(request.headers.get('X-User-Id'))
+        requester = db.get_user(id=supervisor_id)
+        if not requester or requester[3] != 'sv':
+            return jsonify({"error": "Unauthorized: Only supervisors can access this"}), 403
+        
+        operators = db.get_operators_by_supervisor(supervisor_id)
+        return jsonify({"status": "success", "operators": operators}), 200
+    except Exception as e:
+        logging.error(f"Error fetching operators: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/sv/data', methods=['GET'])
 def get_sv_data():
     try:
@@ -1614,21 +1655,10 @@ def get_activity_logs():
             log_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         except ValueError:
             return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
-        # Fetch logs
-        with db._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT change_time, is_active 
-                FROM operator_activity_logs 
-                WHERE operator_id = %s 
-                AND change_time::date = %s 
-                ORDER BY change_time ASC
-            """, (user_id, log_date))
-            logs = cursor.fetchall()
-        activity_logs = [
-            {"change_time": row[0].isoformat(), "is_active": row[1]}
-            for row in logs
-        ]
+            
+        activity_logs = db.get_activity_logs(user_id)
         return jsonify({"status": "success", "logs": activity_logs}), 200
+        
     except Exception as e:
         logging.error(f"Error fetching activity logs: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
