@@ -927,7 +927,7 @@ def get_operator_activity():
 
 @app.route('/api/sv/operators', methods=['GET'])
 @require_api_key
-def get_sv_operators():
+def get_sv_operators_moderka():
     try:
         supervisor_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=supervisor_id)
