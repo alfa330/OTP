@@ -3823,8 +3823,8 @@
                                             <tbody>
                                               {previewCallsData.operators.map((op, i) => (
                                                 <tr key={i} className="hover:bg-gray-50">
-                                                  <td className="border border-gray-300 p-2">{op.name}</td>
-                                                  <td className="border border-gray-300 p-2">{op.cph}</td>
+                                                  <td className="border border-gray-300 p-2">{op.name ?? op[0]}</td>
+                                                  <td className="border border-gray-300 p-2">{op.cph ?? op[1]}</td>
                                                 </tr>
                                               ))}
                                             </tbody>
