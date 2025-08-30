@@ -834,11 +834,28 @@ class Database:
 
     def process_calls_sheet(self, file):
         try:
-            excel = pd.ExcelFile(file)
-            sheet_name = excel.sheet_names[0]
-            df = pd.read_excel(excel, sheet_name=sheet_name)
+            filename = file.filename.lower()
     
-            required_columns = ["Name", "Количество поступивших", "Время в работе", "Всего перерыва"]
+            # Загружаем файл в DataFrame
+            if filename.endswith(".csv"):
+                df = pd.read_csv(file)
+                sheet_name = "CSV"
+            elif filename.endswith((".xls", ".xlsx")):
+                excel = pd.ExcelFile(file)
+                sheet_name = excel.sheet_names[0]
+                df = pd.read_excel(excel, sheet_name=sheet_name)
+            else:
+                return None, None, "Неверный формат файла. Поддерживаются только CSV, XLS, XLSX"
+    
+            # Проверяем обязательные колонки
+            required_columns = [
+                "Name", 
+                "Количество поступивших", 
+                "Время в работе", 
+                "Всего перерыва",
+                "Тех. причина",
+                "Тренинг"
+            ]
             for col in required_columns:
                 if col not in df.columns:
                     return None, None, f"Не найдена колонка: {col}"
@@ -852,13 +869,17 @@ class Database:
                         name = str(row["Name"]).strip()
                         calls = int(row["Количество поступивших"])
     
+                        # Конвертация времени в секунды
                         work_time = pd.to_timedelta(str(row["Время в работе"])).total_seconds()
                         break_time = pd.to_timedelta(str(row["Всего перерыва"])).total_seconds()
+                        tech_time = pd.to_timedelta(str(row["Тех. причина"])).total_seconds()
+                        training_time = pd.to_timedelta(str(row["Тренинг"])).total_seconds()
     
-                        net_hours = (work_time - break_time) / 3600
+                        # Чистое рабочее время
+                        net_hours = (work_time - break_time - tech_time - training_time) / 3600
                         cph = round(calls / net_hours, 2) if net_hours > 0 else 0
     
-                        # Найти оператора
+                        # Проверяем, есть ли оператор в БД
                         cursor.execute(
                             "SELECT id FROM users WHERE name = %s AND role = 'operator'",
                             (name,)
@@ -868,7 +889,7 @@ class Database:
                             continue
                         operator_id = result[0]
     
-                        # Обновляем work_hours
+                        # Обновляем / вставляем данные по звонкам
                         cursor.execute("""
                             INSERT INTO work_hours (operator_id, month, calls_per_hour)
                             VALUES (%s, %s, %s)
@@ -879,13 +900,14 @@ class Database:
                         operators.append((name, cph))
     
                     except Exception as e:
-                        print(f"Ошибка при обработке {row}: {e}")
+                        print(f"Ошибка при обработке строки {row}: {e}")
                         continue
     
             return sheet_name, operators, None
     
         except Exception as e:
             return None, None, str(e)
+
     
     def process_and_upload_timesheet(self):
         """
