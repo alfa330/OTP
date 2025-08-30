@@ -2859,7 +2859,7 @@
                     const response = await axios.get(
                         `${API_BASE_URL}/api/admin/monthly_report?month=${selectedReportMonth}`,
                         {
-                            headers: { 'X-API-Key': user.apiKey },
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id},
                             responseType: 'blob' // <-- Важно для бинарных файлов (xlsx)
                         }
                     );
