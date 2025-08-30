@@ -2395,6 +2395,12 @@
                 return 'text-red-600';
             };
 
+            const getCallsPerHourColor = (CPH) => {
+                if (CPH >= 20) return 'text-green-600';
+                if (CPH >= 10) return 'text-yellow-600';
+                return 'text-red-600';
+            };
+
             const getCurrentWeekOfMonth = () => {
                 const today = new Date();
                 const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
@@ -3931,9 +3937,9 @@
                                                         <p className="text-lg font-semibold">{hoursData.norm_hours.toFixed(2)} hours</p>
                                                     </div>
                                                     <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-1">Performance</p>
-                                                        <p className={`text-lg font-semibold ${getHoursPerformanceColor((hoursData.regular_hours / hoursData.norm_hours) * 100, 100)}`}>
-                                                            {((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100).toFixed(2)}% / 100%
+                                                        <p className="text-sm font-medium text-gray-500 mb-1">Calls per hour</p>
+                                                        <p className={`text-lg font-semibold ${getCallsPerHourColor(hoursData.calls_per_hour.toFixed(2))}`}>
+                                                            {hoursData.calls_per_hour.toFixed(2)}
                                                         </p>
                                                     </div>
                                 
