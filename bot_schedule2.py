@@ -1093,6 +1093,7 @@ def get_sv_operators():
 def handle_monthly_report():
     try:
         month = request.args.get('month')
+        user_id = request.args.get('')
         if not month:
             month = datetime.now().strftime('%Y-%m')
         
@@ -1104,8 +1105,15 @@ def handle_monthly_report():
         
         logging.info(f"Generating monthly report for {month}")
         
-        svs = db.get_supervisors()
-        
+        user_id = int(request.headers.get('X-User-Id'))
+        user = db.get_user(id=user_id)
+        if user[3]=="sv":
+            svs=[(user[0], user[2], _, _)]
+        elif user[3]=="admin":
+            svs = db.get_supervisors()
+        else:
+            return jsonify({"error": "Only admin or SV can access to this report"}), 404
+            
         if not svs:
             return jsonify({"error": "No supervisors found"}), 404
         
