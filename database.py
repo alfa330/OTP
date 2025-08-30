@@ -832,7 +832,7 @@ class Database:
                     norm_hours = EXCLUDED.norm_hours
             """, (operator_id, month, regular_hours, training_hours, fines, norm_hours))
 
-    def process_calls_sheet(file):
+    def process_calls_sheet(self, file):
         try:
             excel = pd.ExcelFile(file)
             sheet_name = excel.sheet_names[0]  # Берем первый лист
@@ -846,7 +846,6 @@ class Database:
     
             operators = []
             month = date.today().strftime("%Y-%m")
-            db = Database() # Assuming db is global or accessible
             with self._get_cursor() as cursor:
                 for _, row in df.iterrows():
                     try:
