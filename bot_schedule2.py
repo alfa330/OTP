@@ -1108,7 +1108,7 @@ def handle_monthly_report():
         user_id = int(request.headers.get('X-User-Id'))
         user = db.get_user(id=user_id)
         if user[3]=="sv":
-            svs=[(user[0], user[2], _, _)]
+            svs=[(user[0], user[2], "", "")]
         elif user[3]=="admin":
             svs = db.get_supervisors()
         else:
