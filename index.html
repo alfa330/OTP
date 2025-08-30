@@ -1524,7 +1524,7 @@
             const handlePreviewCallsTable = async (fileParam) => {
               const file = fileParam || callsTableFile; // если не передали — взять из стейта
               if (!file) {
-                addToast("error", "Сначала выберите файл");
+                showToast("Сначала выберите файл", "error");
                 return;
               }
             
@@ -1548,7 +1548,7 @@
                 setShowCallsPreview(true);
               } catch (error) {
                 console.error("Preview error:", error);
-                addToast("error", "Failed to preview calls table");
+                showToast("Failed to preview calls table", "error");
               }
             };
             
