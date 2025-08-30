@@ -835,10 +835,9 @@ class Database:
     def process_calls_sheet(self, file):
         try:
             excel = pd.ExcelFile(file)
-            sheet_name = excel.sheet_names[0]  # Берем первый лист
+            sheet_name = excel.sheet_names[0]
             df = pd.read_excel(excel, sheet_name=sheet_name)
     
-            # Проверяем обязательные колонки
             required_columns = ["Name", "Количество поступивших", "Время в работе", "Всего перерыва"]
             for col in required_columns:
                 if col not in df.columns:
@@ -846,6 +845,7 @@ class Database:
     
             operators = []
             month = date.today().strftime("%Y-%m")
+    
             with self._get_cursor() as cursor:
                 for _, row in df.iterrows():
                     try:
@@ -858,18 +858,17 @@ class Database:
                         net_hours = (work_time - break_time) / 3600
                         cph = round(calls / net_hours, 2) if net_hours > 0 else 0
     
-                        # Найти оператора в users
+                        # Найти оператора
                         cursor.execute(
                             "SELECT id FROM users WHERE name = %s AND role = 'operator'",
                             (name,)
                         )
                         result = cursor.fetchone()
                         if not result:
-                            # можно добавить лог: print(f"Оператор {name} не найден в БД")
-                            continue  
+                            continue
                         operator_id = result[0]
     
-                        # Обновляем work_hours (текущий месяц)
+                        # Обновляем work_hours
                         cursor.execute("""
                             INSERT INTO work_hours (operator_id, month, calls_per_hour)
                             VALUES (%s, %s, %s)
@@ -880,11 +879,9 @@ class Database:
                         operators.append((name, cph))
     
                     except Exception as e:
-                        # логируем ошибку, но не падаем
                         print(f"Ошибка при обработке {row}: {e}")
                         continue
     
-            conn.commit()
             return sheet_name, operators, None
     
         except Exception as e:
