@@ -877,7 +877,7 @@ class Database:
     
                         # Чистое рабочее время
                         net_hours = (work_time - break_time - tech_time - training_time) / 3600
-                        cph = round(calls / net_hours, 2) if net_hours > 0 else 0
+                        cph = round(calls / net_hours, 1) if net_hours > 0 else 0
     
                         # Проверяем, есть ли оператор в БД
                         cursor.execute(
