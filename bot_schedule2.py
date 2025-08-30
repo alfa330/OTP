@@ -373,8 +373,15 @@ def preview_calls_table():
         if file.filename == '':
             return jsonify({"error": "Файл не выбран"}), 400
 
+        if not file.filename.lower().endswith(('.csv', '.xls', '.xlsx')):
+            return jsonify({"error": "Неверный формат файла. Допустимы .csv, .xls, .xlsx"}), 400
+
         # Получаем user_id из заголовка
-        user_id = int(request.headers.get('X-User-Id'))
+        user_id_header = request.headers.get('X-User-Id')
+        if not user_id_header or not user_id_header.isdigit():
+            return jsonify({"error": "Некорректный X-User-Id"}), 400
+        user_id = int(user_id_header)
+
         user = db.get_user(id=user_id)
         if not user or user[3] != 'sv':  # user[3] == role
             return jsonify({"error": "Unauthorized: только супервайзеры могут загружать таблицы"}), 403
@@ -387,13 +394,11 @@ def preview_calls_table():
         return jsonify({
             "status": "success",
             "sheet_name": sheet_name,
-            "operators": [
-                {"name": op[0], "cph": op[1]} for op in operators
-            ]
+            "operators": operators  # если process_calls_sheet вернёт словари
         }), 200
 
     except Exception as e:
-        logging.error(f"Ошибка при загрузке таблицы звонков: {e}")
+        logging.error(f"Ошибка при загрузке таблицы звонков: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/sv/preview_table', methods=['POST'])
