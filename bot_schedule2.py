@@ -380,7 +380,7 @@ def preview_calls_table():
             return jsonify({"error": "Unauthorized: только супервайзеры могут загружать таблицы"}), 403
 
         # Обработка файла и обновление БД
-        sheet_name, operators, error = process_calls_sheet(file)
+        sheet_name, operators, error = db.process_calls_sheet(file)
         if error:
             return jsonify({"error": error}), 400
 
