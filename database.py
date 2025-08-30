@@ -407,8 +407,20 @@ class Database:
                     norm_hours FLOAT NOT NULL DEFAULT 0,
                     daily_hours FLOAT[] NOT NULL DEFAULT ARRAY[]::FLOAT[],
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    calls_per_hour FLOAT NOT NULL DEFAULT 0.0;
                     UNIQUE(operator_id, month)
                 );
+            """)
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns 
+                        WHERE table_name = 'work_hours' AND column_name = 'calls_per_hour'
+                    ) THEN
+                        ALTER TABLE work_hours ADD COLUMN calls_per_hour FLOAT NOT NULL DEFAULT 0.0;
+                    END IF;
+                END $$;
             """)
             # Processed sheets table
             cursor.execute("""
@@ -453,6 +465,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_users_rate ON users(rate);
                 CREATE INDEX IF NOT EXISTS idx_user_history_user_id ON user_history(user_id);
                 CREATE INDEX IF NOT EXISTS idx_user_history_changed_at ON user_history(changed_at);
+                CREATE INDEX IF NOT EXISTS idx_work_hours_calls_per_hour ON work_hours(calls_per_hour);
             """)
 
     def create_user(self, telegram_id, name, role, direction_id=None, hire_date=None, supervisor_id=None, login=None, password=None, hours_table_url=None):
