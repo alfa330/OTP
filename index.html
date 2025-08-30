@@ -1521,7 +1521,29 @@
             const [previewCallsData, setPreviewCallsData] = useState(null);
             const [showCallsPreview, setShowCallsPreview] = useState(false);
 
-
+            const handlePreviewCallsTable = async () => {
+              try {
+                const formData = new FormData();
+                formData.append("file", callsTableFile);
+            
+                const response = await axios.post(
+                  `${API_BASE_URL}/api/sv/preview_calls_table`,
+                  formData,
+                  {
+                    headers: {
+                      'X-User-Id': user.id, 
+                      'X-API-Key': user.apiKey,
+                      "Content-Type": "multipart/form-data",
+                    },
+                  }
+                );
+            
+                setPreviewCallsData(response.data);
+                setShowCallsPreview(true); // открыть модальное окно
+              } catch (error) {
+                addToast("error", "Failed to preview calls table");
+              }
+            }; 
             
             const monthNames = [
             "января",
@@ -1603,31 +1625,7 @@
                 setShowModal(true);
                 setRequestMessage('');
                 }
-            };
-
-            const handlePreviewCallsTable = async () => {
-              try {
-                const formData = new FormData();
-                formData.append("file", callsTableFile);
-            
-                const response = await axios.post(
-                  `${API_BASE_URL}/api/sv/preview_calls_table`,
-                  formData,
-                  {
-                    headers: {
-                      'X-User-Id': user.id, 
-                      'X-API-Key': user.apiKey,
-                      "Content-Type": "multipart/form-data",
-                    },
-                  }
-                );
-            
-                setPreviewCallsData(response.data);
-                setShowCallsPreview(true); // открыть модальное окно
-              } catch (error) {
-                addToast("error", "Failed to preview calls table");
-              }
-            };    
+            };   
 
             const handleSendRequest = async () => {
                 if (!requestMessage.trim()) {
