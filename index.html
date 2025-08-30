@@ -1523,11 +1523,11 @@
 
             const handlePreviewCallsTable = async () => {
               if (!callsTableFile) {
-                addToast("error", "Сначала выберите файл для загрузки");
+                showToast("Сначала выберите файл для загрузки", "error");
                 return;
               }
               if (!user?.id || !user?.apiKey) {
-                addToast("error", "Нет данных авторизации");
+                showToast("Нет данных авторизации, "error"");
                 return;
               }
               try {
