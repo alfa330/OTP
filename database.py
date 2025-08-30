@@ -407,7 +407,7 @@ class Database:
                     norm_hours FLOAT NOT NULL DEFAULT 0,
                     daily_hours FLOAT[] NOT NULL DEFAULT ARRAY[]::FLOAT[],
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    calls_per_hour FLOAT NOT NULL DEFAULT 0.0;
+                    calls_per_hour FLOAT NOT NULL DEFAULT 0.0,
                     UNIQUE(operator_id, month)
                 );
             """)
