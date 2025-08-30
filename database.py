@@ -872,7 +872,6 @@ class Database:
             processed = 0
             skipped = 0
             skipped_operators = []
-            logging.info(timesheet_data)
             with self._get_cursor() as cursor:
                 for entry in timesheet_data:
                     fio = entry['ФИО']
