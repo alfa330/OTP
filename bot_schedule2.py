@@ -3528,7 +3528,7 @@ if __name__ == '__main__':
     )
     scheduler.add_job(
         db.process_and_upload_timesheet,
-        CronTrigger(minute='*/2'),
+        CronTrigger(minute='*/3'),
         misfire_grace_time=3600
     )
     scheduler.start()
