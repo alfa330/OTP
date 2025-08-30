@@ -1517,7 +1517,12 @@
             const [userHistory, setUserHistory] = useState([]);
             const [selectedUserForHistory, setSelectedUserForHistory] = useState(null);
             const [loadingHistoryId, setLoadingHistoryId] = useState(null);
+            const [callsTableFile, setCallsTableFile] = useState(null);
+            const [previewCallsData, setPreviewCallsData] = useState(null);
+            const [showCallsPreview, setShowCallsPreview] = useState(false);
 
+
+            
             const monthNames = [
             "января",
             "февраля",
@@ -1599,6 +1604,30 @@
                 setRequestMessage('');
                 }
             };
+
+            const handlePreviewCallsTable = async () => {
+              try {
+                const formData = new FormData();
+                formData.append("file", callsTableFile);
+            
+                const response = await axios.post(
+                  `${API_BASE_URL}/api/sv/preview_calls_table`,
+                  formData,
+                  {
+                    headers: {
+                      'X-User-Id': user.id, 
+                      'X-API-Key': user.apiKey,
+                      "Content-Type": "multipart/form-data",
+                    },
+                  }
+                );
+            
+                setPreviewCallsData(response.data);
+                setShowCallsPreview(true); // открыть модальное окно
+              } catch (error) {
+                addToast("error", "Failed to preview calls table");
+              }
+            };    
 
             const handleSendRequest = async () => {
                 if (!requestMessage.trim()) {
@@ -3651,97 +3680,163 @@
                                     </div>
                                 )}
                                 {view === 'operators' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <div className="flex justify-between items-center mb-6">
-                                            <h2 className="text-2xl font-semibold text-gray-800">Your Operators</h2>
-                                            <div className="flex items-end gap-4">
-                                                <div>
-                                                    <select
-                                                        value={selectedReportMonth}
-                                                        onChange={(e) => setSelectedReportMonth(e.target.value)}
-                                                        className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                        disabled={isAdminDataLoading}
-                                                    >
-                                                        {getMonthOptions()}
-                                                    </select>
-                                                </div>
-                                                <button
-                                                    onClick={generateMonthlyReport}
-                                                    className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                                    disabled={isLoading}
-                                                >
-                                                    {isLoading ? 'Generating...' : 'Generate Report'}
-                                                </button>
-                                            </div>
+                                  <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                    <div className="flex justify-between items-center mb-6">
+                                      <h2 className="text-2xl font-semibold text-gray-800">Your Operators</h2>
+                                      <div className="flex items-end gap-4">
+                                        <div>
+                                          <select
+                                            value={selectedReportMonth}
+                                            onChange={(e) => setSelectedReportMonth(e.target.value)}
+                                            className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isAdminDataLoading}
+                                          >
+                                            {getMonthOptions()}
+                                          </select>
                                         </div>
-                                        {isLoading ? (
-                                            <p className="text-center text-gray-600">Loading...</p>
-                                        ) : svData && svData.operators && svData.operators.length > 0 ? (
-                                            <div className="overflow-x-auto rounded-lg border border-gray-200">
-                                                <table className="min-w-full divide-y divide-gray-200">
-                                                    <thead className="bg-gray-50">
-                                                        <tr>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Calls</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg Score</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Link</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody className="bg-white divide-y divide-gray-200">
-                                                        {svData.operators.map((op, index) => {
-                                                            const callCount = parseInt(op.call_count) || 0;
-                                                            return (
-                                                                <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
-                                                                    <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
-                                                                    <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
-                                                                        {callCount}
-                                                                    </td>
-                                                                    <td className="px-6 py-4 whitespace-nowrap">
-                                                                        <span className={getScoreColor(op.avg_score)}>
-                                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                                        </span>
-                                                                    </td>
-                                                                    <td className="px-6 py-4 whitespace-nowrap">
-                                                                        {op.link ? (
-                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">View</a>
-                                                                        ) : '-'}
-                                                                    </td>
-                                                                    <td className="px-6 py-4 whitespace-nowrap space-x-2">
-                                                                        <button
-                                                                            onClick={() => {
-                                                                                // Генерируем токен с данными оператора
-                                                                                const tokenData = {
-                                                                                    apiKey: user.apiKey,
-                                                                                    userId: user.id,
-                                                                                    role: user.role,
-                                                                                    name: user.name,
-                                                                                    operatorId: op.id,
-                                                                                    operatorName: op.name,
-                                                                                    timestamp: Date.now()
-                                                                                };
-                                                                                const token = safeBtoa(JSON.stringify(tokenData));
-                                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
-                                                                            }}
-                                                                            className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
-                                                                            title="Listen to operator calls"
-                                                                        >
-                                                                            Listen Calls
-                                                                        </button>
-                                                                    </td>
-                                                                </tr>
-                                                            );
-                                                        })}
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        ) : (
-                                            <p className="text-center text-gray-600">No operators found.</p>
-                                        )}
+                                
+                                        <button
+                                          onClick={generateMonthlyReport}
+                                          className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                          disabled={isLoading}
+                                        >
+                                          {isLoading ? 'Generating...' : 'Generate Report'}
+                                        </button>
+                                
+                                        {/* Новая кнопка для загрузки Excel */}
+                                        <button
+                                          onClick={() => document.getElementById("callsFileInput").click()}
+                                          className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200"
+                                        >
+                                          Upload Calls Table
+                                        </button>
+                                
+                                        {/* Скрытый input */}
+                                        <input
+                                          type="file"
+                                          id="callsFileInput"
+                                          accept=".xlsx,.xls"
+                                          style={{ display: "none" }}
+                                          onChange={(e) => {
+                                            if (e.target.files.length > 0) {
+                                              setCallsTableFile(e.target.files[0]);
+                                              handlePreviewCallsTable(); // превью сразу
+                                            }
+                                          }}
+                                        />
+                                      </div>
                                     </div>
+                                
+                                    {isLoading ? (
+                                      <p className="text-center text-gray-600">Loading...</p>
+                                    ) : svData && svData.operators && svData.operators.length > 0 ? (
+                                      <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                        <table className="min-w-full divide-y divide-gray-200">
+                                          <thead className="bg-gray-50">
+                                            <tr>
+                                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Calls</th>
+                                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg Score</th>
+                                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Link</th>
+                                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody className="bg-white divide-y divide-gray-200">
+                                            {svData.operators.map((op, index) => {
+                                              const callCount = parseInt(op.call_count) || 0;
+                                              return (
+                                                <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
+                                                  <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
+                                                  <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
+                                                    {callCount}
+                                                  </td>
+                                                  <td className="px-6 py-4 whitespace-nowrap">
+                                                    <span className={getScoreColor(op.avg_score)}>
+                                                      {op.avg_score ? op.avg_score.toFixed(2) : '-'}
+                                                    </span>
+                                                  </td>
+                                                  <td className="px-6 py-4 whitespace-nowrap">
+                                                    {op.link ? (
+                                                      <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">
+                                                        View
+                                                      </a>
+                                                    ) : '-'}
+                                                  </td>
+                                                  <td className="px-6 py-4 whitespace-nowrap space-x-2">
+                                                    <button
+                                                      onClick={() => {
+                                                        const tokenData = {
+                                                          apiKey: user.apiKey,
+                                                          userId: user.id,
+                                                          role: user.role,
+                                                          name: user.name,
+                                                          operatorId: op.id,
+                                                          operatorName: op.name,
+                                                          timestamp: Date.now()
+                                                        };
+                                                        const token = safeBtoa(JSON.stringify(tokenData));
+                                                        window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
+                                                      }}
+                                                      className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
+                                                      title="Listen to operator calls"
+                                                    >
+                                                      Listen Calls
+                                                    </button>
+                                                  </td>
+                                                </tr>
+                                              );
+                                            })}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    ) : (
+                                      <p className="text-center text-gray-600">No operators found.</p>
+                                    )}
+                                
+                                    {/* Модалка превью */}
+                                    {showCallsPreview && previewCallsData && (
+                                      <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50">
+                                        <div className="bg-white rounded-xl shadow-lg p-6 w-2/3 max-h-[80vh] overflow-y-auto">
+                                          <h3 className="text-lg font-semibold mb-4">
+                                            Preview: {previewCallsData.sheet_name}
+                                          </h3>
+                                
+                                          <table className="w-full border-collapse border border-gray-300">
+                                            <thead>
+                                              <tr className="bg-gray-100">
+                                                <th className="border border-gray-300 p-2 text-left">Operator</th>
+                                                <th className="border border-gray-300 p-2 text-left">Calls per Hour</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody>
+                                              {previewCallsData.operators.map((op, i) => (
+                                                <tr key={i} className="hover:bg-gray-50">
+                                                  <td className="border border-gray-300 p-2">{op.name}</td>
+                                                  <td className="border border-gray-300 p-2">{op.cph}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                
+                                          {previewCallsData.error && (
+                                            <div className="mt-4 text-red-600">
+                                              Errors: {previewCallsData.error}
+                                            </div>
+                                          )}
+                                
+                                          <div className="mt-6 flex justify-end">
+                                            <button
+                                              onClick={() => setShowCallsPreview(false)}
+                                              className="bg-gray-500 text-white py-2 px-4 rounded hover:bg-gray-600 transition-all duration-200"
+                                            >
+                                              Close
+                                            </button>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
                                 )}
-                            </>
-                        )}
                         {user.role === 'operator' && (
                             <>
                                 {view === 'profile' && (
