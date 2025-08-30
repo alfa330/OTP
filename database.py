@@ -838,7 +838,7 @@ class Database:
     
             # Загружаем файл в DataFrame
             if filename.endswith(".csv"):
-                df = pd.read_csv(file)
+                df = pd.read_csv(file, sep=";")
                 sheet_name = "CSV"
             elif filename.endswith((".xls", ".xlsx")):
                 excel = pd.ExcelFile(file)
