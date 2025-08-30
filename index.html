@@ -1521,26 +1521,24 @@
             const [previewCallsData, setPreviewCallsData] = useState(null);
             const [showCallsPreview, setShowCallsPreview] = useState(false);
 
-            const handlePreviewCallsTable = async () => {
-              if (!callsTableFile) {
-                showToast("Сначала выберите файл для загрузки", "error");
+            const handlePreviewCallsTable = async (fileParam) => {
+              const file = fileParam || callsTableFile; // если не передали — взять из стейта
+              if (!file) {
+                addToast("error", "Сначала выберите файл");
                 return;
               }
-              if (!user?.id || !user?.apiKey) {
-                showToast("Нет данных авторизации, "error"");
-                return;
-              }
+            
               try {
                 const formData = new FormData();
-                formData.append("file", callsTableFile);
+                formData.append("file", file);
             
                 const response = await axios.post(
                   `${API_BASE_URL}/api/sv/preview_calls_table`,
                   formData,
                   {
                     headers: {
-                      'X-User-Id': user.id,
-                      'X-API-Key': user.apiKey,
+                      "X-User-Id": user.id,
+                      "X-API-Key": user.apiKey,
                       "Content-Type": "multipart/form-data",
                     },
                   }
@@ -1549,10 +1547,10 @@
                 setPreviewCallsData(response.data);
                 setShowCallsPreview(true);
               } catch (error) {
-                console.error(error);
+                console.error("Preview error:", error);
                 addToast("error", "Failed to preview calls table");
               }
-            }; 
+            };
             
             const monthNames = [
             "января",
@@ -3732,8 +3730,9 @@
                                           style={{ display: "none" }}
                                           onChange={(e) => {
                                             if (e.target.files.length > 0) {
-                                              setCallsTableFile(e.target.files[0]);
-                                              handlePreviewCallsTable(); // превью сразу
+                                              const file = e.target.files[0];
+                                              setCallsTableFile(file);
+                                              handlePreviewCallsTable(file); // превью сразу
                                             }
                                           }}
                                         />
