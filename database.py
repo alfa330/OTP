@@ -1097,7 +1097,8 @@ class Database:
                 wh.training_hours,
                 wh.fines,
                 wh.norm_hours,
-                wh.daily_hours
+                wh.daily_hours,
+                wh.calls_per_hour
             FROM users u
             LEFT JOIN work_hours wh ON u.id = wh.operator_id
             WHERE u.role = 'operator'
@@ -1112,7 +1113,7 @@ class Database:
         
         # Добавить группировку, если operator_id не указан
         if not operator_id:
-            query += " GROUP BY u.id, u.name, u.direction_id, wh.regular_hours, wh.training_hours, wh.fines, wh.norm_hours, wh.daily_hours"
+            query += " GROUP BY u.id, u.name, u.direction_id, wh.regular_hours, wh.training_hours, wh.fines, wh.norm_hours, wh.daily_hours, wh.calls_per_hour"
         
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
@@ -1125,7 +1126,8 @@ class Database:
                     "training_hours": float(row[4]) if row[4] is not None else 0,
                     "fines": float(row[5]) if row[5] is not None else 0,
                     "norm_hours": float(row[6]) if row[6] is not None else 0,
-                    "daily_hours": row[7] if row[7] is not None else [0.0]*31
+                    "daily_hours": row[7] if row[7] is not None else [0.0]*31,
+                    "calls_per_hour": row[8]
                 } for row in cursor.fetchall()
             ]
 
