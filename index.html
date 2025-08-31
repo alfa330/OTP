@@ -671,40 +671,42 @@
         
                 ctx.clearRect(0, 0, width, height);
         
-                // серый фон дуги
+                // фон (серая дуга)
                 ctx.beginPath();
                 ctx.arc(centerX, centerY, radius, startAngle, maxAngle);
                 ctx.strokeStyle = "#e5e7eb";
                 ctx.lineWidth = 8;
                 ctx.stroke();
         
-                // нормируем "базовый" процент (0–100)
-                const basePercent = Math.min(percentage, 100);
-                const baseProgressAngle = startAngle + (basePercent / 100) * Math.PI;
-        
-                // цвет дуги до 100%
-                ctx.beginPath();
-                ctx.arc(centerX, centerY, radius, startAngle, baseProgressAngle);
-                ctx.strokeStyle =
-                    basePercent >= 90 ? "#16a34a" : basePercent >= 50 ? "#eab308" : "#dc2626";
-                ctx.lineWidth = 8;
-                ctx.stroke();
-        
-                // если переработка > 100% → рисуем дополнительную дугу поверх
-                if (percentage > 100) {
-                    const extraPercent = percentage - 100;
-                    // ограничим максимум до 50% (ещё полдуги), чтобы красиво выглядело
-                    const extraClamped = Math.min(extraPercent, 50);
-                    const extraAngle = baseProgressAngle + (extraClamped / 100) * Math.PI;
-        
+                if (percentage <= 100) {
+                    // обычный прогресс
+                    const progressAngle = startAngle + (percentage / 100) * Math.PI;
                     ctx.beginPath();
-                    ctx.arc(centerX, centerY, radius, baseProgressAngle, extraAngle);
-                    ctx.strokeStyle = "#2563eb"; // синий для переработки
+                    ctx.arc(centerX, centerY, radius, startAngle, progressAngle);
+                    ctx.strokeStyle =
+                        percentage >= 90 ? "#16a34a" : percentage >= 50 ? "#eab308" : "#dc2626";
+                    ctx.lineWidth = 8;
+                    ctx.stroke();
+                } else {
+                    // сначала зелёная дуга до 100%
+                    const fullAngle = startAngle + Math.PI; // ровно половина круга
+                    ctx.beginPath();
+                    ctx.arc(centerX, centerY, radius, startAngle, fullAngle);
+                    ctx.strokeStyle = "#16a34a";
+                    ctx.lineWidth = 8;
+                    ctx.stroke();
+        
+                    // потом синяя дуга поверх
+                    const extraPercent = Math.min(percentage - 100, 50); // максимум ещё 50% (ещё пол-дуги)
+                    const extraAngle = fullAngle + (extraPercent / 100) * Math.PI;
+                    ctx.beginPath();
+                    ctx.arc(centerX, centerY, radius, fullAngle, extraAngle);
+                    ctx.strokeStyle = "#2563eb"; // синий
                     ctx.lineWidth = 8;
                     ctx.stroke();
                 }
         
-                // текст (всегда показываем фактическое значение, даже если больше 100%)
+                // текст (фактический процент)
                 ctx.font = `${Math.floor(width / 10)}px Arial`;
                 ctx.fillStyle = "#1f2937";
                 ctx.textAlign = "center";
@@ -719,6 +721,7 @@
                 </div>
             );
         };
+
 
         const DisputeModal = ({ 
           selectedEvaluation, 
