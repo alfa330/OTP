@@ -4056,71 +4056,113 @@
                                   </div>
                                 )}
                                 {(view === 'hours' || view === 'evaluation') && (
-                                    <div className="mb-6">
-                                        <label className="block mb-2 font-semibold text-gray-700">Select Month:</label>
-                                        <select
-                                            value={selectedMonth}
-                                            onChange={(e) => setSelectedMonth(e.target.value)}
-                                            className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                            disabled={isLoading}
-                                        >
-                                            {getMonthOptions()}
-                                        </select>
-                                    </div>
+                                  <div className="mb-6">
+                                    <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                      <i className="fas fa-calendar-alt text-blue-600"></i>
+                                      Select Month:
+                                    </label>
+                                    <select
+                                      value={selectedMonth}
+                                      onChange={(e) => setSelectedMonth(e.target.value)}
+                                      className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                      disabled={isLoading}
+                                    >
+                                      {getMonthOptions()}
+                                    </select>
+                                  </div>
                                 )}
+                                
                                 {view === 'hours' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Work Hours</h2>
-                                        {isLoading ? (
-                                            <p className="text-center text-gray-600">Loading...</p>
-                                        ) : hoursData ? (
-                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                                <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-1">Regular Hours</p>
-                                                        <p className={`text-lg font-semibold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
-                                                            {hoursData.regular_hours.toFixed(2)} hours
-                                                        </p>
-                                                    </div>
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-1">Training Hours</p>
-                                                        <p className="text-lg font-semibold">{hoursData.training_hours.toFixed(2)} hours</p>
-                                                    </div>
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-1">Fines</p>
-                                                        <p className="text-lg font-semibold text-red-600">{hoursData.fines.toFixed(2)}</p>
-                                                    </div>
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-1">Norm Hours</p>
-                                                        <p className="text-lg font-semibold">{hoursData.norm_hours.toFixed(2)} hours</p>
-                                                    </div>
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                        <p className="text-sm font-medium text-gray-500 mb-1">Calls per hour</p>
-                                                        <p className={`text-lg font-semibold ${getCallsPerHourColor(hoursData.calls_per_hour.toFixed(2))}`}>
-                                                            {hoursData.calls_per_hour.toFixed(1)}
-                                                        </p>
-                                                    </div>
+                                  <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                    <h2 className="text-3xl font-bold mb-8 text-gray-900 flex items-center gap-2">
+                                      <i className="fas fa-clock text-purple-600"></i>
+                                      <span className="bg-gradient-to-r from-purple-600 to-indigo-600 bg-clip-text text-transparent">
+                                        Your Work Hours
+                                      </span>
+                                    </h2>
                                 
-                                                    {/* Полукруговая диаграмма сразу после Performance */}
-                                                    <div className="p-4 bg-gray-50 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md flex justify-center">
-                                                        <SemiCircleProgress
-                                                            percentage={Math.min((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100, 100)}
-                                                            label="Выполнение нормы"
-                                                            width={160}
-                                                            height={90}
-                                                        />
-                                                    </div>
-                                                </div>
+                                    {isLoading ? (
+                                      <p className="text-center text-gray-600 flex items-center justify-center">
+                                        <i className="fas fa-spinner fa-spin mr-2 text-gray-500"></i>
+                                        <span className="italic">Loading work hours...</span>
+                                      </p>
+                                    ) : hoursData ? (
+                                      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                        {/* Левая часть с карточками */}
+                                        <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
+                                          {/* Regular Hours */}
+                                          <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                            <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                              <i className="fas fa-briefcase text-gray-400"></i> Regular Hours
+                                            </p>
+                                            <p className={`text-xl font-bold ${getHoursPerformanceColor(hoursData.regular_hours, hoursData.norm_hours)}`}>
+                                              {hoursData.regular_hours.toFixed(2)} <span className="text-sm font-medium text-gray-500">hrs</span>
+                                            </p>
+                                          </div>
                                 
-                                                {/* Календарь вместо диаграммы справа */}
-                                                <div className="col-span-1">
-                                                    <WorkHoursCalendar hoursData={hoursData} selectedMonth={selectedMonth} user={user} />
-                                                </div>
-                                            </div>
-                                        ) : (
-                                            <p className="text-center text-gray-600">No hours data available.</p>
-                                        )}
-                                    </div>
+                                          {/* Training Hours */}
+                                          <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                            <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                              <i className="fas fa-chalkboard-teacher text-gray-400"></i> Training Hours
+                                            </p>
+                                            <p className="text-xl font-bold text-blue-700">
+                                              {hoursData.training_hours.toFixed(2)} <span className="text-sm font-medium text-gray-500">hrs</span>
+                                            </p>
+                                          </div>
+                                
+                                          {/* Fines */}
+                                          <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                            <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                              <i className="fas fa-exclamation-triangle text-gray-400"></i> Fines
+                                            </p>
+                                            <p className="text-xl font-bold text-red-600">
+                                              {hoursData.fines.toFixed(2)}
+                                            </p>
+                                          </div>
+                                
+                                          {/* Norm Hours */}
+                                          <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                            <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                              <i className="fas fa-bullseye text-gray-400"></i> Norm Hours
+                                            </p>
+                                            <p className="text-xl font-bold text-gray-900">
+                                              {hoursData.norm_hours.toFixed(2)} <span className="text-sm font-medium text-gray-500">hrs</span>
+                                            </p>
+                                          </div>
+                                
+                                          {/* Calls per hour */}
+                                          <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                            <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                              <i className="fas fa-phone-alt text-gray-400"></i> Calls / Hour
+                                            </p>
+                                            <p className={`text-xl font-bold ${getCallsPerHourColor(hoursData.calls_per_hour.toFixed(2))}`}>
+                                              {hoursData.calls_per_hour.toFixed(1)}
+                                            </p>
+                                          </div>
+                                
+                                          {/* Полукруговая диаграмма */}
+                                          <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition flex justify-center">
+                                            <SemiCircleProgress
+                                              percentage={Math.min((hoursData.regular_hours / (hoursData.norm_hours || 1)) * 100, 100)}
+                                              label="Выполнение нормы"
+                                              width={160}
+                                              height={90}
+                                            />
+                                          </div>
+                                        </div>
+                                
+                                        {/* Правая часть – календарь */}
+                                        <div className="col-span-1">
+                                          <WorkHoursCalendar hoursData={hoursData} selectedMonth={selectedMonth} user={user} />
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <p className="text-center text-gray-600 flex items-center justify-center">
+                                        <i className="fas fa-times-circle mr-2 text-red-500"></i>
+                                        No hours data available.
+                                      </p>
+                                    )}
+                                  </div>
                                 )}
                                 {view === 'evaluation' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
