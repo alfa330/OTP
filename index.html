@@ -1521,6 +1521,29 @@
             const [previewCallsData, setPreviewCallsData] = useState(null);
             const [showCallsPreview, setShowCallsPreview] = useState(false);
 
+            // Load user from localStorage on mount
+            useEffect(() => {
+                const storedUser = localStorage.getItem('user');
+                if (storedUser) {
+                    try {
+                        const parsedUser = JSON.parse(storedUser);
+                        setUser(parsedUser);
+                        setShowLogin(false);
+                    } catch (err) {
+                        console.error('Error parsing stored user:', err);
+                        localStorage.removeItem('user');
+                        setShowLogin(true);
+                    }
+                }
+            }, []);
+            
+            // Save user to localStorage when it changes
+            useEffect(() => {
+                if (user) {
+                    localStorage.setItem('user', JSON.stringify(user));
+                }
+            }, [user]);
+            
             // Persist and restore view (after user is loaded to ensure role-based access)
             useEffect(() => {
                 if (user) {
