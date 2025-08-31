@@ -26,7 +26,7 @@
             };
 
             return (
-                <div className="fixed bottom-4 right-4 space-y-3 z-50" aria-live="polite">
+                <div className="fixed bottom-4 right-4 space-y-3 z-[9999]" aria-live="polite">
                     {toasts.map(toast => (
                         <div
                             key={toast.id}
@@ -1521,6 +1521,70 @@
             const [previewCallsData, setPreviewCallsData] = useState(null);
             const [showCallsPreview, setShowCallsPreview] = useState(false);
 
+            // Persist and restore view (after user is loaded to ensure role-based access)
+            useEffect(() => {
+                if (user) {
+                    const savedView = localStorage.getItem('currentView');
+                    if (savedView) {
+                        setView(savedView);
+                    }
+                }
+            }, [user]);
+            
+            useEffect(() => {
+                if (view && user) { // Only save if user is logged in
+                    localStorage.setItem('currentView', view);
+                }
+            }, [view]);
+            
+            // Persist and restore selectedMonth
+            useEffect(() => {
+                if (user) {
+                    const savedMonth = localStorage.getItem('selectedMonth');
+                    if (savedMonth) {
+                        setSelectedMonth(savedMonth);
+                    }
+                }
+            }, [user]);
+            
+            useEffect(() => {
+                if (selectedMonth && user) {
+                    localStorage.setItem('selectedMonth', selectedMonth);
+                }
+            }, [selectedMonth]);
+            
+            // Persist and restore selectedReportMonth (for admin/supervisor)
+            useEffect(() => {
+                if (user && (user.role === 'admin' || user.role === 'supervisor')) {
+                    const savedReportMonth = localStorage.getItem('selectedReportMonth');
+                    if (savedReportMonth) {
+                        setSelectedReportMonth(savedReportMonth);
+                    }
+                }
+            }, [user]);
+            
+            useEffect(() => {
+                if (selectedReportMonth && user) {
+                    localStorage.setItem('selectedReportMonth', selectedReportMonth);
+                }
+            }, [selectedReportMonth]);
+            
+            // Persist and restore calculatorType (for salary view)
+            useEffect(() => {
+                if (user) {
+                    const savedCalcType = localStorage.getItem('calculatorType');
+                    if (savedCalcType) {
+                        setCalculatorType(savedCalcType);
+                    }
+                }
+            }, [user]);
+            
+            useEffect(() => {
+                if (calculatorType && user) {
+                    localStorage.setItem('calculatorType', calculatorType);
+                }
+            }, [calculatorType]);
+
             const handlePreviewCallsTable = async (fileParam) => {
               const file = fileParam || callsTableFile; // если не передали — взять из стейта
               if (!file) {
@@ -2621,7 +2685,11 @@
                         bonusFilmingQuantity: ''
                     });
                     setSalaryResult(null);
-                    
+                    localStorage.removeItem('user');
+                    localStorage.removeItem('currentView');
+                    localStorage.removeItem('selectedMonth');
+                    localStorage.removeItem('selectedReportMonth');
+                    localStorage.removeItem('calculatorType');
                 }
             };
 
