@@ -4025,32 +4025,36 @@
                                         </div>
                                 
                                         {/* Direction */}
-                                        <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover:shadow-md transition relative">
+                                        <div className="relative bg-gray-50 p-5 rounded-xl shadow-sm hover:shadow-md transition">
+                                          {/* Заголовок */}
                                           <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                             <i className="fas fa-compass text-gray-400"></i> Direction
-                                            {/* Tooltip icon */}
-                                            <div className="relative group ml-2">
-                                              <i className="fas fa-info-circle text-gray-400 cursor-pointer"></i>
-                                              {/* Tooltip box */}
-                                              <div className="absolute left-0 top-full mt-2 w-40 bg-white border border-gray-200 rounded-lg shadow-lg p-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-10">
-                                                {["Чат менеджер", "Оператор", "Модератор"].map((dir) => (
-                                                  <p
-                                                    key={dir}
-                                                    className={`text-sm ${
-                                                      profileData.direction === dir
-                                                        ? "text-gray-900 font-semibold"
-                                                        : "text-gray-400"
-                                                    }`}
-                                                  >
-                                                    {dir}
-                                                  </p>
-                                                ))}
-                                              </div>
-                                            </div>
                                           </p>
+                                        
+                                          {/* Значение */}
                                           <p className="text-lg font-medium text-gray-800">
                                             {profileData.direction || "-"}
                                           </p>
+                                        
+                                          {/* Иконка info справа по центру */}
+                                          <div className="absolute right-3 top-1/2 -translate-y-1/2 group">
+                                            <i className="fas fa-info-circle text-gray-400 cursor-pointer"></i>
+                                            {/* Tooltip */}
+                                            <div className="absolute right-6 top-1/2 -translate-y-1/2 w-44 bg-white border border-gray-200 rounded-lg shadow-lg p-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-10">
+                                              {["Чат менеджер", "Оператор", "Модератор"].map((dir) => (
+                                                <p
+                                                  key={dir}
+                                                  className={`text-sm ${
+                                                    profileData.direction === dir
+                                                      ? "text-gray-900 font-semibold"
+                                                      : "text-gray-400"
+                                                  }`}
+                                                >
+                                                  {dir}
+                                                </p>
+                                              ))}
+                                            </div>
+                                          </div>
                                         </div>
 
                                         {/* Hire Date */}
