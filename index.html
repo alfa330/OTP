@@ -4025,13 +4025,34 @@
                                         </div>
                                 
                                         {/* Direction */}
-                                        <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover:shadow-md transition">
+                                        <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover:shadow-md transition relative">
                                           <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                            <i className="fas fa-route text-gray-400"></i> Direction
+                                            <i className="fas fa-compass text-gray-400"></i> Direction
+                                            {/* Tooltip icon */}
+                                            <div className="relative group ml-2">
+                                              <i className="fas fa-info-circle text-gray-400 cursor-pointer"></i>
+                                              {/* Tooltip box */}
+                                              <div className="absolute left-0 top-full mt-2 w-40 bg-white border border-gray-200 rounded-lg shadow-lg p-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-10">
+                                                {["Чат менеджер", "Оператор", "Модератор"].map((dir) => (
+                                                  <p
+                                                    key={dir}
+                                                    className={`text-sm ${
+                                                      profileData.direction === dir
+                                                        ? "text-gray-900 font-semibold"
+                                                        : "text-gray-400"
+                                                    }`}
+                                                  >
+                                                    {dir}
+                                                  </p>
+                                                ))}
+                                              </div>
+                                            </div>
                                           </p>
-                                          <p className="text-lg font-medium text-gray-800 italic">{profileData.direction || '-'}</p>
+                                          <p className="text-lg font-medium text-gray-800">
+                                            {profileData.direction || "-"}
+                                          </p>
                                         </div>
-                                
+
                                         {/* Hire Date */}
                                         <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover:shadow-md transition">
                                           <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
