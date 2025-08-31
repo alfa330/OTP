@@ -1529,6 +1529,7 @@
             const [previewCallsData, setPreviewCallsData] = useState(null);
             const [showCallsPreview, setShowCallsPreview] = useState(false);
             const [errorMessage, setErrorMessage] = useState('');
+            const [converterData, setConverterData] = useState({amount: "", kpi: ""});
             
             // Load user from localStorage on mount
             useEffect(() => {
@@ -4211,7 +4212,7 @@
                                                         Call
                                                     </button>
                                                     <button
-                                                        className={`px-4 py-2 rounded ${calculatorType === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                                        className={`px-4 py-2 mr-2 rounded ${calculatorType === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
                                                         onClick={() => setCalculatorType('chat')}
                                                     >
                                                         Chat
