@@ -3972,55 +3972,88 @@
                         )}
                         {user.role === 'operator' && (
                             <>
-                                {view === 'profile' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Your Profile</h2>
-                                        {isLoading ? (
-                                            <p className="text-center text-gray-600">Loading...</p>
-                                        ) : profileData ? (
-                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Name</p>
-                                                    <p className="text-lg font-medium text-gray-900">{profileData.name || '-'}</p>
-                                                </div>
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Role</p>
-                                                    <p className="text-lg font-medium text-gray-900">{profileData.role || '-'}</p>
-                                                </div>
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Direction</p>
-                                                    <p className="text-lg font-medium text-gray-900">
-                                                        {profileData.direction ? profileData.direction : '-'}
-                                                    </p>
-                                                </div>
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Hire Date</p>
-                                                    <p className="text-lg font-medium text-gray-900">{profileData.hire_date || '-'}</p>
-                                                </div>
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Supervisor</p>
-                                                    <p className="text-lg font-medium text-gray-900">{profileData.supervisor_name || '-'}</p>
-                                                </div>
-                                                <div className="bg-gray-50 p-4 rounded-lg shadow-sm transition-all duration-200 hover:shadow-md">
-                                                    <p className="text-sm font-medium text-gray-500 mb-1">Hours Table</p>
-                                                    {profileData.hours_table_url ? (
-                                                        <a
-                                                            href={profileData.hours_table_url}
-                                                            target="_blank"
-                                                            rel="noopener noreferrer"
-                                                            className="text-blue-600 hover:text-blue-800 font-medium transition-colors duration-200"
-                                                        >
-                                                            View Hours Table
-                                                        </a>
-                                                    ) : (
-                                                        <p className="text-lg text-gray-900">-</p>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        ) : (
-                                            <p className="text-center text-gray-600">No profile data available. Please try refreshing or contact support.</p>
-                                        )}
-                                    </div>
+                                {view === 'profile' && ( 
+                                  <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                    <h2 className="text-3xl font-bold mb-8 text-gray-900 flex items-center gap-2">
+                                      <i className="fas fa-user-circle text-blue-600"></i>
+                                      <span className="bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+                                        Your Profile
+                                      </span>
+                                    </h2>
+                                
+                                    {isLoading ? (
+                                      <p className="text-center text-gray-600 flex items-center justify-center">
+                                        <i className="fas fa-spinner fa-spin mr-2 text-gray-500"></i>
+                                        <span className="italic">Loading your data...</span>
+                                      </p>
+                                    ) : profileData ? (
+                                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        {/* Name */}
+                                        <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover:shadow-md transition">
+                                          <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                            <i className="fas fa-id-card text-gray-400"></i> Name
+                                          </p>
+                                          <p className="text-xl font-semibold text-gray-900">{profileData.name || '-'}</p>
+                                        </div>
+                                
+                                        {/* Role */}
+                                        <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover:shadow-md transition">
+                                          <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                            <i className="fas fa-user-tag text-gray-400"></i> Role
+                                          </p>
+                                          <p className="text-lg font-medium text-blue-700">{profileData.role || '-'}</p>
+                                        </div>
+                                
+                                        {/* Direction */}
+                                        <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover:shadow-md transition">
+                                          <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                            <i className="fas fa-route text-gray-400"></i> Direction
+                                          </p>
+                                          <p className="text-lg font-medium text-gray-800 italic">{profileData.direction || '-'}</p>
+                                        </div>
+                                
+                                        {/* Hire Date */}
+                                        <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover:shadow-md transition">
+                                          <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                            <i className="fas fa-calendar-alt text-gray-400"></i> Hire Date
+                                          </p>
+                                          <p className="text-lg font-semibold text-green-700">{profileData.hire_date || '-'}</p>
+                                        </div>
+                                
+                                        {/* Supervisor */}
+                                        <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover:shadow-md transition">
+                                          <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                            <i className="fas fa-user-tie text-gray-400"></i> Supervisor
+                                          </p>
+                                          <p className="text-lg font-medium text-gray-900">{profileData.supervisor_name || '-'}</p>
+                                        </div>
+                                
+                                        {/* Hours Table */}
+                                        <div className="bg-gray-50 p-5 rounded-xl shadow-sm hover:shadow-md transition">
+                                          <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                            <i className="fas fa-table text-gray-400"></i> Hours Table
+                                          </p>
+                                          {profileData.hours_table_url ? (
+                                            <a
+                                              href={profileData.hours_table_url}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              className="text-blue-600 hover:text-blue-800 font-semibold underline"
+                                            >
+                                              View Hours Table
+                                            </a>
+                                          ) : (
+                                            <p className="text-lg text-gray-900">-</p>
+                                          )}
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <p className="text-center text-gray-600 flex items-center justify-center">
+                                        <i className="fas fa-exclamation-circle mr-2 text-red-500"></i>
+                                        <span className="font-medium">No profile data available</span>
+                                      </p>
+                                    )}
+                                  </div>
                                 )}
                                 {(view === 'hours' || view === 'evaluation') && (
                                     <div className="mb-6">
