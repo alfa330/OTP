@@ -3090,44 +3090,51 @@
 
             if (!user) {
                 return (
-                    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
+                      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
                         <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md transform transition-all duration-300 hover:scale-105">
-                            <h1 className="text-3xl font-bold mb-6 text-center text-gray-800">OTP Bot Dashboard</h1>
-                            <input
-                                type="text"
-                                placeholder="Login"
-                                value={login}
-                                onChange={(e) => setLogin(e.target.value)}
-                                onKeyPress={handleKeyPress}
-                                className="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                disabled={isLoading}
-                            />
-                            <input
-                                type="password"
-                                placeholder="Password"
-                                value={password}
-                                onChange={(e) => setPassword(e.target.value)}
-                                onKeyPress={handleKeyPress}
-                                className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                disabled={isLoading}
-                            />
+                          <h1 className="text-3xl font-bold mb-6 text-center text-gray-800">
+                            OTP Bot Dashboard
+                          </h1>
+                    
+                          <input
+                            type="text"
+                            placeholder="Login"
+                            value={login}
+                            onChange={(e) => setLogin(e.target.value)}
+                            onKeyPress={handleKeyPress}
+                            className="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                            disabled={isLoading}
+                          />
+                          <input
+                            type="password"
+                            placeholder="Password"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            onKeyPress={handleKeyPress}
+                            className="w-full p-3 mb-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                            disabled={isLoading}
+                          />
+                    
+                          {/* Контейнер под сообщение всегда занимает место */}
+                          <div className="min-h-[2rem] flex items-center justify-center mb-4">
                             {errorMessage && (
-                                <p className="text-red-500 text-center mb-4 p-2 border border-red-500 rounded-lg bg-red-50 animate-fade-in-out">
-                                    {errorMessage}
-                                </p>
-                            ):(<p>
-
-                                </p>
+                              <p className="text-red-500 text-center p-2 border border-red-500 rounded-lg bg-red-50 animate-fade-in-out">
+                                {errorMessage}
+                              </p>
                             )}
-                            <button
-                                onClick={handleLogin}
-                                className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                disabled={isLoading}
-                            >
-                                {isLoading ? 'Logging in...' : 'Login'}
-                            </button>
+                          </div>
+                    
+                          <button
+                            onClick={handleLogin}
+                            className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${
+                              isLoading ? "cursor-not-allowed opacity-50" : ""
+                            }`}
+                            disabled={isLoading}
+                          >
+                            {isLoading ? "Logging in..." : "Login"}
+                          </button>
                         </div>
-                    </div>
+                      </div>
                 );
             }
 
