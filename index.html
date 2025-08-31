@@ -1528,11 +1528,11 @@
                     try {
                         const parsedUser = JSON.parse(storedUser);
                         setUser(parsedUser);
-                        setShowLogin(false);
+                        setLogin(false);
                     } catch (err) {
                         console.error('Error parsing stored user:', err);
                         localStorage.removeItem('user');
-                        setShowLogin(true);
+                        setLogin(true);
                     }
                 }
             }, []);
