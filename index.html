@@ -2,33 +2,24 @@
 <html lang="en">
 <head>
     <style>
-        @keyframes pulse-slow {
+        @keyframes bg-pulse {
           0%, 100% {
-            opacity: 0.2;
-            transform: scale(1);
+            opacity: 0.15;
             filter: grayscale(100%);
+            background-size: 280px;
           }
           50% {
-            opacity: 0.5;
-            transform: scale(1.05);
+            opacity: 0.35;
             filter: grayscale(0%);
+            background-size: 320px;
           }
         }
     
-        .background-logo {
-          position: fixed;
-          inset: 0;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          pointer-events: none;
-          z-index: 0; /* чтобы было сзади */
-        }
-    
-        .background-logo img {
-          width: 24rem; /* размер (96 по Tailwind = w-96) */
-          opacity: 0.2;
-          animation: pulse-slow 6s ease-in-out infinite;
+        body {
+          background: #f9fafb url("https://iili.io/KfVwgf4.png") no-repeat center center;
+          background-attachment: fixed;
+          background-size: 300px;
+          animation: bg-pulse 8s ease-in-out infinite;
         }
     </style>
     <meta charset="UTF-8">
@@ -43,10 +34,7 @@
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 </head>
-<body class="bg-gray-50 font-sans antialiased text-gray-900">
-    <div class="background-logo">
-        <img src="https://iili.io/KfVwgf4.png" alt="logo background"/>
-    </div>
+<body class="font-sans antialiased text-gray-900">
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef, useMemo } = React;
