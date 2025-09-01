@@ -2,13 +2,34 @@
 <html lang="en">
 <head>
     <style>
-     body {
-       background-image: url("https://iili.io/KfVwgf4.png");
-       background-repeat: no-repeat;
-       background-position: center;
-       background-size: 300px; /* размер логотипа, можно менять */
-       background-attachment: fixed; /* чтобы логотип не прокручивался */
-     }
+        @keyframes pulse-slow {
+          0%, 100% {
+            opacity: 0.2;
+            transform: scale(1);
+            filter: grayscale(100%);
+          }
+          50% {
+            opacity: 0.5;
+            transform: scale(1.05);
+            filter: grayscale(0%);
+          }
+        }
+    
+        .background-logo {
+          position: fixed;
+          inset: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          pointer-events: none;
+          z-index: 0; /* чтобы было сзади */
+        }
+    
+        .background-logo img {
+          width: 24rem; /* размер (96 по Tailwind = w-96) */
+          opacity: 0.2;
+          animation: pulse-slow 6s ease-in-out infinite;
+        }
     </style>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -23,6 +44,9 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 </head>
 <body class="bg-gray-50 font-sans antialiased text-gray-900">
+    <div class="background-logo">
+        <img src="https://iili.io/KfVwgf4.png" alt="logo background"/>
+    </div>
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef, useMemo } = React;
