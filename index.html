@@ -96,36 +96,7 @@
                 },
             },
         };
-
-        const ThemeToggle = () => {
-          const [darkMode, setDarkMode] = React.useState(
-            localStorage.getItem("theme") === "dark"
-          );
         
-          React.useEffect(() => {
-            if (darkMode) {
-              document.documentElement.classList.add("dark");
-              localStorage.setItem("theme", "dark");
-            } else {
-              document.documentElement.classList.remove("dark");
-              localStorage.setItem("theme", "light");
-            }
-          }, [darkMode]);
-        
-          return (
-            <button
-              onClick={() => setDarkMode(!darkMode)}
-              className="p-2 rounded-full bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 shadow-md hover:scale-110 transition"
-              title="Переключить тему"
-            >
-              {darkMode ? (
-                <i className="fas fa-moon text-lg"></i>   // иконка луны
-              ) : (
-                <i className="fas fa-sun text-lg"></i>    // иконка солнца
-              )}
-            </button>
-          );
-        };
         
         const MonitoringScaleModal = ({ isOpen, onClose, onSave, initialDirections }) => {
             const [directions, setDirections] = useState(initialDirections || []);
@@ -3294,9 +3265,6 @@
 
             return (
                 <div className="flex h-screen overflow-hidden">
-                    <div className="flex justify-end p-4">
-                        <ThemeToggle />
-                    </div>
                     <div className="fixed top-0 left-0 h-full w-64 bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 transition-all duration-300 ease-in-out">
                         <div className="p-6">
                           <h1 className="text-4xl font-extrabold mb-8 flex items-center gap-3 text-white">
