@@ -3268,13 +3268,15 @@
                 <div className="flex h-screen overflow-hidden">
                     <div className="fixed top-0 left-0 h-full w-64 bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 transition-all duration-300 ease-in-out">
                         <div className="p-6">
-                          <h1 className="text-5xl font-extrabold mb-8 flex items-center gap-1 text-white">
-                              <img 
-                                src="https://iili.io/Kfw7PQp.png" 
-                                alt="Site Icon" 
-                                className="w-12 h-12 object-contain"
-                              />
-                              OTP
+                            <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
+                              <span className="flex">
+                                <span className="bg-white text-blue-800 px-3 py-2 rounded-l-2xl shadow-lg text-4xl border border-white">
+                                  OTP
+                                </span>
+                                <span className="bg-white text-indigo-700 px-2 py-2 rounded-r-2xl border-t border-b border-r border-white text-4xl -ml-px">
+                                  <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-12 h-12 object-contain mr-0.1"/>
+                                </span>
+                              </span>
                             </h1>
                             <ul className="space-y-2">
                                 {user.role === 'admin' && (
