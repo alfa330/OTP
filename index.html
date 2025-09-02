@@ -112,7 +112,10 @@
             const [editingCriterionIndex, setEditingCriterionIndex] = useState(null);
             const [isEditingCriterion, setIsEditingCriterion] = useState(false);
             const [activeTab, setActiveTab] = useState('directions');
-            const [isLoading, setIsLoading] = useState(false);  // Added this line to fix the error
+            const [isLoading, setIsLoading] = useState(false); 
+            const [newCriterionHasDeficiency, setNewCriterionHasDeficiency] = useState(false);
+            const [newDeficiencyWeight, setNewDeficiencyWeight] = useState('');
+            const [newDeficiencyDescription, setNewDeficiencyDescription] = useState('');
 
             const totalWeight = (directionIndex) => {
                 return directions[directionIndex]?.criteria
@@ -189,6 +192,13 @@
                         alert('Total weight of non-critical criteria cannot exceed 100.');
                         return;
                     }
+                    if (newCriterionHasDeficiency) {
+                        const defWeight = Number(newDeficiencyWeight);
+                        if (isNaN(defWeight) || defWeight <= 0 || defWeight > weight) {
+                            alert('Deficiency weight must be >0 and ≤ criterion weight.');
+                            return;
+                        }
+                    }
                 }
                 setDirections(directions.map((direction, index) => {
                     if (index === selectedDirectionIndex) {
@@ -198,7 +208,11 @@
                                 name: newCriterionName,
                                 weight: newCriterionCritical ? 0 : Number(newCriterionWeight),
                                 isCritical: newCriterionCritical,
-                                value: newCriterionValue || 'No description provided'
+                                value: newCriterionValue || 'No description provided',
+                                deficiency: newCriterionHasDeficiency ? {
+                                    weight: Number(newDeficiencyWeight),
+                                    description: newDeficiencyDescription || 'No description provided'
+                                } : null
                             }]
                         };
                     }
@@ -279,6 +293,9 @@
                 setNewCriterionWeight('');
                 setNewCriterionValue('');
                 setNewCriterionCritical(false);
+                setNewCriterionHasDeficiency(false);
+                setNewDeficiencyWeight('');
+                setNewDeficiencyDescription('');
                 setEditingCriterionIndex(null);
                 setIsEditingCriterion(false);
             };
@@ -497,6 +514,43 @@
                                             />
                                             <label className="text-sm font-medium">Critical (sets score to 0 if Error, no weight)</label>
                                         </div>
+                                        <div className="flex items-center">
+                                            <input
+                                                type="checkbox"
+                                                checked={newCriterionHasDeficiency}
+                                                onChange={(e) => {
+                                                    setNewCriterionHasDeficiency(e.target.checked);
+                                                    if (!e.target.checked) {
+                                                        setNewDeficiencyWeight('');
+                                                        setNewDeficiencyDescription('');
+                                                    }
+                                                }}
+                                                className="mr-2"
+                                                disabled={directions.length === 0}
+                                            />
+                                            <label className="text-sm font-medium">Has Deficiency</label>
+                                        </div>
+
+                                        {newCriterionHasDeficiency && (
+                                            <div className="space-y-2">
+                                                <input
+                                                    type="number"
+                                                    value={newDeficiencyWeight}
+                                                    onChange={(e) => setNewDeficiencyWeight(e.target.value)}
+                                                    placeholder="Deficiency weight"
+                                                    min="1"
+                                                    className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                />
+                                                <textarea
+                                                    value={newDeficiencyDescription}
+                                                    onChange={(e) => setNewDeficiencyDescription(e.target.value)}
+                                                    placeholder="Deficiency description"
+                                                    className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                    rows={2}
+                                                />
+                                            </div>
+                                        )}
+
                                         <div className="flex space-x-2">
                                             <button
                                                 onClick={isEditingCriterion ? handleEditCriterion : handleAddCriterion}
@@ -547,6 +601,11 @@
                                                         </svg>
                                                         <span className="text-sm font-medium text-gray-800">
                                                             {criterion.name} {criterion.isCritical ? '(Critical)' : `(${criterion.weight}%)`}
+                                                            {criterion.deficiency && (
+                                                                <span className="ml-2 text-xs text-orange-600">
+                                                                    Deficiency: {criterion.deficiency.weight}% - {criterion.deficiency.description}
+                                                                </span>
+                                                            )}
                                                         </span>
                                                     </div>
                                                     <div className="flex space-x-2">
