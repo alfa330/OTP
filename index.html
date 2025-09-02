@@ -3120,57 +3120,72 @@
 
             if (!user) {
                 return (
-                      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
-                        <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md transform transition-all duration-300 hover:scale-105">
-                            <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
-                              <span className="flex">
-                                <span className="bg-indigo-700 text-white px-3 py-2 rounded-l-2xl shadow-lg text-4xl border border-indigo-700">
-                                  OTP
-                                </span>
-                                <span className="bg-white text-indigo-700 px-2 py-2 rounded-r-2xl border-t border-b border-r border-indigo-700 text-4xl -ml-px">
-                                  <img src="https://iili.io/KfNE2qv.png" alt="Site Icon" className="w-12 h-12 object-contain mr-0.1"/>
-                                </span>
-                              </span>
-                            </h1>
-                          <input
-                            type="text"
-                            placeholder="Login"
-                            value={login}
-                            onChange={(e) => setLogin(e.target.value)}
-                            onKeyPress={handleKeyPress}
-                            className="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                            disabled={isLoading}
-                          />
-                          <input
-                            type="password"
-                            placeholder="Password"
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            onKeyPress={handleKeyPress}
-                            className="w-full p-3 mb-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                            disabled={isLoading}
-                          />
-                    
-                          {/* Контейнер под сообщение всегда занимает место */}
-                          <div className="min-h-[2rem] flex items-center justify-center mb-4">
-                            {errorMessage && (
-                              <p className="text-red-500 text-center p-2 border border-red-500 rounded-lg bg-red-50 animate-fade-in-out">
-                                {errorMessage}
-                              </p>
-                            )}
-                          </div>
-                    
-                          <button
-                            onClick={handleLogin}
-                            className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${
-                              isLoading ? "cursor-not-allowed opacity-50" : ""
-                            }`}
-                            disabled={isLoading}
-                          >
-                            {isLoading ? "Logging in..." : "Login"}
-                          </button>
-                        </div>
+                  <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
+                    <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-lg">
+                      <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
+                        <span className="flex">
+                          <span className="bg-indigo-700 text-white px-3 py-2 rounded-l-2xl shadow-lg text-4xl border border-indigo-700">
+                            OTP
+                          </span>
+                          <span className="bg-white text-indigo-700 px-2 py-2 rounded-r-2xl border-t border-b border-r border-indigo-700 text-4xl -ml-px">
+                            <img
+                              src="https://iili.io/KfNE2qv.png"
+                              alt="Site Icon"
+                              className="w-12 h-12 object-contain mr-0.5"
+                            />
+                          </span>
+                        </span>
+                      </h1>
+                
+                      <input
+                        type="text"
+                        placeholder="Login"
+                        value={login}
+                        onChange={(e) => setLogin(e.target.value)}
+                        onKeyPress={handleKeyPress}
+                        className="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all duration-200"
+                        disabled={isLoading}
+                      />
+                      <input
+                        type="password"
+                        placeholder="Password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        onKeyPress={handleKeyPress}
+                        className="w-full p-3 mb-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all duration-200"
+                        disabled={isLoading}
+                      />
+                
+                      {/* Контейнер под сообщение всегда занимает место */}
+                      <div className="min-h-[2rem] flex items-center justify-center mb-4">
+                        {errorMessage && (
+                          <p className="text-red-500 text-center p-2 border border-red-500 rounded-lg bg-red-50 animate-fade-in-out">
+                            {errorMessage}
+                          </p>
+                        )}
                       </div>
+                
+                      <button
+                        onClick={handleLogin}
+                        className={`w-full bg-indigo-600 text-white p-3 rounded-lg hover:bg-indigo-700 transition-all duration-200 ${
+                          isLoading ? "cursor-not-allowed opacity-50" : ""
+                        }`}
+                        disabled={isLoading}
+                      >
+                        {isLoading ? "Logging in..." : "Login"}
+                      </button>
+                
+                      <div className="mt-4 text-center">
+                        <button
+                          type="button"
+                          className="text-indigo-600 hover:underline text-sm"
+                          onClick={() => alert("Функция восстановления пароля в разработке")}
+                        >
+                          Забыл пароль?
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 );
             }
 
