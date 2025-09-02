@@ -3121,7 +3121,7 @@
             if (!user) {
                 return (
                   <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
-                    <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-lg">
+                    <div className="bg-white p-10 rounded-xl shadow-2xl w-full max-w-md transition-all duration-300">
                       <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
                         <span className="flex">
                           <span className="bg-indigo-700 text-white px-3 py-2 rounded-l-2xl shadow-lg text-4xl border border-indigo-700">
@@ -3143,16 +3143,17 @@
                         value={login}
                         onChange={(e) => setLogin(e.target.value)}
                         onKeyPress={handleKeyPress}
-                        className="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all duration-200"
+                        className="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                         disabled={isLoading}
                       />
+                
                       <input
                         type="password"
                         placeholder="Password"
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
                         onKeyPress={handleKeyPress}
-                        className="w-full p-3 mb-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all duration-200"
+                        className="w-full p-3 mb-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                         disabled={isLoading}
                       />
                 
@@ -3177,9 +3178,8 @@
                 
                       <div className="mt-4 text-center">
                         <button
-                          type="button"
-                          className="text-indigo-600 hover:underline text-sm"
-                          onClick={() => alert("Функция восстановления пароля в разработке")}
+                          onClick={() => console.log("Forgot password clicked")}
+                          className="text-sm text-indigo-600 hover:underline"
                         >
                           Забыл пароль?
                         </button>
