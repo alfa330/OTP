@@ -12,7 +12,7 @@
     </style>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TECHub</title>
+    <title>OTP</title>
     <link rel="icon" type="image/x-icon" href="favicon.ico">
     <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
@@ -3122,15 +3122,16 @@
                 return (
                       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
                         <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md transform transition-all duration-300 hover:scale-105">
-                          <h1 className="text-5xl font-extrabold mb-6 text-center text-indigo-700 flex items-center justify-center gap-1 tracking-tight">
-                              <img 
-                                src="https://iili.io/KfNE2qv.png" 
-                                alt="Site Icon" 
-                                className="w-16 h-16 object-contain"
-                              />
-                              TECHub
+                            <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
+                              <span className="flex">
+                                <span className="bg-indigo-700 text-white px-3 py-2 rounded-l-2xl shadow-lg text-4xl border border-indigo-700">
+                                  OTP
+                                </span>
+                                <span className="bg-white text-indigo-700 px-2 py-2 rounded-r-2xl border-t border-b border-r border-indigo-700 text-4xl -ml-px">
+                                  <img src="https://iili.io/KfNE2qv.png" alt="Site Icon" className="w-12 h-12 object-contain mr-0.1"/>
+                                </span>
+                              </span>
                             </h1>
-                    
                           <input
                             type="text"
                             placeholder="Login"
@@ -3273,7 +3274,7 @@
                                 alt="Site Icon" 
                                 className="w-12 h-12 object-contain"
                               />
-                              TECHub
+                              OTP
                             </h1>
                             <ul className="space-y-2">
                                 {user.role === 'admin' && (
