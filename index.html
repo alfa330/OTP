@@ -288,6 +288,19 @@
                 setEditingCriterionIndex(index);
                 setIsEditingCriterion(true);
             };
+
+            const handleDeleteCriterion = (index) => {
+                setDirections(directions.map((direction, i) => {
+                    if (i === selectedDirectionIndex) {
+                        return {
+                            ...direction,
+                            criteria: direction.criteria.filter((_, j) => j !== index)
+                        };
+                    }
+                    return direction;
+                }));
+                if (editingCriterionIndex === index) {
+                    resetCriterionForm();
             
             const resetCriterionForm = () => {
                 setNewCriterionName('');
