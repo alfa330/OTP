@@ -4708,18 +4708,26 @@
                                                             <div className="form-group">
                                                               <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                 Desired Amount (KZT)
-                                                                <span className="relative group cursor-pointer">
-                                                                  <span className="w-4 h-4 flex items-center justify-center rounded-full bg-gray-300 text-xs font-bold">i</span>
-                                                                  <span className="absolute left-6 top-1/2 -translate-y-1/2 w-64 p-2 text-sm text-white bg-gray-800 rounded-lg shadow-lg opacity-0 group-hover:opacity-100 transition">
-                                                                    Введите сумму и KPI (макс. 2.5). Расчёт: часы = сумма / (KPI * 700).
-                                                                    Ниже показаны часы для разных KPI.
+                                                                <span className="relative">
+                                                                  <span className="w-4 h-4 flex items-center justify-center rounded-full bg-gray-300 text-xs font-bold cursor-pointer group">
+                                                                    i
+                                                                    {/* Tooltip */}
+                                                                    <span className="absolute left-6 top-1/2 -translate-y-1/2 w-64 p-2 text-sm text-white bg-gray-800 rounded-lg shadow-lg opacity-0 pointer-events-none group-hover:opacity-100 transition">
+                                                                      Введите сумму и KPI (макс. 2.5). Расчёт: часы = сумма / (KPI * 700).
+                                                                      Ниже показаны часы для разных KPI.
+                                                                    </span>
                                                                   </span>
                                                                 </span>
                                                               </label>
                                                               <input
                                                                 type="number"
                                                                 value={converterData.amount}
-                                                                onChange={(e) => setConverterData({ ...converterData, amount: parseFloat(e.target.value) || "" })}
+                                                                onChange={(e) =>
+                                                                  setConverterData({
+                                                                    ...converterData,
+                                                                    amount: parseFloat(e.target.value) || "",
+                                                                  })
+                                                                }
                                                                 min="0"
                                                                 step="1"
                                                                 className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
