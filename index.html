@@ -253,7 +253,11 @@
                                     name: newCriterionName,
                                     weight: newCriterionCritical ? 0 : Number(newCriterionWeight),
                                     isCritical: newCriterionCritical,
-                                    value: newCriterionValue || 'No description provided'
+                                    value: newCriterionValue || 'No description provided',
+                                    deficiency: newCriterionHasDeficiency ? {
+                                        weight: Number(newDeficiencyWeight),
+                                        description: newDeficiencyDescription || 'No description provided'
+                                    } : null
                                 } : criterion
                             )
                         };
@@ -273,19 +277,26 @@
                 setIsEditingCriterion(true);
             };
             
-            const handleDeleteCriterion = (index) => {
-                setDirections(directions.map((direction, i) => {
-                    if (i === selectedDirectionIndex) {
-                        return {
-                            ...direction,
-                            criteria: direction.criteria.filter((_, j) => j !== index)
-                        };
-                    }
-                    return direction;
-                }));
-                if (editingCriterionIndex === index) {
-                    resetCriterionForm();
+            const handleStartEditCriterion = (index) => {
+                const criterion = directions[selectedDirectionIndex].criteria[index];
+                setNewCriterionName(criterion.name);
+                setNewCriterionWeight(criterion.isCritical ? '' : criterion.weight);
+                setNewCriterionValue(criterion.value);
+                setNewCriterionCritical(criterion.isCritical);
+            
+                // Заполняем deficiency
+                if (criterion.deficiency) {
+                    setNewCriterionHasDeficiency(true);
+                    setNewDeficiencyWeight(criterion.deficiency.weight);
+                    setNewDeficiencyDescription(criterion.deficiency.description);
+                } else {
+                    setNewCriterionHasDeficiency(false);
+                    setNewDeficiencyWeight('');
+                    setNewDeficiencyDescription('');
                 }
+            
+                setEditingCriterionIndex(index);
+                setIsEditingCriterion(true);
             };
             
             const resetCriterionForm = () => {
