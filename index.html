@@ -266,17 +266,7 @@
                 }));
                 resetCriterionForm();
             };
-            
-            const handleStartEditCriterion = (index) => {
-                const criterion = directions[selectedDirectionIndex].criteria[index];
-                setNewCriterionName(criterion.name);
-                setNewCriterionWeight(criterion.isCritical ? '' : criterion.weight);
-                setNewCriterionValue(criterion.value);
-                setNewCriterionCritical(criterion.isCritical);
-                setEditingCriterionIndex(index);
-                setIsEditingCriterion(true);
-            };
-            
+                        
             const handleStartEditCriterion = (index) => {
                 const criterion = directions[selectedDirectionIndex].criteria[index];
                 setNewCriterionName(criterion.name);
