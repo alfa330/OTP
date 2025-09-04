@@ -1919,7 +1919,7 @@ class Database:
                 if role == "sv":
                     supervisor_id = requester_id
         query = """
-            SELECT t.id, t.training_date, t.start_time, t.end_time, t.reason, t.comment, t.created_at
+            SELECT t.id, t.operator_id, t.training_date, t.start_time, t.end_time, t.reason, t.comment, t.created_at
             FROM trainings t
             JOIN users u ON t.operator_id = u.id
         """
@@ -1943,12 +1943,13 @@ class Database:
             return [
                 {
                     "id": row[0],
-                    "date": row[1].strftime('%Y-%m-%d'),
-                    "start_time": row[2].strftime('%H:%M'),
-                    "end_time": row[3].strftime('%H:%M'),
-                    "reason": row[4],
-                    "comment": row[5],
-                    "created_at": row[6].strftime('%Y-%m-%d %H:%M')
+                    "operator_id": row[1],
+                    "date": row[2].strftime('%Y-%m-%d'),
+                    "start_time": row[3].strftime('%H:%M'),
+                    "end_time": row[4].strftime('%H:%M'),
+                    "reason": row[5],
+                    "comment": row[6],
+                    "created_at": row[7].strftime('%Y-%m-%d %H:%M')
                 } for row in cursor.fetchall()
             ]
     
