@@ -739,7 +739,7 @@
         
             useEffect(() => {
                 operators.forEach(op => {
-                    axios.get(`${API_BASE_URL}/trainings/${op.id}?month=${month}`).then(res => {
+                    axios.get(`${API_BASE_URL}/api/trainings/${op.id}?month=${month}`).then(res => {
                         setTrainings(prev => ({...prev, [op.id]: res.data}));
                     });
                 });
@@ -758,7 +758,7 @@
             };
         
             const handleDelete = (trainingId) => {
-                axios.delete(`${API_BASE_URL}/trainings/${trainingId}`, {
+                axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
                     headers: {
                         'X-API-Key': user.apiKey, // Используем user.apiKey
                         'X-User-Id': user.id // ID текущего пользователя
@@ -766,7 +766,7 @@
                 })
                     .then(() => {
                         // Обновляем список тренингов для текущего оператора
-                        axios.get(`${API_BASE_URL}/trainings/${currentOperator}?month=${month}`, {
+                        axios.get(`${API_BASE_URL}/api/trainings/${currentOperator}?month=${month}`, {
                             headers: {
                                 'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
@@ -790,7 +790,7 @@
             const handleSave = (data) => {
                 const updateTrainings = () => {
                     // Обновляем список тренингов для текущего оператора
-                    axios.get(`${API_BASE_URL}/trainings/${currentOperator}?month=${month}`, {
+                    axios.get(`${API_BASE_URL}/api/trainings/${currentOperator}?month=${month}`, {
                         headers: {
                             'X-API-Key': user.apiKey, // Предполагается, что FLASK_API_KEY доступен
                             'X-User-Id': user.id // ID текущего пользователя
@@ -808,7 +808,7 @@
             
                 if (editingTraining) {
                     // Обновление существующего тренинга
-                    axios.put(`${API_BASE_URL}/trainings/${editingTraining.id}`, data, {
+                    axios.put(`${API_BASE_URL}/api/trainings/${editingTraining.id}`, data, {
                         headers: {
                             'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
@@ -825,7 +825,7 @@
                         });
                 } else {
                     // Добавление нового тренинга
-                    axios.post(`${API_BASE_URL}/trainings`, { ...data, operator_id: currentOperator }, {
+                    axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: currentOperator }, {
                         headers: {
                             'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
