@@ -3396,6 +3396,11 @@
                                                 <i className="fas fa-sliders-h"></i> Manage Monitoring Scale
                                             </button>
                                         </li>
+                                        <li>
+                                            <button onClick={() => setView('trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-book"></i> Manage trainings
+                                            </button>
+                                        </li>
                                     </>
                                 )}
                                 {user.role === 'sv' && (
@@ -3413,6 +3418,11 @@
                                         <li>
                                             <button onClick={() => setView('manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-user-edit"></i> Manage my operators
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => setView('trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-book"></i> Manage trainings
                                             </button>
                                         </li>
                                     </>
