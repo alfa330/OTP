@@ -1857,11 +1857,10 @@
                 // ...existing code...
             // Компонент тренинга с useState
             const TrainingBox = ({ training, onEdit, onDelete }) => {
-                const [showFullComment, setShowFullComment] = useState(false);
+                const [showDetails, setShowDetails] = useState(false);
                 const maxCommentLength = 50;
                 const isLongComment = training.comment && training.comment.length > maxCommentLength;
                 const shortComment = isLongComment ? training.comment.slice(0, maxCommentLength) + '...' : training.comment;
-                // Вычисляем время тренинга в минутах
                 function getMinutes(start, end) {
                     if (!start || !end) return '';
                     const [sh, sm] = start.split(':').map(Number);
@@ -1871,7 +1870,6 @@
                     return mins;
                 }
                 const minutes = getMinutes(training.start_time, training.end_time);
-                // Форматируем дату
                 function formatDate(dateStr) {
                     if (!dateStr) return '';
                     const [y, m, d] = dateStr.split('-');
@@ -1879,38 +1877,42 @@
                 }
                 const formattedDate = formatDate(training.date);
                 return (
-                    <div className="flex flex-col bg-white border border-gray-300 rounded-lg shadow px-2 py-2 mx-1 w-40 min-w-[140px] max-w-[160px]">
-                        <div className="flex flex-row items-center justify-between w-full mb-1">
-                            <span className="border border-green-500 rounded px-1 py-0.5 text-xs font-semibold text-green-700 bg-green-50 truncate max-w-[70px]">{training.reason}</span>
-                            <span className="border border-gray-400 rounded px-1 py-0.5 text-xs font-medium text-gray-700 bg-gray-50 ml-1">{formattedDate}</span>
-                        </div>
-                        <div className="flex flex-row items-center justify-between w-full mb-1">
-                            <span className="border border-blue-400 rounded px-1 py-0.5 text-xs font-medium text-blue-700 bg-blue-50">{minutes ? `${minutes} мин.` : ''}</span>
-                            <div className="flex gap-1 ml-1">
-                                <button onClick={onEdit} title="Редактировать" className="text-gray-500 hover:text-blue-600 p-0.5">
-                                    <i className="fas fa-pen fa-xs"></i>
-                                </button>
-                                <button onClick={onDelete} title="Удалить" className="text-gray-500 hover:text-red-600 p-0.5">
-                                    <i className="fas fa-trash fa-xs"></i>
-                                </button>
+                    <>
+                        <div className="flex flex-col bg-white border border-gray-300 rounded-lg shadow px-2 py-2 mx-1 w-40 min-w-[140px] max-w-[160px] cursor-pointer hover:ring-2 hover:ring-blue-300 transition" onClick={() => setShowDetails(true)}>
+                            <div className="flex flex-row items-center justify-between w-full mb-1">
+                                <span className="border border-green-500 rounded px-1 py-0.5 text-xs font-semibold text-green-700 bg-green-50 truncate max-w-[70px]">{training.reason}</span>
+                                <span className="border border-gray-400 rounded px-1 py-0.5 text-xs font-medium text-gray-700 bg-gray-50 ml-1">{formattedDate}</span>
                             </div>
-                        </div>
-                        {training.comment && (
-                            <div className="mt-0.5 text-xs text-gray-500 w-full text-center cursor-pointer truncate" style={{maxWidth:'120px'}} onClick={() => isLongComment && setShowFullComment(true)}>
-                                {shortComment}
-                                {isLongComment && <span className="text-blue-500 ml-1">(ещё)</span>}
+                            <div className="flex flex-row items-center justify-between w-full mb-1">
+                                <span className="border border-blue-400 rounded px-1 py-0.5 text-xs font-medium text-blue-700 bg-blue-50">{minutes ? `${minutes} мин.` : ''}</span>
                             </div>
-                        )}
-                        {showFullComment && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowFullComment(false)}>
-                                <div className="bg-white p-4 rounded-lg shadow-lg max-w-md w-full" onClick={e => e.stopPropagation()}>
-                                    <h3 className="text-lg font-semibold mb-2">Комментарий</h3>
-                                    <div className="text-sm text-gray-800 mb-4 whitespace-pre-line">{training.comment}</div>
-                                    <button onClick={() => setShowFullComment(false)} className="px-4 py-2 rounded bg-blue-500 text-white">Закрыть</button>
+                            {training.comment && (
+                                <div className="mt-0.5 text-xs text-gray-500 w-full text-center truncate" style={{maxWidth:'120px'}}>
+                                    {shortComment}
+                                    {isLongComment && <span className="text-blue-500 ml-1">(ещё)</span>}
+                                </div>
+                            )}
+                        </div>
+                        {showDetails && (
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowDetails(false)}>
+                                <div className="bg-white p-6 rounded-lg shadow-lg max-w-xs w-full" onClick={e => e.stopPropagation()}>
+                                    <h3 className="text-lg font-semibold mb-2">Детали тренинга</h3>
+                                    <div className="mb-2"><span className="font-medium">Причина:</span> {training.reason}</div>
+                                    <div className="mb-2"><span className="font-medium">Дата:</span> {formattedDate}</div>
+                                    <div className="mb-2"><span className="font-medium">Время:</span> {minutes ? `${minutes} мин.` : ''}</div>
+                                    {training.comment && <div className="mb-2"><span className="font-medium">Комментарий:</span> {training.comment}</div>}
+                                    <div className="flex justify-end gap-3 mt-4">
+                                        <button onClick={() => { setShowDetails(false); onEdit(); }} title="Редактировать" className="text-blue-600 hover:text-blue-800 px-2 py-1 rounded border border-blue-200 bg-blue-50 flex items-center gap-1">
+                                            <i className="fas fa-pen fa-sm"></i> Редактировать
+                                        </button>
+                                        <button onClick={() => { setShowDetails(false); onDelete(); }} title="Удалить" className="text-red-600 hover:text-red-800 px-2 py-1 rounded border border-red-200 bg-red-50 flex items-center gap-1">
+                                            <i className="fas fa-trash fa-sm"></i> Удалить
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         )}
-                    </div>
+                    </>
                 );
             };
 
