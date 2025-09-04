@@ -336,6 +336,27 @@ class Database:
                     UNIQUE(evaluator_id, operator_id, month, phone_number, score, comment, is_draft)
                 );
             """)
+            #Trainings table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS trainings (
+                    id SERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    training_date DATE NOT NULL,
+                    start_time TIME NOT NULL,
+                    end_time TIME NOT NULL,
+                    reason VARCHAR(255) NOT NULL CHECK(reason IN (
+                        'Обратная связь', 'Собрание', 'Тех. сбой', 'Мотивационная беседа', 
+                        'Дисциплинарный тренинг', 'Тренинг по качеству. Разбор ошибок', 
+                        'Тренинг по качеству. Объяснение МШ', 'Тренинг по продукту', 
+                        'Мониторинг', 'Практика в офисе таксопарка'
+                    )),
+                    comment TEXT,
+                    created_by INTEGER REFERENCES users(id),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(operator_id, training_date, start_time, end_time)
+                );
+            """)
+            
             # Work hours table with fines column
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS work_hours (
@@ -407,6 +428,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_user_history_user_id ON user_history(user_id);
                 CREATE INDEX IF NOT EXISTS idx_user_history_changed_at ON user_history(changed_at);
                 CREATE INDEX IF NOT EXISTS idx_work_hours_calls_per_hour ON work_hours(calls_per_hour);
+                CREATE INDEX IF NOT EXISTS idx_trainings_operator_id ON trainings(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_trainings_training_date ON trainings(training_date);
             """)
 
     def create_user(self, telegram_id, name, role, direction_id=None, hire_date=None, supervisor_id=None, login=None, password=None, hours_table_url=None):
@@ -1866,6 +1889,75 @@ class Database:
         except Exception as e:
             logging.error(f"Error generating users report: {e}")
             return None, None
+
+    def add_training(self, operator_id, training_date, start_time, end_time, reason, comment, created_by):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO trainings (operator_id, training_date, start_time, end_time, reason, comment, created_by)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (operator_id, training_date, start_time, end_time, reason, comment, created_by))
+            return cursor.fetchone()[0]
+    
+    def get_trainings_for_operator(self, operator_id, month=None):
+        query = """
+            SELECT id, training_date, start_time, end_time, reason, comment, created_at
+            FROM trainings
+            WHERE operator_id = %s
+        """
+        params = [operator_id]
+        if month:
+            query += " AND TO_CHAR(training_date, 'YYYY-MM') = %s"
+            params.append(month)
+        query += " ORDER BY training_date DESC, start_time DESC"
+        
+        with self._get_cursor() as cursor:
+            cursor.execute(query, params)
+            return [
+                {
+                    "id": row[0],
+                    "date": row[1].strftime('%Y-%m-%d'),
+                    "start_time": row[2].strftime('%H:%M'),
+                    "end_time": row[3].strftime('%H:%M'),
+                    "reason": row[4],
+                    "comment": row[5],
+                    "created_at": row[6].strftime('%Y-%m-%d %H:%M')
+                } for row in cursor.fetchall()
+            ]
+    
+    def update_training(self, training_id, training_date=None, start_time=None, end_time=None, reason=None, comment=None):
+        updates = []
+        params = []
+        if training_date:
+            updates.append("training_date = %s")
+            params.append(training_date)
+        if start_time:
+            updates.append("start_time = %s")
+            params.append(start_time)
+        if end_time:
+            updates.append("end_time = %s")
+            params.append(end_time)
+        if reason:
+            updates.append("reason = %s")
+            params.append(reason)
+        if comment is not None:
+            updates.append("comment = %s")
+            params.append(comment)
+        
+        if not updates:
+            return False
+        
+        query = f"UPDATE trainings SET {', '.join(updates)} WHERE id = %s RETURNING id"
+        params.append(training_id)
+        
+        with self._get_cursor() as cursor:
+            cursor.execute(query, params)
+            return cursor.fetchone() is not None
+    
+    def delete_training(self, training_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM trainings WHERE id = %s RETURNING id", (training_id,))
+            return cursor.fetchone() is not None
 
 # Initialize database
 db = Database()
