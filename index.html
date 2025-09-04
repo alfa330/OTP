@@ -1714,8 +1714,8 @@
                     // Группируем операторов по SV (supervisor)
                     const svMap = {};
                     operators.forEach(op => {
-                        if (!svMap[op.supervisor]) svMap[op.supervisor] = [];
-                        svMap[op.supervisor].push(op);
+                        if (!svMap[op.supervisor_name]) svMap[op.supervisor_name] = [];
+                        svMap[op.supervisor_name].push(op);
                     });
                     setSvGroups(Object.entries(svMap)); // [[svName, [operators]]]
                 }, [operators]);
