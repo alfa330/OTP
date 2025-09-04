@@ -682,6 +682,128 @@
                 </div>
             );
         };
+
+        const TrainingModal = ({ isOpen, onClose, onSave, initialData = {} }) => {
+            const [date, setDate] = useState(initialData.date || '');
+            const [startTime, setStartTime] = useState(initialData.start_time || '');
+            const [endTime, setEndTime] = useState(initialData.end_time || '');
+            const [reason, setReason] = useState(initialData.reason || '');
+            const [comment, setComment] = useState(initialData.comment || '');
+            const reasons = [
+                "Обратная связь", "Собрание", "Тех. сбой", "Мотивационная беседа", 
+                "Дисциплинарный тренинг", "Тренинг по качеству. Разбор ошибок", 
+                "Тренинг по качеству. Объяснение МШ", "Тренинг по продукту", 
+                "Мониторинг", "Практика в офисе таксопарка"
+            ];
+        
+            const handleSave = () => {
+                if (!date || !startTime || !endTime || !reason) {
+                    alert('Заполните обязательные поля');
+                    return;
+                }
+                onSave({ date, start_time: startTime, end_time: endTime, reason, comment });
+                onClose();
+            };
+        
+            if (!isOpen) return null;
+        
+            return (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+                        <h2 className="text-xl font-semibold mb-4">{initialData.id ? 'Редактировать тренинг' : 'Добавить тренинг'}</h2>
+                        <div className="space-y-4">
+                            <input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full p-2 border rounded" />
+                            <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} className="w-full p-2 border rounded" />
+                            <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} className="w-full p-2 border rounded" />
+                            <select value={reason} onChange={e => setReason(e.target.value)} className="w-full p-2 border rounded">
+                                <option value="">Выберите причину</option>
+                                {reasons.map(r => <option key={r} value={r}>{r}</option>)}
+                            </select>
+                            <textarea value={comment} onChange={e => setComment(e.target.value)} placeholder="Комментарий" className="w-full p-2 border rounded" rows={3} />
+                        </div>
+                        <div className="flex justify-end mt-4 space-x-2">
+                            <button onClick={handleSave} className="bg-green-500 text-white p-2 rounded">Сохранить</button>
+                            <button onClick={onClose} className="bg-gray-500 text-white p-2 rounded">Отмена</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const TrainingsView = ({ user, operators }) => {  // operators - список операторов (все для админа, свои для св)
+            const [month, setMonth] = useState(new Date().toISOString().slice(0,7));
+            const [trainings, setTrainings] = useState({});  // {operator_id: [trainings]}
+            const [showModal, setShowModal] = useState(false);
+            const [currentOperator, setCurrentOperator] = useState(null);
+            const [editingTraining, setEditingTraining] = useState(null);
+        
+            useEffect(() => {
+                operators.forEach(op => {
+                    axios.get(`/trainings/${op.id}?month=${month}`).then(res => {
+                        setTrainings(prev => ({...prev, [op.id]: res.data}));
+                    });
+                });
+            }, [month, operators]);
+        
+            const handleAdd = (opId) => {
+                setCurrentOperator(opId);
+                setEditingTraining(null);
+                setShowModal(true);
+            };
+        
+            const handleEdit = (opId, training) => {
+                setCurrentOperator(opId);
+                setEditingTraining(training);
+                setShowModal(true);
+            };
+        
+            const handleDelete = (trainingId) => {
+                axios.delete(`/trainings/${trainingId}`).then(() => {
+                    // Обновить список
+                    axios.get(`/trainings/${currentOperator}?month=${month}`).then(res => {
+                        setTrainings(prev => ({...prev, [currentOperator]: res.data}));
+                    });
+                });
+            };
+        
+            const handleSave = (data) => {
+                if (editingTraining) {
+                    axios.put(`/trainings/${editingTraining.id}`, data).then(() => {
+                        // Обновить
+                    });
+                } else {
+                    axios.post('/trainings', {...data, operator_id: currentOperator}).then(() => {
+                        // Обновить
+                    });
+                }
+            };
+        
+            return (
+                <div>
+                    <select value={month} onChange={e => setMonth(e.target.value)}>
+                        {/* Опции месяцев */}
+                    </select>
+                    {operators.map(op => (
+                        <div key={op.id}>
+                            <h3>{op.name} | Тренинги</h3>
+                            <div className="flex space-x-2">
+                                {(trainings[op.id] || []).map(t => (
+                                    <div key={t.id} className="border p-2">
+                                        <p>{t.date} {t.start_time}-{t.end_time}</p>
+                                        <p>{t.reason}</p>
+                                        <p>{t.comment}</p>
+                                        <button onClick={() => handleEdit(op.id, t)}>Edit</button>
+                                        <button onClick={() => handleDelete(t.id)}>Delete</button>
+                                    </div>
+                                ))}
+                                <button onClick={() => handleAdd(op.id)} className="border p-2">+</button>
+                            </div>
+                        </div>
+                    ))}
+                    <TrainingModal isOpen={showModal} onClose={() => setShowModal(false)} onSave={handleSave} initialData={editingTraining || {}} />
+                </div>
+            );
+        };
         const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 
         // Error Boundary Component
@@ -3806,6 +3928,7 @@
                                         )}
                                     </div>
                                 )}
+                                {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                             </>
                         )}
                         {user.role === 'sv' && (
@@ -4225,7 +4348,8 @@
                                       </p>
                                     )}
                                   </div>
-                                )}
+                                )} 
+                                {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                                 {(view === 'hours' || view === 'evaluation') && (
                                   <div className="mb-6">
                                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
