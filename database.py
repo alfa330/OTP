@@ -1348,15 +1348,26 @@ class Database:
             """, (is_active, user_id))
             return cursor.fetchone() is not None
     
-    def get_active_operators(self):
+    def get_active_operators(self, direction_name=None):
         with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT id, name, direction_id 
-                FROM users 
-                WHERE role = 'operator' AND is_active = TRUE
-                ORDER BY name
-            """)
+            if direction_name:
+                cursor.execute("""
+                    SELECT u.id, u.name, u.direction_id
+                    FROM users u
+                    JOIN directions d ON u.direction_id = d.id
+                    WHERE u.role = 'operator' AND u.is_active = TRUE
+                      AND d.name = %s AND d.is_active = TRUE
+                    ORDER BY u.name
+                """, (direction_name,))
+            else:
+                cursor.execute("""
+                    SELECT id, name, direction_id 
+                    FROM users 
+                    WHERE role = 'operator' AND is_active = TRUE
+                    ORDER BY name
+                """)
             return [{"id": row[0], "name": row[1], "direction_id": row[2]} for row in cursor.fetchall()]
+
     
     def log_activity(self, operator_id, status):
         allowed_statuses = {"active", "break", "training", "inactive","tech"}
