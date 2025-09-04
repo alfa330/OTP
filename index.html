@@ -4549,6 +4549,7 @@
                                     )}
                                   </div>
                                 )}
+                                {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                             </>
                         )}
                         {user.role === 'operator' && (
