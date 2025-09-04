@@ -1826,20 +1826,41 @@
                     }
                 };
 
-                // Компонент тренинга
-                const TrainingBox = ({ training, onEdit, onDelete }) => (
+                // ...existing code...
+            // Компонент тренинга с useState
+            const TrainingBox = ({ training, onEdit, onDelete }) => {
+                const [showFullComment, setShowFullComment] = useState(false);
+                const maxCommentLength = 50;
+                const isLongComment = training.comment && training.comment.length > maxCommentLength;
+                const shortComment = isLongComment ? training.comment.slice(0, maxCommentLength) + '...' : training.comment;
+                return (
                     <div className="flex flex-col items-center justify-center bg-white border border-gray-300 rounded-lg shadow-sm px-3 py-2 mx-1 w-44 min-w-[160px] max-w-[180px]">
                         <div className="flex flex-col items-center w-full">
                             <span className="border border-green-500 rounded px-2 py-1 text-sm font-semibold text-green-700 mb-1 w-full text-center bg-green-50">{training.reason}</span>
                             <span className="border border-blue-400 rounded px-2 py-1 text-xs font-medium text-blue-700 w-full text-center bg-blue-50">{training.start_time} - {training.end_time}</span>
                         </div>
-                        {training.comment && <div className="mt-1 text-xs text-gray-500 w-full text-center">{training.comment}</div>}
+                        {training.comment && (
+                            <div className="mt-1 text-xs text-gray-500 w-full text-center cursor-pointer truncate" style={{maxWidth:'160px'}} onClick={() => isLongComment && setShowFullComment(true)}>
+                                {shortComment}
+                                {isLongComment && <span className="text-blue-500 ml-1">(ещё)</span>}
+                            </div>
+                        )}
                         <div className="flex justify-center gap-2 mt-2">
                             <button onClick={onEdit} className="text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300">Edit</button>
                             <button onClick={onDelete} className="text-xs px-2 py-1 rounded bg-red-100 hover:bg-red-200 text-red-700 border border-red-300">Delete</button>
                         </div>
+                        {showFullComment && (
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowFullComment(false)}>
+                                <div className="bg-white p-4 rounded-lg shadow-lg max-w-md w-full" onClick={e => e.stopPropagation()}>
+                                    <h3 className="text-lg font-semibold mb-2">Комментарий</h3>
+                                    <div className="text-sm text-gray-800 mb-4 whitespace-pre-line">{training.comment}</div>
+                                    <button onClick={() => setShowFullComment(false)} className="px-4 py-2 rounded bg-blue-500 text-white">Закрыть</button>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 );
+            };
 
                 return (
                     <div className="mt-6">
