@@ -739,7 +739,7 @@
         
             useEffect(() => {
                 operators.forEach(op => {
-                    axios.get(`/trainings/${op.id}?month=${month}`).then(res => {
+                    axios.get(`${API_BASE_URL}/trainings/${op.id}?month=${month}`).then(res => {
                         setTrainings(prev => ({...prev, [op.id]: res.data}));
                     });
                 });
@@ -758,23 +758,87 @@
             };
         
             const handleDelete = (trainingId) => {
-                axios.delete(`/trainings/${trainingId}`).then(() => {
-                    // Обновить список
-                    axios.get(`/trainings/${currentOperator}?month=${month}`).then(res => {
-                        setTrainings(prev => ({...prev, [currentOperator]: res.data}));
+                axios.delete(`${API_BASE_URL}/trainings/${trainingId}`, {
+                    headers: {
+                        'X-API-Key': user.apiKey, // Используем user.apiKey
+                        'X-User-Id': user.id // ID текущего пользователя
+                    }
+                })
+                    .then(() => {
+                        // Обновляем список тренингов для текущего оператора
+                        axios.get(`${API_BASE_URL}/trainings/${currentOperator}?month=${month}`, {
+                            headers: {
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        })
+                            .then(res => {
+                                setTrainings(prev => ({ ...prev, [currentOperator]: res.data }));
+                                showToast('Тренинг успешно удален', 'success');
+                            })
+                            .catch(err => {
+                                console.error('Error updating trainings after delete:', err);
+                                showToast('Ошибка при обновлении списка тренингов', 'error');
+                            });
+                    })
+                    .catch(err => {
+                        console.error('Error deleting training:', err);
+                        showToast('Ошибка при удалении тренинга', 'error');
                     });
-                });
             };
         
             const handleSave = (data) => {
+                const updateTrainings = () => {
+                    // Обновляем список тренингов для текущего оператора
+                    axios.get(`${API_BASE_URL}/trainings/${currentOperator}?month=${month}`, {
+                        headers: {
+                            'X-API-Key': user.apiKey, // Предполагается, что FLASK_API_KEY доступен
+                            'X-User-Id': user.id // ID текущего пользователя
+                        }
+                    })
+                        .then(res => {
+                            setTrainings(prev => ({ ...prev, [currentOperator]: res.data }));
+                            setShowModal(false); // Закрываем модальное окно
+                        })
+                        .catch(err => {
+                            console.error('Error updating trainings:', err);
+                            showToast('Ошибка при обновлении списка тренингов','error')
+                        });
+                };
+            
                 if (editingTraining) {
-                    axios.put(`/trainings/${editingTraining.id}`, data).then(() => {
-                        // Обновить
-                    });
+                    // Обновление существующего тренинга
+                    axios.put(`${API_BASE_URL}/trainings/${editingTraining.id}`, data, {
+                        headers: {
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
+                    })
+                        .then(() => {
+                            updateTrainings();
+                            // Добавляем уведомление об успехе
+                            showToast('Тренинг успешно обновлен','success');
+                        })
+                        .catch(err => {
+                            console.error('Error updating training:', err);
+                            showToast('Ошибка при обновлении тренинга','error');
+                        });
                 } else {
-                    axios.post('/trainings', {...data, operator_id: currentOperator}).then(() => {
-                        // Обновить
-                    });
+                    // Добавление нового тренинга
+                    axios.post(`${API_BASE_URL}/trainings`, { ...data, operator_id: currentOperator }, {
+                        headers: {
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
+                    })
+                        .then(() => {
+                            updateTrainings();
+                            showToast('Тренинг успешно добавлен','success');
+                        })
+                        .catch(err => {
+                            console.error('Error adding training:', err);
+                            sho
+                        });
                 }
             };
         
