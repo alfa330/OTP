@@ -1740,54 +1740,273 @@ def toggle_user_active():
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
-@app.route('/api/active_operators', methods=['GET'])
-@require_api_key
-def get_active_operators():
-    try:
-        direction_name = request.args.get("direction")  # например: /api/active_operators?direction=Sales
-        operators = db.get_active_operators(direction_name)
-        return jsonify({"status": "success", "operators": operators})
-    except Exception as e:
-        logging.error(f"Error fetching active operators: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-    
-@app.route('/api/report/monthly', methods=['GET'])
-@require_api_key
-def get_monthly_report():
-    try:
-        supervisor_id = request.args.get('supervisor_id')
-        month = request.args.get('month')
-        requester_id = int(request.headers.get('X-User-Id'))
-        requester = db.get_user(id=requester_id)
-        if not requester:
-            return jsonify({"error": "Requester not found"}), 404
-
-        if not supervisor_id:
-            if requester[3] == 'sv':
-                supervisor_id = requester_id
-            else:
-                return jsonify({"error": "supervisor_id required"}), 400
-        else:
-            supervisor_id = int(supervisor_id)
-
-        if requester[3] != 'admin' and (requester[3] != 'sv' or supervisor_id != requester_id):
-            return jsonify({"error": "Unauthorized to access this report"}), 403
-
-        logging.info("Начало генерации отчета")
-
-        filename, content = db.generate_monthly_report(supervisor_id, month)
-        if not filename or not content:
-            return jsonify({"error": "Failed to generate report"}), 500
+    @app.route('/api/active_operators', methods=['GET'])
+    @require_api_key
+    def get_active_operators():
+        try:
+            direction_name = request.args.get("direction")  # например: /api/active_operators?direction=Sales
+            operators = db.get_active_operators(direction_name)
+            return jsonify({"status": "success", "operators": operators})
+        except Exception as e:
+            logging.error(f"Error fetching active operators: {e}")
+            return jsonify({"error": f"Internal server error: {str(e)}"}), 500
         
-        return send_file(
-            BytesIO(content),
-            as_attachment=True,
-            download_name=filename,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-    except Exception as e:
-        logging.error(f"Error generating monthly report: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    @app.route('/api/report/monthly', methods=['GET'])
+    @require_api_key
+    def get_monthly_report():
+        try:
+            supervisor_id = request.args.get('supervisor_id')
+            month = request.args.get('month')
+            requester_id = int(request.headers.get('X-User-Id'))
+            requester = db.get_user(id=requester_id)
+            if not requester:
+                return jsonify({"error": "Requester not found"}), 404
+    
+            if not supervisor_id:
+                if requester[3] == 'sv':
+                    supervisor_id = requester_id
+                else:
+                    return jsonify({"error": "supervisor_id required"}), 400
+            else:
+                supervisor_id = int(supervisor_id)
+    
+            if requester[3] != 'admin' and (requester[3] != 'sv' or supervisor_id != requester_id):
+                return jsonify({"error": "Unauthorized to access this report"}), 403
+    
+            logging.info("Начало генерации отчета")
+    
+            filename, content = db.generate_monthly_report(supervisor_id, month)
+            if not filename or not content:
+                return jsonify({"error": "Failed to generate report"}), 500
+            
+            return send_file(
+                BytesIO(content),
+                as_attachment=True,
+                download_name=filename,
+                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+        except Exception as e:
+            logging.error(f"Error generating monthly report: {e}")
+            return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    
+    @app.route('/api/trainings/<int:operator_id>', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    def get_trainings(operator_id):
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+        
+        try:
+            requester_id = int(request.headers.get('X-User-Id'))
+            requester = db.get_user(id=requester_id)
+            if not requester:
+                logging.warning(f"User not found: {requester_id}")
+                return jsonify({"error": "User not found"}), 404
+            
+            # Проверка прав: админ или супервайзер оператора
+            operator = db.get_user(id=operator_id)
+            if not operator:
+                logging.warning(f"Operator not found: {operator_id}")
+                return jsonify({"error": "Operator not found"}), 404
+            
+            if requester[3] != 'admin' and (operator[6] != requester_id or requester[3] != 'sv'):
+                logging.warning(f"Unauthorized access to trainings for operator {operator_id} by user {requester_id}")
+                return jsonify({"error": "Unauthorized"}), 403
+    
+            month = request.args.get('month')
+            if month:
+                try:
+                    datetime.strptime(month, '%Y-%m')
+                except ValueError:
+                    logging.warning(f"Invalid month format: {month}")
+                    return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
+    
+            trainings = db.get_trainings_for_operator(operator_id, month)
+            logging.info(f"Trainings fetched for operator {operator_id}, month: {month}")
+            return jsonify({"status": "success", "trainings": trainings}), 200
+        except Exception as e:
+            logging.error(f"Error fetching trainings for operator {operator_id}: {e}", exc_info=True)
+            return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    
+    @app.route('/api/trainings', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    def add_training():
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+        
+        try:
+            data = request.get_json()
+            required_fields = ['operator_id', 'date', 'start_time', 'end_time', 'reason']
+            if not data or not all(field in data for field in required_fields):
+                logging.warning(f"Missing required fields in add_training: {data}")
+                return jsonify({"error": "Missing required fields"}), 400
+    
+            requester_id = int(request.headers.get('X-User-Id'))
+            requester = db.get_user(id=requester_id)
+            if not requester:
+                logging.warning(f"User not found: {requester_id}")
+                return jsonify({"error": "User not found"}), 404
+    
+            # Проверка прав: админ или супервайзер оператора
+            operator = db.get_user(id=data['operator_id'])
+            if not operator:
+                logging.warning(f"Operator not found: {data['operator_id']}")
+                return jsonify({"error": "Operator not found"}), 404
+            
+            if requester[3] != 'admin' and (operator[6] != requester_id or requester[3] != 'sv'):
+                logging.warning(f"Unauthorized attempt to add training by user {requester_id}")
+                return jsonify({"error": "Unauthorized"}), 403
+    
+            # Валидация данных
+            try:
+                datetime.strptime(data['date'], '%Y-%m-%d')
+                datetime.strptime(data['start_time'], '%H:%M')
+                datetime.strptime(data['end_time'], '%H:%M')
+            except ValueError:
+                logging.warning(f"Invalid date/time format in add_training: {data}")
+                return jsonify({"error": "Invalid date or time format"}), 400
+    
+            allowed_reasons = [
+                "Обратная связь", "Собрание", "Тех. сбой", "Мотивационная беседа",
+                "Дисциплинарный тренинг", "Тренинг по качеству. Разбор ошибок",
+                "Тренинг по качеству. Объяснение МШ", "Тренинг по продукту",
+                "Мониторинг", "Практика в офисе таксопарка"
+            ]
+            if data['reason'] not in allowed_reasons:
+                logging.warning(f"Invalid training reason: {data['reason']}")
+                return jsonify({"error": "Invalid training reason"}), 400
+    
+            training_id = db.add_training(
+                operator_id=data['operator_id'],
+                training_date=data['date'],
+                start_time=data['start_time'],
+                end_time=data['end_time'],
+                reason=data['reason'],
+                comment=data.get('comment'),
+                created_by=requester_id
+            )
+            logging.info(f"Training added: ID {training_id} for operator {data['operator_id']}")
+            return jsonify({"status": "success", "id": training_id}), 201
+        except Exception as e:
+            logging.error(f"Error adding training: {e}", exc_info=True)
+            return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    
+    @app.route('/api/trainings/<int:training_id>', methods=['PUT', 'OPTIONS'])
+    @require_api_key
+    def update_training(training_id):
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+        
+        try:
+            data = request.get_json()
+            if not data:
+                logging.warning("No data provided for update_training")
+                return jsonify({"error": "No data provided"}), 400
+    
+            requester_id = int(request.headers.get('X-User-Id'))
+            requester = db.get_user(id=requester_id)
+            if not requester:
+                logging.warning(f"User not found: {requester_id}")
+                return jsonify({"error": "User not found"}), 404
+    
+            # Проверка прав: админ или создатель тренинга
+            with db._get_cursor() as cursor:
+                cursor.execute("""
+                    SELECT created_by FROM trainings WHERE id = %s
+                """, (training_id,))
+                training = cursor.fetchone()
+                if not training:
+                    logging.warning(f"Training not found: {training_id}")
+                    return jsonify({"error": "Training not found"}), 404
+                
+                if requester[3] != 'admin' and training[0] != requester_id:
+                    logging.warning(f"Unauthorized attempt to update training {training_id} by user {requester_id}")
+                    return jsonify({"error": "Unauthorized"}), 403
+    
+            # Валидация данных, если они предоставлены
+            if 'date' in data:
+                try:
+                    datetime.strptime(data['date'], '%Y-%m-%d')
+                except ValueError:
+                    logging.warning(f"Invalid date format: {data['date']}")
+                    return jsonify({"error": "Invalid date format"}), 400
+            if 'start_time' in data:
+                try:
+                    datetime.strptime(data['start_time'], '%H:%M')
+                except ValueError:
+                    logging.warning(f"Invalid start_time format: {data['start_time']}")
+                    return jsonify({"error": "Invalid start time format"}), 400
+            if 'end_time' in data:
+                try:
+                    datetime.strptime(data['end_time'], '%H:%M')
+                except ValueError:
+                    logging.warning(f"Invalid end_time format: {data['end_time']}")
+                    return jsonify({"error": "Invalid end time format"}), 400
+            if 'reason' in data:
+                allowed_reasons = [
+                    "Обратная связь", "Собрание", "Тех. сбой", "Мотивационная беседа",
+                    "Дисциплинарный тренинг", "Тренинг по качеству. Разбор ошибок",
+                    "Тренинг по качеству. Объяснение МШ", "Тренинг по продукту",
+                    "Мониторинг", "Практика в офисе таксопарка"
+                ]
+                if data['reason'] not in allowed_reasons:
+                    logging.warning(f"Invalid training reason: {data['reason']}")
+                    return jsonify({"error": "Invalid training reason"}), 400
+    
+            success = db.update_training(
+                training_id=training_id,
+                training_date=data.get('date'),
+                start_time=data.get('start_time'),
+                end_time=data.get('end_time'),
+                reason=data.get('reason'),
+                comment=data.get('comment')
+            )
+            if not success:
+                logging.warning(f"Failed to update training {training_id}")
+                return jsonify({"error": "Failed to update training"}), 500
+    
+            logging.info(f"Training updated: ID {training_id}")
+            return jsonify({"status": "success", "message": "Training updated"}), 200
+        except Exception as e:
+            logging.error(f"Error updating training {training_id}: {e}", exc_info=True)
+            return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    
+    @app.route('/api/trainings/<int:training_id>', methods=['DELETE', 'OPTIONS'])
+    @require_api_key
+    def delete_training(training_id):
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+        
+        try:
+            requester_id = int(request.headers.get('X-User-Id'))
+            requester = db.get_user(id=requester_id)
+            if not requester:
+                logging.warning(f"User not found: {requester_id}")
+                return jsonify({"error": "User not found"}), 404
+    
+            # Проверка прав: админ или создатель тренинга
+            with db._get_cursor() as cursor:
+                cursor.execute("""
+                    SELECT created_by FROM trainings WHERE id = %s
+                """, (training_id,))
+                training = cursor.fetchone()
+                if not training:
+                    logging.warning(f"Training not found: {training_id}")
+                    return jsonify({"error": "Training not found"}), 404
+                
+                if requester[3] != 'admin' and training[0] != requester_id:
+                    logging.warning(f"Unauthorized attempt to delete training {training_id} by user {requester_id}")
+                    return jsonify({"error": "Unauthorized"}), 403
+    
+            success = db.delete_training(training_id)
+            if not success:
+                logging.warning(f"Failed to delete training {training_id}")
+                return jsonify({"error": "Failed to delete training"}), 500
+    
+            logging.info(f"Training deleted: ID {training_id}")
+            return jsonify({"status": "success", "message": "Training deleted"}), 200
+        except Exception as e:
+            logging.error(f"Error deleting training {training_id}: {e}", exc_info=True)
+            return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False, use_reloader=False)
