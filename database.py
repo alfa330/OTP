@@ -1898,19 +1898,46 @@ class Database:
                 RETURNING id
             """, (operator_id, training_date, start_time, end_time, reason, comment, created_by))
             return cursor.fetchone()[0]
-    
-    def get_trainings_for_operator(self, operator_id, month=None):
-        query = """
-            SELECT id, training_date, start_time, end_time, reason, comment, created_at
-            FROM trainings
-            WHERE operator_id = %s
+
+    def get_trainings_for_operator(self, requester_id=None, month=None):
         """
-        params = [operator_id]
+        Получить тренинги для оператора/группы/всех, в зависимости от роли requester_id.
+        Если operator_id указан — только для него.
+        Если requester_id — определяет роль и фильтрует:
+            - sv: все тренинги операторов его группы
+            - admin: все тренинги
+        """
+        # Получаем роль requester_id
+        role = None
+        supervisor_id = None
+        if requester_id:
+            with self._get_cursor() as cursor:
+                cursor.execute("SELECT role FROM users WHERE id = %s", (requester_id,))
+                res = cursor.fetchone()
+                if res:
+                    role = res[0]
+                if role == "sv":
+                    supervisor_id = requester_id
+        query = """
+            SELECT t.id, t.training_date, t.start_time, t.end_time, t.reason, t.comment, t.created_at
+            FROM trainings t
+            JOIN users u ON t.operator_id = u.id
+        """
+        params = []
+        where_clauses = []
         if month:
-            query += " AND TO_CHAR(training_date, 'YYYY-MM') = %s"
+            where_clauses.append("TO_CHAR(t.training_date, 'YYYY-MM') = %s")
             params.append(month)
-        query += " ORDER BY training_date DESC, start_time DESC"
-        
+        if role == "sv":
+            where_clauses.append("u.supervisor_id = %s")
+            params.append(supervisor_id)
+        elif role == "operator":
+            where_clauses.append("t.operator_id = %s")
+            params.append(requester_id)
+        # Для admin — без ограничений, кроме month
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+        query += " ORDER BY t.training_date DESC, t.start_time DESC"
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
             return [

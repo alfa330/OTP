@@ -1787,9 +1787,9 @@ def get_monthly_report():
         logging.error(f"Error generating monthly report: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/trainings/<int:operator_id>', methods=['GET'])
+@app.route('/api/trainings', methods=['GET'])
 @require_api_key
-def get_trainings(operator_id):
+def get_trainings():
     
     try:
         requester_id = int(request.headers.get('X-User-Id'))
@@ -1797,16 +1797,6 @@ def get_trainings(operator_id):
         if not requester:
             logging.warning(f"User not found: {requester_id}")
             return jsonify({"error": "User not found"}), 404
-        
-        # Проверка прав: админ или супервайзер оператора
-        operator = db.get_user(id=operator_id)
-        if not operator:
-            logging.warning(f"Operator not found: {operator_id}")
-            return jsonify({"error": "Operator not found"}), 404
-        
-        if requester[3] != 'admin' and (operator[6] != requester_id or requester[3] != 'sv'):
-            logging.warning(f"Unauthorized access to trainings for operator {operator_id} by user {requester_id}")
-            return jsonify({"error": "Unauthorized"}), 403
 
         month = request.args.get('month')
         if month:
@@ -1816,11 +1806,17 @@ def get_trainings(operator_id):
                 logging.warning(f"Invalid month format: {month}")
                 return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
 
-        trainings = db.get_trainings_for_operator(operator_id, month)
-        logging.info(f"Trainings fetched for operator {operator_id}, month: {month}")
+        role = requester[3]
+        if role not in ['admin', 'sv', 'operator']:
+            logging.warning(f"Unauthorized role: {role}")
+            return jsonify({"error": "Unauthorized"}), 403
+        
+        trainings = db.get_trainings(requester_id, month)
+
+        logging.info(f"Trainings fetched for role {role}, month: {month}, by user {requester_id}")
         return jsonify({"status": "success", "trainings": trainings}), 200
     except Exception as e:
-        logging.error(f"Error fetching trainings for operator {operator_id}: {e}", exc_info=True)
+        logging.error(f"Error fetching trainings: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/trainings', methods=['POST'])
