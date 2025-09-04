@@ -1690,15 +1690,19 @@
                 const [editingTraining, setEditingTraining] = useState(null);
             
                 useEffect(() => {
-                    operators.forEach(op => {
-                        axios.get(`${API_BASE_URL}/api/trainings/${op.id}?month=${month}`, {
+                    axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                         headers: {
-                            'X-API-Key': user.apiKey, // Используем user.apiKey
-                            'X-User-Id': user.id // ID текущего пользователя
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
                         }
                     }).then(res => {
-                            setTrainings(prev => ({...prev, [op.id]: res.data}));
+                        // res.data.trainings — массив тренингов, нужно сгруппировать по operator_id
+                        const grouped = {};
+                        (res.data.trainings || []).forEach(t => {
+                            if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                            grouped[t.operator_id].push(t);
                         });
+                        setTrainings(grouped);
                     });
                 }, [month, operators]);
             
@@ -1717,20 +1721,25 @@
                 const handleDelete = (trainingId) => {
                     axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
                         headers: {
-                            'X-API-Key': user.apiKey, // Используем user.apiKey
-                            'X-User-Id': user.id // ID текущего пользователя
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
                         }
                     })
                         .then(() => {
-                            // Обновляем список тренингов для текущего оператора
-                            axios.get(`${API_BASE_URL}/api/trainings/${currentOperator}?month=${month}`, {
+                            // Обновляем список тренингов
+                            axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                                 headers: {
                                     'X-API-Key': user.apiKey,
                                     'X-User-Id': user.id
                                 }
                             })
                                 .then(res => {
-                                    setTrainings(prev => ({ ...prev, [currentOperator]: res.data }));
+                                    const grouped = {};
+                                    (res.data.trainings || []).forEach(t => {
+                                        if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                                        grouped[t.operator_id].push(t);
+                                    });
+                                    setTrainings(grouped);
                                     showToast('Тренинг успешно удален', 'success');
                                 })
                                 .catch(err => {
@@ -1746,25 +1755,27 @@
             
                 const handleSave = (data) => {
                     const updateTrainings = () => {
-                        // Обновляем список тренингов для текущего оператора
-                        axios.get(`${API_BASE_URL}/api/trainings/${currentOperator}?month=${month}`, {
+                        axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                             headers: {
-                                'X-API-Key': user.apiKey, // Предполагается, что FLASK_API_KEY доступен
-                                'X-User-Id': user.id // ID текущего пользователя
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
                             }
                         })
                             .then(res => {
-                                setTrainings(prev => ({ ...prev, [currentOperator]: res.data }));
-                                setShowModal(false); // Закрываем модальное окно
+                                const grouped = {};
+                                (res.data.trainings || []).forEach(t => {
+                                    if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                                    grouped[t.operator_id].push(t);
+                                });
+                                setTrainings(grouped);
+                                setShowModal(false);
                             })
                             .catch(err => {
                                 console.error('Error updating trainings:', err);
                                 showToast('Ошибка при обновлении списка тренингов','error')
                             });
                     };
-                
                     if (editingTraining) {
-                        // Обновление существующего тренинга
                         axios.put(`${API_BASE_URL}/api/trainings/${editingTraining.id}`, data, {
                             headers: {
                                 'X-API-Key': user.apiKey,
@@ -1773,7 +1784,6 @@
                         })
                             .then(() => {
                                 updateTrainings();
-                                // Добавляем уведомление об успехе
                                 showToast('Тренинг успешно обновлен','success');
                             })
                             .catch(err => {
@@ -1781,7 +1791,6 @@
                                 showToast('Ошибка при обновлении тренинга','error');
                             });
                     } else {
-                        // Добавление нового тренинга
                         axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: currentOperator }, {
                             headers: {
                                 'X-API-Key': user.apiKey,
@@ -1794,7 +1803,7 @@
                             })
                             .catch(err => {
                                 console.error('Error adding training:', err);
-                                sho
+                                showToast('Ошибка при добавлении тренинга','error');
                             });
                     }
                 };
