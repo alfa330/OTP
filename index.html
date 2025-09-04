@@ -1975,6 +1975,7 @@
                                 const [year, monthNum] = month.split('-').map(Number);
                                 const daysInMonth = new Date(year, monthNum, 0).getDate();
                                 const daysArr = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+                                const monthLabel = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"][monthNum-1];
                                 return (
                                     <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
                                         <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Супервайзер: {svName}</h2>
@@ -1983,11 +1984,19 @@
                                                 const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
                                                 const trainingsCount = groupTrainings[dateStr]?.length || 0;
                                                 return (
-                                                    <div key={dateStr} className={`bg-white rounded-lg shadow flex flex-col items-center justify-center p-2 cursor-pointer border ${trainingsCount ? 'border-blue-500' : 'border-gray-200'} hover:ring-2 hover:ring-blue-300`} onClick={() => {
+                                                    <div key={dateStr} className={`bg-white rounded-lg shadow flex flex-col items-center justify-between p-1 cursor-pointer border ${trainingsCount ? 'border-blue-500' : 'border-gray-200'} hover:ring-2 hover:ring-blue-300 min-h-[60px]`} onClick={() => {
                                                         if (trainingsCount) setCalendarModal({ open: true, svName, date: dateStr, trainings: groupTrainings });
                                                     }}>
-                                                        <span className="text-xs font-bold text-gray-700">{day}</span>
-                                                        {trainingsCount > 0 && <span className="mt-1 text-xs text-blue-600 font-semibold">{trainingsCount}</span>}
+                                                        {/* Количество тренингов сверху, круг */}
+                                                        <div className="flex justify-center items-center w-full mt-1 mb-1" style={{height:'22px'}}>
+                                                            {trainingsCount > 0 ? (
+                                                                <span className="inline-flex items-center justify-center rounded-full bg-blue-500 text-white text-xs font-bold" style={{width:'22px',height:'22px'}}>{trainingsCount}</span>
+                                                            ) : (
+                                                                <span style={{width:'22px',height:'22px'}}></span>
+                                                            )}
+                                                        </div>
+                                                        {/* День-месяц снизу */}
+                                                        <span className="text-xs font-bold text-gray-700 mb-1">{day}-{monthLabel}</span>
                                                     </div>
                                                 );
                                             })}
