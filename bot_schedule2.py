@@ -655,8 +655,6 @@ def change_sv_table():
 @app.route('/api/call_evaluation/dispute', methods=['POST'])
 @require_api_key
 def dispute_call_evaluation():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
     try:
         data = request.get_json()
         required_fields = ['operator_id', 'id', 'month', 'dispute_text']
@@ -1789,11 +1787,9 @@ def get_monthly_report():
         logging.error(f"Error generating monthly report: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/trainings/<int:operator_id>', methods=['GET', 'OPTIONS'])
+@app.route('/api/trainings/<int:operator_id>', methods=['GET'])
 @require_api_key
 def get_trainings(operator_id):
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
     
     try:
         requester_id = int(request.headers.get('X-User-Id'))
@@ -1827,11 +1823,9 @@ def get_trainings(operator_id):
         logging.error(f"Error fetching trainings for operator {operator_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/trainings', methods=['POST', 'OPTIONS'])
+@app.route('/api/trainings', methods=['POST'])
 @require_api_key
 def add_training():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
     
     try:
         data = request.get_json()
@@ -1890,11 +1884,9 @@ def add_training():
         logging.error(f"Error adding training: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/trainings/<int:training_id>', methods=['PUT', 'OPTIONS'])
+@app.route('/api/trainings/<int:training_id>', methods=['PUT'])
 @require_api_key
 def update_training(training_id):
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
     
     try:
         data = request.get_json()
@@ -1970,12 +1962,9 @@ def update_training(training_id):
         logging.error(f"Error updating training {training_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/trainings/<int:training_id>', methods=['DELETE', 'OPTIONS'])
+@app.route('/api/trainings/<int:training_id>', methods=['DELETE'])
 @require_api_key
 def delete_training(training_id):
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    
     try:
         requester_id = int(request.headers.get('X-User-Id'))
         requester = db.get_user(id=requester_id)
