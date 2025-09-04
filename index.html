@@ -1714,9 +1714,18 @@
                 // Группировка операторов по SV
                 const [svGroups, setSvGroups] = useState([]);
                 const [search, setSearch] = useState("");
+                const [operatorsLoaded, setOperatorsLoaded] = useState(false);
 
                 useEffect(() => {
-                    // Получаем тренинги за выбранный месяц
+                    // Флаг, что операторы загружены (не пустой массив)
+                    if (operators && operators.length > 0) {
+                        setOperatorsLoaded(true);
+                    }
+                }, [operators]);
+
+                useEffect(() => {
+                    // Получаем тренинги только если операторы загружены
+                    if (!operatorsLoaded) return;
                     axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
@@ -1730,7 +1739,7 @@
                         });
                         setTrainings(grouped);
                     });
-                }, [month, operators]);
+                }, [month, operatorsLoaded]);
 
                 useEffect(() => {
                     // Группируем операторов по SV (supervisor)
@@ -1763,9 +1772,7 @@
                         }
                     })
                         .then(() => {
-                            // Обновляем список тренингов
-                            const now = new Date();
-                            const month = now.toISOString().slice(0,7);
+                            // Обновляем только тренинги
                             axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                                 headers: {
                                     'X-API-Key': user.apiKey,
@@ -1794,8 +1801,6 @@
 
                 const handleSave = (data) => {
                     const updateTrainings = () => {
-                        const now = new Date();
-                        const month = now.toISOString().slice(0,7);
                         axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                             headers: {
                                 'X-API-Key': user.apiKey,
@@ -1866,22 +1871,36 @@
                     return mins;
                 }
                 const minutes = getMinutes(training.start_time, training.end_time);
+                // Форматируем дату
+                function formatDate(dateStr) {
+                    if (!dateStr) return '';
+                    const [y, m, d] = dateStr.split('-');
+                    return `${d}.${m}.${y}`;
+                }
+                const formattedDate = formatDate(training.date);
                 return (
-                    <div className="flex flex-col items-center justify-center bg-white border border-gray-300 rounded-lg shadow-sm px-3 py-2 mx-1 w-44 min-w-[160px] max-w-[180px]">
-                        <div className="flex flex-col items-center w-full">
-                            <span className="border border-green-500 rounded px-2 py-1 text-sm font-semibold text-green-700 mb-1 w-full text-center bg-green-50">{training.reason}</span>
-                            <span className="border border-blue-400 rounded px-2 py-1 text-xs font-medium text-blue-700 w-full text-center bg-blue-50">{minutes ? `${minutes} мин.` : ''}</span>
+                    <div className="flex flex-col bg-white border border-gray-300 rounded-lg shadow-sm px-3 py-2 mx-1 w-52 min-w-[180px] max-w-[220px]">
+                        <div className="flex flex-row items-center justify-between w-full mb-1">
+                            <span className="border border-green-500 rounded px-2 py-1 text-sm font-semibold text-green-700 bg-green-50">{training.reason}</span>
+                            <span className="border border-gray-400 rounded px-2 py-1 text-xs font-medium text-gray-700 bg-gray-50 ml-2">{formattedDate}</span>
+                        </div>
+                        <div className="flex flex-row items-center justify-between w-full mb-1">
+                            <span className="border border-blue-400 rounded px-2 py-1 text-xs font-medium text-blue-700 bg-blue-50">{minutes ? `${minutes} мин.` : ''}</span>
+                            <div className="flex gap-2 ml-2">
+                                <button onClick={onEdit} title="Редактировать" className="text-gray-500 hover:text-blue-600 p-1">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536M9 13l6.536-6.536a2 2 0 112.828 2.828L11.828 15.828a2 2 0 01-2.828 0L9 13zm0 0V17h4" /></svg>
+                                </button>
+                                <button onClick={onDelete} title="Удалить" className="text-gray-500 hover:text-red-600 p-1">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                </button>
+                            </div>
                         </div>
                         {training.comment && (
-                            <div className="mt-1 text-xs text-gray-500 w-full text-center cursor-pointer truncate" style={{maxWidth:'160px'}} onClick={() => isLongComment && setShowFullComment(true)}>
+                            <div className="mt-1 text-xs text-gray-500 w-full text-center cursor-pointer truncate" style={{maxWidth:'180px'}} onClick={() => isLongComment && setShowFullComment(true)}>
                                 {shortComment}
                                 {isLongComment && <span className="text-blue-500 ml-1">(ещё)</span>}
                             </div>
                         )}
-                        <div className="flex justify-center gap-2 mt-2">
-                            <button onClick={onEdit} className="text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300">Edit</button>
-                            <button onClick={onDelete} className="text-xs px-2 py-1 rounded bg-red-100 hover:bg-red-200 text-red-700 border border-red-300">Delete</button>
-                        </div>
                         {showFullComment && (
                             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowFullComment(false)}>
                                 <div className="bg-white p-4 rounded-lg shadow-lg max-w-md w-full" onClick={e => e.stopPropagation()}>
