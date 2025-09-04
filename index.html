@@ -1683,20 +1683,24 @@
             };
     
             const TrainingsView = ({ user, operators }) => {  // operators - список операторов (все для админа, свои для св)
-                const [month, setMonth] = useState(new Date().toISOString().slice(0,7));
-                const [trainings, setTrainings] = useState({});  // {operator_id: [trainings]}
+                const [trainings, setTrainings] = useState({}); // {operator_id: [trainings]}
                 const [showModal, setShowModal] = useState(false);
                 const [currentOperator, setCurrentOperator] = useState(null);
                 const [editingTraining, setEditingTraining] = useState(null);
-            
+
+                // Группировка операторов по SV
+                const [svGroups, setSvGroups] = useState([]);
+
                 useEffect(() => {
+                    // Получаем тренинги за текущий месяц
+                    const now = new Date();
+                    const month = now.toISOString().slice(0,7);
                     axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
                         }
                     }).then(res => {
-                        // res.data.trainings — массив тренингов, нужно сгруппировать по operator_id
                         const grouped = {};
                         (res.data.trainings || []).forEach(t => {
                             if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
@@ -1704,20 +1708,30 @@
                         });
                         setTrainings(grouped);
                     });
-                }, [month, operators]);
-            
+                }, [operators]);
+
+                useEffect(() => {
+                    // Группируем операторов по SV (supervisor)
+                    const svMap = {};
+                    operators.forEach(op => {
+                        if (!svMap[op.supervisor]) svMap[op.supervisor] = [];
+                        svMap[op.supervisor].push(op);
+                    });
+                    setSvGroups(Object.entries(svMap)); // [[svName, [operators]]]
+                }, [operators]);
+
                 const handleAdd = (opId) => {
                     setCurrentOperator(opId);
                     setEditingTraining(null);
                     setShowModal(true);
                 };
-            
+
                 const handleEdit = (opId, training) => {
                     setCurrentOperator(opId);
                     setEditingTraining(training);
                     setShowModal(true);
                 };
-            
+
                 const handleDelete = (trainingId) => {
                     axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
                         headers: {
@@ -1727,6 +1741,8 @@
                     })
                         .then(() => {
                             // Обновляем список тренингов
+                            const now = new Date();
+                            const month = now.toISOString().slice(0,7);
                             axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                                 headers: {
                                     'X-API-Key': user.apiKey,
@@ -1752,9 +1768,11 @@
                             showToast('Ошибка при удалении тренинга', 'error');
                         });
                 };
-            
+
                 const handleSave = (data) => {
                     const updateTrainings = () => {
+                        const now = new Date();
+                        const month = now.toISOString().slice(0,7);
                         axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                             headers: {
                                 'X-API-Key': user.apiKey,
@@ -1807,26 +1825,44 @@
                             });
                     }
                 };
-            
+
+                // Компонент тренинга
+                const TrainingBox = ({ training, onEdit, onDelete }) => (
+                    <div className="flex flex-col items-center justify-center bg-white border border-gray-300 rounded-lg shadow-sm px-3 py-2 mx-1 w-44 min-w-[160px] max-w-[180px]">
+                        <div className="flex flex-col items-center w-full">
+                            <span className="border border-green-500 rounded px-2 py-1 text-sm font-semibold text-green-700 mb-1 w-full text-center bg-green-50">{training.reason}</span>
+                            <span className="border border-blue-400 rounded px-2 py-1 text-xs font-medium text-blue-700 w-full text-center bg-blue-50">{training.start_time} - {training.end_time}</span>
+                        </div>
+                        {training.comment && <div className="mt-1 text-xs text-gray-500 w-full text-center">{training.comment}</div>}
+                        <div className="flex justify-center gap-2 mt-2">
+                            <button onClick={onEdit} className="text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300">Edit</button>
+                            <button onClick={onDelete} className="text-xs px-2 py-1 rounded bg-red-100 hover:bg-red-200 text-red-700 border border-red-300">Delete</button>
+                        </div>
+                    </div>
+                );
+
                 return (
-                    <div>
-                        <select value={month} onChange={e => setMonth(e.target.value)}>
-                            {/* Опции месяцев */}
-                        </select>
-                        {operators.map(op => (
-                            <div key={op.id}>
-                                <h3>{op.name} | Тренинги</h3>
-                                <div className="flex space-x-2">
-                                    {(trainings[op.id] || []).map(t => (
-                                        <div key={t.id} className="border p-2">
-                                            <p>{t.date} {t.start_time}-{t.end_time}</p>
-                                            <p>{t.reason}</p>
-                                            <p>{t.comment}</p>
-                                            <button onClick={() => handleEdit(op.id, t)}>Edit</button>
-                                            <button onClick={() => handleDelete(t.id)}>Delete</button>
+                    <div className="mt-6">
+                        {svGroups.map(([svName, ops]) => (
+                            <div key={svName} className="mb-8">
+                                <h2 className="text-lg font-bold text-gray-800 mb-2">{svName}</h2>
+                                <div className="space-y-4">
+                                    {ops.map(op => (
+                                        <div key={op.id} className="flex items-center bg-gray-50 rounded-lg shadow p-3">
+                                            <span className="font-semibold text-gray-900 w-48 min-w-[120px]">{op.name}</span>
+                                            <div className="flex flex-row flex-wrap items-center ml-2">
+                                                {(trainings[op.id] || []).map(t => (
+                                                    <TrainingBox
+                                                        key={t.id}
+                                                        training={t}
+                                                        onEdit={() => handleEdit(op.id, t)}
+                                                        onDelete={() => handleDelete(t.id)}
+                                                    />
+                                                ))}
+                                                <button onClick={() => handleAdd(op.id)} className="ml-2 px-3 py-2 rounded-lg border border-dashed border-green-400 text-green-600 bg-white hover:bg-green-50 transition">+</button>
+                                            </div>
                                         </div>
                                     ))}
-                                    <button onClick={() => handleAdd(op.id)} className="border p-2">+</button>
                                 </div>
                             </div>
                         ))}
