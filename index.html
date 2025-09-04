@@ -1728,7 +1728,8 @@
 
                 const handleEdit = (opId, training) => {
                     setCurrentOperator(opId);
-                    setEditingTraining(training);
+                    // Передаём копию объекта, чтобы не было мутаций
+                    setEditingTraining({ ...training });
                     setShowModal(true);
                 };
 
@@ -1833,11 +1834,21 @@
                 const maxCommentLength = 50;
                 const isLongComment = training.comment && training.comment.length > maxCommentLength;
                 const shortComment = isLongComment ? training.comment.slice(0, maxCommentLength) + '...' : training.comment;
+                // Вычисляем время тренинга в минутах
+                function getMinutes(start, end) {
+                    if (!start || !end) return '';
+                    const [sh, sm] = start.split(':').map(Number);
+                    const [eh, em] = end.split(':').map(Number);
+                    let mins = (eh * 60 + em) - (sh * 60 + sm);
+                    if (isNaN(mins) || mins < 0) return '';
+                    return mins;
+                }
+                const minutes = getMinutes(training.start_time, training.end_time);
                 return (
                     <div className="flex flex-col items-center justify-center bg-white border border-gray-300 rounded-lg shadow-sm px-3 py-2 mx-1 w-44 min-w-[160px] max-w-[180px]">
                         <div className="flex flex-col items-center w-full">
                             <span className="border border-green-500 rounded px-2 py-1 text-sm font-semibold text-green-700 mb-1 w-full text-center bg-green-50">{training.reason}</span>
-                            <span className="border border-blue-400 rounded px-2 py-1 text-xs font-medium text-blue-700 w-full text-center bg-blue-50">{training.start_time} - {training.end_time}</span>
+                            <span className="border border-blue-400 rounded px-2 py-1 text-xs font-medium text-blue-700 w-full text-center bg-blue-50">{minutes ? `${minutes} мин.` : ''}</span>
                         </div>
                         {training.comment && (
                             <div className="mt-1 text-xs text-gray-500 w-full text-center cursor-pointer truncate" style={{maxWidth:'160px'}} onClick={() => isLongComment && setShowFullComment(true)}>
@@ -1865,11 +1876,11 @@
                 return (
                     <div className="mt-6">
                         {svGroups.map(([svName, ops]) => (
-                            <div key={svName} className="mb-8">
-                                <h2 className="text-lg font-bold text-gray-800 mb-2">{svName}</h2>
+                            <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
+                                <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Супервайзер: {svName}</h2>
                                 <div className="space-y-4">
                                     {ops.map(op => (
-                                        <div key={op.id} className="flex items-center bg-gray-50 rounded-lg shadow p-3">
+                                        <div key={op.id} className="flex items-center bg-white rounded-lg shadow p-3 mb-2 border border-gray-200">
                                             <span className="font-semibold text-gray-900 w-48 min-w-[120px]">{op.name}</span>
                                             <div className="flex flex-row flex-wrap items-center ml-2">
                                                 {(trainings[op.id] || []).map(t => (
