@@ -1092,18 +1092,35 @@ class Database:
             raise ValueError("Invalid date format. Use YYYY-MM-DD")
         
         with self._get_cursor() as cursor:
+            # Берём последний статус до указанной даты
+            cursor.execute("""
+                SELECT change_time, is_active
+                FROM operator_activity_logs
+                WHERE operator_id = %s
+                  AND change_time < %s
+                ORDER BY change_time DESC
+                LIMIT 1
+            """, (operator_id, log_date))
+            prev_log = cursor.fetchone()
+    
+            # Берём все записи за указанную дату
             cursor.execute("""
                 SELECT change_time, is_active 
                 FROM operator_activity_logs 
                 WHERE operator_id = %s 
-                AND change_time::date = %s 
+                  AND change_time::date = %s 
                 ORDER BY change_time ASC
             """, (operator_id, log_date))
             logs = cursor.fetchall()
-        return [
+    
+        result = []
+        if prev_log:
+            result.append({"change_time": prev_log[0].isoformat(), "is_active": prev_log[1]})
+        result.extend([
             {"change_time": row[0].isoformat(), "is_active": row[1]}
             for row in logs
-        ]
+        ])
+        return result
     
     def get_hours_summary(self, operator_id=None, month=None):
         query = """
