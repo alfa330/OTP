@@ -1691,7 +1691,12 @@
             
                 useEffect(() => {
                     operators.forEach(op => {
-                        axios.get(`${API_BASE_URL}/api/trainings/${op.id}?month=${month}`).then(res => {
+                        axios.get(`${API_BASE_URL}/api/trainings/${op.id}?month=${month}`, {
+                        headers: {
+                            'X-API-Key': user.apiKey, // Используем user.apiKey
+                            'X-User-Id': user.id // ID текущего пользователя
+                        }
+                    }).then(res => {
                             setTrainings(prev => ({...prev, [op.id]: res.data}));
                         });
                     });
