@@ -1858,9 +1858,8 @@
             // Компонент тренинга с useState
             const TrainingBox = ({ training, onEdit, onDelete }) => {
                 const [showDetails, setShowDetails] = useState(false);
+                const [editMode, setEditMode] = useState(false);
                 const maxCommentLength = 50;
-                const isLongComment = training.comment && training.comment.length > maxCommentLength;
-                const shortComment = isLongComment ? training.comment.slice(0, maxCommentLength) + '...' : training.comment;
                 function getMinutes(start, end) {
                     if (!start || !end) return '';
                     const [sh, sm] = start.split(':').map(Number);
@@ -1888,24 +1887,50 @@
                             </div>
                             {training.comment && (
                                 <div className="mt-0.5 text-xs text-gray-500 w-full text-center truncate" style={{maxWidth:'120px'}}>
-                                    {shortComment}
-                                    {isLongComment && <span className="text-blue-500 ml-1">(ещё)</span>}
+                                    {training.comment}
                                 </div>
                             )}
                         </div>
                         {showDetails && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowDetails(false)}>
-                                <div className="bg-white p-6 rounded-lg shadow-lg max-w-xs w-full" onClick={e => e.stopPropagation()}>
-                                    <h3 className="text-lg font-semibold mb-2">Детали тренинга</h3>
-                                    <div className="mb-2"><span className="font-medium">Причина:</span> {training.reason}</div>
-                                    <div className="mb-2"><span className="font-medium">Дата:</span> {formattedDate}</div>
-                                    <div className="mb-2"><span className="font-medium">Время:</span> {minutes ? `${minutes} мин.` : ''}</div>
-                                    {training.comment && <div className="mb-2"><span className="font-medium">Комментарий:</span> {training.comment}</div>}
-                                    <div className="flex justify-end gap-3 mt-4">
-                                        <button onClick={() => { setShowDetails(false); onEdit(); }} title="Редактировать" className="text-blue-600 hover:text-blue-800 px-2 py-1 rounded border border-blue-200 bg-blue-50 flex items-center gap-1">
-                                            <i className="fas fa-pen fa-sm"></i> Редактировать
-                                        </button>
-                                        <button onClick={() => { setShowDetails(false); onDelete(); }} title="Удалить" className="text-red-600 hover:text-red-800 px-2 py-1 rounded border border-red-200 bg-red-50 flex items-center gap-1">
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setShowDetails(false); setEditMode(false); }}>
+                                <div className="bg-white p-6 rounded-lg shadow-lg max-w-md w-full relative" onClick={e => e.stopPropagation()}>
+                                    <button
+                                        onClick={() => setEditMode(!editMode)}
+                                        className={`absolute top-4 left-4 px-2 py-1 rounded border flex items-center gap-1 text-xs font-semibold transition ${editMode ? 'bg-blue-600 text-white border-blue-600' : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'}`}
+                                        title="Редактировать"
+                                    >
+                                        <i className="fas fa-pen fa-sm"></i> {editMode ? 'Редактирование' : 'Редактировать'}
+                                    </button>
+                                    <h3 className="text-lg font-semibold mb-4 text-center">{editMode ? 'Редактировать тренинг' : 'Детали тренинга'}</h3>
+                                    {!editMode ? (
+                                        <div className="space-y-3">
+                                            <div><span className="font-medium">Причина:</span> {training.reason}</div>
+                                            <div><span className="font-medium">Дата:</span> {formattedDate}</div>
+                                            <div><span className="font-medium">Время:</span> {minutes ? `${minutes} мин.` : ''} <span className="text-xs text-gray-500">({training.start_time} - {training.end_time})</span></div>
+                                            {training.comment && <div><span className="font-medium">Комментарий:</span> {training.comment}</div>}
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-3">
+                                            <div>
+                                                <label className="block text-xs font-medium text-gray-700 mb-1">Причина</label>
+                                                <input type="text" value={training.reason} readOnly className="w-full p-2 border rounded bg-gray-100" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-medium text-gray-700 mb-1">Дата</label>
+                                                <input type="text" value={formattedDate} readOnly className="w-full p-2 border rounded bg-gray-100" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-medium text-gray-700 mb-1">Время</label>
+                                                <input type="text" value={minutes ? `${minutes} мин.` : ''} readOnly className="w-full p-2 border rounded bg-gray-100" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-medium text-gray-700 mb-1">Комментарий</label>
+                                                <textarea value={training.comment} readOnly className="w-full p-2 border rounded bg-gray-100" rows={2} />
+                                            </div>
+                                        </div>
+                                    )}
+                                    <div className="flex justify-end gap-3 mt-6">
+                                        <button onClick={() => { setShowDetails(false); setEditMode(false); onDelete(); }} title="Удалить" className="text-red-600 hover:text-red-800 px-3 py-2 rounded border border-red-200 bg-red-50 flex items-center gap-1">
                                             <i className="fas fa-trash fa-sm"></i> Удалить
                                         </button>
                                     </div>
