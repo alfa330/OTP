@@ -1641,6 +1641,14 @@
                 const [endTime, setEndTime] = useState(initialData.end_time || '');
                 const [reason, setReason] = useState(initialData.reason || '');
                 const [comment, setComment] = useState(initialData.comment || '');
+
+                useEffect(() => {
+                    setDate(initialData.date || '');
+                    setStartTime(initialData.start_time || '');
+                    setEndTime(initialData.end_time || '');
+                    setReason(initialData.reason || '');
+                    setComment(initialData.comment || '');
+                }, [initialData, isOpen]);
                 const reasons = [
                     "Обратная связь", "Собрание", "Тех. сбой", "Мотивационная беседа", 
                     "Дисциплинарный тренинг", "Тренинг по качеству. Разбор ошибок", 
@@ -1664,14 +1672,29 @@
                         <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
                             <h2 className="text-xl font-semibold mb-4">{initialData.id ? 'Редактировать тренинг' : 'Добавить тренинг'}</h2>
                             <div className="space-y-4">
-                                <input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full p-2 border rounded" />
-                                <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} className="w-full p-2 border rounded" />
-                                <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} className="w-full p-2 border rounded" />
-                                <select value={reason} onChange={e => setReason(e.target.value)} className="w-full p-2 border rounded">
-                                    <option value="">Выберите причину</option>
-                                    {reasons.map(r => <option key={r} value={r}>{r}</option>)}
-                                </select>
-                                <textarea value={comment} onChange={e => setComment(e.target.value)} placeholder="Комментарий" className="w-full p-2 border rounded" rows={3} />
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Дата тренинга <span className="text-red-500">*</span></label>
+                                    <input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full p-2 border rounded" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Время начала <span className="text-red-500">*</span></label>
+                                    <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} className="w-full p-2 border rounded" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Время окончания <span className="text-red-500">*</span></label>
+                                    <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} className="w-full p-2 border rounded" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Причина <span className="text-red-500">*</span></label>
+                                    <select value={reason} onChange={e => setReason(e.target.value)} className="w-full p-2 border rounded">
+                                        <option value="">Выберите причину</option>
+                                        {reasons.map(r => <option key={r} value={r}>{r}</option>)}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Комментарий</label>
+                                    <textarea value={comment} onChange={e => setComment(e.target.value)} placeholder="Комментарий к тренингу" className="w-full p-2 border rounded" rows={3} />
+                                </div>
                             </div>
                             <div className="flex justify-end mt-4 space-x-2">
                                 <button onClick={handleSave} className="bg-green-500 text-white p-2 rounded">Сохранить</button>
@@ -1885,11 +1908,15 @@
                             </div>
                         </div>
                         {svGroups
-                            .filter(([svName]) => svName && svName.toLowerCase().includes(search.toLowerCase()) || search === "")
                             .map(([svName, ops]) => {
+                                const searchLower = search.trim().toLowerCase();
                                 // Фильтруем операторов внутри группы
-                                const filteredOps = ops.filter(op => op.name.toLowerCase().includes(search.toLowerCase()) || search === "");
-                                if (filteredOps.length === 0) return null;
+                                const filteredOps = ops.filter(op => op.name.toLowerCase().includes(searchLower) || searchLower === "");
+                                // Группа показывается если:
+                                // - имя супервайзера содержит поисковый текст
+                                // - или хотя бы один оператор содержит поисковый текст
+                                const showGroup = svName && svName.toLowerCase().includes(searchLower) || filteredOps.length > 0 || searchLower === "";
+                                if (!showGroup) return null;
                                 return (
                                     <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
                                         <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Супервайзер: {svName}</h2>
