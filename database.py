@@ -1899,7 +1899,7 @@ class Database:
             """, (operator_id, training_date, start_time, end_time, reason, comment, created_by))
             return cursor.fetchone()[0]
 
-    def get_trainings_for_operator(self, requester_id=None, month=None):
+    def get_trainings(self, requester_id=None, month=None):
         """
         Получить тренинги для оператора/группы/всех, в зависимости от роли requester_id.
         Если operator_id указан — только для него.
