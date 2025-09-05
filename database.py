@@ -1916,8 +1916,6 @@ class Database:
                 res = cursor.fetchone()
                 if res:
                     role = res[0]
-                if role == "sv":
-                    supervisor_id = requester_id
         query = """
             SELECT t.id, t.operator_id, t.training_date, t.start_time, t.end_time, t.reason, t.comment, t.created_at
             FROM trainings t
@@ -1928,10 +1926,7 @@ class Database:
         if month:
             where_clauses.append("TO_CHAR(t.training_date, 'YYYY-MM') = %s")
             params.append(month)
-        if role == "sv":
-            where_clauses.append("u.supervisor_id = %s")
-            params.append(supervisor_id)
-        elif role == "operator":
+        if role == "operator":
             where_clauses.append("t.operator_id = %s")
             params.append(requester_id)
         # Для admin — без ограничений, кроме month
