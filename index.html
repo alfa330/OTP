@@ -2010,9 +2010,10 @@
                                 const filteredOps = ops.filter(op => op.name.toLowerCase().includes(searchLower) || searchLower === "");
                                 const showGroup = svName && svName.toLowerCase().includes(searchLower) || filteredOps.length > 0 || searchLower === "";
                                 if (!showGroup) return null;
+                                if (user.role !== 'admin' && svName !== user.name) return null;
                                 return (
                                     <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
-                                        <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Супервайзер: {svName}</h2>
+                                        <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Супервайзер: {svName === user.name ? 'Вы' : svName}</h2>
                                         <div className="space-y-4">
                                             {filteredOps.map(op => (
                                                 <div key={op.id} className="flex items-center bg-white rounded-lg shadow p-2 mb-2 border border-gray-200">
