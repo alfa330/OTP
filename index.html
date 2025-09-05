@@ -1977,7 +1977,6 @@
                                 const daysInMonth = new Date(year, monthNum, 0).getDate();
                                 const daysArr = Array.from({ length: daysInMonth }, (_, i) => i + 1);
                                 const monthLabel = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"][monthNum-1];
-                                if (user.role !== 'admin' && svName !== user.name) return null;
                                 return (
                                     <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
                                         <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Супервайзер: {svName}</h2>
@@ -2012,7 +2011,6 @@
                                 const filteredOps = ops.filter(op => op.name.toLowerCase().includes(searchLower) || searchLower === "");
                                 const showGroup = svName && svName.toLowerCase().includes(searchLower) || filteredOps.length > 0 || searchLower === "";
                                 if (!showGroup) return null;
-                                if (user.role !== 'admin' && svName !== user.name) return null;
                                 return (
                                     <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
                                         <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Супервайзер: {svName === user.name ? 'Вы' : svName}</h2>

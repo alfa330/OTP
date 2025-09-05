@@ -1905,8 +1905,8 @@ def update_training(training_id):
             if not training:
                 logging.warning(f"Training not found: {training_id}")
                 return jsonify({"error": "Training not found"}), 404
-            
-            if requester[3] != 'admin' and training[0] != requester_id:
+
+            if requester[3] != 'admin' and requester[3] != 'sv':
                 logging.warning(f"Unauthorized attempt to update training {training_id} by user {requester_id}")
                 return jsonify({"error": "Unauthorized"}), 403
 
@@ -1978,7 +1978,7 @@ def delete_training(training_id):
                 logging.warning(f"Training not found: {training_id}")
                 return jsonify({"error": "Training not found"}), 404
             
-            if requester[3] != 'admin' and training[0] != requester_id:
+            if requester[3] != 'admin' and requester[3] != 'sv':
                 logging.warning(f"Unauthorized attempt to delete training {training_id} by user {requester_id}")
                 return jsonify({"error": "Unauthorized"}), 403
 
