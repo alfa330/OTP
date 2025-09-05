@@ -1711,14 +1711,13 @@
                 const [showModal, setShowModal] = useState(false);
                 const [currentOperator, setCurrentOperator] = useState(null);
                 const [editingTraining, setEditingTraining] = useState(null);
-                // Для календарной модалки
-                const [calendarTrainingModal, setCalendarTrainingModal] = useState({ open: false, training: null, operator: null });
                 // Группировка операторов по SV
                 const [svGroups, setSvGroups] = useState([]);
                 const [search, setSearch] = useState("");
                 const [operatorsLoaded, setOperatorsLoaded] = useState(false);
                 const [calendarView, setCalendarView] = useState(false);
                 const [calendarModal, setCalendarModal] = useState({ open: false, svName: '', date: '', trainings: {} });
+                const [selectedCalendarTraining, setSelectedCalendarTraining] = useState(null);
 
                 useEffect(() => {
                     // Флаг, что операторы загружены (не пустой массив)
@@ -2042,10 +2041,9 @@
                         <TrainingModal isOpen={showModal} onClose={() => setShowModal(false)} onSave={handleSave} initialData={editingTraining || {}} />
                         {/* Модальное окно календаря по группе и дате */}
                         {calendarModal.open && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                                {/* Календарная модалка нормальной ширины */}
-                                <div className="bg-white p-6 rounded-lg shadow-lg max-w-lg w-full relative" onClick={e => e.stopPropagation()}>
-                                    <button onClick={() => setCalendarModal({ open: false, svName: '', date: '', trainings: {} })} className="absolute top-3 right-3 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-start z-50" onClick={() => { setCalendarModal({ open: false, svName: '', date: '', trainings: {} }); setSelectedCalendarTraining(null); }}>
+                                <div className="bg-white p-6 rounded-lg shadow-lg max-w-xl w-full relative mr-4" style={{marginLeft: '40px'}} onClick={e => e.stopPropagation()}>
+                                    <button onClick={() => { setCalendarModal({ open: false, svName: '', date: '', trainings: {} }); setSelectedCalendarTraining(null); }} className="absolute top-3 right-3 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
                                         <i className="fas fa-times fa-lg"></i>
                                     </button>
                                     <h3 className="text-lg font-bold mb-4 text-center">Тренинги группы {calendarModal.svName} за {(() => { const [y,m,d]=calendarModal.date.split('-'); return `${d}.${m}.${y}`; })()}</h3>
@@ -2062,7 +2060,7 @@
                                                     <div className="font-semibold text-blue-700 mb-2">{fio}</div>
                                                     <div className="flex flex-wrap gap-2">
                                                         {list.map(t => (
-                                                            <div key={t.id} className="bg-white border border-gray-300 rounded-lg shadow px-2 py-2 min-w-[140px] max-w-[160px] relative group">
+                                                            <div key={t.id} className="bg-white border border-gray-300 rounded-lg shadow px-2 py-2 min-w-[140px] max-w-[160px] cursor-pointer" onClick={() => { setSelectedCalendarTraining({ ...t, operatorName: fio }); }}>
                                                                 <div className="flex flex-row items-center justify-between w-full mb-1">
                                                                     <span className="border border-blue-400 rounded px-1 py-0.5 text-xs font-medium text-blue-700 bg-blue-50">{(() => { const [sh,sm]=t.start_time.split(':').map(Number); const [eh,em]=t.end_time.split(':').map(Number); let mins=(eh*60+em)-(sh*60+sm); return !isNaN(mins)&&mins>=0?`${mins} мин.`:''; })()}</span>
                                                                     <span className="border border-gray-400 rounded px-1 py-0.5 text-xs font-medium text-gray-700 bg-gray-50">{(() => { const [y,m,d]=t.date.split('-'); return `${d}.${m}.${y}`; })()}</span>
@@ -2073,11 +2071,6 @@
                                                                 {t.comment && (
                                                                     <div className="mt-0.5 text-xs text-gray-500 w-full text-center truncate" style={{maxWidth:'120px'}}>{t.comment.length>50?t.comment.slice(0,50)+'...':t.comment}</div>
                                                                 )}
-                                                                {/* Кнопки редактирования и удаления при наведении */}
-                                                                <div className="absolute top-2 right-2 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                                                    <button onClick={() => setCalendarTrainingModal({ open: true, training: t, operator: fio })} className="bg-blue-500 text-white px-2 py-1 rounded text-xs shadow hover:bg-blue-600">Редактировать</button>
-                                                                    <button onClick={() => handleDelete(t.id)} className="bg-red-500 text-white px-2 py-1 rounded text-xs shadow hover:bg-red-600">Удалить</button>
-                                                                </div>
                                                             </div>
                                                         ))}
                                                     </div>
@@ -2086,20 +2079,40 @@
                                         })()}
                                     </div>
                                 </div>
-                                {/* TrainingModal справа, поверх календарной модалки */}
-                                {calendarTrainingModal.open && (
-                                    <div style={{ position: 'fixed', right: '8%', top: '50%', transform: 'translateY(-50%)', zIndex: 60 }}>
-                                        <TrainingModal
-                                            isOpen={true}
-                                            onClose={() => setCalendarTrainingModal({ open: false, training: null, operator: null })}
-                                            onSave={data => {
-                                                setEditingTraining(calendarTrainingModal.training);
-                                                setCurrentOperator(calendarTrainingModal.training.operator_id);
-                                                handleSave(data);
-                                                setCalendarTrainingModal({ open: false, training: null, operator: null });
-                                            }}
-                                            initialData={calendarTrainingModal.training || {}}
-                                        />
+                                {selectedCalendarTraining && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg max-w-md w-full relative ml-4" style={{marginRight: '40px'}} onClick={e => e.stopPropagation()}>
+                                        <button onClick={() => setSelectedCalendarTraining(null)} className="absolute top-3 right-3 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
+                                            <i className="fas fa-times fa-lg"></i>
+                                        </button>
+                                        <h3 className="text-xl font-semibold mb-4 text-center">Детали тренинга</h3>
+                                        <div className="space-y-4">
+                                            <div className="flex justify-between items-center">
+                                                <div>
+                                                    <label className="block text-sm font-medium text-gray-700 mb-1">Оператор</label>
+                                                    <input type="text" value={selectedCalendarTraining.operatorName || ''} disabled className="w-32 p-2 border rounded bg-gray-100 text-blue-700 font-semibold" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm font-medium text-gray-700 mb-1">Дата</label>
+                                                    <input type="text" value={(() => { const [y,m,d]=selectedCalendarTraining.date.split('-'); return `${d}.${m}.${y}`; })()} disabled className="w-28 p-2 border rounded bg-gray-100 text-gray-500" />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">Причина</label>
+                                                <input type="text" value={selectedCalendarTraining.reason} disabled className="w-full p-2 border rounded bg-gray-100 text-green-700 font-semibold" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">Время начала</label>
+                                                <input type="text" value={selectedCalendarTraining.start_time} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-500" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">Время окончания</label>
+                                                <input type="text" value={selectedCalendarTraining.end_time} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-500" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">Комментарий</label>
+                                                <textarea value={selectedCalendarTraining.comment || ''} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-500" rows={3} />
+                                            </div>
+                                        </div>
                                     </div>
                                 )}
                             </div>
