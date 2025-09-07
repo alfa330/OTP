@@ -1326,43 +1326,67 @@
             );
           };
 
-        const SalaryCalculationResultChat = ({ result }) => {
-          if (!result) return null;
-        
-          const rows = [
-            { label: "Direction", value: "Chat" },
-            { label: "Points", value: result.points },
-            { label: "Premium Coefficient", value: result.premiumCoefficient },
-            { label: "Monthly Hours Norm", value: result.hoursNorm },
-            { label: "Hours Percentage", value: `${result.hoursPercentage}%` },
-            { label: "Base Salary", value: `${result.baseSalary} KZT` },
-            { label: "Premium Part", value: `${result.premiumPart} KZT` },
-            { 
-              label: "Bonuses", 
-              value: `${result.bonuses} KZT ${result.bonusDetails ? `(${result.bonusDetails})` : ""}` 
-            },
-          ];
-        
-          return (
-            <div className="mt-6 p-6 bg-white shadow-md rounded-2xl border border-gray-200">
-              <h3 className="text-2xl font-bold mb-6 text-gray-800">💰 Calculation Result</h3>
-              
-              <div className="divide-y divide-gray-200">
-                {rows.map((row, index) => (
-                  <div key={index} className="flex justify-between py-3">
-                    <span className="text-gray-600 font-medium">{row.label}:</span>
-                    <span className="text-gray-900">{row.value}</span>
+            const SalaryCalculationResultChat = ({ result }) => {
+              if (!result) return null;
+            
+              return (
+                <div className="mt-6 flex justify-center">
+                  <div className="w-full max-w-md bg-white shadow-md rounded-2xl p-6 border border-gray-200">
+                    <h3 className="text-lg font-bold mb-5 text-gray-800 text-center">
+                       Calculation Result
+                    </h3>
+            
+                    <div className="space-y-3 text-sm">
+                      <div className="flex justify-between border-b pb-1">
+                        <span className="text-gray-600 font-medium">Direction:</span>
+                        <span className="text-gray-800">Chat</span>
+                      </div>
+                      <div className="flex justify-between border-b pb-1">
+                        <span className="text-gray-600 font-medium">Points:</span>
+                        <span className="text-gray-800">{result.points}</span>
+                      </div>
+                      <div className="flex justify-between border-b pb-1">
+                        <span className="text-gray-600 font-medium">Premium Coefficient:</span>
+                        <span className="text-gray-800">{result.premiumCoefficient}</span>
+                      </div>
+                      <div className="flex justify-between border-b pb-1">
+                        <span className="text-gray-600 font-medium">Monthly Hours Norm:</span>
+                        <span className="text-gray-800">{result.hoursNorm}</span>
+                      </div>
+                      <div className="flex justify-between border-b pb-1">
+                        <span className="text-gray-600 font-medium">Hours Percentage:</span>
+                        <span className="text-gray-800">{result.hoursPercentage}%</span>
+                      </div>
+                      <div className="flex justify-between border-b pb-1">
+                        <span className="text-gray-600 font-medium">Base Salary:</span>
+                        <span className="text-gray-800">{result.baseSalary} KZT</span>
+                      </div>
+                      <div className="flex justify-between border-b pb-1">
+                        <span className="text-gray-600 font-medium">Premium Part:</span>
+                        <span className="text-gray-800">{result.premiumPart} KZT</span>
+                      </div>
+                      <div className="flex justify-between border-b pb-1">
+                        <span className="text-gray-600 font-medium">Bonuses:</span>
+                        <span className="text-gray-800">
+                          {result.bonuses} KZT{" "}
+                          {result.bonusDetails ? (
+                            <span className="text-gray-500 italic">({result.bonusDetails})</span>
+                          ) : (
+                            ""
+                          )}
+                        </span>
+                      </div>
+                      <div className="flex justify-between pt-2">
+                        <span className="text-gray-700 font-semibold">Total Salary:</span>
+                        <span className="text-green-600 font-bold text-base">
+                          {result.finalSalary} KZT
+                        </span>
+                      </div>
+                    </div>
                   </div>
-                ))}
-        
-                <div className="flex justify-between py-4 text-lg font-semibold">
-                  <span className="text-gray-700">Total Salary:</span>
-                  <span className="text-green-600">{result.finalSalary} KZT</span>
                 </div>
-              </div>
-            </div>
-          );
-        };
+              );
+            };
             
           return (
                 <div>
