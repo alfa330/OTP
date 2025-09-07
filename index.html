@@ -5010,7 +5010,7 @@
                                       </div>
                                     )}
                                         {view === 'salary' && (
-                                            <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                            <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg max-w-md mx-auto">
                                                 <h2 className="text-2xl font-semibold mb-6 text-gray-800">Salary Calculator</h2>
                                                 <div className="flex mb-4">
                                                     <button
@@ -5036,12 +5036,23 @@
                                                     <>
                                                         <div className="grid grid-cols-1 gap-6">
                                                             <div className="form-group">
-                                                                <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
+                                                                                                                                <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                                                                                                                    Employee Experience (months):
+                                                                                                                                    <span className="relative group">
+                                                                                                                                        <span className="w-5 h-5 flex items-center justify-center rounded-full bg-gray-300 text-xs font-bold cursor-pointer">i
+                                                                                                                                            <span className="absolute left-6 top-1/2 -translate-y-1/2 w-56 p-2 text-sm text-white bg-gray-800 rounded-lg shadow-lg opacity-0 pointer-events-none group-hover:opacity-100 transition">
+                                                                                                                                                0-3 мес: 1 балл<br/>4-9 мес: 2 балла<br/>10-15 мес: 3 балла<br/>16+ мес: 4 балла
+                                                                                                                                                {salaryData.experience && (<span className="block mt-2 text-green-400 font-bold">Ваш балл: {salaryData.experience === '0-3' ? 1 : salaryData.experience === '4-9' ? 2 : salaryData.experience === '10-15' ? 3 : salaryData.experience === '16+' ? 4 : 0}</span>)}
+                                                                                                                                            </span>
+                                                                                                                                        </span>
+                                                                                                                                    </span>
+                                                                                                                                </label>
                                                                 <select
                                                                     value={salaryData.experience}
                                                                     onChange={(e) => setSalaryData({ ...salaryData, experience: e.target.value })}
                                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                     disabled={isLoading}
+                                                                    style={{maxWidth: '320px'}}
                                                                 >
                                                                     <option value="">Select Experience</option>
                                                                     <option value="0-3">0-3 months</option>
@@ -5051,59 +5062,113 @@
                                                                 </select>
                                                             </div>
                                                             <div className="form-group">
-                                                                <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
+                                                                                                                                <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                                                                                                                    Quality (%):
+                                                                                                                                    <span className="relative group">
+                                                                                                                                        <span className="w-5 h-5 flex items-center justify-center rounded-full bg-gray-300 text-xs font-bold cursor-pointer">i
+                                                                                                                                            <span className="absolute left-6 top-1/2 -translate-y-1/2 w-56 p-2 text-sm text-white bg-gray-800 rounded-lg shadow-lg opacity-0 pointer-events-none group-hover:opacity-100 transition">
+                                                                                                                                                &gt;=90%: 3 балла<br/>80-89%: 2 балла<br/>70-79%: 1 балл<br/>&lt;70%: 0 баллов
+                                                                                                                                                {salaryData.quality && (<span className="block mt-2 text-green-400 font-bold">Ваш балл: {salaryData.quality >= 90 ? 3 : salaryData.quality >= 80 ? 2 : salaryData.quality >= 70 ? 1 : 0}</span>)}
+                                                                                                                                            </span>
+                                                                                                                                        </span>
+                                                                                                                                    </span>
+                                                                                                                                </label>
                                                                 <input
                                                                     type="number"
                                                                     value={salaryData.quality}
-                                                                    onChange={(e) => setSalaryData({ ...salaryData, quality: e.target.value })}
+                                                                    onChange={(e) => setSalaryData({ ...salaryData, quality: Math.min(100, Math.max(0, e.target.value)) })}
                                                                     min="0"
                                                                     max="100"
                                                                     step="0.01"
                                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                     disabled={isLoading}
+                                                                    style={{maxWidth: '320px'}}
                                                                 />
                                                             </div>
                                                             <div className="form-group">
-                                                                <label className="block mb-2 font-semibold text-gray-700">Calls per Hour:</label>
+                                                                                                                                <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                                                                                                                    Calls per Hour:
+                                                                                                                                    <span className="relative group">
+                                                                                                                                        <span className="w-5 h-5 flex items-center justify-center rounded-full bg-gray-300 text-xs font-bold cursor-pointer">i
+                                                                                                                                            <span className="absolute left-6 top-1/2 -translate-y-1/2 w-56 p-2 text-sm text-white bg-gray-800 rounded-lg shadow-lg opacity-0 pointer-events-none group-hover:opacity-100 transition">
+                                                                                                                                                &gt;=6: 3 балла<br/>5-5.99: 2 балла<br/>4-4.99: 1 балл<br/>&lt;4: 0 баллов
+                                                                                                                                                {salaryData.callsPerHour && (<span className="block mt-2 text-green-400 font-bold">Ваш балл: {salaryData.callsPerHour >= 6 ? 3 : salaryData.callsPerHour >= 5 ? 2 : salaryData.callsPerHour >= 4 ? 1 : 0}</span>)}
+                                                                                                                                            </span>
+                                                                                                                                        </span>
+                                                                                                                                    </span>
+                                                                                                                                </label>
                                                                 <input
                                                                     type="number"
                                                                     value={salaryData.callsPerHour}
-                                                                    onChange={(e) => setSalaryData({ ...salaryData, callsPerHour: e.target.value })}
+                                                                    onChange={(e) => setSalaryData({ ...salaryData, callsPerHour: Math.min(100, Math.max(0, e.target.value)) })}
                                                                     min="0"
                                                                     max="100"
                                                                     step="0.01"
                                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                     disabled={isLoading}
+                                                                    style={{maxWidth: '320px'}}
                                                                 />
                                                             </div>
                                                             <div className="form-group">
-                                                                <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
+                                                                                                                                <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                                                                                                                    Monthly Hours Norm:
+                                                                                                                                    <span className="relative group">
+                                                                                                                                        <span className="w-5 h-5 flex items-center justify-center rounded-full bg-gray-300 text-xs font-bold cursor-pointer">i
+                                                                                                                                            <span className="absolute left-6 top-1/2 -translate-y-1/2 w-56 p-2 text-sm text-white bg-gray-800 rounded-lg shadow-lg opacity-0 pointer-events-none group-hover:opacity-100 transition">
+                                                                                                                                                Макс: 744 часов<br/>Норма: 160-180 часов (обычно)<br/>Балл: 1 за выполнение нормы
+                                                                                                                                                {salaryData.hoursNorm && (<span className="block mt-2 text-green-400 font-bold">Введено: {salaryData.hoursNorm}</span>)}
+                                                                                                                                            </span>
+                                                                                                                                        </span>
+                                                                                                                                    </span>
+                                                                                                                                </label>
                                                                 <input
                                                                     type="number"
                                                                     value={salaryData.hoursNorm}
-                                                                    onChange={(e) => setSalaryData({ ...salaryData, hoursNorm: e.target.value })}
+                                                                    onChange={(e) => setSalaryData({ ...salaryData, hoursNorm: Math.min(744, Math.max(0, e.target.value)) })}
                                                                     min="0"
                                                                     max="744"
                                                                     step="0.01"
                                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                     disabled={isLoading}
+                                                                    style={{maxWidth: '320px'}}
                                                                 />
                                                             </div>
                                                             <div className="form-group">
-                                                                <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
+                                                                                                                                <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                                                                                                                    Total Hours Worked:
+                                                                                                                                    <span className="relative group">
+                                                                                                                                        <span className="w-5 h-5 flex items-center justify-center rounded-full bg-gray-300 text-xs font-bold cursor-pointer">i
+                                                                                                                                            <span className="absolute left-6 top-1/2 -translate-y-1/2 w-56 p-2 text-sm text-white bg-gray-800 rounded-lg shadow-lg opacity-0 pointer-events-none group-hover:opacity-100 transition">
+                                                                                                                                                Макс: 744 часов<br/>Балл: 1 за выполнение нормы
+                                                                                                                                                {salaryData.totalHours && (<span className="block mt-2 text-green-400 font-bold">Введено: {salaryData.totalHours}</span>)}
+                                                                                                                                            </span>
+                                                                                                                                        </span>
+                                                                                                                                    </span>
+                                                                                                                                </label>
                                                                 <input
                                                                     type="number"
                                                                     value={salaryData.totalHours}
-                                                                    onChange={(e) => setSalaryData({ ...salaryData, totalHours: e.target.value })}
+                                                                    onChange={(e) => setSalaryData({ ...salaryData, totalHours: Math.min(744, Math.max(0, e.target.value)) })}
                                                                     min="0"
                                                                     max="744"
                                                                     step="0.01"
                                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                     disabled={isLoading}
+                                                                    style={{maxWidth: '320px'}}
                                                                 />
                                                             </div>
                                                             <div className="form-group">
-                                                                <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
+                                                                                                                                <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                                                                                                                    Bonuses:
+                                                                                                                                    <span className="relative group">
+                                                                                                                                        <span className="w-5 h-5 flex items-center justify-center rounded-full bg-gray-300 text-xs font-bold cursor-pointer">i
+                                                                                                                                            <span className="absolute left-6 top-1/2 -translate-y-1/2 w-56 p-2 text-sm text-white bg-gray-800 rounded-lg shadow-lg opacity-0 pointer-events-none group-hover:opacity-100 transition">
+                                                                                                                                                Тренинг: 6000 KZT<br/>Реферал: 5000 KZT/друг<br/>Съёмка: 5000 KZT/раз
+                                                                                                                                                {(salaryData.bonusTraining || salaryData.bonusRefer || salaryData.bonusFilming) && (<span className="block mt-2 text-green-400 font-bold">Выбрано бонусов: {Number(!!salaryData.bonusTraining) + Number(!!salaryData.bonusRefer) + Number(!!salaryData.bonusFilming)}</span>)}
+                                                                                                                                            </span>
+                                                                                                                                        </span>
+                                                                                                                                    </span>
+                                                                                                                                </label>
                                                                 <div className="space-y-4">
                                                                     <div className="flex items-center gap-4">
                                                                         <input
