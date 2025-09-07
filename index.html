@@ -2346,6 +2346,7 @@
             const [requestMessage, setRequestMessage] = useState('');
             const [isSending, setIsSending] = useState(false);
             const [showModal, setShowModal] = useState(false);
+            const [showLegend, setShowLegend] = useState(false);
 
             const today = new Date();
             const fallbackMonth = `${today.getFullYear()}-${String(
@@ -2438,10 +2439,17 @@
 
             return (
                 <div className="bg-white p-6 rounded-lg shadow-lg">
-                <h2 className="text-2xl font-bold mb-4 text-center">Work Hours Calendar</h2>
-
-                <div className="mb-2 text-center text-sm text-gray-600">
+                <div className="flex items-center justify-center gap-2 mb-2">
+                <div className="text-center text-sm text-gray-600">
                     {`Месяц: ${monthLabel} ${year}`}
+                </div>
+                <button
+                    onClick={() => setShowLegend((prev) => !prev)}
+                    className="w-5 h-5 flex items-center justify-center rounded-full border border-gray-400 text-xs font-bold text-gray-600 hover:bg-gray-100"
+                    title="Показать легенду"
+                >
+                    i
+                </button>
                 </div>
 
                 {/* Сетка календаря */}
@@ -2499,7 +2507,8 @@
                 </div>
 
                 {/* Легенда */}
-                <div className="mt-4 text-sm">
+                {showLegend && (
+                <div className="mt-4 text-sm bg-gray-50 p-3 rounded-lg border border-gray-200 shadow-sm">
                     <p className="flex items-center gap-3 flex-wrap">
                     <span className="inline-flex items-center gap-1">
                         <span className="inline-block w-4 h-4 border-2 border-blue-600 rounded" /> Сегодня
@@ -2516,11 +2525,13 @@
                     <span className="inline-flex items-center gap-1">
                         <span className="inline-block w-4 h-4 bg-green-700 rounded" /> 8+ ч
                     </span>
+                    {/* 🔶 Маркер тренинга */}
                     <span className="inline-flex items-center gap-1">
                         <span className="inline-block w-2 h-2 rounded-full bg-yellow-400" /> Тренинг
                     </span>
                     </p>
                 </div>
+                )}
 
                 {/* Модальное окно для запроса */}
                 {showModal && selectedDay && (
