@@ -2516,45 +2516,92 @@
                     <span className="inline-flex items-center gap-1">
                         <span className="inline-block w-4 h-4 bg-green-700 rounded" /> 8+ ч
                     </span>
+                    <span className="inline-flex items-center gap-1">
+                        <span className="inline-block w-2 h-2 rounded-full bg-yellow-400" /> Тренинг
+                    </span>
                     </p>
                 </div>
 
                 {/* Модальное окно для запроса */}
                 {showModal && selectedDay && (
-                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                        <h3 className="text-xl font-semibold mb-4">
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-lg">
+                    <h3 className="text-xl font-bold mb-4 text-gray-800">
                         Запрос по дню: {selectedDay.day} {monthLabel}
-                        </h3>
-                        <textarea
+                    </h3>
+
+                    {/* Информация о дне */}
+                    <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                        <p className="text-sm text-gray-700">
+                        <span className="font-semibold">Дата:</span> {selectedDay.dateStr}
+                        </p>
+                        <p className="text-sm text-gray-700">
+                        <span className="font-semibold">Выполненные часы:</span> {selectedDay.hours}
+                        </p>
+                    </div>
+
+                    {/* Тренинги на этот день */}
+                    {trainings.filter(t => t.date === selectedDay.dateStr).length > 0 && (
+                        <div className="mb-4">
+                        <h4 className="text-md font-semibold text-gray-800 mb-2">Тренинги</h4>
+                        <div className="space-y-2 max-h-40 overflow-y-auto pr-2">
+                            {trainings
+                            .filter(t => t.date === selectedDay.dateStr)
+                            .map(t => (
+                                <div
+                                key={t.id}
+                                className="p-3 bg-yellow-50 border-l-4 border-yellow-400 rounded-md"
+                                >
+                                <p className="text-sm text-gray-800">
+                                    <span className="font-semibold">Время:</span> {t.start_time} – {t.end_time}
+                                </p>
+                                <p className="text-sm text-gray-800">
+                                    <span className="font-semibold">Причина:</span> {t.reason}
+                                </p>
+                                {t.comment && (
+                                    <p className="text-sm text-gray-600 italic">"{t.comment}"</p>
+                                )}
+                                <p className="text-xs text-gray-500 mt-1">
+                                    Создал: {t.created_by_name} ({t.created_at})
+                                </p>
+                                </div>
+                            ))}
+                        </div>
+                        </div>
+                    )}
+
+                    {/* Поле запроса */}
+                    <textarea
                         value={requestMessage}
                         onChange={(e) => setRequestMessage(e.target.value)}
                         placeholder="Введите текст запроса..."
-                        className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
+                        className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4 text-sm"
                         rows={4}
                         disabled={isSending}
-                        />
-                        <div className="flex justify-end gap-2">
+                    />
+
+                    {/* Кнопки */}
+                    <div className="flex justify-end gap-2">
                         <button
-                            onClick={handleSendRequest}
-                            className={`px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 ${isSending ? 'opacity-50 cursor-not-allowed' : ''}`}
-                            disabled={isSending}
+                        onClick={handleSendRequest}
+                        className={`px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition ${isSending ? "opacity-50 cursor-not-allowed" : ""}`}
+                        disabled={isSending}
                         >
-                            {isSending ? 'Отправка...' : 'Отправить запрос'}
+                        {isSending ? "Отправка..." : "Отправить запрос"}
                         </button>
                         <button
-                            onClick={() => {
+                        onClick={() => {
                             setShowModal(false);
                             setSelectedDay(null);
-                            }}
-                            className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600"
-                            disabled={isSending}
+                        }}
+                        className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition"
+                        disabled={isSending}
                         >
-                            Отмена
+                        Отмена
                         </button>
-                        </div>
                     </div>
                     </div>
+                </div>
                 )}
                 </div>
             );
