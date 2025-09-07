@@ -1995,6 +1995,15 @@
                                 return (
                                     <div className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
                                         <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Календарь тренингов по всем супервайзерам</h2>
+                                        {/* Легенда цветов SV */}
+                                        <div className="flex flex-wrap gap-4 mb-4 items-center">
+                                            {svNames.map(svName => (
+                                                <div key={svName} className="flex items-center gap-2">
+                                                    <span className="inline-block rounded-full" style={{width:'18px',height:'18px',background:getSvColor(svName)}}></span>
+                                                    <span className="text-sm font-medium text-gray-700">{svName === user.name ? 'Вы' : svName}</span>
+                                                </div>
+                                            ))}
+                                        </div>
                                         <div className="grid grid-cols-7 gap-2 mb-4">
                                             {daysArr.map(day => {
                                                 const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
