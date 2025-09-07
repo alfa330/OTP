@@ -1326,56 +1326,44 @@
             );
           };
 
-          const SalaryCalculationResultChat = ({ result }) => {
-            if (!result) return null;
-
-            return (
-              <div className="mt-6 p-6 bg-gray-50 rounded-lg">
-                <h3 className="text-xl font-semibold mb-4">Calculation Result</h3>
-                <div className="space-y-2">
-                  <div className="flex justify-between">
-                    <span className="font-medium">Direction:</span>
-                    <span>Chat</span>
+        const SalaryCalculationResultChat = ({ result }) => {
+          if (!result) return null;
+        
+          const rows = [
+            { label: "Direction", value: "Chat" },
+            { label: "Points", value: result.points },
+            { label: "Premium Coefficient", value: result.premiumCoefficient },
+            { label: "Monthly Hours Norm", value: result.hoursNorm },
+            { label: "Hours Percentage", value: `${result.hoursPercentage}%` },
+            { label: "Base Salary", value: `${result.baseSalary} KZT` },
+            { label: "Premium Part", value: `${result.premiumPart} KZT` },
+            { 
+              label: "Bonuses", 
+              value: `${result.bonuses} KZT ${result.bonusDetails ? `(${result.bonusDetails})` : ""}` 
+            },
+          ];
+        
+          return (
+            <div className="mt-6 p-6 bg-white shadow-md rounded-2xl border border-gray-200">
+              <h3 className="text-2xl font-bold mb-6 text-gray-800">💰 Calculation Result</h3>
+              
+              <div className="divide-y divide-gray-200">
+                {rows.map((row, index) => (
+                  <div key={index} className="flex justify-between py-3">
+                    <span className="text-gray-600 font-medium">{row.label}:</span>
+                    <span className="text-gray-900">{row.value}</span>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">Points:</span>
-                    <span>{result.points}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">Premium Coefficient:</span>
-                    <span>{result.premiumCoefficient}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">Monthly Hours Norm:</span>
-                    <span>{result.hoursNorm}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">Hours Percentage:</span>
-                    <span>{result.hoursPercentage}%</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">Base Salary:</span>
-                    <span>{result.baseSalary} KZT</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">Premium Part:</span>
-                    <span>{result.premiumPart} KZT</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">Bonuses:</span>
-                    <span>{result.bonuses} KZT {result.bonusDetails ? `(${result.bonusDetails})` : ''}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-medium">Total Salary:</span>
-                    <span className="text-green-600 font-semibold">
-                      {result.finalSalary} KZT
-                    </span>
-                  </div>
+                ))}
+        
+                <div className="flex justify-between py-4 text-lg font-semibold">
+                  <span className="text-gray-700">Total Salary:</span>
+                  <span className="text-green-600">{result.finalSalary} KZT</span>
                 </div>
               </div>
-            );
-          };
-
+            </div>
+          );
+        };
+            
           return (
                 <div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
