@@ -1376,10 +1376,13 @@
           };
 
           return (
-        <div>
-          <div className="grid grid-cols-1 gap-6">
-            <div>
-              <label className="block mb-2 font-semibold text-gray-700">Employee Experience (months):</label>
+                <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                            <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                <i className="fas fa-user-clock text-blue-500"></i>
+                                Employee Experience (months):
+                            </label>
               <select
                 value={experience}
                 onChange={(e) => setExperience(e.target.value)}
@@ -1394,8 +1397,11 @@
                 <option value="18+">≥18 months</option>
               </select>
             </div>
-            <div>
-              <label className="block mb-2 font-semibold text-gray-700">Quality (%):</label>
+                        <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                            <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                <i className="fas fa-star text-yellow-500"></i>
+                                Quality (%):
+                            </label>
               <input
                 type="number"
                 value={quality}
@@ -1406,8 +1412,11 @@
                 className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
-            <div>
-              <label className="block mb-2 font-semibold text-gray-700">Average Score per Chat:</label>
+                        <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                            <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                <i className="fas fa-chart-line text-green-500"></i>
+                                Average Score per Chat:
+                            </label>
               <input
                 type="number"
                 value={avgScore}
@@ -1418,8 +1427,11 @@
                 className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
-            <div>
-              <label className="block mb-2 font-semibold text-gray-700">Average Response Time (minutes):</label>
+                        <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                            <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                <i className="fas fa-clock text-purple-500"></i>
+                                Average Response Time (minutes):
+                            </label>
               <input
                 type="number"
                 value={responseTime}
@@ -1430,8 +1442,11 @@
                 className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
-            <div>
-              <label className="block mb-2 font-semibold text-gray-700">Chats per Hour:</label>
+                        <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                            <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                <i className="fas fa-comments text-blue-500"></i>
+                                Chats per Hour:
+                            </label>
               <input
                 type="number"
                 value={chatsPerHour}
@@ -1442,8 +1457,11 @@
                 className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
-            <div>
-              <label className="block mb-2 font-semibold text-gray-700">Monthly Hours Norm:</label>
+                        <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                            <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                <i className="fas fa-bullseye text-indigo-500"></i>
+                                Monthly Hours Norm:
+                            </label>
               <input
                 type="number"
                 value={hoursNorm}
@@ -1454,8 +1472,11 @@
                 className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
-            <div>
-              <label className="block mb-2 font-semibold text-gray-700">Total Hours Worked:</label>
+                        <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                            <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                <i className="fas fa-briefcase text-pink-500"></i>
+                                Total Hours Worked:
+                            </label>
               <input
                 type="number"
                 value={totalHours}
@@ -1466,94 +1487,99 @@
                 className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
-            <div>
-              <label className="block mb-2 font-semibold text-gray-700">Bonuses:</label>
-              <div className="space-y-4">
-                <div className="flex items-center gap-4">
-                  <input
-                    type="checkbox"
-                    checked={bonusTraining}
-                    onChange={(e) => setBonusTraining(e.target.checked)}
-                    className="w-5 h-5"
-                  />
-                  <label className="text-sm">Training (6000 KZT)</label>
-                </div>
-                <div className="flex items-center gap-4">
-                  <input
-                    type="checkbox"
-                    checked={bonusRefer}
-                    onChange={(e) => setBonusRefer(e.target.checked)}
-                    className="w-5 h-5"
-                  />
-                  <label className="text-sm">Refer a Friend (5000 KZT per friend)</label>
-                  {bonusRefer && (
-                    <input
-                      type="number"
-                      value={bonusReferQuantity}
-                      onChange={(e) => setBonusReferQuantity(e.target.value)}
-                      min="1"
-                      step="1"
-                      placeholder="Quantity"
-                      className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                  )}
-                </div>
-                <div className="flex items-center gap-4">
-                  <input
-                    type="checkbox"
-                    checked={bonusFilming}
-                    onChange={(e) => setBonusFilming(e.target.checked)}
-                    className="w-5 h-5"
-                  />
-                  <label className="text-sm">Filming (5000 KZT per session)</label>
-                  {bonusFilming && (
-                    <input
-                      type="number"
-                      value={bonusFilmingQuantity}
-                      onChange={(e) => setBonusFilmingQuantity(e.target.value)}
-                      min="1"
-                      step="1"
-                      placeholder="Quantity"
-                      className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                  )}
-                </div>
+                        <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
+                            <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
+                                <i className="fas fa-gift text-red-500"></i>
+                                Bonuses:
+                            </label>
+                            <div className="space-y-4 mt-2">
+                                <div className="flex items-center gap-4">
+                                    <input
+                                        type="checkbox"
+                                        checked={bonusTraining}
+                                        onChange={(e) => setBonusTraining(e.target.checked)}
+                                        className="w-5 h-5"
+                                    />
+                                    <label className="text-sm font-medium text-blue-700">Training (6000 KZT)</label>
+                                </div>
+                                <div className="flex items-center gap-4">
+                                    <input
+                                        type="checkbox"
+                                        checked={bonusRefer}
+                                        onChange={(e) => setBonusRefer(e.target.checked)}
+                                        className="w-5 h-5"
+                                    />
+                                    <label className="text-sm font-medium text-green-700">Refer a Friend (5000 KZT per friend)</label>
+                                    {bonusRefer && (
+                                        <input
+                                            type="number"
+                                            value={bonusReferQuantity}
+                                            onChange={(e) => setBonusReferQuantity(e.target.value)}
+                                            min="1"
+                                            step="1"
+                                            placeholder="Quantity"
+                                            className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    )}
+                                </div>
+                                <div className="flex items-center gap-4">
+                                    <input
+                                        type="checkbox"
+                                        checked={bonusFilming}
+                                        onChange={(e) => setBonusFilming(e.target.checked)}
+                                        className="w-5 h-5"
+                                    />
+                                    <label className="text-sm font-medium text-purple-700">Filming (5000 KZT per session)</label>
+                                    {bonusFilming && (
+                                        <input
+                                            type="number"
+                                            value={bonusFilmingQuantity}
+                                            onChange={(e) => setBonusFilmingQuantity(e.target.value)}
+                                            min="1"
+                                            step="1"
+                                            placeholder="Quantity"
+                                            className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    )}
+                                </div>
               </div>
             </div>
           </div>
-          <div className="flex justify-center gap-4 mt-6">
-            <button
-              onClick={calculateSalary}
-              className={`px-6 py-3 rounded-lg font-semibold text-lg bg-green-500 text-white hover:bg-green-600 transition-all duration-200 ${
-                !validateForm() ? 'opacity-50 cursor-not-allowed' : ''
-              }`}
-              disabled={!validateForm()}
-            >
-              Calculate
-            </button>
-            <button
-              onClick={togglePointsTable}
-              className={`px-6 py-3 rounded-lg font-semibold text-lg bg-purple-500 text-white hover:bg-purple-600 transition-all duration-200 ${
-                !result ? 'opacity-50 cursor-not-allowed' : ''
-              }`}
-              disabled={!result}
-            >
-              {showTable ? 'Hide Points Table' : 'Show Points Table'}
-            </button>
-            <button
-              onClick={clearForm}
-              className={`px-6 py-3 rounded-lg font-semibold text-lg bg-red-500 text-white hover:bg-red-600 transition-all duration-200 ${
-                !hasInput() ? 'opacity-50 cursor-not-allowed' : ''
-              }`}
-              disabled={!hasInput()}
-            >
-              Clear
-            </button>
-          </div>
-          <SalaryCalculationResultChat result={result} />
-          <div className={`mt-6 ${showTable ? '' : 'hidden'}`}>
-            {result && generatePointsTable(result.tableData)}
-          </div>
+                    <div className="flex justify-center gap-4 mt-8">
+                        <button
+                            onClick={calculateSalary}
+                            className={`px-8 py-4 rounded-xl font-bold text-lg bg-green-500 text-white hover:bg-green-600 shadow transition-all duration-200 ${
+                                !validateForm() ? 'opacity-50 cursor-not-allowed' : ''
+                            }`}
+                            disabled={!validateForm()}
+                        >
+                            <i className="fas fa-calculator mr-2"></i> Calculate
+                        </button>
+                        <button
+                            onClick={togglePointsTable}
+                            className={`px-8 py-4 rounded-xl font-bold text-lg bg-purple-500 text-white hover:bg-purple-600 shadow transition-all duration-200 ${
+                                !result ? 'opacity-50 cursor-not-allowed' : ''
+                            }`}
+                            disabled={!result}
+                        >
+                            <i className="fas fa-table mr-2"></i> {showTable ? 'Hide Points Table' : 'Show Points Table'}
+                        </button>
+                        <button
+                            onClick={clearForm}
+                            className={`px-8 py-4 rounded-xl font-bold text-lg bg-red-500 text-white hover:bg-red-600 shadow transition-all duration-200 ${
+                                !hasInput() ? 'opacity-50 cursor-not-allowed' : ''
+                            }`}
+                            disabled={!hasInput()}
+                        >
+                            <i className="fas fa-eraser mr-2"></i> Clear
+                        </button>
+                    </div>
+                    <div className="mt-8">
+                        <SalaryCalculationResultChat result={result} />
+                    </div>
+                    <div className={`mt-8 ${showTable ? '' : 'hidden'}`}> 
+                        {result && generatePointsTable(result.tableData)}
+                    </div>
                 </div>
             );
         };
@@ -2857,46 +2883,48 @@
             if (!salaryResult) return null;
 
             return (
-                <div className="mt-8 p-8 bg-white rounded-xl shadow-lg border border-gray-200 max-w-xl mx-auto">
-                    <h3 className="text-2xl font-bold mb-6 text-blue-700 text-center">Salary Calculation Result</h3>
-                    <div className="divide-y divide-gray-200">
-                        <div className="flex justify-between py-3">
-                            <span className="text-gray-600 font-medium">Direction</span>
-                            <span className="font-semibold text-gray-900">Operator</span>
-                        </div>
-                        <div className="flex justify-between py-3 bg-blue-50 rounded">
-                            <span className="text-gray-600 font-medium">Points</span>
-                            <span className="font-bold text-blue-700">{salaryResult.points}</span>
-                        </div>
-                        <div className="flex justify-between py-3">
-                            <span className="text-gray-600 font-medium">Premium Coefficient</span>
-                            <span className="font-semibold text-gray-900">{salaryResult.premiumCoefficient}</span>
-                        </div>
-                        <div className="flex justify-between py-3">
-                            <span className="text-gray-600 font-medium">Monthly Hours Norm</span>
-                            <span className="font-semibold text-gray-900">{salaryResult.hoursNorm.toFixed(2)}</span>
-                        </div>
-                        <div className="flex justify-between py-3">
-                            <span className="text-gray-600 font-medium">Hours Percentage</span>
-                            <span className="font-semibold text-gray-900">{salaryResult.hoursPercentage.toFixed(2)}%</span>
-                        </div>
-                        <div className="flex justify-between py-3">
-                            <span className="text-gray-600 font-medium">Base Salary</span>
-                            <span className="font-semibold text-gray-900">{salaryResult.baseSalary.toFixed(2)} KZT</span>
-                        </div>
-                        <div className="flex justify-between py-3 bg-blue-50 rounded">
-                            <span className="text-gray-600 font-medium">Premium Part</span>
-                            <span className="font-bold text-blue-700">{salaryResult.premiumPart.toFixed(2)} KZT</span>
-                        </div>
-                        <div className="flex justify-between py-3">
-                            <span className="text-gray-600 font-medium">Bonuses</span>
-                            <span className="font-semibold text-gray-900">{salaryResult.bonuses} KZT</span>
-                        </div>
-                        <div className="flex justify-between py-4">
-                            <span className="text-lg font-bold text-gray-800">Total Salary</span>
-                            <span className="text-2xl font-bold text-green-600">{salaryResult.finalSalary.toFixed(2)} KZT</span>
-                        </div>
+                <div className="mt-6 p-6 bg-gray-50 rounded-lg">
+                <h3 className="text-xl font-semibold mb-4">Calculation Result</h3>
+                <div className="space-y-2">
+                    <div className="flex justify-between">
+                    <span className="font-medium">Direction:</span>
+                    <span>Operator</span>
                     </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Points:</span>
+                    <span>{salaryResult.points}</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Premium Coefficient:</span>
+                    <span>{salaryResult.premiumCoefficient}</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Monthly Hours Norm:</span>
+                    <span>{salaryResult.hoursNorm.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Hours Percentage:</span>
+                    <span>{salaryResult.hoursPercentage.toFixed(2)}%</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Base Salary:</span>
+                    <span>{salaryResult.baseSalary.toFixed(2)} KZT</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Premium Part:</span>
+                    <span>{salaryResult.premiumPart.toFixed(2)} KZT</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Bonuses:</span>
+                    <span>{salaryResult.bonuses} KZT</span>
+                    </div>
+                    <div className="flex justify-between">
+                    <span className="font-medium">Total Salary:</span>
+                    <span className="text-green-600 font-semibold">
+                        {salaryResult.finalSalary.toFixed(2)} KZT
+                    </span>
+                    </div>
+                </div>
                 </div>
             );
             };
