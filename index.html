@@ -1716,8 +1716,16 @@
                 const [search, setSearch] = useState("");
                 const [operatorsLoaded, setOperatorsLoaded] = useState(false);
                 const [calendarView, setCalendarView] = useState(false);
-                const [calendarModal, setCalendarModal] = useState({ open: false, svName: '', date: '', trainings: {} });
+                const [calendarModal, setCalendarModal] = useState({ open: false, date: '', trainings: [] });
                 const [selectedCalendarTraining, setSelectedCalendarTraining] = useState(null);
+                // Цвета для SV
+                const svColors = ["#3b82f6", "#10b981", "#f59e42", "#ef4444", "#a78bfa", "#f472b6", "#22d3ee", "#facc15", "#64748b", "#14b8a6"];
+                function getSvColor(svName) {
+                    // Детерминированно по имени SV
+                    let hash = 0;
+                    for (let i = 0; i < svName.length; i++) hash = svName.charCodeAt(i) + ((hash << 5) - hash);
+                    return svColors[Math.abs(hash) % svColors.length];
+                }
 
                 useEffect(() => {
                     // Флаг, что операторы загружены (не пустой массив)
@@ -1959,17 +1967,22 @@
                             </button>
                         </div>
                         {calendarView ? (
-                            svGroups.map(([svName, ops]) => {
+                            (() => {
+                                // Общий календарь по всем SV
                                 const searchLower = search.trim().toLowerCase();
-                                const filteredOps = ops.filter(op => op.name.toLowerCase().includes(searchLower) || searchLower === "");
-                                const showGroup = svName && svName.toLowerCase().includes(searchLower) || filteredOps.length > 0 || searchLower === "";
-                                if (!showGroup) return null;
-                                // Собираем тренинги по датам для группы
-                                const groupTrainings = {};
-                                filteredOps.forEach(op => {
-                                    (trainings[op.id] || []).forEach(t => {
-                                        if (!groupTrainings[t.date]) groupTrainings[t.date] = [];
-                                        groupTrainings[t.date].push({ ...t, operator: op.name });
+                                // Собираем SV по id
+                                const svById = {};
+                                operators.forEach(op => {
+                                    svById[op.id] = op.supervisor_name;
+                                });
+                                // Собираем тренинги по датам и SV
+                                const calendarData = {}; // {date: {svName: [trainings]}}
+                                Object.entries(trainings).forEach(([opId, list]) => {
+                                    const svName = svById[opId] || "";
+                                    list.forEach(t => {
+                                        if (!calendarData[t.date]) calendarData[t.date] = {};
+                                        if (!calendarData[t.date][svName]) calendarData[t.date][svName] = [];
+                                        calendarData[t.date][svName].push({ ...t, operator: operators.find(o => o.id == opId)?.name || "" });
                                     });
                                 });
                                 // Календарь месяца
@@ -1977,24 +1990,28 @@
                                 const daysInMonth = new Date(year, monthNum, 0).getDate();
                                 const daysArr = Array.from({ length: daysInMonth }, (_, i) => i + 1);
                                 const monthLabel = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"][monthNum-1];
+                                // Собираем все SV, которые есть в этом месяце
+                                const svNames = Array.from(new Set(operators.map(op => op.supervisor_name)));
                                 return (
-                                    <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
-                                        <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Супервайзер: {svName}</h2>
+                                    <div className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
+                                        <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Календарь тренингов по всем супервайзерам</h2>
                                         <div className="grid grid-cols-7 gap-2 mb-4">
                                             {daysArr.map(day => {
                                                 const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-                                                const trainingsCount = groupTrainings[dateStr]?.length || 0;
+                                                const svTrainings = calendarData[dateStr] || {};
+                                                const totalCount = Object.values(svTrainings).reduce((acc, arr) => acc + arr.length, 0);
                                                 return (
-                                                    <div key={dateStr} className={`bg-white rounded-lg shadow flex flex-col items-center justify-between p-1 cursor-pointer border ${trainingsCount ? 'border-blue-500' : 'border-gray-200'} hover:ring-2 hover:ring-blue-300 min-h-[60px]`} onClick={() => {
-                                                        if (trainingsCount) setCalendarModal({ open: true, svName, date: dateStr, trainings: groupTrainings });
+                                                    <div key={dateStr} className={`bg-white rounded-lg shadow flex flex-col items-center justify-between p-1 cursor-pointer border ${totalCount ? 'border-blue-500' : 'border-gray-200'} hover:ring-2 hover:ring-blue-300 min-h-[60px]`} onClick={() => {
+                                                        if (totalCount) setCalendarModal({ open: true, date: dateStr, trainings: svTrainings });
                                                     }}>
-                                                        {/* Количество тренингов сверху, круг */}
-                                                        <div className="flex justify-center items-center w-full mt-1 mb-1" style={{height:'22px'}}>
-                                                            {trainingsCount > 0 ? (
-                                                                <span className="inline-flex items-center justify-center rounded-full bg-blue-500 text-white text-xs font-bold" style={{width:'22px',height:'22px'}}>{trainingsCount}</span>
-                                                            ) : (
-                                                                <span style={{width:'22px',height:'22px'}}></span>
-                                                            )}
+                                                        {/* Цветные счетчики по SV */}
+                                                        <div className="flex flex-row flex-wrap justify-center items-center w-full mt-1 mb-1 gap-1" style={{minHeight:'22px'}}>
+                                                            {svNames.map(svName => {
+                                                                const count = svTrainings[svName]?.length || 0;
+                                                                return count > 0 ? (
+                                                                    <span key={svName} title={svName} className="inline-flex items-center justify-center rounded-full text-white text-xs font-bold" style={{width:'22px',height:'22px',background:getSvColor(svName)}}>{count}</span>
+                                                                ) : null;
+                                                            })}
                                                         </div>
                                                         {/* День-месяц снизу */}
                                                         <span className="text-xs font-bold text-gray-700 mb-1">{day}-{monthLabel}</span>
@@ -2004,7 +2021,7 @@
                                         </div>
                                     </div>
                                 );
-                            })
+                            })()
                         ) : (
                             svGroups.map(([svName, ops]) => {
                                 const searchLower = search.trim().toLowerCase();
@@ -2037,28 +2054,23 @@
                             })
                         )}
                         <TrainingModal isOpen={showModal} onClose={() => setShowModal(false)} onSave={handleSave} initialData={editingTraining || {}} />
-                        {/* Модальное окно календаря по группе и дате */}
+                        {/* Модальное окно календаря по дню (общий) */}
                         {calendarModal.open && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-start z-50" onClick={() => { setCalendarModal({ open: false, svName: '', date: '', trainings: {} }); setSelectedCalendarTraining(null); }}>
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-start z-50" onClick={() => { setCalendarModal({ open: false, date: '', trainings: [] }); setSelectedCalendarTraining(null); }}>
                                 <div className="bg-white p-6 rounded-lg shadow-lg max-w-xl w-full relative mr-4" style={{marginLeft: '40px'}} onClick={e => e.stopPropagation()}>
-                                    <button onClick={() => { setCalendarModal({ open: false, svName: '', date: '', trainings: {} }); setSelectedCalendarTraining(null); }} className="absolute top-3 right-3 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
+                                    <button onClick={() => { setCalendarModal({ open: false, date: '', trainings: [] }); setSelectedCalendarTraining(null); }} className="absolute top-3 right-3 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
                                         <i className="fas fa-times fa-lg"></i>
                                     </button>
-                                    <h3 className="text-lg font-bold mb-4 text-center">Тренинги группы {calendarModal.svName} за {(() => { const [y,m,d]=calendarModal.date.split('-'); return `${d}.${m}.${y}`; })()}</h3>
+                                    <h3 className="text-lg font-bold mb-4 text-center">Тренинги за {(() => { const [y,m,d]=calendarModal.date.split('-'); return `${d}.${m}.${y}`; })()}</h3>
                                     <div className="space-y-4">
                                         {(() => {
-                                            // Собрать тренинги по операторам
-                                            const byOperator = {};
-                                            (calendarModal.trainings[calendarModal.date] || []).forEach(t => {
-                                                if (!byOperator[t.operator]) byOperator[t.operator] = [];
-                                                byOperator[t.operator].push(t);
-                                            });
-                                            return Object.entries(byOperator).map(([fio, list]) => (
-                                                <div key={fio}>
-                                                    <div className="font-semibold text-blue-700 mb-2">{fio}</div>
+                                            // calendarModal.trainings: {svName: [trainings]}
+                                            return Object.entries(calendarModal.trainings).map(([svName, list]) => (
+                                                <div key={svName}>
+                                                    <div className="font-semibold mb-2" style={{color:getSvColor(svName)}}>{svName}</div>
                                                     <div className="flex flex-wrap gap-2">
                                                         {list.map(t => (
-                                                            <div key={t.id} className="bg-white border border-gray-300 rounded-lg shadow px-2 py-2 min-w-[140px] max-w-[160px] cursor-pointer" onClick={() => { setSelectedCalendarTraining({ ...t, operatorName: fio }); }}>
+                                                            <div key={t.id} className="bg-white border border-gray-300 rounded-lg shadow px-2 py-2 min-w-[140px] max-w-[160px] cursor-pointer" onClick={() => { setSelectedCalendarTraining({ ...t, operatorName: t.operator }); }}>
                                                                 <div className="flex flex-row items-center justify-between w-full mb-1">
                                                                     <span className="border border-blue-400 rounded px-1 py-0.5 text-xs font-medium text-blue-700 bg-blue-50">{(() => { const [sh,sm]=t.start_time.split(':').map(Number); const [eh,em]=t.end_time.split(':').map(Number); let mins=(eh*60+em)-(sh*60+sm); return !isNaN(mins)&&mins>=0?`${mins} мин.`:''; })()}</span>
                                                                     <span className="border border-gray-400 rounded px-1 py-0.5 text-xs font-medium text-gray-700 bg-gray-50">{(() => { const [y,m,d]=t.date.split('-'); return `${d}.${m}.${y}`; })()}</span>
