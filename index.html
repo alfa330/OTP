@@ -2857,48 +2857,46 @@
             if (!salaryResult) return null;
 
             return (
-                <div className="mt-6 p-6 bg-gray-50 rounded-lg">
-                <h3 className="text-xl font-semibold mb-4">Calculation Result</h3>
-                <div className="space-y-2">
-                    <div className="flex justify-between">
-                    <span className="font-medium">Direction:</span>
-                    <span>Operator</span>
+                <div className="mt-8 p-8 bg-white rounded-xl shadow-lg border border-gray-200 max-w-xl mx-auto">
+                    <h3 className="text-2xl font-bold mb-6 text-blue-700 text-center">Salary Calculation Result</h3>
+                    <div className="divide-y divide-gray-200">
+                        <div className="flex justify-between py-3">
+                            <span className="text-gray-600 font-medium">Direction</span>
+                            <span className="font-semibold text-gray-900">Operator</span>
+                        </div>
+                        <div className="flex justify-between py-3 bg-blue-50 rounded">
+                            <span className="text-gray-600 font-medium">Points</span>
+                            <span className="font-bold text-blue-700">{salaryResult.points}</span>
+                        </div>
+                        <div className="flex justify-between py-3">
+                            <span className="text-gray-600 font-medium">Premium Coefficient</span>
+                            <span className="font-semibold text-gray-900">{salaryResult.premiumCoefficient}</span>
+                        </div>
+                        <div className="flex justify-between py-3">
+                            <span className="text-gray-600 font-medium">Monthly Hours Norm</span>
+                            <span className="font-semibold text-gray-900">{salaryResult.hoursNorm.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between py-3">
+                            <span className="text-gray-600 font-medium">Hours Percentage</span>
+                            <span className="font-semibold text-gray-900">{salaryResult.hoursPercentage.toFixed(2)}%</span>
+                        </div>
+                        <div className="flex justify-between py-3">
+                            <span className="text-gray-600 font-medium">Base Salary</span>
+                            <span className="font-semibold text-gray-900">{salaryResult.baseSalary.toFixed(2)} KZT</span>
+                        </div>
+                        <div className="flex justify-between py-3 bg-blue-50 rounded">
+                            <span className="text-gray-600 font-medium">Premium Part</span>
+                            <span className="font-bold text-blue-700">{salaryResult.premiumPart.toFixed(2)} KZT</span>
+                        </div>
+                        <div className="flex justify-between py-3">
+                            <span className="text-gray-600 font-medium">Bonuses</span>
+                            <span className="font-semibold text-gray-900">{salaryResult.bonuses} KZT</span>
+                        </div>
+                        <div className="flex justify-between py-4">
+                            <span className="text-lg font-bold text-gray-800">Total Salary</span>
+                            <span className="text-2xl font-bold text-green-600">{salaryResult.finalSalary.toFixed(2)} KZT</span>
+                        </div>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Points:</span>
-                    <span>{salaryResult.points}</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Premium Coefficient:</span>
-                    <span>{salaryResult.premiumCoefficient}</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Monthly Hours Norm:</span>
-                    <span>{salaryResult.hoursNorm.toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Hours Percentage:</span>
-                    <span>{salaryResult.hoursPercentage.toFixed(2)}%</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Base Salary:</span>
-                    <span>{salaryResult.baseSalary.toFixed(2)} KZT</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Premium Part:</span>
-                    <span>{salaryResult.premiumPart.toFixed(2)} KZT</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Bonuses:</span>
-                    <span>{salaryResult.bonuses} KZT</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Total Salary:</span>
-                    <span className="text-green-600 font-semibold">
-                        {salaryResult.finalSalary.toFixed(2)} KZT
-                    </span>
-                    </div>
-                </div>
                 </div>
             );
             };
