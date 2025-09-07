@@ -1673,6 +1673,7 @@
             const [showCallsPreview, setShowCallsPreview] = useState(false);
             const [errorMessage, setErrorMessage] = useState('');
             const [converterData, setConverterData] = useState({amount: "", kpi: ""});
+            const [operatorTrainings, setOperatorTrainings] = useState([]);
 
             const TrainingModal = ({ isOpen, onClose, onSave, initialData = {} }) => {
                 const [date, setDate] = useState(initialData.date || '');
@@ -2340,7 +2341,7 @@
             return "bg-green-700 text-white";
             };
 
-            const WorkHoursCalendar = ({ hoursData, selectedMonth, user }) => {
+            const WorkHoursCalendar = ({ hoursData, selectedMonth, user, trainings = [] }) => {
             const [selectedDay, setSelectedDay] = useState(null);
             const [requestMessage, setRequestMessage] = useState('');
             const [isSending, setIsSending] = useState(false);
@@ -3486,6 +3487,23 @@
                 }
             };
 
+            const fetchTrainings = async () =>{
+                try{
+                    const response = await axios.get(`${API_BASE_URL}/api/trainings?month=${selectedMonth}`,{
+                        headers: {'X-API-Key': user.apiKey, 
+                                  'X-User-Id': user.id}
+                    });  
+                    const data = response.data;
+                    if (data.status === 'success' ){
+                        setOperatorTrainings(data.trainings);
+                    } 
+                }
+                catch (err) {
+                    console.error('Fetch training data error:',err);
+                    showToast('Fetch training data error','error');
+                }
+            };
+
             const fetchHoursData = async () => {
                 setIsLoading(true);
                 
@@ -3742,6 +3760,7 @@
                         fetchProfileData();
                         fetchHoursData();
                         fetchOperatorData();
+                        fetchTrainings();
                     }
                 }
             }, [user, selectedMonth]);
@@ -4886,7 +4905,7 @@
                                     
                                             {/* Правая часть – календарь */}
                                             <div className="col-span-1">
-                                              <WorkHoursCalendar hoursData={hoursData} selectedMonth={selectedMonth} user={user} />
+                                              <WorkHoursCalendar hoursData={hoursData} selectedMonth={selectedMonth} user={user} trainings={operatorTrainings}/>
                                             </div>
                                           </div>
                                         ) : (
