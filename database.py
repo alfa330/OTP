@@ -1901,15 +1901,14 @@ class Database:
 
     def get_trainings(self, requester_id=None, month=None):
         """
-        Получить тренинги для оператора/группы/всех, в зависимости от роли requester_id.
+        Получить тренинги для оператора/всех, в зависимости от роли requester_id.
         Если operator_id указан — только для него.
         Если requester_id — определяет роль и фильтрует:
-            - sv: все тренинги операторов его группы
-            - admin: все тренинги
+            - admin, sv: все тренинги (с фильтром по month, если указан)
+            - operator: только свои тренинги (с фильтром по month, если указан)
         """
         # Получаем роль requester_id
         role = None
-        supervisor_id = None
         if requester_id:
             with self._get_cursor() as cursor:
                 cursor.execute("SELECT role FROM users WHERE id = %s", (requester_id,))
@@ -1917,7 +1916,7 @@ class Database:
                 if res:
                     role = res[0]
         query = """
-            SELECT t.id, t.operator_id, t.training_date, t.start_time, t.end_time, t.reason, t.comment, t.created_at
+            SELECT t.id, t.operator_id, t.training_date, t.start_time, t.end_time, t.reason, t.comment, t.created_at, t.created_by
             FROM trainings t
             JOIN users u ON t.operator_id = u.id
         """
@@ -1944,7 +1943,8 @@ class Database:
                     "end_time": row[4].strftime('%H:%M'),
                     "reason": row[5],
                     "comment": row[6],
-                    "created_at": row[7].strftime('%Y-%m-%d %H:%M')
+                    "created_at": row[7].strftime('%Y-%m-%d %H:%M'),
+                    "created_by": row[8]
                 } for row in cursor.fetchall()
             ]
     
