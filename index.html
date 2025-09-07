@@ -2374,17 +2374,20 @@
                 const hours = dailyHours[day - 1] ?? 0;
 
                 const isToday =
-                today.getFullYear() === year &&
-                today.getMonth() === monthIndex &&
-                today.getDate() === day;
+                    today.getFullYear() === year &&
+                    today.getMonth() === monthIndex &&
+                    today.getDate() === day;
 
                 const isPastDay =
-                new Date(year, monthIndex, day) <
-                new Date(today.getFullYear(), today.getMonth(), today.getDate());
+                    new Date(year, monthIndex, day) <
+                    new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
                 const isPastDayWithZero = isPastDay && hours === 0;
 
-                cells.push({ day, dateStr, hours, isPastDayWithZero, isToday });
+                // проверяем тренинги
+                const hasTraining = trainings.some(t => t.date === dateStr);
+
+                cells.push({ day, dateStr, hours, isPastDayWithZero, isToday, hasTraining });
             }
 
             const handleDayClick = (cell) => {
@@ -2469,17 +2472,18 @@
                         {/* Часы */}
                         {cell.hours > 0 ? (
                             <div className="flex items-center">
-                            <span className="text-sm">
-                                {String(cell.hours).split(".")[0]}
-                            </span>
+                            <span className="text-sm">{String(cell.hours).split(".")[0]}</span>
                             {String(cell.hours).includes(".") && (
-                                <span className="text-[10px]">
-                                .{String(cell.hours).split(".")[1]}
-                                </span>
+                                <span className="text-[10px]">.{String(cell.hours).split(".")[1]}</span>
                             )}
                             </div>
                         ) : (
                             ""
+                        )}
+
+                        {/* 🔶 Маркер тренинга */}
+                        {cell.hasTraining && (
+                            <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 shadow" />
                         )}
 
                         {/* Tooltip */}
