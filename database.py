@@ -1916,9 +1916,10 @@ class Database:
                 if res:
                     role = res[0]
         query = """
-            SELECT t.id, t.operator_id, t.training_date, t.start_time, t.end_time, t.reason, t.comment, t.created_at, t.created_by
+            SELECT t.id, t.operator_id, t.training_date, t.start_time, t.end_time, t.reason, t.comment, t.created_at, cb.name as created_by_name
             FROM trainings t
             JOIN users u ON t.operator_id = u.id
+            LEFT JOIN users cb ON t.created_by = cb.id
         """
         params = []
         where_clauses = []
@@ -1944,7 +1945,7 @@ class Database:
                     "reason": row[5],
                     "comment": row[6],
                     "created_at": row[7].strftime('%Y-%m-%d %H:%M'),
-                    "created_by": row[8]
+                    "created_by_name": row[8] if row[8] else "System"
                 } for row in cursor.fetchall()
             ]
     
