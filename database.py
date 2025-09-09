@@ -1372,7 +1372,7 @@ class Database:
 
     def set_user_active(self, user_id, status):
         # допустимые статусы
-        allowed_statuses = {"active", "break", "training", "inactive", "tech"}
+        allowed_statuses = {"active", "break", "training", "inactive", "tech", "iesigning"}
         if status not in allowed_statuses:
             return False  # неверный статус
     
