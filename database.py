@@ -1410,7 +1410,7 @@ class Database:
 
     
     def log_activity(self, operator_id, status):
-        allowed_statuses = {"active", "break", "training", "inactive","tech"}
+        allowed_statuses = {"active", "break", "training", "inactive","tech","iesigning"}
         if status not in allowed_statuses:
             return False
     
@@ -1626,6 +1626,7 @@ class Database:
             yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # Training - жёлтый
             purple_fill = PatternFill(start_color="800080", end_color="800080", fill_type="solid")  # Tech - фиолетовый
             red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")     # Inactive - красный
+            blue_fill = PatternFill(start_color="5195F5", end_color="5195F5", fill_type="solid")  # IEsigning - голубой           
     
             for op_id, name in operators_dict.items():
                 ws = wb.create_sheet(title=name[:31])
@@ -1702,6 +1703,8 @@ class Database:
                         cell_status.fill = purple_fill
                     elif log['is_active'] == 'inactive':
                         cell_status.fill = red_fill
+                    elif log['is_active'] == 'iesigning':
+                        cell_status.fill = blue_fill
                     ws.cell(current_row, 4).value = dur_str
     
                     current_row += 1
