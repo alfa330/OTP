@@ -1697,14 +1697,14 @@ def toggle_user_active():
             return jsonify({"error": "Missing status field"}), 400
 
         new_status = data['status']
-        allowed_statuses = {"active", "break", "training", "inactive", "tech"}
+        allowed_statuses = {"active", "break", "training", "inactive", "tech","iesigning"}
         if new_status not in allowed_statuses:
             return jsonify({"error": f"Invalid status. Allowed: {', '.join(allowed_statuses)}"}), 400
 
         user_id = int(request.headers.get('X-User-Id'))
         user = db.get_user(id=user_id)
-        if not user or user[3] != 'operator':
-            return jsonify({"error": "Only operators can change status"}), 403
+        if not user:
+            return jsonify({"error": "Unauthurized"}), 403
 
         # здесь предполагаем, что user[10] хранит BOOLEAN (is_active)
         current_active = user[10]
