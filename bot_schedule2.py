@@ -576,7 +576,7 @@ def get_sv_list():
     try:
         supervisors = db.get_supervisors()
         logging.info(f"Fetched {len(supervisors)} supervisors")
-        sv_data = [{"id": sv[0], "name": sv[1], "table": sv[2]} for sv in supervisors]
+        sv_data = [{"id": sv[0], "name": sv[1], "table": sv[2],"role": sv[3], "hire_date": sv[4], "status": sv[5]} for sv in supervisors]
         return jsonify({"status": "success", "sv_list": sv_data})
     except Exception as e:
         logging.error(f"Error fetching SV list: {e}", exc_info=True)
@@ -1173,7 +1173,7 @@ def handle_monthly_report():
         total_format = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#E2EFDA', 'num_format': '0.00', 'align': 'center'})
         total_int_format = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#E2EFDA', 'num_format': '0', 'align': 'center'})
 
-        for sv_id, sv_name, _, _ in svs:
+        for sv_id, sv_name, _, _, _, _ in svs:
             operators = db.get_operators_by_supervisor(sv_id)
             
             safe_sheet_name = sv_name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
@@ -2542,7 +2542,8 @@ async def delSv(message: types.Message):
             return
 
         ikb = InlineKeyboardMarkup(row_width=1)
-        for sv_id, sv_name, _, _ in supervisors:
+        
+        for sv_id, sv_name, _, _, _, _ in supervisors:
             ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"delsv_{sv_id}"))
         await bot.send_message(
             chat_id=message.from_user.id,
@@ -2599,7 +2600,7 @@ async def change_sv_table(message: types.Message):
             return
 
         ikb = InlineKeyboardMarkup(row_width=1)
-        for sv_id, sv_name, _, _ in supervisors:
+        for sv_id, sv_name, _, _, _, _ in supervisors:
             ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"change_hours_table_{sv_id}"))
         
         await bot.send_message(
@@ -2791,7 +2792,7 @@ async def view_hours_data(message: types.Message):
             return
         
         ikb = InlineKeyboardMarkup(row_width=1)
-        for sv_id, sv_name, _, _ in supervisors:
+        for sv_id, sv_name, _, _, _, _ in supervisors:
             ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"hours_{sv_id}"))
         
         await bot.send_message(
@@ -2865,7 +2866,7 @@ async def view_evaluations(message: types.Message):
                     reply_markup=get_evaluations_keyboard()
                 )
         ikb = InlineKeyboardMarkup(row_width=1)
-        for sv_id, sv_name, _, _ in supervisors:
+        for sv_id, sv_name, _, _, _, _ in supervisors:
             ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"eval_{sv_id}"))
         
         await bot.send_message(
@@ -3662,7 +3663,7 @@ def sync_generate_weekly_report():
         # Get supervisors from the database
         svs = db.get_supervisors()
         
-        for sv_id, sv_name, _, _ in svs:
+        for sv_id, sv_name, _, _, _, _ in svs:
             operators = db.get_operators_by_supervisor(sv_id)
             
             safe_sheet_name = sv_name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
