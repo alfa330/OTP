@@ -574,9 +574,6 @@ def get_user_hours():
 @require_api_key
 def get_sv_list():
     try:
-        # Verify database connectivity
-        with db._get_cursor() as cursor:
-            cursor.execute("SELECT 1")
         supervisors = db.get_supervisors()
         logging.info(f"Fetched {len(supervisors)} supervisors")
         sv_data = [{"id": sv[0], "name": sv[1], "table": sv[2]} for sv in supervisors]
