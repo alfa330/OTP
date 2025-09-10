@@ -1192,7 +1192,7 @@ class Database:
     def get_supervisors(self):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name, hours_table_url, hire_date, status
+                SELECT id, name, hours_table_url, role, hire_date, status
                 FROM users 
                 WHERE role = 'sv'
             """)
