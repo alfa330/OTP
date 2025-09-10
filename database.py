@@ -951,8 +951,8 @@ class Database:
         total_processed = 0
         total_skipped = 0
         results = []
-        for supervisor in supervisors:
-            supervisor_id, supervisor_name, _, hours_table_url = supervisor
+        for supervisor in supervisors:  
+            supervisor_id, supervisor_name, hours_table_url, _, _, _ = supervisor
             
             if not hours_table_url:
                 logging.warning(f"Supervisor {supervisor_name} (ID: {supervisor_id}) has no hours_table_url")
