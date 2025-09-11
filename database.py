@@ -1775,8 +1775,8 @@ class Database:
 
     def generate_users_report(self, current_date=None):
         """
-        Generates an Excel report of all operators with columns: ФИО | Направление | Супервайзер | Статус | Ставка | Дата принятия.
-        
+        Generates an Excel report of all operators with columns: ФИО | Направление | Супервайзер | Статус | Ставка | Дата принятия | Логин.
+    
         :param current_date: Optional, current date for filename (defaults to today).
         :return: (filename, content) or (None, None) on error.
         """
@@ -1785,14 +1785,14 @@ class Database:
                 current_date = date.today()
             else:
                 current_date = datetime.strptime(current_date, "%Y-%m-%d").date() if isinstance(current_date, str) else current_date
-            
+    
             filename = f"users_report_{current_date.strftime('%Y-%m-%d')}.xlsx"
-            
+    
             # Fetch all operators with required data
             with self._get_cursor() as cursor:
                 cursor.execute("""
                     SELECT u.name, COALESCE(d.name, 'N/A') as direction, COALESCE(s.name, 'N/A') as supervisor,
-                           u.status, u.rate, u.hire_date, u.supervisor_id
+                           u.status, u.rate, u.hire_date, u.supervisor_id, u.login
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -1800,98 +1800,102 @@ class Database:
                     ORDER BY s.name, u.name
                 """)
                 all_operators = cursor.fetchall()
-            
+    
             if not all_operators:
                 logging.warning("No operators found for users report")
                 return None, None
-            
+    
             # Group by supervisor
             operators_by_supervisor = defaultdict(list)
             supervisors = {}  # supervisor_id -> name
             for row in all_operators:
-                name, direction, supervisor, status, rate, hire_date, sup_id = row
-                operators_by_supervisor[sup_id].append((name, direction, supervisor, status, rate, hire_date))
+                name, direction, supervisor, status, rate, hire_date, sup_id, login = row
+                operators_by_supervisor[sup_id].append((name, direction, supervisor, status, rate, hire_date, login))
                 if sup_id and supervisor != 'N/A':
                     supervisors[sup_id] = supervisor
-            
+    
             # Create workbook
             wb = Workbook()
             ws_summary = wb.active
             ws_summary.title = "Summary"
-            
+    
             # Headers for summary
-            headers = ["ФИО", "Направление", "Супервайзер", "Статус", "Ставка", "Дата принятия"]
+            headers = ["ФИО", "Направление", "Супервайзер", "Статус", "Ставка", "Дата принятия", "Логин"]
             for col, header in enumerate(headers, start=1):
                 cell = ws_summary.cell(1, col)
                 cell.value = header
                 cell.font = Font(bold=True)
-            
+    
             # Fill summary data
             row = 2
             for op in all_operators:
-                name, direction, supervisor, status, rate, hire_date = op[:6]
+                name, direction, supervisor, status, rate, hire_date, _, login = op
                 ws_summary.cell(row, 1).value = name
                 ws_summary.cell(row, 2).value = direction
                 ws_summary.cell(row, 3).value = supervisor
                 ws_summary.cell(row, 4).value = status
                 ws_summary.cell(row, 5).value = float(rate) if rate else 1.0
                 ws_summary.cell(row, 6).value = hire_date.strftime('%Y-%m-%d') if hire_date else 'N/A'
+                ws_summary.cell(row, 7).value = login
                 row += 1
-            
+    
             # Add table to summary
-            tab_summary = Table(displayName="SummaryTable", ref=f"A1:F{row-1}")
+            tab_summary = Table(displayName="SummaryTable", ref=f"A1:G{row-1}")
             style = TableStyleInfo(name="TableStyleMedium2", showFirstColumn=True, showLastColumn=False, showRowStripes=True, showColumnStripes=False)
             tab_summary.tableStyleInfo = style
             ws_summary.add_table(tab_summary)
-            
+    
             # Auto-adjust columns
-            for col in ['A', 'B', 'C', 'D', 'E', 'F']:
+            for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G']:
                 ws_summary.column_dimensions[col].auto_size = True
-            
+    
             # Create per-supervisor sheets
             for sup_id, ops in operators_by_supervisor.items():
                 sup_name = supervisors.get(sup_id, "No Supervisor")
                 sheet_title = sup_name[:31]  # Truncate to Excel sheet name limit
                 ws = wb.create_sheet(title=sheet_title)
-                
+    
                 # Headers
                 for col, header in enumerate(headers, start=1):
                     cell = ws.cell(1, col)
                     cell.value = header
                     cell.font = Font(bold=True)
-                
+    
                 # Fill data
                 row = 2
-                for name, direction, supervisor, status, rate, hire_date in ops:
+                for name, direction, supervisor, status, rate, hire_date, login in ops:
                     ws.cell(row, 1).value = name
                     ws.cell(row, 2).value = direction
                     ws.cell(row, 3).value = supervisor
                     ws.cell(row, 4).value = status
                     ws.cell(row, 5).value = float(rate) if rate else 1.0
                     ws.cell(row, 6).value = hire_date.strftime('%Y-%m-%d') if hire_date else 'N/A'
+                    ws.cell(row, 7).value = login
                     row += 1
-                
+    
                 # Add table
                 if row > 2:
-                    tab = Table(displayName=f"Table_{sheet_title.replace(' ', '_')}", ref=f"A1:F{row-1}")
+                    table_ref = f"A1:G{row-1}"
+                    tab = Table(displayName=f"Table_{sheet_title.replace(' ', '_')}", ref=table_ref)
                     tab.tableStyleInfo = style
                     ws.add_table(tab)
-                
+    
                 # Auto-adjust columns
-                for col in ['A', 'B', 'C', 'D', 'E', 'F']:
+                for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G']:
                     ws.column_dimensions[col].auto_size = True
-            
+    
             # Save to BytesIO
             output = BytesIO()
             wb.save(output)
             output.seek(0)
             content = output.getvalue()
-            
+    
             return filename, content
-        
+    
         except Exception as e:
             logging.error(f"Error generating users report: {e}")
             return None, None
+
 
     def add_training(self, operator_id, training_date, start_time, end_time, reason, comment, created_by):
         with self._get_cursor() as cursor:
