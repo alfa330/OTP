@@ -4121,54 +4121,48 @@
                             </ul>
                         </div>
                     </div>
-                    <div className="ml-64 p-8 bg-gray-50 min-h-screen w-full overflow-y-auto">
-                      <div className="flex items-center justify-end mb-4">
-                        <div className="flex items-center gap-3">
-                            {/* Имя пользователя */}
-                            <div className="hidden sm:flex items-center gap-2 mr-2">
-                            <i className="fas fa-user text-gray-500"></i>
-                            <span className="text-sm font-medium text-gray-700">{user?.name || 'User'}</span>
-                            </div>
-
-                            {/* Контейнер дропдауна */}
-                            <div className="relative" ref={accountDropdownRef}>
+                    <div className="ml-64 p-8 bg-gray-50 min-h-screen w-full overflow-y-auto relative">
+                      <div className="absolute top-4 right-6 z-50 pointer-events-auto">
+                        <div className="relative" ref={accountDropdownRef}>
                             <button
-                                onClick={() => setShowAccountDropdown(prev => !prev)}
-                                className="flex items-center gap-2 px-3 py-2 rounded-md hover:bg-gray-100 focus:outline-none"
-                                aria-expanded={showAccountDropdown}
-                                aria-haspopup="menu"
-                                title="Account"
+                            onClick={() => setShowAccountDropdown(prev => !prev)}
+                            className="flex items-center gap-2 px-3 py-2 rounded-md hover:bg-white/10 focus:outline-none backdrop-blur-sm bg-white/40 dark:bg-gray-800/40 border border-white/10 dark:border-black/20"
+                            aria-expanded={showAccountDropdown}
+                            aria-haspopup="menu"
+                            title="Account"
                             >
-                                <i className="fas fa-cog text-lg text-gray-700"></i>
+                            <span className="hidden sm:inline text-sm font-medium text-gray-800 dark:text-gray-100">
+                                {user?.name || 'User'}
+                            </span>
+                            <i className="fas fa-cog text-lg text-gray-700 dark:text-gray-200"></i>
                             </button>
 
                             {showAccountDropdown && (
-                                <div className="absolute right-0 mt-2 w-52 bg-white border rounded-lg shadow-lg z-50">
+                            <div className="absolute right-0 mt-2 w-52 bg-white/80 dark:bg-gray-900/85 backdrop-blur-md rounded-lg shadow-lg ring-0 border border-white/10 dark:border-black/20">
                                 <button
-                                    onClick={() => { setShowChangeLoginForm(true); setShowAccountDropdown(false); }}
-                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                onClick={() => { setShowChangeLoginForm(true); setShowAccountDropdown(false); }}
+                                className="block w-full text-left px-4 py-2 hover:bg-white/30 dark:hover:bg-gray-800/30"
                                 >
-                                    <i className="fas fa-user-edit mr-2"></i> Смена логина
+                                <i className="fas fa-user-edit mr-2"></i> Смена логина
                                 </button>
 
                                 <button
-                                    onClick={() => { setShowChangePasswordForm(true); setShowAccountDropdown(false); }}
-                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                onClick={() => { setShowChangePasswordForm(true); setShowAccountDropdown(false); }}
+                                className="block w-full text-left px-4 py-2 hover:bg-white/30 dark:hover:bg-gray-800/30"
                                 >
-                                    <i className="fas fa-lock mr-2"></i> Смена пароля
+                                <i className="fas fa-lock mr-2"></i> Смена пароля
                                 </button>
 
-                                <div className="border-t my-1" />
+                                <div className="border-t my-1 border-white/10 dark:border-black/20" />
 
                                 <button
-                                    onClick={() => { setShowLogoutConfirm(true); setShowAccountDropdown(false); }}
-                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100 text-red-600"
+                                onClick={() => { setShowLogoutConfirm(true); setShowAccountDropdown(false); }}
+                                className="block w-full text-left px-4 py-2 hover:bg-white/30 dark:hover:bg-gray-800/30 text-red-600"
                                 >
-                                    <i className="fas fa-sign-out-alt mr-2"></i> Logout
+                                <i className="fas fa-sign-out-alt mr-2"></i> Logout
                                 </button>
-                                </div>
-                            )}
                             </div>
+                            )}
                         </div>
                         </div>
                         {user.role === 'admin' && (
