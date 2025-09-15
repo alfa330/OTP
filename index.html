@@ -1680,15 +1680,15 @@
             const [operatorTrainings, setOperatorTrainings] = useState([]);
             const [showAddSvModal, setShowAddSvModal] = useState(false);
             const [openMenuId, setOpenMenuId] = useState(null);
-            const [showAccountDropdown, setShowAccountDropdown] = useState(false);
-            const accountDropdownRef = useRef(null);
+            const [showSidebarAccountDropdown, setShowSidebarAccountDropdown] = useState(false);
+            const sidebarAccountRef = useRef(null);
 
 
 
             useEffect(() => {
             function handleClickOutside(e) {
-                if (accountDropdownRef.current && !accountDropdownRef.current.contains(e.target)) {
-                setShowAccountDropdown(false);
+                if (sidebarAccountRef.current && !sidebarAccountRef.current.contains(e.target)) {
+                setShowSidebarAccountDropdown(false);
                 }
             }
             document.addEventListener('mousedown', handleClickOutside);
@@ -4108,63 +4108,49 @@
                                         </li>
                                     </>
                                 )}
-                                <li>
-                                    <button onClick={() => setShowAccountMenu(true)} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3">
-                                        <i className="fas fa-cog"></i> Account
+                                <li className="relative" ref={sidebarAccountRef}>
+                                <button
+                                    onClick={() => setShowSidebarAccountDropdown(prev => !prev)}
+                                    className="w-full text-left py-3 px-4 rounded-lg hover:bg-gray-100 transition-all duration-150 flex items-center gap-3"
+                                    aria-expanded={showSidebarAccountDropdown}
+                                    aria-haspopup="menu"
+                                >
+                                    <i className="fas fa-cog"></i>
+                                    <span className="ml-2">Account</span>
+                                    <i className={`fas ml-auto transition-transform ${showSidebarAccountDropdown ? 'fa-chevron-up' : 'fa-chevron-down'}`}></i>
+                                </button>
+
+                                {showSidebarAccountDropdown && (
+                                    <div className="absolute left-full top-0 ml-2 w-56 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm rounded-md shadow-lg border border-white/10 dark:border-black/20 z-40">
+                                    <button
+                                        onClick={() => { setShowChangeLoginForm(true); setShowSidebarAccountDropdown(false); }}
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700"
+                                    >
+                                        <i className="fas fa-user-edit mr-2"></i> Смена логина
                                     </button>
-                                </li>
-                                <li>
-                                    <button onClick={handleLogout} className="w-full text-left py-3 px-4 rounded-lg hover:bg-red-700 bg-red-600 transition-all duration-200 flex items-center gap-3">
-                                        <i className="fas fa-sign-out-alt"></i> Logout
+
+                                    <button
+                                        onClick={() => { setShowChangePasswordForm(true); setShowSidebarAccountDropdown(false); }}
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700"
+                                    >
+                                        <i className="fas fa-lock mr-2"></i> Смена пароля
                                     </button>
+
+                                    <div className="border-t border-white/10 dark:border-black/20" />
+
+                                    <button
+                                        onClick={() => { setShowLogoutConfirm(true); setShowSidebarAccountDropdown(false); }}
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 text-red-600"
+                                    >
+                                        <i className="fas fa-sign-out-alt mr-2"></i> Logout
+                                    </button>
+                                    </div>
+                                )}
                                 </li>
                             </ul>
                         </div>
                     </div>
-                    <div className="ml-64 p-8 bg-gray-50 min-h-screen w-full overflow-y-auto relative">
-                      <div className="absolute top-4 right-6 z-50 pointer-events-auto">
-                        <div className="relative" ref={accountDropdownRef}>
-                            <button
-                            onClick={() => setShowAccountDropdown(prev => !prev)}
-                            className="flex items-center gap-2 px-3 py-2 rounded-md hover:bg-white/10 focus:outline-none backdrop-blur-sm bg-white/40 dark:bg-gray-800/40 border border-white/10 dark:border-black/20"
-                            aria-expanded={showAccountDropdown}
-                            aria-haspopup="menu"
-                            title="Account"
-                            >
-                            <span className="hidden sm:inline text-sm font-medium text-gray-800 dark:text-gray-100">
-                                {user?.name || 'User'}
-                            </span>
-                            <i className="fas fa-cog text-lg text-gray-700 dark:text-gray-200"></i>
-                            </button>
-
-                            {showAccountDropdown && (
-                            <div className="absolute right-0 mt-2 w-52 bg-white/80 dark:bg-gray-900/85 backdrop-blur-md rounded-lg shadow-lg ring-0 border border-white/10 dark:border-black/20">
-                                <button
-                                onClick={() => { setShowChangeLoginForm(true); setShowAccountDropdown(false); }}
-                                className="block w-full text-left px-4 py-2 hover:bg-white/30 dark:hover:bg-gray-800/30"
-                                >
-                                <i className="fas fa-user-edit mr-2"></i> Смена логина
-                                </button>
-
-                                <button
-                                onClick={() => { setShowChangePasswordForm(true); setShowAccountDropdown(false); }}
-                                className="block w-full text-left px-4 py-2 hover:bg-white/30 dark:hover:bg-gray-800/30"
-                                >
-                                <i className="fas fa-lock mr-2"></i> Смена пароля
-                                </button>
-
-                                <div className="border-t my-1 border-white/10 dark:border-black/20" />
-
-                                <button
-                                onClick={() => { setShowLogoutConfirm(true); setShowAccountDropdown(false); }}
-                                className="block w-full text-left px-4 py-2 hover:bg-white/30 dark:hover:bg-gray-800/30 text-red-600"
-                                >
-                                <i className="fas fa-sign-out-alt mr-2"></i> Logout
-                                </button>
-                            </div>
-                            )}
-                        </div>
-                        </div>
+                    <div className="ml-64 p-8 bg-gray-50 min-h-screen w-full overflow-y-auto">
                         {user.role === 'admin' && (
                             <>
                                 {view === 'sv_list' && (
