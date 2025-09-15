@@ -4025,23 +4025,23 @@
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => setView('view_scores')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'view_scores' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-chart-bar"></i> View Operator Scores
-                                            </button>
-                                        </li>
-                                        <li>
                                             <button onClick={() => setView('manage_users')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_users' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-user-cog"></i> Manage Users
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3">
-                                                <i className="fas fa-sliders-h"></i> Manage Monitoring Scale
+                                            <button onClick={() => setView('view_scores')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'view_scores' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-chart-bar"></i> View Operator Scores
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => setView('trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-book"></i> Manage trainings
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3">
+                                                <i className="fas fa-sliders-h"></i> Manage Monitoring Scale
                                             </button>
                                         </li>
                                     </>
@@ -4545,7 +4545,7 @@
                                                         {/* Сумма Rate */}
                                                         <td className="px-6 py-3">
                                                         <RateCircle
-                                                            rate={svUsers.reduce((sum, u) => sum + (u.rate || 0), 0)}
+                                                            rate = {svUsers.reduce((sum, u) => sum + (u.rate || 0), 0)}
                                                             len = {svUsers.length}
                                                         />
                                                         </td>
