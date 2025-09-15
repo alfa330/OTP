@@ -4126,16 +4126,15 @@
                                         </select>
                                         <button
                                         onClick={generateMonthlyReport}
-                                        className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                        className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 min-w-[180px] text-center ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                         disabled={isLoading}
                                         >
                                         {isLoading ? 'Generating...' : 'Generate Report'}
                                         </button>
 
-                                        {/* Открыть модалку добавления */}
                                         <button
                                         onClick={() => setShowAddSvModal(true)}
-                                        className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200"
+                                        className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200 min-w-[180px] text-center"
                                         >
                                         + Add Supervisor
                                         </button>
