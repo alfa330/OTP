@@ -1678,6 +1678,7 @@
             const [errorMessage, setErrorMessage] = useState('');
             const [converterData, setConverterData] = useState({amount: "", kpi: ""});
             const [operatorTrainings, setOperatorTrainings] = useState([]);
+            const [showAddSvModal, setShowAddSvModal] = useState(false);
 
             const TrainingModal = ({ isOpen, onClose, onSave, initialData = {} }) => {
                 const [date, setDate] = useState(initialData.date || '');
@@ -4109,149 +4110,148 @@
                         {user.role === 'admin' && (
                             <>
                                 {view === 'sv_list' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <div className="flex justify-between items-center mb-6">
-                                            <h2 className="text-2xl font-semibold text-gray-800">Supervisors</h2>
-                                            <div className="flex items-end gap-4">
-                                                <div>
-                                                    <select
-                                                        value={selectedReportMonth}
-                                                        onChange={(e) => setSelectedReportMonth(e.target.value)}
-                                                        className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                        disabled={isAdminDataLoading}
-                                                    >
-                                                        {getMonthOptions()}
-                                                    </select>
-                                                </div>
+                                <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                    {/* Header */}
+                                    <div className="flex justify-between items-center mb-6">
+                                    <h2 className="text-2xl font-semibold text-gray-800">Supervisors</h2>
+                                    <div className="flex items-center gap-4">
+                                        <select
+                                        value={selectedReportMonth}
+                                        onChange={(e) => setSelectedReportMonth(e.target.value)}
+                                        className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        disabled={isAdminDataLoading}
+                                        >
+                                        {getMonthOptions()}
+                                        </select>
+                                        <button
+                                        onClick={generateMonthlyReport}
+                                        className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                        disabled={isLoading}
+                                        >
+                                        {isLoading ? 'Generating...' : 'Generate Report'}
+                                        </button>
+
+                                        {/* Add Supervisor button */}
+                                        <button
+                                        onClick={() => setShowAddSvModal(true)}
+                                        className="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-all duration-200 flex items-center gap-2"
+                                        >
+                                        <i className="fas fa-plus"></i> Add
+                                        </button>
+                                    </div>
+                                    </div>
+
+                                    {/* Table */}
+                                    {isAdminDataLoading ? (
+                                    <p className="text-center text-gray-600">Loading...</p>
+                                    ) : svList.length === 0 ? (
+                                    <p className="text-center text-gray-600">No supervisors found.</p>
+                                    ) : (
+                                    <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                        <table className="min-w-full divide-y divide-gray-200">
+                                        <thead className="bg-gray-50">
+                                            <tr>
+                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Table URL</th>
+                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="bg-white divide-y divide-gray-200">
+                                            {svList.map((sv) => (
+                                            <tr key={sv.id} className="hover:bg-gray-50 transition-colors duration-200">
+                                                <td className="px-6 py-4 whitespace-nowrap">{sv.name}</td>
+                                                <td className="px-6 py-4 whitespace-nowrap">{sv.id}</td>
+                                                <td className="px-6 py-4 whitespace-nowrap">
+                                                {sv.table ? (
+                                                    <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">
+                                                    View Table
+                                                    </a>
+                                                ) : (
+                                                    'No table'
+                                                )}
+                                                </td>
+                                                <td className="px-6 py-4 whitespace-nowrap space-x-2">
                                                 <button
-                                                    onClick={generateMonthlyReport}
-                                                    className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                                    disabled={isLoading}
+                                                    onClick={() => {
+                                                    setUserToEdit({ ...sv });
+                                                    setShowUserEditModal(true);
+                                                    }}
+                                                    className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
                                                 >
-                                                    {isLoading ? 'Generating...' : 'Generate Report'}
+                                                    <i className="fas fa-edit"></i> Edit
                                                 </button>
-                                            </div>
-                                        </div>
-                                        <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                            <h2 className="text-2xl font-semibold mb-6 text-gray-800">Add Supervisor</h2>
-                                            <input
-                                                type="text"
-                                                placeholder="Supervisor Name"
-                                                value={newSvName}
-                                                onChange={(e) => setNewSvName(e.target.value)}
-                                                className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                                disabled={isLoading}
-                                            />
-                                            <button
-                                                onClick={addSv}
-                                                className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                                disabled={isLoading}
-                                            >
-                                                {isLoading ? 'Adding...' : 'Add Supervisor'}
-                                            </button>
-                                            {newCredentials && (
-                                                <div className="mt-4 p-4 bg-green-100 rounded-lg">
-                                                    <p className="font-bold mb-2">New Supervisor Credentials:</p>
-                                                    <p className="mb-1">Login: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.login}</span></p>
-                                                    <p>Password: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.password}</span></p>
-                                                    <p className="text-sm text-gray-600 mt-2 italic">Note: These credentials are shown only once. Please record them securely.</p>
-                                                </div>
-                                            )}
-                                        </div>
-                                        {isAdminDataLoading ? (
-                                            <p className="text-center text-gray-600">Loading...</p>
-                                        ) : svList.length === 0 ? (
-                                            <p className="text-center text-gray-600">No supervisors found.</p>
-                                        ) : (
-                                            <div className="overflow-x-auto rounded-lg border border-gray-200">
-                                                <table className="min-w-full divide-y divide-gray-200">
-                                                    <thead className="bg-gray-50">
-                                                        <tr>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Table URL</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody className="bg-white divide-y divide-gray-200">
-                                                        {svList.map(sv => (
-                                                            <tr key={sv.id} className="hover:bg-gray-50 transition-colors duration-200">
-                                                                <td className="px-6 py-4 whitespace-nowrap">{sv.name}</td>
-                                                                <td className="px-6 py-4 whitespace-nowrap">{sv.id}</td>
-                                                                <td className="px-6 py-4 whitespace-nowrap">
-                                                                    {sv.table ? (
-                                                                        <a href={sv.table} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">View Table</a>
-                                                                    ) : 'No table'}
-                                                                </td>
-                                                                <td className="px-6 py-4 whitespace-nowrap space-x-2">
-                                                                    <button
-                                                                        onClick={() => {
-                                                                            setUserToEdit({ ...sv });
-                                                                            setShowUserEditModal(true);
-                                                                        }}
-                                                                        className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
-                                                                    >
-                                                                        <i className="fas fa-edit"></i> Edit
-                                                                    </button>
-                                                                    
-                                                                    <button
-                                                                        onClick={() => {
-                                                                            setSelectedUserForHistory(sv);
-                                                                            fetchUserHistory(sv.id);
-                                                                        }}
-                                                                        disabled={loadingHistoryId === sv.id}
-                                                                        className={`bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700 text-sm transition-all duration-200 flex items-center gap-1 ${loadingHistoryId === sv.id ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                                                    >
-                                                                        {loadingHistoryId === sv.id ? (
-                                                                            <>
-                                                                                <i className="fas fa-spinner fa-spin"></i> Loading...
-                                                                            </>
-                                                                        ) : (
-                                                                            <>
-                                                                                <i className="fas fa-history"></i> History
-                                                                            </>
-                                                                        )}
-                                                                    </button>
-                                                                </td>
-                                                            </tr>
-                                                        ))}
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        )}
+                                                <button
+                                                    onClick={() => {
+                                                    setSelectedUserForHistory(sv);
+                                                    fetchUserHistory(sv.id);
+                                                    }}
+                                                    disabled={loadingHistoryId === sv.id}
+                                                    className={`bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700 text-sm transition-all duration-200 flex items-center gap-1 ${
+                                                    loadingHistoryId === sv.id ? 'opacity-50 cursor-not-allowed' : ''
+                                                    }`}
+                                                >
+                                                    {loadingHistoryId === sv.id ? (
+                                                    <>
+                                                        <i className="fas fa-spinner fa-spin"></i> Loading...
+                                                    </>
+                                                    ) : (
+                                                    <>
+                                                        <i className="fas fa-history"></i> History
+                                                    </>
+                                                    )}
+                                                </button>
+                                                </td>
+                                            </tr>
+                                            ))}
+                                        </tbody>
+                                        </table>
                                     </div>
+                                    )}
+                                </div>
                                 )}
-                                {showChangeTableForm && currentSvForTableChange && (
-                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Change Table for {currentSvForTableChange.name}</h2>
-                                        <input
-                                            type="text"
-                                            placeholder="New Google Sheets URL"
-                                            value={newTableUrl}
-                                            onChange={(e) => setNewTableUrl(e.target.value)}
-                                            className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                            disabled={isLoading}
-                                        />
-                                        <div className="flex justify-between">
-                                            <button
-                                                onClick={() => changeSvTable(currentSvForTableChange.id, newTableUrl)}
-                                                className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                                disabled={isLoading}
-                                            >
-                                                {isLoading ? 'Updating...' : 'Update Table'}
-                                            </button>
-                                            <button
-                                                onClick={() => {
-                                                    setShowChangeTableForm(false);
-                                                    setCurrentSvForTableChange(null);
-                                                    setNewTableUrl('');
-                                                }}
-                                                className="bg-gray-600 text-white px-6 py-3 rounded-lg hover:bg-gray-700 transition-all duration-200"
-                                            >
-                                                Cancel
-                                            </button>
+
+                                /* Modal Add Supervisor */
+                                {showAddSvModal && (
+                                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                                    <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md">
+                                    <h2 className="text-2xl font-semibold mb-6 text-gray-800">Add Supervisor</h2>
+                                    <input
+                                        type="text"
+                                        placeholder="Supervisor Name"
+                                        value={newSvName}
+                                        onChange={(e) => setNewSvName(e.target.value)}
+                                        className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                        disabled={isLoading}
+                                    />
+                                    <button
+                                        onClick={addSv}
+                                        className={`w-full bg-green-600 text-white p-3 rounded-lg hover:bg-green-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                        disabled={isLoading}
+                                    >
+                                        {isLoading ? 'Adding...' : 'Add Supervisor'}
+                                    </button>
+                                    <button
+                                        onClick={() => setShowAddSvModal(false)}
+                                        className="mt-4 w-full bg-gray-600 text-white p-3 rounded-lg hover:bg-gray-700 transition-all duration-200"
+                                    >
+                                        Cancel
+                                    </button>
+
+                                    {newCredentials && (
+                                        <div className="mt-4 p-4 bg-green-100 rounded-lg">
+                                        <p className="font-bold mb-2">New Supervisor Credentials:</p>
+                                        <p className="mb-1">
+                                            Login: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.login}</span>
+                                        </p>
+                                        <p>
+                                            Password: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.password}</span>
+                                        </p>
+                                        <p className="text-sm text-gray-600 mt-2 italic">Note: These credentials are shown only once. Please record them securely.</p>
                                         </div>
+                                    )}
                                     </div>
+                                </div>
                                 )}
                                 {view === 'view_scores' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
