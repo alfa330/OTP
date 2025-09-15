@@ -1679,6 +1679,7 @@
             const [converterData, setConverterData] = useState({amount: "", kpi: ""});
             const [operatorTrainings, setOperatorTrainings] = useState([]);
             const [showAddSvModal, setShowAddSvModal] = useState(false);
+            const [openMenuId, setOpenMenuId] = useState(null);
 
             const TrainingModal = ({ isOpen, onClose, onSave, initialData = {} }) => {
                 const [date, setDate] = useState(initialData.date || '');
