@@ -713,8 +713,8 @@
             }
         }
         
-        const RateCircle = ({ rate }) => {
-            const percentage = rate * 100;
+        const RateCircle = ({ rate, len=1 }) => {
+            const percentage = rate * 100 / len;
             const color = '#16a34a';
         
             return (
@@ -731,7 +731,7 @@
                             fill="none"
                             stroke={color}
                             strokeWidth="3"
-                            strokeDasharray={`${percentage}, 100`}
+                            strokeDasharray={`${percentage.toFixed(2)}, 100`}
                         />
                     </svg>
                     <div className="absolute inset-0 flex items-center justify-center text-sm font-medium text-gray-800">
@@ -4545,7 +4545,8 @@
                                                         {/* Сумма Rate */}
                                                         <td className="px-6 py-3">
                                                         <RateCircle
-                                                            rate={svUsers.reduce((sum, u) => sum + (u.rate || 0), 0) / svUsers.length}
+                                                            rate={rate = svUsers.reduce((sum, u) => sum + (u.rate || 0), 0)}
+                                                            len = {svUsers.length}
                                                         />
                                                         </td>
 
