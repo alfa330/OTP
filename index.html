@@ -4111,14 +4111,13 @@
                                 <li className="relative" ref={sidebarAccountRef}>
                                 <button
                                     onClick={() => setShowSidebarAccountDropdown(prev => !prev)}
-                                    className="w-full text-left py-3 px-4 rounded-lg hover:bg-gray-100 transition-colors duration-150 flex items-center gap-3"
+                                    className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
                                     aria-expanded={showSidebarAccountDropdown}
                                     aria-haspopup="menu"
                                 >
-                                    <i className="fas fa-cog text-gray-600"></i>
-                                    <span className="ml-2 text-gray-800">Account</span>
+                                    <i className="fas fa-cog"></i> Account
                                     {/* стрелка направо */}
-                                    <i className="fas ml-auto fa-chevron-right text-gray-500"></i>
+                                    <i className="fas ml-auto fa-chevron-right"></i>
                                 </button>
 
                                 {showSidebarAccountDropdown && (
@@ -4130,20 +4129,13 @@
                                         <i className="fas fa-user-edit mr-2"></i> Смена логина
                                     </button>
 
+                                    <div className="border-t border-gray-200" />
+
                                     <button
                                         onClick={() => { setShowChangePasswordForm(true); setShowSidebarAccountDropdown(false); }}
                                         className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
                                     >
                                         <i className="fas fa-lock mr-2"></i> Смена пароля
-                                    </button>
-
-                                    <div className="border-t border-gray-200" />
-
-                                    <button
-                                        onClick={() => { setShowLogoutConfirm(true); setShowSidebarAccountDropdown(false); }}
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 text-red-600"
-                                    >
-                                        <i className="fas fa-sign-out-alt mr-2"></i> Logout
                                     </button>
                                     </div>
                                 )}
