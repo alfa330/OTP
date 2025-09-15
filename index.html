@@ -4111,41 +4111,47 @@
                                 <li className="relative" ref={sidebarAccountRef}>
                                 <button
                                     onClick={() => setShowSidebarAccountDropdown(prev => !prev)}
-                                    className="w-full text-left py-3 px-4 rounded-lg hover:bg-gray-100 transition-all duration-150 flex items-center gap-3"
+                                    className="w-full text-left py-3 px-4 rounded-lg hover:bg-gray-100 transition-colors duration-150 flex items-center gap-3"
                                     aria-expanded={showSidebarAccountDropdown}
                                     aria-haspopup="menu"
                                 >
-                                    <i className="fas fa-cog"></i>
-                                    <span className="ml-2">Account</span>
-                                    <i className={`fas ml-auto transition-transform ${showSidebarAccountDropdown ? 'fa-chevron-up' : 'fa-chevron-down'}`}></i>
+                                    <i className="fas fa-cog text-gray-600"></i>
+                                    <span className="ml-2 text-gray-800">Account</span>
+                                    {/* стрелка направо */}
+                                    <i className="fas ml-auto fa-chevron-right text-gray-500"></i>
                                 </button>
 
                                 {showSidebarAccountDropdown && (
-                                    <div className="absolute left-full top-0 ml-2 w-56 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm rounded-md shadow-lg border border-white/10 dark:border-black/20 z-40">
+                                    <div className="absolute left-full top-0 ml-2 w-56 bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40">
                                     <button
                                         onClick={() => { setShowChangeLoginForm(true); setShowSidebarAccountDropdown(false); }}
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700"
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
                                     >
                                         <i className="fas fa-user-edit mr-2"></i> Смена логина
                                     </button>
 
                                     <button
                                         onClick={() => { setShowChangePasswordForm(true); setShowSidebarAccountDropdown(false); }}
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700"
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
                                     >
                                         <i className="fas fa-lock mr-2"></i> Смена пароля
                                     </button>
 
-                                    <div className="border-t border-white/10 dark:border-black/20" />
+                                    <div className="border-t border-gray-200" />
 
                                     <button
                                         onClick={() => { setShowLogoutConfirm(true); setShowSidebarAccountDropdown(false); }}
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 text-red-600"
+                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 text-red-600"
                                     >
                                         <i className="fas fa-sign-out-alt mr-2"></i> Logout
                                     </button>
                                     </div>
                                 )}
+                                </li>
+                                <li>
+                                <button onClick={handleLogout} className="w-full text-left py-3 px-4 rounded-lg hover:bg-red-700 bg-red-600 transition-all duration-200 flex items-center gap-3">
+                                    <i className="fas fa-sign-out-alt"></i> Logout
+                                </button>
                                 </li>
                             </ul>
                         </div>
