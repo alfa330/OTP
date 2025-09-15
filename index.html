@@ -1680,6 +1680,20 @@
             const [operatorTrainings, setOperatorTrainings] = useState([]);
             const [showAddSvModal, setShowAddSvModal] = useState(false);
             const [openMenuId, setOpenMenuId] = useState(null);
+            const [showAccountDropdown, setShowAccountDropdown] = useState(false);
+            const accountDropdownRef = useRef(null);
+
+
+
+            useEffect(() => {
+            function handleClickOutside(e) {
+                if (accountDropdownRef.current && !accountDropdownRef.current.contains(e.target)) {
+                setShowAccountDropdown(false);
+                }
+            }
+            document.addEventListener('mousedown', handleClickOutside);
+            return () => document.removeEventListener('mousedown', handleClickOutside);
+            }, []);
 
             const TrainingModal = ({ isOpen, onClose, onSave, initialData = {} }) => {
                 const [date, setDate] = useState(initialData.date || '');
@@ -4108,6 +4122,55 @@
                         </div>
                     </div>
                     <div className="ml-64 p-8 bg-gray-50 min-h-screen w-full overflow-y-auto">
+                      <div className="flex items-center justify-end mb-4">
+                        <div className="flex items-center gap-3">
+                            {/* Имя пользователя */}
+                            <div className="hidden sm:flex items-center gap-2 mr-2">
+                            <i className="fas fa-user text-gray-500"></i>
+                            <span className="text-sm font-medium text-gray-700">{user?.name || 'User'}</span>
+                            </div>
+
+                            {/* Контейнер дропдауна */}
+                            <div className="relative" ref={accountDropdownRef}>
+                            <button
+                                onClick={() => setShowAccountDropdown(prev => !prev)}
+                                className="flex items-center gap-2 px-3 py-2 rounded-md hover:bg-gray-100 focus:outline-none"
+                                aria-expanded={showAccountDropdown}
+                                aria-haspopup="menu"
+                                title="Account"
+                            >
+                                <i className="fas fa-cog text-lg text-gray-700"></i>
+                            </button>
+
+                            {showAccountDropdown && (
+                                <div className="absolute right-0 mt-2 w-52 bg-white border rounded-lg shadow-lg z-50">
+                                <button
+                                    onClick={() => { setShowChangeLoginForm(true); setShowAccountDropdown(false); }}
+                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                >
+                                    <i className="fas fa-user-edit mr-2"></i> Смена логина
+                                </button>
+
+                                <button
+                                    onClick={() => { setShowChangePasswordForm(true); setShowAccountDropdown(false); }}
+                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                >
+                                    <i className="fas fa-lock mr-2"></i> Смена пароля
+                                </button>
+
+                                <div className="border-t my-1" />
+
+                                <button
+                                    onClick={() => { setShowLogoutConfirm(true); setShowAccountDropdown(false); }}
+                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100 text-red-600"
+                                >
+                                    <i className="fas fa-sign-out-alt mr-2"></i> Logout
+                                </button>
+                                </div>
+                            )}
+                            </div>
+                        </div>
+                        </div>
                         {user.role === 'admin' && (
                             <>
                                 {view === 'sv_list' && (
