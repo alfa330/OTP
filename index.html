@@ -4112,32 +4112,6 @@
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <div className="flex justify-between items-center mb-6">
                                             <h2 className="text-2xl font-semibold text-gray-800">Supervisors</h2>
-                                            <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                                <h2 className="text-2xl font-semibold mb-6 text-gray-800">Add Supervisor</h2>
-                                                <input
-                                                    type="text"
-                                                    placeholder="Supervisor Name"
-                                                    value={newSvName}
-                                                    onChange={(e) => setNewSvName(e.target.value)}
-                                                    className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                                    disabled={isLoading}
-                                                />
-                                                <button
-                                                    onClick={addSv}
-                                                    className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                                    disabled={isLoading}
-                                                >
-                                                    {isLoading ? 'Adding...' : 'Add Supervisor'}
-                                                </button>
-                                                {newCredentials && (
-                                                    <div className="mt-4 p-4 bg-green-100 rounded-lg">
-                                                        <p className="font-bold mb-2">New Supervisor Credentials:</p>
-                                                        <p className="mb-1">Login: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.login}</span></p>
-                                                        <p>Password: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.password}</span></p>
-                                                        <p className="text-sm text-gray-600 mt-2 italic">Note: These credentials are shown only once. Please record them securely.</p>
-                                                    </div>
-                                                )}
-                                            </div>
                                             <div className="flex items-end gap-4">
                                                 <div>
                                                     <select
@@ -4157,6 +4131,32 @@
                                                     {isLoading ? 'Generating...' : 'Generate Report'}
                                                 </button>
                                             </div>
+                                        </div>
+                                        <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                            <h2 className="text-2xl font-semibold mb-6 text-gray-800">Add Supervisor</h2>
+                                            <input
+                                                type="text"
+                                                placeholder="Supervisor Name"
+                                                value={newSvName}
+                                                onChange={(e) => setNewSvName(e.target.value)}
+                                                className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                disabled={isLoading}
+                                            />
+                                            <button
+                                                onClick={addSv}
+                                                className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
+                                                disabled={isLoading}
+                                            >
+                                                {isLoading ? 'Adding...' : 'Add Supervisor'}
+                                            </button>
+                                            {newCredentials && (
+                                                <div className="mt-4 p-4 bg-green-100 rounded-lg">
+                                                    <p className="font-bold mb-2">New Supervisor Credentials:</p>
+                                                    <p className="mb-1">Login: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.login}</span></p>
+                                                    <p>Password: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.password}</span></p>
+                                                    <p className="text-sm text-gray-600 mt-2 italic">Note: These credentials are shown only once. Please record them securely.</p>
+                                                </div>
+                                            )}
                                         </div>
                                         {isAdminDataLoading ? (
                                             <p className="text-center text-gray-600">Loading...</p>
