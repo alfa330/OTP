@@ -110,7 +110,7 @@
                     },
                 },
                 animation: {
-                    'slide-in': 'slide-in 0.3s ease-out',
+                    'slide-in': 'slide-in 0.2s ease-out',
                     'slide-out': 'slide-out 0.3s ease-in',
                     progress: 'progress 5s linear forwards',
                     'fade-in-out': 'fade-in-out 5s ease-in-out forwards',
@@ -118,7 +118,7 @@
                     'dropdown-reverse': 'dropdown-reverse 0.2s ease-in forwards',
 
                     'fade-in': 'fadeIn 0.3s ease-out forwards',
-                    'scale-in': 'scaleIn 0.3s ease-out forwards',
+                    'scale-in': 'scaleIn 0.2s ease-out forwards',
                     'scale-out': 'scaleOut 0.2s ease-in forwards',
                 },
                 },
@@ -3967,7 +3967,7 @@
                     onClick={() => setShowLogoutConfirm(false)} 
                 >
                     <div
-                    className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-sm p-6 transform animate-scale-in"
+                    className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-sm p-6 transform animate-scale-in text-center"
                     onClick={(e) => e.stopPropagation()} 
                     role="dialog"
                     aria-modal="true"
@@ -3983,7 +3983,7 @@
                         Вы уверены, что хотите выйти из аккаунта?
                     </p>
 
-                    <div className="flex justify-end gap-3">
+                    <div className="flex justify-center gap-4">
                         <button
                         onClick={() => setShowLogoutConfirm(false)}
                         className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 
@@ -4001,7 +4001,7 @@
                     </div>
                     </div>
                 </div>
-            )}
+                )}
 
             const averageScore = operatorData?.evaluations?.length > 0
                     ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
