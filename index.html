@@ -1693,7 +1693,15 @@
             const [openMenuId, setOpenMenuId] = useState(null);
             const [showSidebarAccountDropdown, setShowSidebarAccountDropdown] = useState(false);
             const sidebarAccountRef = useRef(null);
+            const [modalError, setModalError] = useState("");
 
+            const inputRef = useRef(null);
+
+            useEffect(() => {
+            if (showChangeLoginForm && inputRef.current) {
+                inputRef.current.focus();
+            }
+            }, [showChangeLoginForm]);
 
 
             useEffect(() => {
