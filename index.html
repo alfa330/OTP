@@ -4479,104 +4479,115 @@
                                         ).map(([svName, svUsers]) => (
                                         <div key={svName} className="mb-8">
                                             <h3 className="text-xl font-semibold text-gray-800 bg-gray-100 px-6 py-3 rounded-t-lg">{svName}</h3>
-                                            <table className="min-w-full table-fixed border rounded-lg">
+
+                                            {/* table-fixed + colgroup обеспечивают одинаковое распределение ширин */}
+                                            <table className="min-w-full table-fixed border rounded-lg w-full">
+                                            <colgroup>
+                                                {/* Процентные ширины — можно подправить под ваш макет */}
+                                                <col style={{ width: '30%' }} />
+                                                <col style={{ width: '18%' }} />
+                                                <col style={{ width: '15%' }} />
+                                                <col style={{ width: '17%' }} />
+                                                <col style={{ width: '15%' }} />
+                                                <col style={{ width: '5%' }} />
+                                            </colgroup>
+
                                             <thead className="bg-gray-50">
                                                 <tr>
-                                                <th className="px-6 py-3 w-1/4 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                                                <th className="px-6 py-3 w-1/5 text-left text-xs font-medium text-gray-500 uppercase">Direction</th>
-                                                <th className="px-6 py-3 w-1/5 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                                                <th className="px-6 py-3 w-1/5 text-left text-xs font-medium text-gray-500 uppercase">Hire Date</th>
-                                                <th className="px-6 py-3 w-1/6 text-left text-xs font-medium text-gray-500 uppercase">Rate</th>
-                                                <th className="px-6 py-3 w-12"></th> {/* пустая для меню */}
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Direction</th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Hire Date</th>
+                                                {/* Rate — выровнено по центру */}
+                                                <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Rate</th>
+                                                <th className="px-6 py-3"></th> {/* пустая для меню */}
                                                 </tr>
                                             </thead>
 
                                             <tbody className="bg-white divide-y divide-gray-200">
-                                            {svUsers.map(u => (
+                                                {svUsers.map(u => (
                                                 <tr key={u.id} className="hover:bg-gray-50 transition-colors duration-200 group">
-                                                {/* Name */}
-                                                <td className="px-6 py-4 truncate">{u.name}</td>
+                                                    {/* Name */}
+                                                    <td className="px-6 py-4 truncate">{u.name}</td>
 
-                                                {/* Direction */}
-                                                <td className="px-6 py-4">{u.direction || '-'}</td>
+                                                    {/* Direction */}
+                                                    <td className="px-6 py-4">{u.direction || '-'}</td>
 
-                                                {/* Status */}
-                                                <td className="px-6 py-4">
+                                                    {/* Status */}
+                                                    <td className="px-6 py-4">
                                                     {u.status === 'working' || !u.status ? (
-                                                    <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Working</span>
+                                                        <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Working</span>
                                                     ) : u.status === 'unpaid_leave' ? (
-                                                    <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">UL</span>
+                                                        <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">UL</span>
                                                     ) : u.status === 'fired' ? (
-                                                    <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Fired</span>
+                                                        <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Fired</span>
                                                     ) : (
-                                                    <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{u.status}</span>
+                                                        <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{u.status}</span>
                                                     )}
-                                                </td>
+                                                    </td>
 
-                                                {/* Hire Date */}
-                                                <td className="px-6 py-4">
-                                                    {u.hire_date ? new Date(u.hire_date).toLocaleDateString("ru-RU") : '-'}
-                                                </td>
+                                                    {/* Hire Date */}
+                                                    <td className="px-6 py-4">{u.hire_date ? new Date(u.hire_date).toLocaleDateString("ru-RU") : '-'}</td>
 
-                                                {/* Rate */}
-                                                <td className="px-6 py-4">
-                                                    <RateCircle rate={u.rate || 1.0} />
-                                                </td>
+                                                    {/* Rate (центрируем содержимое) */}
+                                                    <td className="px-6 py-4 text-center">
+                                                    <div className="inline-flex items-center justify-center">
+                                                        <RateCircle rate={u.rate || 1.0} />
+                                                    </div>
+                                                    </td>
 
-                                                {/* Меню (отдельная колонка!) */}
-                                                <td className="px-2 py-4 text-right opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                                                    {/* Меню */}
+                                                    <td className="px-2 py-4 text-right opacity-0 group-hover:opacity-100 transition-opacity duration-200">
                                                     <div className="relative inline-block text-left">
-                                                    <button
+                                                        <button
                                                         onClick={() => setOpenMenuId(openMenuId === u.id ? null : u.id)}
                                                         className="p-2 rounded-full hover:bg-gray-100"
-                                                    >
+                                                        >
                                                         <i className="fas fa-ellipsis-v"></i>
-                                                    </button>
+                                                        </button>
 
-                                                    {openMenuId === u.id && (
+                                                        {openMenuId === u.id && (
                                                         <div className="absolute right-0 mt-2 w-40 bg-white border rounded-lg shadow-lg z-50">
-                                                        <button
+                                                            <button
                                                             onClick={() => {
-                                                            setUserToEdit(u);
-                                                            setShowUserEditModal(true);
-                                                            setOpenMenuId(null);
+                                                                setUserToEdit(u);
+                                                                setShowUserEditModal(true);
+                                                                setOpenMenuId(null);
                                                             }}
                                                             className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                                        >
+                                                            >
                                                             <i className="fas fa-edit mr-2"></i>Edit
-                                                        </button>
-                                                        <button
+                                                            </button>
+                                                            <button
                                                             onClick={() => {
-                                                            setSelectedUserForHistory(u);
-                                                            fetchUserHistory(u.id);
-                                                            setOpenMenuId(null);
+                                                                setSelectedUserForHistory(u);
+                                                                fetchUserHistory(u.id);
+                                                                setOpenMenuId(null);
                                                             }}
                                                             disabled={loadingHistoryId === u.id}
                                                             className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                                        >
+                                                            >
                                                             {loadingHistoryId === u.id ? (
-                                                            <>
+                                                                <>
                                                                 <i className="fas fa-spinner fa-spin mr-2"></i>Loading...
-                                                            </>
+                                                                </>
                                                             ) : (
-                                                            <>
+                                                                <>
                                                                 <i className="fas fa-history mr-2"></i>History
-                                                            </>
+                                                                </>
                                                             )}
-                                                        </button>
+                                                            </button>
                                                         </div>
-                                                    )}
+                                                        )}
                                                     </div>
-                                                </td>
+                                                    </td>
                                                 </tr>
-                                            ))}
+                                                ))}
                                             </tbody>
 
                                             <tfoot className="bg-gray-50">
                                                 <tr>
-                                                <td className="px-6 py-3 font-medium text-gray-700">
-                                                    {svUsers.length} operators
-                                                </td>
+                                                <td className="px-6 py-3 font-medium text-gray-700">{svUsers.length} operators</td>
                                                 <td className="px-6 py-3 text-gray-700">
                                                     {Array.from(new Set(svUsers.map(u => u.direction || '-'))).join(', ')}
                                                 </td>
@@ -4609,12 +4620,15 @@
                                                     </div>
                                                 </td>
                                                 <td className="px-6 py-3"></td>
-                                                <td className="px-6 py-3">
+
+                                                {/* Rate в tfoot — тоже центрируем, используем те же обёртки */}
+                                                <td className="px-6 py-3 text-center">
                                                     <RateCircle
                                                     rate={svUsers.reduce((sum, u) => sum + (u.rate || 0), 0)}
                                                     len={svUsers.length}
                                                     />
                                                 </td>
+
                                                 <td></td>
                                                 </tr>
                                             </tfoot>
