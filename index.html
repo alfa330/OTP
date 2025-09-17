@@ -5753,7 +5753,7 @@
                         <>
                             {/* Backdrop с blur */}
                             <div
-                            className="fixed inset-0 z-40 bg-black/30 backdrop-blur-md transition-opacity duration-300"
+                            className="fixed inset-0 z-60 bg-black/30 backdrop-blur-md transition-opacity duration-300"
                             onClick={() => {
                                 setShowChangeLoginForm(false);
                                 setShowChangePasswordForm(false);
@@ -5764,7 +5764,7 @@
 
                             {/* Контейнер для модалей — ловит Escape */}
                             <div
-                            className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none"
+                            className="fixed inset-0 z-70 flex items-center justify-center p-4 pointer-events-none"
                             tabIndex={-1}
                             onKeyDown={(e) => {
                                 if (e.key === "Escape") {
