@@ -5751,8 +5751,7 @@
                         )}
                         {(showChangeLoginForm || showChangePasswordForm) && (
                         <>
-                            {/* Backdrop: покрывает весь экран и делает blur подсветки под ним (включая sidebar),
-                                обязательно z-index ниже модалки, но выше всего остального */}
+                            {/* Backdrop с blur */}
                             <div
                             className="fixed inset-0 z-50 bg-black/30 backdrop-blur-md transition-opacity duration-300"
                             onClick={() => {
@@ -5763,8 +5762,18 @@
                             aria-hidden="true"
                             />
 
-                            {/* Центр модалки */}
-                            <div className="fixed inset-0 z-60 flex items-center justify-center p-4 pointer-events-none">
+                            {/* Контейнер для модалей — ловит Escape */}
+                            <div
+                            className="fixed inset-0 z-60 flex items-center justify-center p-4 pointer-events-none"
+                            tabIndex={-1}
+                            onKeyDown={(e) => {
+                                if (e.key === "Escape") {
+                                setShowChangeLoginForm(false);
+                                setShowChangePasswordForm(false);
+                                setModalError("");
+                                }
+                            }}
+                            >
                             {/* Login modal */}
                             {showChangeLoginForm && (
                                 <div
@@ -5779,6 +5788,7 @@
                                     <h2 id="change-login-title" className="text-lg font-semibold">
                                         Смена логина
                                     </h2>
+                                    {/* Кнопка закрытия остаётся в заголовке — это заменяет кнопку "Отмена" */}
                                     <button
                                         type="button"
                                         onClick={() => { setShowChangeLoginForm(false); setModalError(""); }}
@@ -5856,24 +5866,20 @@
                                         {modalError && <p className="text-sm text-red-600 dark:text-red-400">{modalError}</p>}
                                     </div>
 
-                                    <div className="mt-2 flex gap-3">
+                                    {/* Эргономичная панель — только кнопка обновить, выровнена вправо */}
+                                    <div className="mt-4 flex justify-end">
                                         <button
                                         type="submit"
-                                        className={`flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-white font-medium transition disabled:opacity-60 disabled:cursor-not-allowed ${isLoading ? "bg-blue-600" : "bg-blue-600 hover:bg-blue-700"}`}
+                                        className={`inline-flex items-center justify-center gap-2 px-5 py-3 rounded-lg text-white font-medium transition disabled:opacity-60 disabled:cursor-not-allowed ${isLoading ? "bg-blue-600" : "bg-blue-600 hover:bg-blue-700"}`}
                                         disabled={isLoading}
                                         >
                                         <i className={`fas fa-save ${isLoading ? "animate-pulse" : ""}`} />
-                                        {isLoading ? "Обновление..." : "Обновить логин"}
-                                        </button>
-
-                                        <button
-                                        type="button"
-                                        onClick={() => { setShowChangeLoginForm(false); setModalError(""); }}
-                                        className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-lg bg-gray-100 dark:bg-slate-700 text-gray-800 dark:text-gray-100 hover:bg-gray-200 dark:hover:bg-slate-600 transition"
-                                        >
-                                        <i className="fas fa-times" /> Отмена
+                                        {isLoading ? "Обновление..." : "Обновить"}
                                         </button>
                                     </div>
+
+                                    {/* Подсказка про закрытие модалки */}
+                                    <p className="mt-3 text-xs text-gray-400">Нажмите Esc или крестик вверху, чтобы закрыть.</p>
                                     </form>
                                 </div>
                                 </div>
@@ -5903,9 +5909,7 @@
                                     </button>
                                     </div>
 
-                                    <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
-                                    Введите новый пароль и подтвердите.
-                                    </p>
+                                    <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">Введите новый пароль и подтвердите.</p>
 
                                     <form
                                     className="mt-5 space-y-4"
@@ -5965,24 +5969,19 @@
                                         {modalError && <p className="text-sm text-red-600 dark:text-red-400">{modalError}</p>}
                                     </div>
 
-                                    <div className="mt-2 flex gap-3">
+                                    {/* Только кнопка "Обновить", выровнена вправо */}
+                                    <div className="mt-4 flex justify-end">
                                         <button
                                         type="submit"
-                                        className={`flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-white font-medium transition disabled:opacity-60 disabled:cursor-not-allowed ${isLoading ? "bg-blue-600" : "bg-blue-600 hover:bg-blue-700"}`}
+                                        className={`inline-flex items-center justify-center gap-2 px-5 py-3 rounded-lg text-white font-medium transition disabled:opacity-60 disabled:cursor-not-allowed ${isLoading ? "bg-blue-600" : "bg-blue-600 hover:bg-blue-700"}`}
                                         disabled={isLoading}
                                         >
                                         <i className={`fas fa-save ${isLoading ? "animate-pulse" : ""}`} />
-                                        {isLoading ? "Обновление..." : "Обновить пароль"}
-                                        </button>
-
-                                        <button
-                                        type="button"
-                                        onClick={() => { setShowChangePasswordForm(false); setModalError(""); }}
-                                        className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-lg bg-gray-100 dark:bg-slate-700 text-gray-800 dark:text-gray-100 hover:bg-gray-200 dark:hover:bg-slate-600 transition"
-                                        >
-                                        <i className="fas fa-times" /> Отмена
+                                        {isLoading ? "Обновление..." : "Обновить"}
                                         </button>
                                     </div>
+
+                                    <p className="mt-3 text-xs text-gray-400">Нажмите Esc или крестик вверху, чтобы закрыть.</p>
                                     </form>
                                 </div>
                                 </div>
