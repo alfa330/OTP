@@ -4525,8 +4525,15 @@
                                                     )}
                                                     </td>
 
-                                                    {/* Hire Date */}
-                                                    <td className="px-6 py-4">{u.hire_date ? new Date(u.hire_date).toLocaleDateString("ru-RU") : '-'}</td>
+                                                    <td className="px-6 py-4">
+                                                    {u.hire_date
+                                                        ? (() => {
+                                                            const [day, month, year] = u.hire_date.split("-");
+                                                            const date = new Date(`${year}-${month}-${day}`);
+                                                            return date.toLocaleDateString("ru-RU");
+                                                        })()
+                                                        : "-"}
+                                                    </td>
 
                                                     {/* Rate (центрируем содержимое) */}
                                                     <td className="px-6 py-4 text-center">
