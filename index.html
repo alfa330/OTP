@@ -5866,15 +5866,17 @@
                                     </div>
 
                                     {/* Эргономичная панель — только кнопка обновить, выровнена вправо */}
-                                    <div className="mt-4 flex justify-end">
-                                        <button
+                                    <div className="mt-6 flex justify-center">
+                                    <button
                                         type="submit"
-                                        className={`inline-flex items-center justify-center gap-2 px-5 py-3 rounded-lg text-white font-medium transition disabled:opacity-60 disabled:cursor-not-allowed ${isLoading ? "bg-blue-600" : "bg-blue-600 hover:bg-blue-700"}`}
+                                        className={`inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl text-white font-medium shadow-md transition 
+                                                    disabled:opacity-60 disabled:cursor-not-allowed 
+                                                    ${isLoading ? "bg-blue-600" : "bg-blue-600 hover:bg-blue-700 active:scale-95"}`}
                                         disabled={isLoading}
-                                        >
+                                    >
                                         <i className={`fas fa-save ${isLoading ? "animate-pulse" : ""}`} />
                                         {isLoading ? "Обновление..." : "Обновить"}
-                                        </button>
+                                    </button>
                                     </div>
 
                                     {/* Подсказка про закрытие модалки */}
@@ -5970,15 +5972,17 @@
                                     </div>
 
                                     {/* Только кнопка "Обновить", выровнена вправо */}
-                                    <div className="mt-4 flex justify-end">
-                                        <button
+                                    <div className="mt-6 flex justify-center">
+                                    <button
                                         type="submit"
-                                        className={`inline-flex items-center justify-center gap-2 px-5 py-3 rounded-lg text-white font-medium transition disabled:opacity-60 disabled:cursor-not-allowed ${isLoading ? "bg-blue-600" : "bg-blue-600 hover:bg-blue-700"}`}
+                                        className={`inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl text-white font-medium shadow-md transition 
+                                                    disabled:opacity-60 disabled:cursor-not-allowed 
+                                                    ${isLoading ? "bg-blue-600" : "bg-blue-600 hover:bg-blue-700 active:scale-95"}`}
                                         disabled={isLoading}
-                                        >
+                                    >
                                         <i className={`fas fa-save ${isLoading ? "animate-pulse" : ""}`} />
                                         {isLoading ? "Обновление..." : "Обновить"}
-                                        </button>
+                                    </button>
                                     </div>
 
                                     <p className="mt-3 text-xs text-gray-400">Нажмите Esc или крестик вверху, чтобы закрыть.</p>
