@@ -3959,92 +3959,48 @@
                 );
             }
 
-            if (showLogoutConfirm) {
-                return (
-                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                            <h2 className="text-xl font-semibold mb-4">Confirm Logout</h2>
-                            <p className="mb-4">Are you sure you want to log out?</p>
-                            <div className="flex justify-between">
-                                <button
-                                    onClick={confirmLogout}
-                                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
-                                >
-                                    Yes, Logout
-                                </button>
-                                <button
-                                    onClick={() => setShowLogoutConfirm(false)}
-                                    className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-                                >
-                                    Cancel
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                );
-            }
+            {showLogoutConfirm && (
+            <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-fade-in"
+                onClick={() => setShowLogoutConfirm(false)} 
+            >
+                <div
+                className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-sm p-6 transform animate-scale-in"
+                onClick={(e) => e.stopPropagation()} 
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="logout-title"
+                >
+                <h2
+                    id="logout-title"
+                    className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-3"
+                >
+                    Подтверждение выхода
+                </h2>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
+                    Вы уверены, что хотите выйти из аккаунта?
+                </p>
 
-            {showChangeLoginForm && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 transition-opacity duration-300">
-                    <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md transform transition-all duration-300 scale-100">
-                        <div className="flex justify-between items-center mb-6">
-                            <h2 className="text-2xl font-bold text-center flex-grow">Change Login</h2>
-                            <button onClick={() => setShowChangeLoginForm(false)} className="text-gray-500 hover:text-gray-700">
-                                <i className="fas fa-times text-xl"></i>
-                            </button>
-                        </div>
-                        <form className="space-y-6">
-                            <div className="relative">
-                                <label htmlFor="new-login" className="block text-sm font-medium text-gray-700 mb-2">New Login</label>
-                                <div className="absolute inset-y-0 left-0 flex items-center pl-3 mt-6">
-                                    <i className="fas fa-user text-gray-400"></i>
-                                </div>
-                                <input
-                                    id="new-login"
-                                    type="text"
-                                    placeholder="Enter new login"
-                                    value={loginData.new_login}
-                                    onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
-                                    className="w-full pl-10 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                    disabled={isLoading}
-                                />
-                            </div>
-                            <div className="relative">
-                                <label htmlFor="confirm-login" className="block text-sm font-medium text-gray-700 mb-2">Confirm New Login</label>
-                                <div className="absolute inset-y-0 left-0 flex items-center pl-3 mt-6">
-                                    <i className="fas fa-user-check text-gray-400"></i>
-                                </div>
-                                <input
-                                    id="confirm-login"
-                                    type="text"
-                                    placeholder="Confirm new login"
-                                    value={loginData.confirm_login}
-                                    onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
-                                    className="w-full pl-10 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                    disabled={isLoading}
-                                />
-                            </div>
-                            <div className="flex justify-between gap-4">
-                                <button
-                                    type="button"
-                                    onClick={handleChangeLogin}
-                                    className={`flex-1 bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-600 transition-all duration-200 flex items-center justify-center gap-2 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                    disabled={isLoading}
-                                >
-                                    <i className="fas fa-save"></i> {isLoading ? 'Updating...' : 'Update Login'}
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setShowChangeLoginForm(false)}
-                                    className="flex-1 bg-gray-500 text-white py-3 rounded-lg hover:bg-gray-600 transition-all duration-200 flex items-center justify-center gap-2"
-                                >
-                                    <i className="fas fa-times"></i> Cancel
-                                </button>
-                            </div>
-                        </form>
-                    </div>
+                <div className="flex justify-end gap-3">
+                    <button
+                    onClick={() => setShowLogoutConfirm(false)}
+                    className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 
+                                dark:bg-slate-800 dark:text-gray-300 dark:hover:bg-slate-700 transition"
+                    >
+                    Отмена
+                    </button>
+                    <button
+                    onClick={confirmLogout}
+                    className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 text-white hover:bg-red-700 
+                                focus:ring-2 focus:ring-red-400 transition"
+                    >
+                    Выйти
+                    </button>
                 </div>
+                </div>
+            </div>
             )}
+
             const averageScore = operatorData?.evaluations?.length > 0
                     ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
                     : 0;
