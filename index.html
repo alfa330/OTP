@@ -66,51 +66,65 @@
         };
 
         tailwind.config = {
-        theme: {
-            extend: {
-            keyframes: {
-                'slide-in': {
-                '0%': { transform: 'translateX(100%)', opacity: '0' },
-                '100%': { transform: 'translateX(0)', opacity: '1' },
-                },
-                'slide-out': {
-                '0%': { transform: 'translateX(0)', opacity: '1' },
-                '100%': { transform: 'translateX(100%)', opacity: '0' },
-                },
-                progress: {
-                '0%': { width: '100%' },
-                '100%': { width: '0%' },
-                },
-                'fade-in-out': {
-                '0%': { opacity: '0', transform: 'scale(0.95)' },
-                '10%': { opacity: '1', transform: 'scale(1)' },
-                '90%': { opacity: '1', transform: 'scale(1)' },
-                '100%': { opacity: '0', transform: 'scale(0.95)' },
-                },
-                // 👇 добавляем новые keyframes для dropdown
-                dropdown: {
-                '0%': { transform: 'scaleY(0)', opacity: '0' },
-                '100%': { transform: 'scaleY(1)', opacity: '1' },
-                },
-                'dropdown-reverse': {
-                '0%': { transform: 'scaleY(1)', opacity: '1' },
-                '100%': { transform: 'scaleY(0)', opacity: '0' },
-                },
-            },
-            animation: {
-                'slide-in': 'slide-in 0.3s ease-out',
-                'slide-out': 'slide-out 0.3s ease-in',
-                progress: 'progress 5s linear forwards',
-                'fade-in-out': 'fade-in-out 5s ease-in-out forwards',
-                dropdown: 'dropdown 0.2s ease-out forwards',
-                'dropdown-reverse': 'dropdown-reverse 0.2s ease-in forwards',
-            },
-            },
-        },
-        };
+            theme: {
+                extend: {
+                keyframes: {
+                    'slide-in': {
+                    '0%': { transform: 'translateX(100%)', opacity: '0' },
+                    '100%': { transform: 'translateX(0)', opacity: '1' },
+                    },
+                    'slide-out': {
+                    '0%': { transform: 'translateX(0)', opacity: '1' },
+                    '100%': { transform: 'translateX(100%)', opacity: '0' },
+                    },
+                    progress: {
+                    '0%': { width: '100%' },
+                    '100%': { width: '0%' },
+                    },
+                    'fade-in-out': {
+                    '0%': { opacity: '0', transform: 'scale(0.95)' },
+                    '10%': { opacity: '1', transform: 'scale(1)' },
+                    '90%': { opacity: '1', transform: 'scale(1)' },
+                    '100%': { opacity: '0', transform: 'scale(0.95)' },
+                    },
+                    dropdown: {
+                    '0%': { transform: 'scaleY(0)', opacity: '0' },
+                    '100%': { transform: 'scaleY(1)', opacity: '1' },
+                    },
+                    'dropdown-reverse': {
+                    '0%': { transform: 'scaleY(1)', opacity: '1' },
+                    '100%': { transform: 'scaleY(0)', opacity: '0' },
+                    },
 
-        
-        
+                    fadeIn: {
+                    '0%': { opacity: '0' },
+                    '100%': { opacity: '1' },
+                    },
+                    scaleIn: {
+                    '0%': { opacity: '0', transform: 'scale(0.95) translateY(-10px)' },
+                    '100%': { opacity: '1', transform: 'scale(1) translateY(0)' },
+                    },
+                    scaleOut: {
+                    '0%': { opacity: '1', transform: 'scale(1) translateY(0)' },
+                    '100%': { opacity: '0', transform: 'scale(0.95) translateY(-10px)' },
+                    },
+                },
+                animation: {
+                    'slide-in': 'slide-in 0.3s ease-out',
+                    'slide-out': 'slide-out 0.3s ease-in',
+                    progress: 'progress 5s linear forwards',
+                    'fade-in-out': 'fade-in-out 5s ease-in-out forwards',
+                    dropdown: 'dropdown 0.2s ease-out forwards',
+                    'dropdown-reverse': 'dropdown-reverse 0.2s ease-in forwards',
+
+                    'fade-in': 'fadeIn 0.3s ease-out forwards',
+                    'scale-in': 'scaleIn 0.3s ease-out forwards',
+                    'scale-out': 'scaleOut 0.2s ease-in forwards',
+                },
+                },
+            },
+            };
+
         const MonitoringScaleModal = ({ isOpen, onClose, onSave, initialDirections }) => {
             const [directions, setDirections] = useState(initialDirections || []);
             const [newDirectionName, setNewDirectionName] = useState('');
@@ -5753,7 +5767,8 @@
                         <>
                             {/* Backdrop с blur */}
                             <div
-                            className="fixed inset-0 z-60 bg-black/30 backdrop-blur-md transition-opacity duration-300"
+                            className="pointer-events-auto w-full max-w-md bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl ring-1 ring-black/5 border border-white/20 overflow-hidden 
+                                         transform transition-all duration-300 opacity-100 scale-100 translate-y-0 animate-scaleIn"
                             onClick={() => {
                                 setShowChangeLoginForm(false);
                                 setShowChangePasswordForm(false);
@@ -5780,7 +5795,8 @@
                                 role="dialog"
                                 aria-modal="true"
                                 aria-labelledby="change-login-title"
-                                className="pointer-events-auto w-full max-w-md bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl ring-1 ring-black/5 border border-white/20 overflow-hidden transform transition-all duration-300"
+                                className="pointer-events-auto w-full max-w-md bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl ring-1 ring-black/5 border border-white/20 overflow-hidden 
+                                            transform transition-all duration-300 opacity-100 scale-100 translate-y-0 animate-scaleIn"
                                 onClick={(e) => e.stopPropagation()}
                                 >
                                 <div className="px-6 py-5">
@@ -5916,8 +5932,8 @@
                                 role="dialog"
                                 aria-modal="true"
                                 aria-labelledby="change-password-title"
-                                className="pointer-events-auto w-full max-w-md bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl ring-1 ring-black/5 border border-white/20 overflow-hidden transform transition-all duration-300"
-                                onClick={(e) => e.stopPropagation()}
+                                className="pointer-events-auto w-full max-w-md bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl ring-1 ring-black/5 border border-white/20 overflow-hidden 
+                                            transform transition-all duration-300 opacity-100 scale-100 translate-y-0 animate-scaleIn"
                                 >
                                 <div className="px-6 py-5">
                                     <div className="flex items-start justify-between gap-4">
