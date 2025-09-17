@@ -4479,7 +4479,6 @@
                                         ).map(([svName, svUsers]) => (
                                         <div key={svName} className="mb-8">
                                             <h3 className="text-xl font-semibold text-gray-800 bg-gray-100 px-6 py-3 rounded-t-lg">{svName}</h3>
-
                                             {/* table-fixed + colgroup обеспечивают одинаковое распределение ширин */}
                                             <table className="min-w-full table-fixed border rounded-lg w-full">
                                             <colgroup>
@@ -4527,7 +4526,6 @@
                                                     </td>
 
                                                     {/* Hire Date */}
-                                                    condole.log(u.name==="Ядигаров Руслан Азизулы" ? u.hire_date : "" );
                                                     <td className="px-6 py-4">{u.hire_date ? new Date(u.hire_date).toLocaleDateString("ru-RU") : '-'}</td>
 
                                                     {/* Rate (центрируем содержимое) */}
