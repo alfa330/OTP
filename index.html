@@ -66,37 +66,49 @@
         };
 
         tailwind.config = {
-            theme: {
-                extend: {
-                    keyframes: {
-                        'slide-in': {
-                            '0%': { transform: 'translateX(100%)', opacity: '0' },
-                            '100%': { transform: 'translateX(0)', opacity: '1' },
-                        },
-                        'slide-out': {
-                            '0%': { transform: 'translateX(0)', opacity: '1' },
-                            '100%': { transform: 'translateX(100%)', opacity: '0' },
-                        },
-                        progress: {
-                            '0%': { width: '100%' },
-                            '100%': { width: '0%' },
-                        },
-                        'fade-in-out': {
-                            '0%': { opacity: '0', transform: 'scale(0.95)' },
-                            '10%': { opacity: '1', transform: 'scale(1)' },
-                            '90%': { opacity: '1', transform: 'scale(1)' },
-                            '100%': { opacity: '0', transform: 'scale(0.95)' },
-                        },
-                    },
-                    animation: {
-                        'slide-in': 'slide-in 0.3s ease-out',
-                        'slide-out': 'slide-out 0.3s ease-in',
-                        progress: 'progress 5s linear forwards',
-                        'fade-in-out': 'fade-in-out 5s ease-in-out forwards',
-                    },
+        theme: {
+            extend: {
+            keyframes: {
+                'slide-in': {
+                '0%': { transform: 'translateX(100%)', opacity: '0' },
+                '100%': { transform: 'translateX(0)', opacity: '1' },
+                },
+                'slide-out': {
+                '0%': { transform: 'translateX(0)', opacity: '1' },
+                '100%': { transform: 'translateX(100%)', opacity: '0' },
+                },
+                progress: {
+                '0%': { width: '100%' },
+                '100%': { width: '0%' },
+                },
+                'fade-in-out': {
+                '0%': { opacity: '0', transform: 'scale(0.95)' },
+                '10%': { opacity: '1', transform: 'scale(1)' },
+                '90%': { opacity: '1', transform: 'scale(1)' },
+                '100%': { opacity: '0', transform: 'scale(0.95)' },
+                },
+                // 👇 добавляем новые keyframes для dropdown
+                dropdown: {
+                '0%': { transform: 'scaleY(0)', opacity: '0' },
+                '100%': { transform: 'scaleY(1)', opacity: '1' },
+                },
+                'dropdown-reverse': {
+                '0%': { transform: 'scaleY(1)', opacity: '1' },
+                '100%': { transform: 'scaleY(0)', opacity: '0' },
                 },
             },
+            animation: {
+                'slide-in': 'slide-in 0.3s ease-out',
+                'slide-out': 'slide-out 0.3s ease-in',
+                progress: 'progress 5s linear forwards',
+                'fade-in-out': 'fade-in-out 5s ease-in-out forwards',
+                dropdown: 'dropdown 0.2s ease-out forwards',
+                'dropdown-reverse': 'dropdown-reverse 0.2s ease-in forwards',
+            },
+            },
+        },
         };
+
         
         
         const MonitoringScaleModal = ({ isOpen, onClose, onSave, initialDirections }) => {
@@ -1621,7 +1633,6 @@
             const [selectedSvData, setSelectedSvData] = useState(null);
             const [showChangeTableForm, setShowChangeTableForm] = useState(false);
             const [currentSvForTableChange, setCurrentSvForTableChange] = useState(null);
-            const [showAccountMenu, setShowAccountMenu] = useState(false);
             const [showChangeLoginForm, setShowChangeLoginForm] = useState(false);
             const [showChangePasswordForm, setShowChangePasswordForm] = useState(false);
             const [newCredentials, setNewCredentials] = useState(null);
@@ -4108,20 +4119,27 @@
                                         </li>
                                     </>
                                 )}
-                                <li className="relative" ref={sidebarAccountRef}>
+                               <li className="relative" ref={sidebarAccountRef}>
                                 <button
                                     onClick={() => setShowSidebarAccountDropdown(prev => !prev)}
-                                    className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
+                                    className="group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative"
                                     aria-expanded={showSidebarAccountDropdown}
                                     aria-haspopup="menu"
                                 >
-                                    <i className="fas fa-cog"></i> Account
-                                    {/* стрелка направо */}
-                                    <i className="fas ml-auto fa-chevron-right"></i>
+                                    {/* Стрелка слева */}
+                                    <i className="fas fa-chevron-left absolute left-2 opacity-0 transform -translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0"></i>
+
+                                    <i className="fas fa-cog"></i>
+                                    <span className="ml-2">Account</span>
+
+                                    {/* Стрелка справа */}
+                                    <i className="fas fa-chevron-right ml-auto transition-opacity duration-300 group-hover:opacity-0"></i>
                                 </button>
 
                                 {showSidebarAccountDropdown && (
-                                    <div className="absolute left-full top-0 ml-2 w-56 bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40">
+                                    <div
+                                    className="absolute left-full top-0 ml-2 w-56 origin-top transform scale-y-0 animate-dropdown bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40"
+                                    >
                                     <button
                                         onClick={() => { setShowChangeLoginForm(true); setShowSidebarAccountDropdown(false); }}
                                         className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
@@ -5648,44 +5666,6 @@
                                 onClose={() => setShowHistoryModal(false)}
                                 history={userHistory}
                             />
-                        )}
-                        {showAccountMenu && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 transition-opacity duration-300">
-                                <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md transform transition-all duration-300 scale-100">
-                                    <div className="flex justify-between items-center mb-4">
-                                        <h2 className="text-xl font-semibold text-center flex-grow">Account Settings</h2>
-                                        <button onClick={() => setShowAccountMenu(false)} className="text-gray-500 hover:text-gray-700">
-                                            <i className="fas fa-times text-xl"></i>
-                                        </button>
-                                    </div>
-                                    <div className="space-y-4">
-                                        <button
-                                            onClick={() => {
-                                                setShowChangeLoginForm(true);
-                                                setShowAccountMenu(false);
-                                            }}
-                                            className="w-full bg-blue-500 text-white py-3 rounded-lg hover:bg-blue-600 transition-all duration-200 flex items-center justify-center gap-2"
-                                        >
-                                            <i className="fas fa-user-edit"></i> Change Login
-                                        </button>
-                                        <button
-                                            onClick={() => {
-                                                setShowChangePasswordForm(true);
-                                                setShowAccountMenu(false);
-                                            }}
-                                            className="w-full bg-blue-500 text-white py-3 rounded-lg hover:bg-blue-600 transition-all duration-200 flex items-center justify-center gap-2"
-                                        >
-                                            <i className="fas fa-lock"></i> Change Password
-                                        </button>
-                                        <button
-                                            onClick={() => setShowAccountMenu(false)}
-                                            className="w-full bg-gray-500 text-white py-3 rounded-lg hover:bg-gray-600 transition-all duration-200 flex items-center justify-center gap-2"
-                                        >
-                                            <i className="fas fa-times"></i> Close
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
                         )}
                         {showChangeLoginForm && (
                             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 transition-opacity duration-300">
