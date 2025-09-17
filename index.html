@@ -1735,7 +1735,7 @@
             useEffect(() => {
             function handleClickOutside(e) {
                 if (sidebarAccountRef.current && !sidebarAccountRef.current.contains(e.target)) {
-                setShowSidebarAccountDropdown(false);
+                handleToggleDropdown();
                 }
             }
             document.addEventListener('mousedown', handleClickOutside);
