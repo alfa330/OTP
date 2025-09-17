@@ -4126,19 +4126,18 @@
                                     aria-expanded={showSidebarAccountDropdown}
                                     aria-haspopup="menu"
                                 >
-                                    {/* Стрелка слева */}
-                                    <i className="fas fa-chevron-left absolute left-2 opacity-0 transform -translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0"></i>
-
+                                    {/* Иконка настроек */}
                                     <i className="fas fa-cog"></i>
                                     <span className="ml-2">Account</span>
 
-                                    {/* Стрелка справа */}
-                                    <i className="fas fa-chevron-right ml-auto transition-opacity duration-300 group-hover:opacity-0"></i>
+                                    {/* Стрелка появляется только при hover */}
+                                    <i className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0"></i>
                                 </button>
 
                                 {showSidebarAccountDropdown && (
                                     <div
-                                    className="absolute left-full top-0 ml-2 w-56 origin-top transform scale-y-0 animate-dropdown bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40"
+                                    className={`absolute left-full top-0 ml-2 w-56 origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
+                                        ${showSidebarAccountDropdown ? "animate-dropdown" : "animate-dropdown-reverse"}`}
                                     >
                                     <button
                                         onClick={() => { setShowChangeLoginForm(true); setShowSidebarAccountDropdown(false); }}
