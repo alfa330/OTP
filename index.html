@@ -1710,14 +1710,24 @@
             const [modalError, setModalError] = useState("");
             const [isClosing, setIsClosing] = useState(false);
 
-            const handleToggleDropdown = () => {
-            if (showSidebarAccountDropdown) {
-                // запускаем анимацию закрытия
+            const handleToggleDropdown = (forceClose = null) => {
+            if (forceClose === true) {
+                // закрытие с анимацией
                 setIsClosing(true);
                 setTimeout(() => {
                 setShowSidebarAccountDropdown(false);
                 setIsClosing(false);
-                }, 200); // время совпадает с duration анимации
+                }, 200);
+                return;
+            }
+
+            if (showSidebarAccountDropdown) {
+                // обычное закрытие
+                setIsClosing(true);
+                setTimeout(() => {
+                setShowSidebarAccountDropdown(false);
+                setIsClosing(false);
+                }, 200);
             } else {
                 setShowSidebarAccountDropdown(true);
             }
@@ -1735,12 +1745,14 @@
             useEffect(() => {
             function handleClickOutside(e) {
                 if (sidebarAccountRef.current && !sidebarAccountRef.current.contains(e.target)) {
-                handleToggleDropdown();
+                if (showSidebarAccountDropdown) {
+                    handleToggleDropdown(true); 
+                }
                 }
             }
-            document.addEventListener('mousedown', handleClickOutside);
-            return () => document.removeEventListener('mousedown', handleClickOutside);
-            }, []);
+            document.addEventListener("mousedown", handleClickOutside);
+            return () => document.removeEventListener("mousedown", handleClickOutside);
+            }, [showSidebarAccountDropdown]);
 
             const TrainingModal = ({ isOpen, onClose, onSave, initialData = {} }) => {
                 const [date, setDate] = useState(initialData.date || '');
@@ -4133,7 +4145,7 @@
                                         ${showSidebarAccountDropdown && !isClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
                                     >
                                     <button
-                                        onClick={() => { setShowChangeLoginForm(true); handleToggleDropdown(); }}
+                                        onClick={() => { setShowChangeLoginForm(true); handleToggleDropdown(true); }}
                                         className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
                                     >
                                         <i className="fas fa-user-edit mr-2"></i> Смена логина
@@ -4142,7 +4154,7 @@
                                     <div className="border-t border-gray-200" />
 
                                     <button
-                                        onClick={() => { setShowChangePasswordForm(true); handleToggleDropdown(); }}
+                                        onClick={() => { setShowChangePasswordForm(true); handleToggleDropdown(true); }}
                                         className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
                                     >
                                         <i className="fas fa-lock mr-2"></i> Смена пароля
