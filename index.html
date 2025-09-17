@@ -1708,6 +1708,20 @@
             const [showSidebarAccountDropdown, setShowSidebarAccountDropdown] = useState(false);
             const sidebarAccountRef = useRef(null);
             const [modalError, setModalError] = useState("");
+            const [isClosing, setIsClosing] = useState(false);
+
+            const handleToggleDropdown = () => {
+            if (showSidebarAccountDropdown) {
+                // запускаем анимацию закрытия
+                setIsClosing(true);
+                setTimeout(() => {
+                setShowSidebarAccountDropdown(false);
+                setIsClosing(false);
+                }, 200); // время совпадает с duration анимации
+            } else {
+                setShowSidebarAccountDropdown(true);
+            }
+            };
 
             const inputRef = useRef(null);
 
@@ -4101,12 +4115,11 @@
                                 )}
                                <li className="relative" ref={sidebarAccountRef}>
                                 <button
-                                    onClick={() => setShowSidebarAccountDropdown(prev => !prev)}
+                                    onClick={handleToggleDropdown}
                                     className="group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative"
                                     aria-expanded={showSidebarAccountDropdown}
                                     aria-haspopup="menu"
                                 >
-                                    {/* Иконка настроек */}
                                     <i className="fas fa-cog"></i>
                                     <span className="ml-2">Account</span>
 
@@ -4114,13 +4127,13 @@
                                     <i className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0"></i>
                                 </button>
 
-                                {showSidebarAccountDropdown && (
+                                {(showSidebarAccountDropdown || isClosing) && (
                                     <div
                                     className={`absolute left-full top-0 ml-2 w-56 origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
-                                        ${showSidebarAccountDropdown ? "animate-dropdown" : "animate-dropdown-reverse"}`}
+                                        ${showSidebarAccountDropdown && !isClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
                                     >
                                     <button
-                                        onClick={() => { setShowChangeLoginForm(true); setShowSidebarAccountDropdown(false); }}
+                                        onClick={() => { setShowChangeLoginForm(true); handleToggleDropdown(); }}
                                         className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
                                     >
                                         <i className="fas fa-user-edit mr-2"></i> Смена логина
@@ -4129,7 +4142,7 @@
                                     <div className="border-t border-gray-200" />
 
                                     <button
-                                        onClick={() => { setShowChangePasswordForm(true); setShowSidebarAccountDropdown(false); }}
+                                        onClick={() => { setShowChangePasswordForm(true); handleToggleDropdown(); }}
                                         className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
                                     >
                                         <i className="fas fa-lock mr-2"></i> Смена пароля
