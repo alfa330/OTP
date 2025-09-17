@@ -5742,65 +5742,159 @@
                             />
                         )}
                         {showChangeLoginForm && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 transition-opacity duration-300">
-                                <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md transform transition-all duration-300 scale-100">
-                                    <div className="flex justify-between items-center mb-6">
-                                        <h2 className="text-2xl font-bold text-center flex-grow">Change Login</h2>
-                                        <button onClick={() => setShowChangeLoginForm(false)} className="text-gray-500 hover:text-gray-700">
-                                            <i className="fas fa-times text-xl"></i>
-                                        </button>
+                        <>
+                            {/* Backdrop с blur и кликом по фону для закрытия */}
+                            <div
+                            className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-300"
+                            onClick={() => setShowChangeLoginForm(false)}
+                            aria-hidden="true"
+                            />
+
+                            {/* Модалка */}
+                            <div
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="change-login-title"
+                            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+                            >
+                            <div
+                                className="w-full max-w-md bg-white/90 dark:bg-slate-900/95 rounded-2xl shadow-2xl ring-1 ring-black/5 border border-white/30 overflow-hidden transform transition-all duration-300"
+                                onClick={(e) => e.stopPropagation()} // предотвратить закрытие при клике внутри модалки
+                            >
+                                <div className="px-6 py-5">
+                                <div className="flex items-start justify-between gap-4">
+                                    <h2 id="change-login-title" className="text-xl font-semibold leading-tight">
+                                    Смена логина
+                                    </h2>
+                                    <button
+                                    type="button"
+                                    onClick={() => setShowChangeLoginForm(false)}
+                                    aria-label="Закрыть"
+                                    className="rounded-md p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-800 transition"
+                                    >
+                                    <i className="fas fa-times text-lg" />
+                                    </button>
+                                </div>
+
+                                <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
+                                    Придумайте новый короткий логин (без пробелов). Подтвердите ввод и нажмите «Обновить».
+                                </p>
+
+                                {/* Форма */}
+                                <form
+                                    className="mt-5 space-y-4"
+                                    onSubmit={(e) => {
+                                    e.preventDefault();
+                                    // Клиентская валидация (простая)
+                                    const newLogin = (loginData.new_login || "").trim();
+                                    const confirm = (loginData.confirm_login || "").trim();
+
+                                    if (!newLogin) {
+                                        setModalError("Логин не может быть пустым.");
+                                        return;
+                                    }
+                                    if (newLogin.length < 3) {
+                                        setModalError("Логин должен быть минимум 3 символа.");
+                                        return;
+                                    }
+                                    if (/\s/.test(newLogin)) {
+                                        setModalError("Логин не должен содержать пробелов.");
+                                        return;
+                                    }
+                                    if (newLogin !== confirm) {
+                                        setModalError("Логины не совпадают. Проверьте ввод.");
+                                        return;
+                                    }
+
+                                    setModalError("");
+                                    // далее вызываем внешнюю функцию для обновления
+                                    handleChangeLogin();
+                                    }}
+                                >
+                                    <div className="relative">
+                                    <label htmlFor="new-login" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                                        Новый логин
+                                    </label>
+
+                                    <div className="absolute inset-y-0 left-0 flex items-center pl-3 mt-6 pointer-events-none">
+                                        <i className="fas fa-user text-gray-400" />
                                     </div>
-                                    <form className="space-y-6">
-                                        <div className="relative">
-                                            <label htmlFor="new-login" className="block text-sm font-medium text-gray-700 mb-2">New Login</label>
-                                            <div className="absolute inset-y-0 left-0 flex items-center pl-3 mt-6">
-                                                <i className="fas fa-user text-gray-400"></i>
-                                            </div>
-                                            <input
-                                                id="new-login"
-                                                type="text"
-                                                placeholder="Enter new login"
-                                                value={loginData.new_login}
-                                                onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
-                                                className="w-full pl-10 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                                disabled={isLoading}
-                                            />
-                                        </div>
-                                        <div className="relative">
-                                            <label htmlFor="confirm-login" className="block text-sm font-medium text-gray-700 mb-2">Confirm New Login</label>
-                                            <div className="absolute inset-y-0 left-0 flex items-center pl-3 mt-6">
-                                                <i className="fas fa-user-check text-gray-400"></i>
-                                            </div>
-                                            <input
-                                                id="confirm-login"
-                                                type="text"
-                                                placeholder="Confirm new login"
-                                                value={loginData.confirm_login}
-                                                onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
-                                                className="w-full pl-10 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                                disabled={isLoading}
-                                            />
-                                        </div>
-                                        <div className="flex justify-between gap-4">
-                                            <button
-                                                type="button"
-                                                onClick={handleChangeLogin}
-                                                className={`flex-1 bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-600 transition-all duration-200 flex items-center justify-center gap-2 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                                disabled={isLoading}
-                                            >
-                                                <i className="fas fa-save"></i> {isLoading ? 'Updating...' : 'Update Login'}
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => setShowChangeLoginForm(false)}
-                                                className="flex-1 bg-gray-500 text-white py-3 rounded-lg hover:bg-gray-600 transition-all duration-200 flex items-center justify-center gap-2"
-                                            >
-                                                <i className="fas fa-times"></i> Cancel
-                                            </button>
-                                        </div>
-                                    </form>
+
+                                    <input
+                                        id="new-login"
+                                        name="new-login"
+                                        type="text"
+                                        inputMode="text"
+                                        autoComplete="username"
+                                        placeholder="например: ivan1987"
+                                        value={loginData.new_login}
+                                        onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
+                                        className="w-full pl-10 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-150 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                        disabled={isLoading}
+                                        autoFocus
+                                        minLength={3}
+                                        aria-describedby="new-login-help"
+                                    />
+                                    <p id="new-login-help" className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                        Разрешены буквы, цифры и символы (без пробелов).
+                                    </p>
+                                    </div>
+
+                                    <div className="relative">
+                                    <label htmlFor="confirm-login" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                                        Подтвердите новый логин
+                                    </label>
+
+                                    <div className="absolute inset-y-0 left-0 flex items-center pl-3 mt-6 pointer-events-none">
+                                        <i className="fas fa-user-check text-gray-400" />
+                                    </div>
+
+                                    <input
+                                        id="confirm-login"
+                                        name="confirm-login"
+                                        type="text"
+                                        placeholder="повторите новый логин"
+                                        value={loginData.confirm_login}
+                                        onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
+                                        className="w-full pl-10 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-150 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                        disabled={isLoading}
+                                        minLength={3}
+                                    />
+                                    </div>
+
+                                    {/* Ошибка/статус */}
+                                    <div aria-live="polite" className="min-h-[1.25rem]">
+                                    {modalError ? (
+                                        <p className="text-sm text-red-600 dark:text-red-400">{modalError}</p>
+                                    ) : null}
+                                    </div>
+
+                                    {/* Кнопки */}
+                                    <div className="mt-2 flex gap-3">
+                                    <button
+                                        type="submit"
+                                        className={`flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-white font-medium transition disabled:opacity-60 disabled:cursor-not-allowed ${
+                                        isLoading ? "bg-blue-600" : "bg-blue-600 hover:bg-blue-700"
+                                        }`}
+                                        disabled={isLoading}
+                                    >
+                                        <i className={`fas fa-save ${isLoading ? "animate-pulse" : ""}`} />
+                                        {isLoading ? "Обновление..." : "Обновить логин"}
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowChangeLoginForm(false)}
+                                        className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-lg bg-gray-100 dark:bg-slate-700 text-gray-800 dark:text-gray-100 hover:bg-gray-200 dark:hover:bg-slate-600 transition"
+                                    >
+                                        <i className="fas fa-times" /> Отмена
+                                    </button>
+                                    </div>
+                                </form>
                                 </div>
                             </div>
+                            </div>
+                        </>
                         )}
                         {showChangePasswordForm && (
                             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 transition-opacity duration-300">
