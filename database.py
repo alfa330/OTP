@@ -1546,7 +1546,7 @@ class Database:
             ws_summary.cell(1, len(dates) + 2).value = "Итого активаций"
             ws_summary.cell(1, len(dates) + 3).value = "Итого деактиваций"
 
-            # Inline fonts для цветного RichText (используются и в листах операторов)
+            # Inline fonts для цветного RichText
             green_font = InlineFont(color="00FF00")
             red_font = InlineFont(color="FF0000")
             break_font = InlineFont(color="FFA500")
@@ -1602,22 +1602,29 @@ class Database:
                 for c in range(1, len(dates) + 4):
                     ws_summary.cell(r, c).border = thin_border
 
-            # Филлы для статусов (как были)
-            green_fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")  # Active - зелёный
-            orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")  # Break - оранжевый
-            yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # Training - жёлтый
-            purple_fill = PatternFill(start_color="800080", end_color="800080", fill_type="solid")  # Tech - фиолетовый
-            red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")     # Inactive - красный
-            blue_fill = PatternFill(start_color="5195F5", end_color="5195F5", fill_type="solid")    # IEsigning - голубой
+            # Филлы для статусов
+            green_fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
+            orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
+            yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+            purple_fill = PatternFill(start_color="800080", end_color="800080", fill_type="solid")
+            red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+            blue_fill = PatternFill(start_color="5195F5", end_color="5195F5", fill_type="solid")
 
-            # Порядок статусов для итоговой строки (кроме 'inactive')
+            # Порядок статусов и отображаемые русские названия (исключаем 'inactive')
             status_order = [
                 ('active', green_font),
+                ('iesigning', iesign_font),
                 ('break', break_font),
                 ('training', training_font),
                 ('tech', tech_font),
-                ('iesigning', iesign_font),
             ]
+            status_display = {
+                'active': 'Активен',
+                'iesigning': 'Подписание',
+                'break': 'Перерыв',
+                'training': 'Тренинг',
+                'tech': 'Тех. причина'
+            }
 
             for op_id, name in operators_dict.items():
                 ws = wb.create_sheet(title=name[:31])
@@ -1635,7 +1642,7 @@ class Database:
                 current_row = 2
                 current_day = None
 
-                # теперь храним длительности по статусам для дня
+                # длительности по статусам для текущего дня
                 day_status_times = defaultdict(timedelta)
 
                 for i, log in enumerate(logs):
@@ -1643,10 +1650,9 @@ class Database:
                     if current_day is None:
                         current_day = dt
                     if dt != current_day:
-                        # Вставляем строку итого для предыдущего дня — теперь по всем статусам, кроме inactive
+                        # 1) строка с общими счетчиками (Итого)
                         ws.cell(current_row, 1).value = current_day.strftime("%Y-%m-%d")
                         ws.cell(current_row, 2).value = "Итого"
-
                         acts = counts_per_op[op_id][current_day]['act']
                         deacts = counts_per_op[op_id][current_day]['deact']
                         rt_counts = CellRichText([
@@ -1655,24 +1661,23 @@ class Database:
                             TextBlock(red_font, str(deacts))
                         ])
                         ws.cell(current_row, 3).value = rt_counts
-
-                        # Формируем rich text с длительностями по статусам (кроме inactive)
-                        pieces = []
-                        first_piece = True
-                        for status, font in status_order:
-                            dur = day_status_times.get(status, timedelta(0))
-                            dur_str = format_duration(dur)
-                            if not first_piece:
-                                pieces.append(TextBlock(default_font, " | "))
-                            pieces.append(TextBlock(font, dur_str))
-                            first_piece = False
-
-                        ws.cell(current_row, 4).value = CellRichText(pieces)
+                        # оставляем колонку D пустой для этой строки
                         ws.cell(current_row, 1).font = Font(bold=True)
                         ws.cell(current_row, 2).font = Font(bold=True)
                         ws.cell(current_row, 3).font = Font(bold=True)
-                        ws.cell(current_row, 4).font = Font(bold=True)
                         current_row += 1
+
+                        # 2) отдельные строки для каждого статуса (Итого: <Статус>) в колонке B и длительность в D
+                        for status_key, font in status_order:
+                            # пропускаем статусы, для которых ноль — если хотите отображать 0s, можно убрать условие
+                            dur = day_status_times.get(status_key, timedelta(0))
+                            dur_str = format_duration(dur)
+                            ws.cell(current_row, 1).value = current_day.strftime("%Y-%m-%d")
+                            ws.cell(current_row, 2).value = f"Итого: {status_display.get(status_key, status_key)}"
+                            ws.cell(current_row, 4).value = dur_str
+                            # подсветка можно не ставить — либо ставим заливку для колонки Статус (C) у событий, здесь оставляем пустой
+                            ws.cell(current_row, 2).font = Font(bold=False)
+                            current_row += 1
 
                         # Сбрасываем для нового дня
                         day_status_times = defaultdict(timedelta)
@@ -1690,7 +1695,6 @@ class Database:
                         dur_str = "N/A (дубликат состояния)"
                     else:
                         dur_str = format_duration(duration)
-                        # Добавляем длительность в соответствующий статус (кроме 'inactive')
                         status = log['is_active']
                         if status != 'inactive':
                             day_status_times[status] += duration
@@ -1716,7 +1720,7 @@ class Database:
 
                     current_row += 1
 
-                # Добавляем итого для последнего дня (если были события)
+                # Итоги для последнего дня
                 if current_day is not None:
                     ws.cell(current_row, 1).value = current_day.strftime("%Y-%m-%d")
                     ws.cell(current_row, 2).value = "Итого"
@@ -1728,23 +1732,19 @@ class Database:
                         TextBlock(red_font, str(deacts))
                     ])
                     ws.cell(current_row, 3).value = rt_counts
-
-                    pieces = []
-                    first_piece = True
-                    for status, font in status_order:
-                        dur = day_status_times.get(status, timedelta(0))
-                        dur_str = format_duration(dur)
-                        if not first_piece:
-                            pieces.append(TextBlock(default_font, " | "))
-                        pieces.append(TextBlock(font, dur_str))
-                        first_piece = False
-
-                    ws.cell(current_row, 4).value = CellRichText(pieces)
                     ws.cell(current_row, 1).font = Font(bold=True)
                     ws.cell(current_row, 2).font = Font(bold=True)
                     ws.cell(current_row, 3).font = Font(bold=True)
-                    ws.cell(current_row, 4).font = Font(bold=True)
                     current_row += 1
+
+                    for status_key, font in status_order:
+                        dur = day_status_times.get(status_key, timedelta(0))
+                        dur_str = format_duration(dur)
+                        ws.cell(current_row, 1).value = current_day.strftime("%Y-%m-%d")
+                        ws.cell(current_row, 2).value = f"Итого: {status_display.get(status_key, status_key)}"
+                        ws.cell(current_row, 4).value = dur_str
+                        ws.cell(current_row, 2).font = Font(bold=False)
+                        current_row += 1
 
                 if current_row > 2:
                     sanitized_name = sanitize_table_name(f"{name}_{op_id}")
@@ -1767,6 +1767,7 @@ class Database:
         except Exception as e:
             logging.error(f"Error generating report: {e}")
             return None, None
+
         
     def get_user_history(self, user_id):
         with self._get_cursor() as cursor:
