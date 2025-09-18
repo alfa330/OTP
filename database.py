@@ -1444,17 +1444,19 @@ class Database:
         
     def generate_monthly_report(self, supervisor_id, month=None, current_date=None):
         """
-        Генерация месячного отчёта (xlsx) — упрощённый для фильтрации вариант:
-        в листе оператора добавлены колонки-итоги по статусам + скрытые колонки с секундами для числовой фильтрации.
+        Генерация месячного отчёта (xlsx).
+        Summary: даты по столбцам + цветной RichText активаций/деактиваций.
+        Operator sheets: строки событий + одна строка "Итого" на день с колонками-итогами
+        (E..I человеко-читаемые в формате HH:MM:SS, J..N — секунды, скрытые для сортировки).
         """
         def sanitize_table_name(name):
-            sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', name or "")
+            sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', (name or ""))
             if not sanitized or (not sanitized[0].isalpha() and sanitized[0] != '_'):
                 sanitized = f"_{sanitized}"
             return sanitized[:255]
 
-        def format_duration_local(duration):
-            """Человеко-читаемый формат: '1ч 23м 45с'."""
+        def format_hms(duration):
+            """Возвращает строку HH:MM:SS, где hours может быть >=24 (полные часы)."""
             if duration is None:
                 return "N/A"
             total = int(duration.total_seconds())
@@ -1463,14 +1465,7 @@ class Database:
             h = total // 3600
             m = (total % 3600) // 60
             s = total % 60
-            parts = []
-            if h:
-                parts.append(f"{h}ч")
-            if m:
-                parts.append(f"{m}м")
-            if s or not parts:
-                parts.append(f"{s}с")
-            return " ".join(parts)
+            return f"{h:02d}:{m:02d}:{s:02d}"
 
         try:
             if current_date is None:
@@ -1522,7 +1517,7 @@ class Database:
                 """, (supervisor_id, month_start_date, end_date))
                 all_logs = cursor.fetchall()
 
-            # Группируем
+            # Группируем логи и считаем активации/деактивации для summary
             logs_per_op = defaultdict(list)
             counts_per_op = defaultdict(lambda: defaultdict(lambda: {'act': 0, 'deact': 0}))
             total_counts_per_op = defaultdict(lambda: {'act': 0, 'deact': 0})
@@ -1538,24 +1533,89 @@ class Database:
                     counts_per_op[op_id][dt]['deact'] += 1
                     total_counts_per_op[op_id]['deact'] += 1
 
+            # Список дат для summary (от 1 числа до end_date)
+            dates = [month_start_date + timedelta(days=i) for i in range((end_date - month_start_date).days + 1)]
+
             wb = Workbook()
             ws_summary = wb.active
             ws_summary.title = "Summary"
 
-            # Простая summary (как раньше) — можно не трогать
+            # -------------------------
+            # 1) Summary: заголовки и данные (как раньше, но стилизовано)
+            # -------------------------
             ws_summary.cell(1, 1).value = "ФИО"
-            # даты здесь пока не нужны — оставим минимальный summary
-            ws_summary.cell(1, 2).value = "Итого активаций"
-            ws_summary.cell(1, 3).value = "Итого деактиваций"
+            for col, dt in enumerate(dates, start=2):
+                ws_summary.cell(1, col).value = dt.strftime("%Y-%m-%d")
+                ws_summary.cell(1, col).alignment = Alignment(horizontal='center', vertical='center')
+            last_date_col = 1 + len(dates)
+            ws_summary.cell(1, last_date_col + 1).value = "Итого активаций"
+            ws_summary.cell(1, last_date_col + 2).value = "Итого деактиваций"
+
+            # шрифты для rich text
+            green_font = InlineFont(color="00AA00") if InlineFont else None
+            red_font = InlineFont(color="AA0000") if InlineFont else None
+            default_font = InlineFont() if InlineFont else None
+
+            # Заполняем summary
             row = 2
             for op_id, name in operators_dict.items():
                 ws_summary.cell(row, 1).value = name
-                ws_summary.cell(row, 2).value = total_counts_per_op[op_id]['act']
-                ws_summary.cell(row, 3).value = total_counts_per_op[op_id]['deact']
+                for col, dt in enumerate(dates, start=2):
+                    activations = counts_per_op[op_id][dt]['act']
+                    deactivations = counts_per_op[op_id][dt]['deact']
+                    cell = ws_summary.cell(row, col)
+                    if CellRichText and TextBlock and green_font and red_font:
+                        # отображаем как цветной rich text: "activations | deactivations"
+                        rt = CellRichText([
+                            TextBlock(green_font, str(activations)),
+                            TextBlock(default_font, " | "),
+                            TextBlock(red_font, str(deactivations))
+                        ])
+                        cell.value = rt
+                    else:
+                        # fallback plain text
+                        cell.value = f"{activations} | {deactivations}"
+                    cell.alignment = Alignment(horizontal='center', vertical='center', wrapText=True)
+                # итоговые колонки
+                act_cell = ws_summary.cell(row, last_date_col + 1)
+                deact_cell = ws_summary.cell(row, last_date_col + 2)
+                if CellRichText and TextBlock and green_font and red_font:
+                    act_cell.value = CellRichText([TextBlock(green_font, str(total_counts_per_op[op_id]['act']))])
+                    deact_cell.value = CellRichText([TextBlock(red_font, str(total_counts_per_op[op_id]['deact']))])
+                else:
+                    act_cell.value = total_counts_per_op[op_id]['act']
+                    deact_cell.value = total_counts_per_op[op_id]['deact']
+                act_cell.alignment = Alignment(horizontal='center', vertical='center')
+                deact_cell.alignment = Alignment(horizontal='center', vertical='center')
                 row += 1
 
-            # Стили/залики/границы
+            # легенда
+            ws_summary.cell(row + 1, 1).value = "Легенда:"
+            ws_summary.cell(row + 2, 1).value = "Зелёный — активации"
+            ws_summary.cell(row + 3, 1).value = "Красный — деактивации"
+
+            # стили summary: жирная шапка, границы, автоширины
             thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+            for c in range(1, last_date_col + 3):
+                cell = ws_summary.cell(1, c)
+                cell.font = Font(bold=True)
+                cell.border = thin_border
+            # применим границы к заполненным ячейкам summary
+            for r in range(1, row):
+                for c in range(1, last_date_col + 3):
+                    ws_summary.cell(r, c).border = thin_border
+            # автоширина (приближённая)
+            ws_summary.column_dimensions['A'].width = 24
+            for idx in range(2, last_date_col + 3):
+                col_letter = ws_summary.cell(1, idx).column_letter
+                ws_summary.column_dimensions[col_letter].width = 12
+            ws_summary.freeze_panes = "A2"
+
+            # -------------------------
+            # 2) Листы по операторам: события + одна строка итого на день с колонками итогов
+            #    (E..I — HH:MM:SS, J..N — секунды (скрыты) для фильтрации)
+            # -------------------------
+            # стили и заливки
             total_fill = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
             status_fill = PatternFill(start_color="F7F7F7", end_color="F7F7F7", fill_type="solid")
             green_fill = PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")
@@ -1565,7 +1625,7 @@ class Database:
             blue_fill = PatternFill(start_color="DCEEFF", end_color="DCEEFF", fill_type="solid")
             inactive_fill = PatternFill(start_color="FFDADA", end_color="FFDADA", fill_type="solid")
 
-            # порядок статусов и отображаемые русские названия (исключаем inactive)
+            # порядок статусов (исключаем 'inactive') — используется для колонок итогов E..I
             status_order = [
                 ('active', 'Активен', green_fill),
                 ('iesigning', 'Подписание', blue_fill),
@@ -1573,17 +1633,16 @@ class Database:
                 ('training', 'Тренинг', yellow_fill),
                 ('tech', 'Тех. поддержка', purple_fill),
             ]
-            # Колонки для итогов: E..I — человеко-читаемые, J..N — секунды (скрыты)
-            # E: Active_read, F: IEsigning_read, G: Break_read, H: Training_read, I: Tech_read
-            # J: Active_sec, K: IEsigning_sec, L: Break_sec, M: Training_sec, N: Tech_sec
 
             for op_id, name in operators_dict.items():
                 ws = wb.create_sheet(title=(name[:31] or f"op_{op_id}"))
 
-                # Хедер
-                headers = ["Дата", "Время / Описание", "Статус", "Длительность",
-                        "Итого Активен", "Итого Подписание", "Итого Перерыв", "Итого Тренинг", "Итого Тех",
-                        "Итого Активен (сек)", "Итого Подписание (сек)", "Итого Перерыв (сек)", "Итого Тренинг (сек)", "Итого Тех (сек)"]
+                # Заголовок: A..N (A-D — события, E-I — human totals, J-N — seconds hidden)
+                headers = [
+                    "Дата", "Время / Описание", "Статус", "Длительность",
+                    "Итого: Активен", "Итого: Подписание", "Итого: Перерыв", "Итого: Тренинг", "Итого: Тех",
+                    "Итого Активен (сек)", "Итого Подписание (сек)", "Итого Перерыв (сек)", "Итого Тренинг (сек)", "Итого Тех (сек)"
+                ]
                 for col_idx, h in enumerate(headers, start=1):
                     cell = ws.cell(1, col_idx)
                     cell.value = h
@@ -1609,41 +1668,42 @@ class Database:
                 logs = sorted(logs_per_op[op_id], key=lambda x: x['change_time'])
                 current_row = 2
                 current_day = None
-                day_status_times = defaultdict(timedelta)  # хранит timedelta по статусам
+                day_status_times = defaultdict(timedelta)  # суммарное timedelta по статусам для дня
 
-                def write_day_totals_singlerow(r, day_dt, counts_dict, day_status_times_dict):
+                def write_day_totals_row(r, day_dt, counts_dict, day_status_times_dict):
                     """
-                    Записывает одну строку 'Итого' с отдельными колонками для каждого статуса (человеко-читаемые)
-                    и с числом секунд в скрытых колонках (числовые для фильтрации/сортировки).
+                    Записывает одну строку 'Итого' с колонками E..I (HH:MM:SS) и J..N (секунды).
                     Возвращает следующий свободный row.
                     """
-                    # human-readable
+                    # A..D
                     ws.cell(r, 1).value = day_dt.strftime("%Y-%m-%d")
                     ws.cell(r, 2).value = "Итого"
-                    # A..D стили
+                    ws.cell(r, 3).value = CellRichText([TextBlock(green_font, str(counts_dict['act'])), TextBlock(default_font, " | "), TextBlock(red_font, str(counts_dict['deact']))]) if CellRichText and TextBlock and green_font and red_font else f"{counts_dict['act']} | {counts_dict['deact']}"
+                    ws.cell(r, 4).value = ""  # оставляем D пустой в строке Итого
+
+                    # стиль для A..D
                     for c in range(1, 5):
                         cell = ws.cell(r, c)
                         cell.fill = total_fill
                         cell.font = Font(bold=True)
+                        cell.alignment = Alignment(horizontal='center', vertical='center')
                         cell.border = thin_border
-                        cell.alignment = Alignment(vertical='center')
 
-                    # Заполнить человеко-читаемые и числовые (секунды)
+                    # колонки итогов E..I и J..N
                     for idx, (status_key, status_name, fill) in enumerate(status_order):
-                        # читаемая колонка
                         dur = day_status_times_dict.get(status_key, timedelta(0))
                         dur_sec = int(dur.total_seconds())
-                        dur_str = format_duration_local(dur)
-                        col_read = 5 + idx  # E(5),F(6)...
-                        col_sec = 10 + idx  # J(10),K(11)...
-                        ws.cell(r, col_read).value = dur_str
+                        dur_hms = format_hms(dur)
+                        col_read = 5 + idx   # E..I
+                        col_sec = 10 + idx   # J..N
+                        ws.cell(r, col_read).value = dur_hms
                         ws.cell(r, col_sec).value = dur_sec
                         # стили
                         ws.cell(r, col_read).alignment = Alignment(horizontal='center', vertical='center')
                         ws.cell(r, col_sec).alignment = Alignment(horizontal='center', vertical='center')
                         ws.cell(r, col_read).border = thin_border
                         ws.cell(r, col_sec).border = thin_border
-                        # можно подсветить ячейку чтения легкой заливкой статуса
+                        # лёгкая заливка
                         ws.cell(r, col_read).fill = status_fill
 
                     return r + 1
@@ -1653,13 +1713,14 @@ class Database:
                     if current_day is None:
                         current_day = dt
                     if dt != current_day:
-                        # записать одну строку итогов
+                        # записать строку итогов предыдущего дня
                         counts = counts_per_op[op_id][current_day]
-                        current_row = write_day_totals_singlerow(current_row, current_day, counts, day_status_times)
+                        current_row = write_day_totals_row(current_row, current_day, counts, day_status_times)
+                        # сброс
                         day_status_times = defaultdict(timedelta)
                         current_day = dt
 
-                    # следующий момент
+                    # next_time
                     if i < len(logs) - 1:
                         next_time = logs[i + 1]['change_time']
                     else:
@@ -1671,58 +1732,58 @@ class Database:
                     if i > 0 and log['is_active'] == logs[i - 1]['is_active']:
                         dur_str = "N/A (дубликат)"
                     else:
-                        dur_str = format_duration_local(duration)
+                        dur_str = format_hms(duration)
                         if log['is_active'] != 'inactive':
                             day_status_times[log['is_active']] += duration
 
-                    # событие
+                    # пишем событие (A..D)
                     ws.cell(current_row, 1).value = dt.strftime("%Y-%m-%d")
                     ws.cell(current_row, 2).value = log['change_time'].strftime("%H:%M:%S")
                     ws.cell(current_row, 3).value = log['is_active'].capitalize()
                     ws.cell(current_row, 4).value = dur_str
 
                     # заливка статуса
-                    cstat = ws.cell(current_row, 3)
+                    cell_stat = ws.cell(current_row, 3)
                     if log['is_active'] == 'active':
-                        cstat.fill = green_fill
+                        cell_stat.fill = green_fill
                     elif log['is_active'] == 'break':
-                        cstat.fill = orange_fill
+                        cell_stat.fill = orange_fill
                     elif log['is_active'] == 'training':
-                        cstat.fill = yellow_fill
+                        cell_stat.fill = yellow_fill
                     elif log['is_active'] == 'tech':
-                        cstat.fill = purple_fill
+                        cell_stat.fill = purple_fill
                     elif log['is_active'] == 'iesigning':
-                        cstat.fill = blue_fill
+                        cell_stat.fill = blue_fill
                     elif log['is_active'] == 'inactive':
-                        cstat.fill = inactive_fill
+                        cell_stat.fill = inactive_fill
 
-                    # границы и выравнивание по строке события
+                    # границы и выравнивание для строки события
                     for col_idx in range(1, 15):
-                        cell = ws.cell(current_row, col_idx)
-                        cell.border = thin_border
+                        ccell = ws.cell(current_row, col_idx)
+                        ccell.border = thin_border
                         if col_idx == 4:
-                            cell.alignment = Alignment(horizontal='center', vertical='center')
+                            ccell.alignment = Alignment(horizontal='center', vertical='center')
                         else:
-                            cell.alignment = Alignment(horizontal='left', vertical='center')
+                            ccell.alignment = Alignment(horizontal='left', vertical='center')
 
                     current_row += 1
 
                 # итоги для последнего дня
                 if current_day is not None:
                     counts = counts_per_op[op_id][current_day]
-                    current_row = write_day_totals_singlerow(current_row, current_day, counts, day_status_times)
+                    current_row = write_day_totals_row(current_row, current_day, counts, day_status_times)
 
-                # Добавим таблицу охватывающую все заполненные строки и колонки A..I (видимые).
+                # добавляем таблицу, охватывающую A..N
                 if current_row > 2:
                     last_row = current_row - 1
                     sanitized_name = sanitize_table_name(f"{name}_{op_id}")
-                    tab_ref = f"A1:N{last_row}"  # включаем скрытые числовые колонки в таблицу — это не мешает
+                    tab_ref = f"A1:N{last_row}"
                     tab_op = Table(displayName=f"Table_{sanitized_name}", ref=tab_ref)
                     style_op = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False, showRowStripes=True)
                     tab_op.tableStyleInfo = style_op
                     ws.add_table(tab_op)
 
-            # Сохранение
+            # Сохранение в BytesIO
             output = BytesIO()
             wb.save(output)
             output.seek(0)
