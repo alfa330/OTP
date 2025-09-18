@@ -4201,7 +4201,7 @@
                                     onClick={() => setShowAddSvModal(true)}
                                     className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200 min-w-[180px] text-center"
                                     >
-                                    + Добавить супервайзера
+                                    + Добавить СВ
                                     </button>
                                 </div>
                                 </div>
@@ -4247,10 +4247,10 @@
                                                 rel="noopener noreferrer"
                                                 className="text-blue-600 hover:text-blue-800"
                                                 >
-                                                View Table
+                                                Просмотр
                                                 </a>
                                             ) : (
-                                                "No table"
+                                                "Нет таблицы"
                                             )}
                                             </td>
 
@@ -4304,7 +4304,7 @@
                                                     }}
                                                     className="block w-full text-left px-4 py-2 hover:bg-gray-100"
                                                     >
-                                                    <i className="fas fa-edit mr-2"></i>Edit
+                                                    <i className="fas fa-edit mr-2"></i>Править
                                                     </button>
                                                     <button
                                                     onClick={() => {
@@ -4326,6 +4326,9 @@
                                                     >
                                                     <i className="fas fa-history mr-2"></i>История
                                                     </button>
+
+                                                    <div className="border-t border-gray-200" />
+
                                                     <button
                                                     onClick={() => removeSv(sv.id)}
                                                     className="block w-full text-left px-4 py-2 text-red-600 hover:bg-red-50"
