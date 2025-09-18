@@ -4279,10 +4279,16 @@
                                             </td>
 
                                             {/* Menu */}
-                                            <td className="px-2 py-4 text-right opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                                            <td
+                                            className={`px-2 py-4 text-right transition-opacity duration-200 relative overflow-visible ${
+                                                openMenuId === sv.id ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                                            }`}
+                                            >
                                             <div className="relative inline-block text-left">
                                                 <button
-                                                onClick={() => setOpenMenuId(openMenuId === sv.id ? null : sv.id)}
+                                                onClick={() =>
+                                                    setOpenMenuId(openMenuId === sv.id ? null : sv.id)
+                                                }
                                                 className="p-2 rounded-full hover:bg-gray-100"
                                                 >
                                                 <i className="fas fa-ellipsis-v"></i>
