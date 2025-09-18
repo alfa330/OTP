@@ -4052,27 +4052,27 @@
                                     <>
                                         <li>
                                             <button onClick={() => setView('sv_list')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_list' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-users"></i> Supervisors
+                                                <i className="fas fa-users"></i> Супервайзеры
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => setView('manage_users')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_users' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-user-cog"></i> Manage Users
+                                                <i className="fas fa-user-cog"></i> Операторы
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => setView('view_scores')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'view_scores' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-chart-bar"></i> View Operator Scores
+                                                <i className="fas fa-chart-bar"></i> Оценки операторов
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => setView('trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-book"></i> Manage trainings
+                                                <i className="fas fa-book"></i> Учет тренингов
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3">
-                                                <i className="fas fa-sliders-h"></i> Manage Monitoring Scale
+                                                <i className="fas fa-sliders-h"></i> Мониторинговая шкала
                                             </button>
                                         </li>
                                     </>
@@ -4081,22 +4081,22 @@
                                     <>
                                         <li>
                                             <button onClick={() => setView('update_table')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'update_table' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-table"></i> Update Table
+                                                <i className="fas fa-table"></i> Обновить таблицу
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => setView('operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'operators' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-users-cog"></i> Your Operators
+                                                <i className="fas fa-users-cog"></i> Оценки операторов
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => setView('manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-user-edit"></i> Manage my operators
+                                                <i className="fas fa-user-edit"></i> Управлять операторами
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => setView('trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-book"></i> Manage trainings
+                                                <i className="fas fa-book"></i> Учет тренингов
                                             </button>
                                         </li>
                                     </>
@@ -4105,22 +4105,22 @@
                                     <>
                                         <li>
                                             <button onClick={() => setView('profile')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'profile' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-user-circle"></i> Profile
+                                                <i className="fas fa-user-circle"></i> Профиль
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => setView('hours')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'hours' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-clock"></i> My Hours
+                                                <i className="fas fa-clock"></i> Мои часы
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => setView('evaluation')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'evaluation' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-phone-alt"></i> Call Evaluations
+                                                <i className="fas fa-phone-alt"></i> Мои оценки
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => setView('salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-calculator"></i> Salary Calculator
+                                                <i className="fas fa-calculator"></i> Калькулятор зарплаты
                                             </button>
                                         </li>
                                     </>
@@ -4133,7 +4133,7 @@
                                     aria-haspopup="menu"
                                 >
                                     <i className="fas fa-cog"></i>
-                                    <span className="ml-2">Account</span>
+                                    <span className="ml-2">Аккаунт</span>
 
                                     {/* Стрелка появляется только при hover */}
                                     <i className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0"></i>
@@ -4164,7 +4164,7 @@
                                 </li>
                                 <li>
                                 <button onClick={handleLogout} className="w-full text-left py-3 px-4 rounded-lg hover:bg-red-700 bg-red-600 transition-all duration-200 flex items-center gap-3">
-                                    <i className="fas fa-sign-out-alt"></i> Logout
+                                    <i className="fas fa-sign-out-alt"></i> Выход
                                 </button>
                                 </li>
                             </ul>
@@ -4176,7 +4176,7 @@
                             {view === 'sv_list' && (
                             <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                 <div className="flex justify-between items-center mb-6">
-                                <h2 className="text-2xl font-semibold text-gray-800">Supervisors</h2>
+                                <h2 className="text-2xl font-semibold text-gray-800">Супервайзеры</h2>
                                 <div className="flex items-center gap-4">
                                     {/* Выбор месяца */}
                                     <select
@@ -4194,23 +4194,23 @@
                                     }`}
                                     disabled={isLoading}
                                     >
-                                    {isLoading ? "Generating..." : "Generate Report"}
+                                    {isLoading ? "Загрузка..." : "Загрузить отчет"}
                                     </button>
 
                                     <button
                                     onClick={() => setShowAddSvModal(true)}
                                     className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200 min-w-[180px] text-center"
                                     >
-                                    + Add Supervisor
+                                    + Добавить супервайзера
                                     </button>
                                 </div>
                                 </div>
 
                                 {/* Таблица */}
                                 {isAdminDataLoading ? (
-                                <p className="text-center text-gray-600">Loading...</p>
+                                <p className="text-center text-gray-600">Загрузка...</p>
                                 ) : svList.length === 0 ? (
-                                <p className="text-center text-gray-600">No supervisors found.</p>
+                                <p className="text-center text-gray-600">Нету супервайзеров.</p>
                                 ) : (
                                 <div className="overflow-visible rounded-lg border border-gray-200">
                                     <table className="min-w-full table-fixed border rounded-lg">
@@ -4224,10 +4224,10 @@
 
                                     <thead className="bg-gray-50">
                                         <tr>
-                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Table URL</th>
-                                        <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
-                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Hire Date</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Имя</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Таблица часов</th>
+                                        <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Статус</th>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Дата принятия</th>
                                         <th className="px-6 py-3"></th>
                                         </tr>
                                     </thead>
@@ -4257,11 +4257,11 @@
                                             {/* Status */}
                                             <td className="px-6 py-4 text-center">
                                             {sv.status === "working" || !sv.status ? (
-                                                <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Working</span>
+                                                <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Работает</span>
                                             ) : sv.status === "unpaid_leave" ? (
-                                                <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">UL</span>
+                                                <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">БС</span>
                                             ) : sv.status === "fired" ? (
-                                                <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Fired</span>
+                                                <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Уволен</span>
                                             ) : (
                                                 <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{sv.status}</span>
                                             )}
@@ -4314,7 +4314,7 @@
                                                     }}
                                                     className="block w-full text-left px-4 py-2 hover:bg-gray-100"
                                                     >
-                                                    <i className="fas fa-table mr-2"></i>Change Table
+                                                    <i className="fas fa-table mr-2"></i>Поменять таблицу
                                                     </button>
                                                     <button
                                                     onClick={() => {
@@ -4324,13 +4324,13 @@
                                                     }}
                                                     className="block w-full text-left px-4 py-2 hover:bg-gray-100"
                                                     >
-                                                    <i className="fas fa-history mr-2"></i>History
+                                                    <i className="fas fa-history mr-2"></i>История
                                                     </button>
                                                     <button
                                                     onClick={() => removeSv(sv.id)}
                                                     className="block w-full text-left px-4 py-2 text-red-600 hover:bg-red-50"
                                                     >
-                                                    <i className="fas fa-trash mr-2"></i>Remove
+                                                    <i className="fas fa-trash mr-2"></i>Удалить
                                                     </button>
                                                 </div>
                                                 )}
@@ -4349,10 +4349,10 @@
                                 {showAddSvModal && (
                                 <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50">
                                     <div className="bg-white w-full max-w-md p-6 rounded-xl shadow-lg relative">
-                                    <h2 className="text-2xl font-semibold mb-6 text-gray-800">Add Supervisor</h2>
+                                    <h2 className="text-2xl font-semibold mb-6 text-gray-800">Добавить супервайзера</h2>
                                     <input
                                         type="text"
-                                        placeholder="Supervisor Name"
+                                        placeholder="Имя супервайзера"
                                         value={newSvName}
                                         onChange={(e) => setNewSvName(e.target.value)}
                                         className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
@@ -4363,21 +4363,21 @@
                                         className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                         disabled={isLoading}
                                     >
-                                        {isLoading ? 'Adding...' : 'Add Supervisor'}
+                                        {isLoading ? 'Добавление...' : 'Добавить'}
                                     </button>
 
                                     {/* Показать новые креды */}
                                     {newCredentials && (
                                         <div className="mt-4 p-4 bg-green-100 rounded-lg">
-                                        <p className="font-bold mb-2">New Supervisor Credentials:</p>
+                                        <p className="font-bold mb-2">Учетные данные нового СВ:</p>
                                         <p className="mb-1">
-                                            Login: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.login}</span>
+                                            Логин: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.login}</span>
                                         </p>
                                         <p>
-                                            Password: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.password}</span>
+                                            Пароль: <span className="font-mono bg-gray-200 px-2 py-1 rounded">{newCredentials.password}</span>
                                         </p>
                                         <p className="text-sm text-gray-600 mt-2 italic">
-                                            Note: These credentials are shown only once. Please record them securely.
+                                            Примечание: эти учётные данные отображаются только один раз. Пожалуйста, запишите их в безопасное место.
                                         </p>
                                         </div>
                                     )}
