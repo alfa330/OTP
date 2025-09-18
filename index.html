@@ -4212,134 +4212,136 @@
                                 ) : svList.length === 0 ? (
                                 <p className="text-center text-gray-600">No supervisors found.</p>
                                 ) : (
-                                <div className="overflow-x-auto rounded-lg border border-gray-200">
-                                    <table className="min-w-full table-fixed border rounded-lg">
-                                    <colgroup>
-                                        <col style={{ width: "30%" }} /> {/* Name */}
-                                        <col style={{ width: "25%" }} /> {/* Table URL */}
-                                        <col style={{ width: "20%" }} /> {/* Status */}
-                                        <col style={{ width: "20%" }} /> {/* Hire Date */}
-                                        <col style={{ width: "5%" }} />  {/* Menu */}
-                                    </colgroup>
+                                <div className="rounded-lg border border-gray-200 overflow-visible">
+                                    <div className="overflow-x-auto">      
+                                        <table className="min-w-full table-fixed border rounded-lg overflow-visible">
+                                        <colgroup>
+                                            <col style={{ width: "30%" }} /> {/* Name */}
+                                            <col style={{ width: "25%" }} /> {/* Table URL */}
+                                            <col style={{ width: "20%" }} /> {/* Status */}
+                                            <col style={{ width: "20%" }} /> {/* Hire Date */}
+                                            <col style={{ width: "5%" }} />  {/* Menu */}
+                                        </colgroup>
 
-                                    <thead className="bg-gray-50">
-                                        <tr>
-                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Table URL</th>
-                                        <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
-                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Hire Date</th>
-                                        <th className="px-6 py-3"></th>
-                                        </tr>
-                                    </thead>
+                                        <thead className="bg-gray-50">
+                                            <tr>
+                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Table URL</th>
+                                            <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
+                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Hire Date</th>
+                                            <th className="px-6 py-3"></th>
+                                            </tr>
+                                        </thead>
 
-                                    <tbody className="bg-white divide-y divide-gray-200">
-                                        {svList.map((sv) => (
-                                        <tr key={sv.id} className="hover:bg-gray-50 transition-colors duration-200 group">
-                                            {/* Name */}
-                                            <td className="px-6 py-4 truncate">{sv.name}</td>
+                                        <tbody className="bg-white divide-y divide-gray-200 overflow-visible">
+                                            {svList.map((sv) => (
+                                            <tr key={sv.id} className="hover:bg-gray-50 transition-colors duration-200 group">
+                                                {/* Name */}
+                                                <td className="px-6 py-4 truncate">{sv.name}</td>
 
-                                            {/* Table URL */}
-                                            <td className="px-6 py-4">
-                                            {sv.table ? (
-                                                <a
-                                                href={sv.table}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="text-blue-600 hover:text-blue-800"
-                                                >
-                                                View Table
-                                                </a>
-                                            ) : (
-                                                "No table"
-                                            )}
-                                            </td>
-
-                                            {/* Status */}
-                                            <td className="px-6 py-4 text-center">
-                                            {sv.status === "working" || !sv.status ? (
-                                                <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Working</span>
-                                            ) : sv.status === "unpaid_leave" ? (
-                                                <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">UL</span>
-                                            ) : sv.status === "fired" ? (
-                                                <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Fired</span>
-                                            ) : (
-                                                <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{sv.status}</span>
-                                            )}
-                                            </td>
-
-                                            {/* Hire Date */}
-                                            <td className="px-6 py-4">
-                                            {sv.hire_date
-                                                ? (() => {
-                                                    const [day, month, year] = sv.hire_date.split("-");
-                                                    const date = new Date(`${year}-${month}-${day}`);
-                                                    return date.toLocaleDateString("ru-RU");
-                                                })()
-                                                : "-"}
-                                            </td>
-
-                                            {/* Menu */}
-                                            <td
-                                            className={`px-2 py-4 text-right transition-opacity duration-200 relative overflow-visible ${
-                                                openMenuId === sv.id ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-                                            }`}
-                                            >
-                                            <div className="relative inline-block text-left">
-                                                <button
-                                                onClick={() =>
-                                                    setOpenMenuId(openMenuId === sv.id ? null : sv.id)
-                                                }
-                                                className="p-2 rounded-full hover:bg-gray-100"
-                                                >
-                                                <i className="fas fa-ellipsis-v"></i>
-                                                </button>
-
-                                                {openMenuId === sv.id && (
-                                                <div className="absolute right-0 mt-2 w-40 bg-white border rounded-lg shadow-lg z-50">
-                                                    <button
-                                                    onClick={() => {
-                                                        setUserToEdit({ ...sv });
-                                                        setShowUserEditModal(true);
-                                                        setOpenMenuId(null);
-                                                    }}
-                                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                                {/* Table URL */}
+                                                <td className="px-6 py-4">
+                                                {sv.table ? (
+                                                    <a
+                                                    href={sv.table}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="text-blue-600 hover:text-blue-800"
                                                     >
-                                                    <i className="fas fa-edit mr-2"></i>Edit
-                                                    </button>
-                                                    <button
-                                                    onClick={() => {
-                                                        setCurrentSvForTableChange(sv);
-                                                        setShowChangeTableForm(true);
-                                                        setOpenMenuId(null);
-                                                    }}
-                                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                                    >
-                                                    <i className="fas fa-table mr-2"></i>Change Table
-                                                    </button>
-                                                    <button
-                                                    onClick={() => {
-                                                        setSelectedUserForHistory(sv);
-                                                        fetchUserHistory(sv.id);
-                                                        setOpenMenuId(null);
-                                                    }}
-                                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                                    >
-                                                    <i className="fas fa-history mr-2"></i>History
-                                                    </button>
-                                                    <button
-                                                    onClick={() => removeSv(sv.id)}
-                                                    className="block w-full text-left px-4 py-2 text-red-600 hover:bg-red-50"
-                                                    >
-                                                    <i className="fas fa-trash mr-2"></i>Remove
-                                                    </button>
-                                                </div>
+                                                    View Table
+                                                    </a>
+                                                ) : (
+                                                    "No table"
                                                 )}
-                                            </div>
-                                            </td>
-                                        </tr>
-                                        ))}
-                                    </tbody>
-                                    </table>
+                                                </td>
+
+                                                {/* Status */}
+                                                <td className="px-6 py-4 text-center">
+                                                {sv.status === "working" || !sv.status ? (
+                                                    <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Working</span>
+                                                ) : sv.status === "unpaid_leave" ? (
+                                                    <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">UL</span>
+                                                ) : sv.status === "fired" ? (
+                                                    <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Fired</span>
+                                                ) : (
+                                                    <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{sv.status}</span>
+                                                )}
+                                                </td>
+
+                                                {/* Hire Date */}
+                                                <td className="px-6 py-4">
+                                                {sv.hire_date
+                                                    ? (() => {
+                                                        const [day, month, year] = sv.hire_date.split("-");
+                                                        const date = new Date(`${year}-${month}-${day}`);
+                                                        return date.toLocaleDateString("ru-RU");
+                                                    })()
+                                                    : "-"}
+                                                </td>
+
+                                                {/* Menu */}
+                                                <td
+                                                className={`px-2 py-4 text-right transition-opacity duration-200 relative overflow-visible ${
+                                                    openMenuId === sv.id ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                                                }`}
+                                                >
+                                                <div className="relative inline-block text-left">
+                                                    <button
+                                                    onClick={() =>
+                                                        setOpenMenuId(openMenuId === sv.id ? null : sv.id)
+                                                    }
+                                                    className="p-2 rounded-full hover:bg-gray-100"
+                                                    >
+                                                    <i className="fas fa-ellipsis-v"></i>
+                                                    </button>
+
+                                                    {openMenuId === sv.id && (
+                                                    <div className="absolute right-0 mt-2 w-40 bg-white border rounded-lg shadow-lg z-50">
+                                                        <button
+                                                        onClick={() => {
+                                                            setUserToEdit({ ...sv });
+                                                            setShowUserEditModal(true);
+                                                            setOpenMenuId(null);
+                                                        }}
+                                                        className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                                        >
+                                                        <i className="fas fa-edit mr-2"></i>Edit
+                                                        </button>
+                                                        <button
+                                                        onClick={() => {
+                                                            setCurrentSvForTableChange(sv);
+                                                            setShowChangeTableForm(true);
+                                                            setOpenMenuId(null);
+                                                        }}
+                                                        className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                                        >
+                                                        <i className="fas fa-table mr-2"></i>Change Table
+                                                        </button>
+                                                        <button
+                                                        onClick={() => {
+                                                            setSelectedUserForHistory(sv);
+                                                            fetchUserHistory(sv.id);
+                                                            setOpenMenuId(null);
+                                                        }}
+                                                        className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                                        >
+                                                        <i className="fas fa-history mr-2"></i>History
+                                                        </button>
+                                                        <button
+                                                        onClick={() => removeSv(sv.id)}
+                                                        className="block w-full text-left px-4 py-2 text-red-600 hover:bg-red-50"
+                                                        >
+                                                        <i className="fas fa-trash mr-2"></i>Remove
+                                                        </button>
+                                                    </div>
+                                                    )}
+                                                </div>
+                                                </td>
+                                            </tr>
+                                            ))}
+                                        </tbody>
+                                        </table>
+                                    </div>
                                 </div>
                                 )}
                             </div>
