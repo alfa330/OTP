@@ -4212,8 +4212,8 @@
                                 ) : svList.length === 0 ? (
                                 <p className="text-center text-gray-600">No supervisors found.</p>
                                 ) : (
-                                <div className="overflow-x-auto rounded-lg border border-gray-200 relative">
-                                    <table className="min-w-full table-fixed border rounded-lg relative">
+                                <div className="overflow-visible rounded-lg border border-gray-200">
+                                    <table className="min-w-full table-fixed border rounded-lg">
                                     <colgroup>
                                         <col style={{ width: "30%" }} /> {/* Name */}
                                         <col style={{ width: "25%" }} /> {/* Table URL */}
@@ -4280,7 +4280,7 @@
 
                                             {/* Menu */}
                                             <td
-                                            className={`px-2 py-4 text-right transition-opacity duration-200 relative ${
+                                            className={`px-2 py-4 text-right transition-opacity duration-200 relative overflow-visible ${
                                                 openMenuId === sv.id ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                                             }`}
                                             >
@@ -4295,8 +4295,7 @@
                                                 </button>
 
                                                 {openMenuId === sv.id && (
-                                                <div className="fixed z-50 bg-white border rounded-lg shadow-lg"
-                                                    style={{ top: "calc(100% + 8px)", right: "20px" }}>
+                                                <div className="absolute right-0 mt-2 w-40 bg-white border rounded-lg shadow-lg z-50">
                                                     <button
                                                     onClick={() => {
                                                         setUserToEdit({ ...sv });
