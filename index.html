@@ -4508,204 +4508,259 @@
                                     <button
                                         onClick={handleGenerateReport}
                                         className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${
-                                        isLoading ? 'opacity-50 cursor-not-allowed' : ''
+                                        isLoading ? "opacity-50 cursor-not-allowed" : ""
                                         }`}
                                         disabled={isLoading}
                                     >
-                                        {isLoading ? 'Generating...' : 'Generate Report'}
+                                        {isLoading ? "Generating..." : "Generate Report"}
+                                    </button>
+                                    </div>
+
+                                    {/* Tabs */}
+                                    <div className="flex space-x-4 mb-6">
+                                    <button
+                                        onClick={() => setActiveUserTab("active")}
+                                        className={`px-4 py-2 rounded-lg font-medium ${
+                                        activeUserTab === "active"
+                                            ? "bg-green-600 text-white"
+                                            : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                                        }`}
+                                    >
+                                        Active
+                                    </button>
+                                    <button
+                                        onClick={() => setActiveUserTab("fired")}
+                                        className={`px-4 py-2 rounded-lg font-medium ${
+                                        activeUserTab === "fired"
+                                            ? "bg-red-600 text-white"
+                                            : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                                        }`}
+                                    >
+                                        Fired
                                     </button>
                                     </div>
 
                                     {isAdminDataLoading ? (
                                     <p className="text-center text-gray-600">Loading...</p>
-                                    ) : users.length === 0 ? (
-                                    <p className="text-center text-gray-600">No users found.</p>
                                     ) : (
-                                    <div className="overflow-x-auto rounded-lg border border-gray-200">
-                                        <div className="mb-4">
-                                        <input
-                                            type="text"
-                                            placeholder="Search by name, direction, or supervisor..."
-                                            value={searchQuery}
-                                            onChange={(e) => setSearchQuery(e.target.value.toLowerCase())}
-                                            className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                        />
-                                        </div>
+                                    (() => {
+                                        // Фильтруем по статусу
+                                        const filteredByStatus =
+                                        activeUserTab === "active"
+                                            ? users.filter(
+                                                (u) => u.status === "working" || u.status === "unpaid_leave" || !u.status
+                                            )
+                                            : users.filter((u) => u.status === "fired");
 
-                                        {/* Группировка по супервайзерам */}
-                                        {Object.entries(
-                                        filteredUsers.reduce((acc, u) => {
-                                            const key = u.supervisor_name || "No Supervisor";
-                                            if (!acc[key]) acc[key] = [];
-                                            acc[key].push(u);
-                                            return acc;
-                                        }, {})
-                                        ).map(([svName, svUsers]) => (
-                                        <div key={svName} className="mb-8">
-                                            <h3 className="text-xl font-semibold text-gray-800 bg-gray-100 px-6 py-3 rounded-t-lg">{svName}</h3>
-                                            {/* table-fixed + colgroup обеспечивают одинаковое распределение ширин */}
-                                            <table className="min-w-full table-fixed border rounded-lg w-full">
-                                            <colgroup>
-                                                {/* Процентные ширины — можно подправить под ваш макет */}
-                                                <col style={{ width: '30%' }} />
-                                                <col style={{ width: '18%' }} />
-                                                <col style={{ width: '15%' }} />
-                                                <col style={{ width: '17%' }} />
-                                                <col style={{ width: '15%' }} />
-                                                <col style={{ width: '5%' }} />
-                                            </colgroup>
+                                        if (filteredByStatus.length === 0) {
+                                        return <p className="text-center text-gray-600">No users found.</p>;
+                                        }
 
-                                            <thead className="bg-gray-50">
-                                                <tr>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Direction</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Hire Date</th>
-                                                {/* Rate — выровнено по центру */}
-                                                <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Rate</th>
-                                                <th className="px-6 py-3"></th> {/* пустая для меню */}
-                                                </tr>
-                                            </thead>
+                                        return (
+                                        <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                            <div className="mb-4">
+                                            <input
+                                                type="text"
+                                                placeholder="Search by name, direction, or supervisor..."
+                                                value={searchQuery}
+                                                onChange={(e) => setSearchQuery(e.target.value.toLowerCase())}
+                                                className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            />
+                                            </div>
 
-                                            <tbody className="bg-white divide-y divide-gray-200">
-                                                {svUsers.map(u => (
-                                                <tr key={u.id} className="hover:bg-gray-50 transition-colors duration-200 group">
-                                                    {/* Name */}
-                                                    <td className="px-6 py-4 truncate">{u.name}</td>
+                                            {/* Группировка по супервайзерам */}
+                                            {Object.entries(
+                                            filteredUsers
+                                                .filter((u) => filteredByStatus.includes(u))
+                                                .reduce((acc, u) => {
+                                                const key = u.supervisor_name || "No Supervisor";
+                                                if (!acc[key]) acc[key] = [];
+                                                acc[key].push(u);
+                                                return acc;
+                                                }, {})
+                                            ).map(([svName, svUsers]) => (
+                                            <div key={svName} className="mb-8">
+                                                <h3 className="text-xl font-semibold text-gray-800 bg-gray-100 px-6 py-3 rounded-t-lg">
+                                                {svName}
+                                                </h3>
+                                                <table className="min-w-full table-fixed border rounded-lg w-full">
+                                                <colgroup>
+                                                    <col style={{ width: "30%" }} />
+                                                    <col style={{ width: "18%" }} />
+                                                    <col style={{ width: "15%" }} />
+                                                    <col style={{ width: "17%" }} />
+                                                    <col style={{ width: "15%" }} />
+                                                    <col style={{ width: "5%" }} />
+                                                </colgroup>
 
-                                                    {/* Direction */}
-                                                    <td className="px-6 py-4">{u.direction || '-'}</td>
+                                                <thead className="bg-gray-50">
+                                                    <tr>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                                                        Name
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                                                        Direction
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                                                        Status
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                                                        Hire Date
+                                                    </th>
+                                                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">
+                                                        Rate
+                                                    </th>
+                                                    <th className="px-6 py-3"></th>
+                                                    </tr>
+                                                </thead>
 
-                                                    {/* Status */}
-                                                    <td className="px-6 py-4">
-                                                    {u.status === 'working' || !u.status ? (
-                                                        <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Working</span>
-                                                    ) : u.status === 'unpaid_leave' ? (
-                                                        <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">UL</span>
-                                                    ) : u.status === 'fired' ? (
-                                                        <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Fired</span>
-                                                    ) : (
-                                                        <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{u.status}</span>
-                                                    )}
-                                                    </td>
-
-                                                    <td className="px-6 py-4">
-                                                    {u.hire_date
-                                                        ? (() => {
-                                                            const [day, month, year] = u.hire_date.split("-");
-                                                            const date = new Date(`${year}-${month}-${day}`);
-                                                            return date.toLocaleDateString("ru-RU");
-                                                        })()
-                                                        : "-"}
-                                                    </td>
-
-                                                    {/* Rate (центрируем содержимое) */}
-                                                    <td className="px-6 py-4 text-center">
-                                                    <div className="inline-flex items-center justify-center">
-                                                        <RateCircle rate={u.rate || 1.0} />
-                                                    </div>
-                                                    </td>
-
-                                                    {/* Меню */}
-                                                    <td className="px-2 py-4 text-right opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                                                    <div className="relative inline-block text-left">
-                                                        <button
-                                                        onClick={() => setOpenMenuId(openMenuId === u.id ? null : u.id)}
-                                                        className="p-2 rounded-full hover:bg-gray-100"
-                                                        >
-                                                        <i className="fas fa-ellipsis-v"></i>
-                                                        </button>
-
-                                                        {openMenuId === u.id && (
-                                                        <div className="absolute right-0 mt-2 w-40 bg-white border rounded-lg shadow-lg z-50">
-                                                            <button
-                                                            onClick={() => {
-                                                                setUserToEdit(u);
-                                                                setShowUserEditModal(true);
-                                                                setOpenMenuId(null);
-                                                            }}
-                                                            className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                                            >
-                                                            <i className="fas fa-edit mr-2"></i>Edit
-                                                            </button>
-                                                            <button
-                                                            onClick={() => {
-                                                                setSelectedUserForHistory(u);
-                                                                fetchUserHistory(u.id);
-                                                                setOpenMenuId(null);
-                                                            }}
-                                                            disabled={loadingHistoryId === u.id}
-                                                            className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                                            >
-                                                            {loadingHistoryId === u.id ? (
-                                                                <>
-                                                                <i className="fas fa-spinner fa-spin mr-2"></i>Loading...
-                                                                </>
-                                                            ) : (
-                                                                <>
-                                                                <i className="fas fa-history mr-2"></i>History
-                                                                </>
-                                                            )}
-                                                            </button>
-                                                        </div>
+                                                <tbody className="bg-white divide-y divide-gray-200">
+                                                    {svUsers.map((u) => (
+                                                    <tr
+                                                        key={u.id}
+                                                        className="hover:bg-gray-50 transition-colors duration-200 group"
+                                                    >
+                                                        <td className="px-6 py-4 truncate">{u.name}</td>
+                                                        <td className="px-6 py-4">{u.direction || "-"}</td>
+                                                        <td className="px-6 py-4">
+                                                        {u.status === "working" || !u.status ? (
+                                                            <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">
+                                                            Working
+                                                            </span>
+                                                        ) : u.status === "unpaid_leave" ? (
+                                                            <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">
+                                                            UL
+                                                            </span>
+                                                        ) : u.status === "fired" ? (
+                                                            <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">
+                                                            Fired
+                                                            </span>
+                                                        ) : (
+                                                            <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">
+                                                            {u.status}
+                                                            </span>
                                                         )}
-                                                    </div>
-                                                    </td>
-                                                </tr>
-                                                ))}
-                                            </tbody>
+                                                        </td>
+                                                        <td className="px-6 py-4">
+                                                        {u.hire_date
+                                                            ? (() => {
+                                                                const [day, month, year] = u.hire_date.split("-");
+                                                                const date = new Date(`${year}-${month}-${day}`);
+                                                                return date.toLocaleDateString("ru-RU");
+                                                            })()
+                                                            : "-"}
+                                                        </td>
+                                                        <td className="px-6 py-4 text-center">
+                                                        <div className="inline-flex items-center justify-center">
+                                                            <RateCircle rate={u.rate || 1.0} />
+                                                        </div>
+                                                        </td>
+                                                        <td className="px-2 py-4 text-right opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                                                        <div className="relative inline-block text-left">
+                                                            <button
+                                                            onClick={() =>
+                                                                setOpenMenuId(openMenuId === u.id ? null : u.id)
+                                                            }
+                                                            className="p-2 rounded-full hover:bg-gray-100"
+                                                            >
+                                                            <i className="fas fa-ellipsis-v"></i>
+                                                            </button>
 
-                                            <tfoot className="bg-gray-50">
-                                                <tr>
-                                                <td className="px-6 py-3 font-medium text-gray-700">{svUsers.length} operators</td>
-                                                <td className="px-6 py-3 text-gray-700">
-                                                    {Array.from(new Set(svUsers.map(u => u.direction || '-'))).join(', ')}
-                                                </td>
-                                                <td className="px-6 py-3">
-                                                    <div className="flex gap-2 flex-wrap">
-                                                    {Object.entries(
-                                                        svUsers.reduce((acc, u) => {
-                                                        const st = u.status || 'working';
-                                                        acc[st] = (acc[st] || 0) + 1;
-                                                        return acc;
-                                                        }, {})
-                                                    ).map(([status, count]) => (
-                                                        <span
-                                                        key={status}
-                                                        title={status}
-                                                        className={`px-2 py-1 rounded-full text-xs font-medium border
-                                                            ${
-                                                            status === 'working' || !status
-                                                                ? 'border-green-500 text-green-700'
-                                                                : status === 'unpaid_leave'
-                                                                ? 'border-yellow-500 text-yellow-700'
-                                                                : status === 'fired'
-                                                                ? 'border-red-500 text-red-700'
-                                                                : 'border-gray-500 text-gray-700'
-                                                            }`}
-                                                        >
-                                                        {count}
-                                                        </span>
+                                                            {openMenuId === u.id && (
+                                                            <div className="absolute right-0 mt-2 w-40 bg-white border rounded-lg shadow-lg z-50">
+                                                                <button
+                                                                onClick={() => {
+                                                                    setUserToEdit(u);
+                                                                    setShowUserEditModal(true);
+                                                                    setOpenMenuId(null);
+                                                                }}
+                                                                className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                                                >
+                                                                <i className="fas fa-edit mr-2"></i>Edit
+                                                                </button>
+                                                                <button
+                                                                onClick={() => {
+                                                                    setSelectedUserForHistory(u);
+                                                                    fetchUserHistory(u.id);
+                                                                    setOpenMenuId(null);
+                                                                }}
+                                                                disabled={loadingHistoryId === u.id}
+                                                                className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                                                >
+                                                                {loadingHistoryId === u.id ? (
+                                                                    <>
+                                                                    <i className="fas fa-spinner fa-spin mr-2"></i>
+                                                                    Loading...
+                                                                    </>
+                                                                ) : (
+                                                                    <>
+                                                                    <i className="fas fa-history mr-2"></i>
+                                                                    History
+                                                                    </>
+                                                                )}
+                                                                </button>
+                                                            </div>
+                                                            )}
+                                                        </div>
+                                                        </td>
+                                                    </tr>
                                                     ))}
-                                                    </div>
-                                                </td>
-                                                <td className="px-6 py-3"></td>
+                                                </tbody>
 
-                                                {/* Rate в tfoot — тоже центрируем, используем те же обёртки */}
-                                                <td className="px-6 py-3 text-center">
-                                                    <RateCircle
-                                                    rate={svUsers.reduce((sum, u) => sum + (u.rate || 0), 0)}
-                                                    len={svUsers.length}
-                                                    />
-                                                </td>
-
-                                                <td></td>
-                                                </tr>
-                                            </tfoot>
-                                            </table>
+                                                <tfoot className="bg-gray-50">
+                                                    <tr>
+                                                    <td className="px-6 py-3 font-medium text-gray-700">
+                                                        {svUsers.length} users
+                                                    </td>
+                                                    <td className="px-6 py-3 text-gray-700">
+                                                        {Array.from(new Set(svUsers.map((u) => u.direction || "-"))).join(
+                                                        ", "
+                                                        )}
+                                                    </td>
+                                                    <td className="px-6 py-3">
+                                                        <div className="flex gap-2 flex-wrap">
+                                                        {Object.entries(
+                                                            svUsers.reduce((acc, u) => {
+                                                            const st = u.status || "working";
+                                                            acc[st] = (acc[st] || 0) + 1;
+                                                            return acc;
+                                                            }, {})
+                                                        ).map(([status, count]) => (
+                                                            <span
+                                                            key={status}
+                                                            title={status}
+                                                            className={`px-2 py-1 rounded-full text-xs font-medium border
+                                                                ${
+                                                                status === "working" || !status
+                                                                    ? "border-green-500 text-green-700"
+                                                                    : status === "unpaid_leave"
+                                                                    ? "border-yellow-500 text-yellow-700"
+                                                                    : status === "fired"
+                                                                    ? "border-red-500 text-red-700"
+                                                                    : "border-gray-500 text-gray-700"
+                                                                }`}
+                                                            >
+                                                            {count}
+                                                            </span>
+                                                        ))}
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-6 py-3"></td>
+                                                    <td className="px-6 py-3 text-center">
+                                                        <RateCircle
+                                                        rate={svUsers.reduce((sum, u) => sum + (u.rate || 0), 0)}
+                                                        len={svUsers.length}
+                                                        />
+                                                    </td>
+                                                    <td></td>
+                                                    </tr>
+                                                </tfoot>
+                                                </table>
+                                            </div>
+                                            ))}
                                         </div>
-                                        ))}
-                                    </div>
+                                        );
+                                    })()
                                     )}
                                 </div>
                                 )}
@@ -4790,11 +4845,11 @@
                                             onClick={() => setActiveTab("active")}
                                             className={`px-4 py-2 rounded-lg font-medium ${
                                             activeTab === "active"
-                                                ? "bg-blue-600 text-white"
+                                                ? "bg-green-600 text-white"
                                                 : "bg-gray-200 text-gray-700 hover:bg-gray-300"
                                             }`}
                                         >
-                                            Active (Working / Unpaid Leave)
+                                            Active
                                         </button>
                                         <button
                                             onClick={() => setActiveTab("fired")}
