@@ -1709,7 +1709,8 @@
             const sidebarAccountRef = useRef(null);
             const [modalError, setModalError] = useState("");
             const [isClosing, setIsClosing] = useState(false);
-            const [activeTab, setActiveTab] = React.useState("active");
+            const [activeTab, setActiveTab] = useState("active");
+            const [activeUserTab, setActiveUserTab] = useState("active");
 
             const handleToggleDropdown = (forceClose = null) => {
             if (forceClose === true) {
