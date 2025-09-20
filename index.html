@@ -1969,75 +1969,263 @@
             }, [showSidebarAccountDropdown]);
 
             const TrainingModal = ({ isOpen, onClose, onSave, initialData = {} }) => {
-                const [date, setDate] = useState(initialData.date || '');
-                const [startTime, setStartTime] = useState(initialData.start_time || '');
-                const [endTime, setEndTime] = useState(initialData.end_time || '');
-                const [reason, setReason] = useState(initialData.reason || '');
-                const [comment, setComment] = useState(initialData.comment || '');
+                const [date, setDate] = useState(initialData.date || "");
+                const [startTime, setStartTime] = useState(initialData.start_time || "");
+                const [endTime, setEndTime] = useState(initialData.end_time || "");
+                const [reason, setReason] = useState(initialData.reason || "");
+                const [comment, setComment] = useState(initialData.comment || "");
+                const [isLoading, setIsLoading] = useState(false);
+                const [error, setError] = useState("");
+                const dateRef = React.useRef(null);
 
-                useEffect(() => {
-                    setDate(initialData.date || '');
-                    setStartTime(initialData.start_time || '');
-                    setEndTime(initialData.end_time || '');
-                    setReason(initialData.reason || '');
-                    setComment(initialData.comment || '');
-                }, [initialData, isOpen]);
                 const reasons = [
-                    "Обратная связь", "Собрание", "Тех. сбой", "Мотивационная беседа", 
-                    "Дисциплинарный тренинг", "Тренинг по качеству. Разбор ошибок", 
-                    "Тренинг по качеству. Объяснение МШ", "Тренинг по продукту", 
-                    "Мониторинг", "Практика в офисе таксопарка"
+                    "Обратная связь",
+                    "Собрание",
+                    "Тех. сбой",
+                    "Мотивационная беседа",
+                    "Дисциплинарный тренинг",
+                    "Тренинг по качеству. Разбор ошибок",
+                    "Тренинг по качеству. Объяснение МШ",
+                    "Тренинг по продукту",
+                    "Мониторинг",
+                    "Практика в офисе таксопарка",
                 ];
-            
-                const handleSave = () => {
-                    if (!date || !startTime || !endTime || !reason) {
-                        alert('Заполните обязательные поля');
-                        return;
+
+                // Сброс/применение initialData при открытии
+                useEffect(() => {
+                    setDate(initialData.date || "");
+                    setStartTime(initialData.start_time || "");
+                    setEndTime(initialData.end_time || "");
+                    setReason(initialData.reason || "");
+                    setComment(initialData.comment || "");
+                    setError("");
+                }, [initialData, isOpen]);
+
+                // Фокус на дату при открытии
+                useEffect(() => {
+                    if (isOpen) {
+                    setTimeout(() => dateRef.current?.focus(), 50);
                     }
-                    onSave({ date, start_time: startTime, end_time: endTime, reason, comment });
-                    onClose();
-                };
-            
+                }, [isOpen]);
+
+                // Закрытие по Escape
+                useEffect(() => {
+                    if (!isOpen) return;
+                    const onKey = (e) => {
+                    if (e.key === "Escape") {
+                        setError("");
+                        onClose();
+                    }
+                    };
+                    window.addEventListener("keydown", onKey);
+                    return () => window.removeEventListener("keydown", onKey);
+                }, [isOpen, onClose]);
+
                 if (!isOpen) return null;
-            
+
+                const parseTime = (t) => {
+                    // t: "HH:MM"
+                    if (!t) return null;
+                    const [hh, mm] = t.split(":").map(Number);
+                    if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+                    return hh * 60 + mm;
+                };
+
+                const validate = () => {
+                    if (!date) return "Укажите дату тренинга.";
+                    if (!startTime) return "Укажите время начала.";
+                    if (!endTime) return "Укажите время окончания.";
+                    if (!reason) return "Выберите причину тренинга.";
+
+                    const s = parseTime(startTime);
+                    const e = parseTime(endTime);
+                    if (s == null || e == null) return "Неправильный формат времени.";
+                    if (e <= s) return "Время окончания должно быть позже времени начала.";
+                    return "";
+                };
+
+                const handleSave = async () => {
+                    const v = validate();
+                    if (v) {
+                    setError(v);
+                    return;
+                    }
+
+                    setError("");
+                    setIsLoading(true);
+                    try {
+                    // onSave может быть sync или async — ждём результат
+                    await onSave({
+                        ...initialData,
+                        date,
+                        start_time: startTime,
+                        end_time: endTime,
+                        reason,
+                        comment,
+                    });
+                    setIsLoading(false);
+                    onClose();
+                    } catch (err) {
+                    console.error("Training save error:", err);
+                    setError("Не удалось сохранить. Попробуйте ещё раз.");
+                    setIsLoading(false);
+                    }
+                };
+
                 return (
-                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                            <h2 className="text-xl font-semibold mb-4">{initialData.id ? 'Редактировать тренинг' : 'Добавить тренинг'}</h2>
-                            <div className="space-y-4">
+                    <>
+                    {/* Backdrop */}
+                    <div
+                        className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-200"
+                        onClick={() => {
+                        setError("");
+                        onClose();
+                        }}
+                        aria-hidden="true"
+                    />
+
+                    {/* Modal */}
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                        <div
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="training-modal-title"
+                        className="w-full max-w-md bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-200"
+                        onClick={(e) => e.stopPropagation()}
+                        >
+                        <div className="px-6 py-5">
+                            <div className="flex items-start justify-between">
+                            <h2 id="training-modal-title" className="text-lg font-semibold text-gray-800 dark:text-gray-100">
+                                {initialData.id ? "Редактировать тренинг" : "Добавить тренинг"}
+                            </h2>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                setError("");
+                                onClose();
+                                }}
+                                aria-label="Закрыть"
+                                className="rounded-md p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-800 transition"
+                            >
+                                <i className="fas fa-times" />
+                            </button>
+                            </div>
+
+                            <div className="mt-4 space-y-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                                Дата тренинга <span className="text-red-500">*</span>
+                                </label>
+                                <input
+                                ref={dateRef}
+                                type="date"
+                                value={date}
+                                onChange={(e) => setDate(e.target.value)}
+                                className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                                />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Дата тренинга <span className="text-red-500">*</span></label>
-                                    <input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full p-2 border rounded" />
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                                    Время начала <span className="text-red-500">*</span>
+                                </label>
+                                <input
+                                    type="time"
+                                    value={startTime}
+                                    onChange={(e) => setStartTime(e.target.value)}
+                                    className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading}
+                                />
                                 </div>
+
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Время начала <span className="text-red-500">*</span></label>
-                                    <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} className="w-full p-2 border rounded" />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Время окончания <span className="text-red-500">*</span></label>
-                                    <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} className="w-full p-2 border rounded" />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Причина <span className="text-red-500">*</span></label>
-                                    <select value={reason} onChange={e => setReason(e.target.value)} className="w-full p-2 border rounded">
-                                        <option value="">Выберите причину</option>
-                                        {reasons.map(r => <option key={r} value={r}>{r}</option>)}
-                                    </select>
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Комментарий</label>
-                                    <textarea value={comment} onChange={e => setComment(e.target.value)} placeholder="Комментарий к тренингу" className="w-full p-2 border rounded" rows={3} />
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                                    Время окончания <span className="text-red-500">*</span>
+                                </label>
+                                <input
+                                    type="time"
+                                    value={endTime}
+                                    onChange={(e) => setEndTime(e.target.value)}
+                                    className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading}
+                                />
                                 </div>
                             </div>
-                            <div className="flex justify-end mt-4 space-x-2">
-                                <button onClick={handleSave} className="bg-green-500 text-white p-2 rounded">Сохранить</button>
-                                <button onClick={onClose} className="bg-gray-500 text-white p-2 rounded">Отмена</button>
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                                Причина <span className="text-red-500">*</span>
+                                </label>
+                                <select
+                                value={reason}
+                                onChange={(e) => setReason(e.target.value)}
+                                className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                                >
+                                <option value="">Выберите причину</option>
+                                {reasons.map((r) => (
+                                    <option key={r} value={r}>
+                                    {r}
+                                    </option>
+                                ))}
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Комментарий</label>
+                                <textarea
+                                value={comment}
+                                onChange={(e) => setComment(e.target.value)}
+                                placeholder="Комментарий к тренингу (необязательно)"
+                                className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                rows={3}
+                                disabled={isLoading}
+                                />
+                            </div>
+
+                            {error && <div className="text-sm text-red-600">{error}</div>}
+
+                            <div className="flex justify-end gap-3 pt-2">
+                                <button
+                                type="button"
+                                onClick={() => {
+                                    setError("");
+                                    onClose();
+                                }}
+                                disabled={isLoading}
+                                className="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 transition"
+                                >
+                                Отмена
+                                </button>
+                                <button
+                                type="button"
+                                onClick={handleSave}
+                                disabled={isLoading}
+                                className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-white ${
+                                    isLoading ? "bg-blue-600 opacity-70 cursor-not-allowed" : "bg-green-600 hover:bg-green-700"
+                                }`}
+                                >
+                                {isLoading ? (
+                                    <>
+                                    <i className="fas fa-spinner fa-spin" /> Сохранение...
+                                    </>
+                                ) : (
+                                    <>
+                                    <i className="fas fa-check" /> Сохранить
+                                    </>
+                                )}
+                                </button>
+                            </div>
                             </div>
                         </div>
+                        </div>
                     </div>
+                    </>
                 );
-            };
-    
+                };
+
             const TrainingsView = ({ user, operators }) => {  // operators - список операторов (все для админа, свои для св)
                 const [month, setMonth] = useState(new Date().toISOString().slice(0,7));
                 const [trainings, setTrainings] = useState({}); // {operator_id: [trainings]}
