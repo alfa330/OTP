@@ -152,7 +152,7 @@
             
             const handleAddDirection = () => {
                 if (!newDirectionName) {
-                    alert('Please enter a direction name.');
+                    alert('Пожалуйста, введите название направления.');
                     return;
                 }
                 setDirections([...directions, { name: newDirectionName, hasFileUpload: newDirectionFileUpload, criteria: [] }]);
@@ -165,7 +165,7 @@
             
             const handleEditDirection = () => {
                 if (!newDirectionName) {
-                    alert('Please enter a direction name.');
+                    alert('Пожалуйста, введите название направления.');
                     return;
                 }
                 setDirections(directions.map((direction, index) => 
@@ -202,27 +202,27 @@
             
             const handleAddCriterion = () => {
                 if (!newCriterionName) {
-                    alert('Please enter a criterion name.');
+                    showToast('Пожалуйста, введите название критерия.', 'error');
                     return;
                 }
                 if (!newCriterionCritical) {
                     if (!newCriterionWeight) {
-                        alert('Please enter a weight for the non-critical criterion.');
+                        showToast('Пожалуйста, введите вес для некритического критерия.', 'error');
                         return;
                     }
                     const weight = Number(newCriterionWeight);
                     if (isNaN(weight) || weight <= 0) {
-                        alert('Weight must be a positive number.');
+                        showToast('Вес должен быть положительным числом.', 'error');
                         return;
                     }
                     if (totalWeight(selectedDirectionIndex) + weight > 100) {
-                        alert('Total weight of non-critical criteria cannot exceed 100.');
+                        showToast('Общий вес некритических критериев не может превышать 100.', 'error');
                         return;
                     }
                     if (newCriterionHasDeficiency) {
                         const defWeight = Number(newDeficiencyWeight);
                         if (isNaN(defWeight) || defWeight <= 0 || defWeight > weight) {
-                            alert('Deficiency weight must be >0 and ≤ criterion weight.');
+                            showToast('Вес недочета должен быть больше 0 и больше веса критерия.', 'error');
                             return;
                         }
                     }
@@ -235,10 +235,10 @@
                                 name: newCriterionName,
                                 weight: newCriterionCritical ? 0 : Number(newCriterionWeight),
                                 isCritical: newCriterionCritical,
-                                value: newCriterionValue || 'No description provided',
+                                value: newCriterionValue || 'Нет описания',
                                 deficiency: newCriterionHasDeficiency ? {
                                     weight: Number(newDeficiencyWeight),
-                                    description: newDeficiencyDescription || 'No description provided'
+                                    description: newDeficiencyDescription || 'Нет описания'
                                 } : null
                             }]
                         };
@@ -250,24 +250,24 @@
             
             const handleEditCriterion = () => {
                 if (!newCriterionName) {
-                    alert('Please enter a criterion name.');
+                    showToast('Пожалуйста, введите название критерия.', 'error');
                     return;
                 }
                 if (!newCriterionCritical) {
                     if (!newCriterionWeight) {
-                        alert('Please enter a weight for the non-critical criterion.');
+                        showToast('Пожалуйста, введите вес для некритического критерия.', 'error');
                         return;
                     }
                     const weight = Number(newCriterionWeight);
                     if (isNaN(weight) || weight <= 0) {
-                        alert('Weight must be a positive number.');
+                        showToast('Вес должен быть положительным числом.', 'error');
                         return;
                     }
                     const newTotalWeight = totalWeight(selectedDirectionIndex) - 
                         (directions[selectedDirectionIndex].criteria[editingCriterionIndex]?.isCritical ? 0 : 
                         directions[selectedDirectionIndex].criteria[editingCriterionIndex]?.weight || 0) + weight;
                     if (newTotalWeight > 100) {
-                        alert('Total weight of non-critical criteria cannot exceed 100.');
+                        showToast('Общий вес некритических критериев не может превышать 100.', 'error');
                         return;
                     }
                 }
@@ -280,10 +280,10 @@
                                     name: newCriterionName,
                                     weight: newCriterionCritical ? 0 : Number(newCriterionWeight),
                                     isCritical: newCriterionCritical,
-                                    value: newCriterionValue || 'No description provided',
+                                    value: newCriterionValue || 'Нет описания',
                                     deficiency: newCriterionHasDeficiency ? {
                                         weight: Number(newDeficiencyWeight),
-                                        description: newDeficiencyDescription || 'No description provided'
+                                        description: newDeficiencyDescription || 'Нет описания'
                                     } : null
                                 } : criterion
                             )
@@ -348,7 +348,7 @@
                     direction.criteria.some(c => !c.isCritical) && totalWeight(index) !== 100
                 );
                 if (invalidDirection) {
-                    alert(`Total weight of non-critical criteria in "${invalidDirection.name}" must equal 100. Current: ${totalWeight(directions.indexOf(invalidDirection))}/100`);
+                    showToast(`Общий вес некритических критериев в "${invalidDirection.name}" должен равняться 100. Текущий: ${totalWeight(directions.indexOf(invalidDirection))}/100`, 'error');
                     return;
                 }
                 setIsLoading(true);
@@ -357,7 +357,7 @@
                     onClose();
                 } catch (error) {
                     console.error('Error saving directions:', error);
-                    alert('Failed to save. Please try again.');
+                    showToast('Не удалось сохранить. Пожалуйста, попробуйте снова.', 'error');
                 } finally {
                     setIsLoading(false);
                 }
@@ -368,20 +368,20 @@
             return (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
                     <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-4xl max-h-[90vh] overflow-y-auto">
-                        <h2 className="text-xl font-semibold mb-4">Monitoring Scale</h2>
+                        <h2 className="text-xl font-semibold mb-4">Мониторинговая шкала</h2>
                         
                         <div className="flex mb-4">
                             <button
                                 className={`px-4 py-2 mr-2 rounded ${activeTab === 'directions' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
                                 onClick={() => setActiveTab('directions')}
                             >
-                                Directions
+                                Направления
                             </button>
                             <button
                                 className={`px-4 py-2 rounded ${activeTab === 'criteria' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
                                 onClick={() => setActiveTab('criteria')}
                             >
-                                Criteria
+                                Критерии
                             </button>
                         </div>
             
@@ -389,14 +389,14 @@
                             <div>
                                 <div className="mb-4">
                                     <label className="block mb-2 font-medium">
-                                        {isEditingDirection ? `Editing Direction: ${directions[editingDirectionIndex]?.name}` : 'New Direction'}
+                                        {isEditingDirection ? `Редактирование направления: ${directions[editingDirectionIndex]?.name}` : 'Новое направление'}
                                     </label>
                                     <div className="flex flex-col space-y-2">
                                         <input
                                             type="text"
                                             value={newDirectionName}
                                             onChange={(e) => setNewDirectionName(e.target.value)}
-                                            placeholder="Direction name"
+                                            placeholder="Название направления"
                                             className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         />
                                         <div className="flex items-center">
@@ -415,7 +415,7 @@
                                                     isEditingDirection ? 'bg-blue-500 hover:bg-blue-600' : 'bg-green-500 hover:bg-green-600'
                                                 }`}
                                             >
-                                                {isEditingDirection ? 'Save Changes' : 'Add Direction'}
+                                                {isEditingDirection ? 'Сохранить изменения' : 'Добавить направление'}
                                             </button>
                                             {isEditingDirection && (
                                                 <button
@@ -427,7 +427,7 @@
                                                     }}
                                                     className="p-2 bg-gray-500 text-white rounded hover:bg-gray-600"
                                                 >
-                                                    Cancel
+                                                    Отмена
                                                 </button>
                                             )}
                                         </div>
@@ -435,9 +435,9 @@
                                 </div>
             
                                 <div className="mb-4">
-                                    <h3 className="text-lg font-medium mb-2">Directions</h3>
+                                    <h3 className="text-lg font-medium mb-2">Направления</h3>
                                     {directions.length === 0 ? (
-                                        <p className="text-gray-500 italic">No directions added.</p>
+                                        <p className="text-gray-500 italic">Нет добавленных направлений.</p>
                                     ) : (
                                         <ul className="space-y-2 max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100">
                                             {directions.map((direction, index) => (
@@ -468,7 +468,7 @@
                                                         <button
                                                             onClick={() => handleStartEditDirection(index)}
                                                             className="text-blue-500 hover:text-blue-700 p-1"
-                                                            title="Edit direction"
+                                                            title="Редактировать направление"
                                                         >
                                                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.29 2.29 0 113.232 3.232L6.5 20.5l-3.5 1 1-3.5L17.768 4.232z" />
@@ -477,7 +477,7 @@
                                                         <button
                                                             onClick={() => handleDeleteDirection(index)}
                                                             className="text-red-500 hover:text-red-700 p-1"
-                                                            title="Delete direction"
+                                                            title="Удалить направление"
                                                         >
                                                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
@@ -495,7 +495,7 @@
                         {activeTab === 'criteria' && (
                             <div>
                                 <div className="mb-4">
-                                    <label className="block mb-2 font-medium">Select Direction for Criteria</label>
+                                    <label className="block mb-2 font-medium">Выберите направление для критериев</label>
                                     <select
                                         value={selectedDirectionIndex}
                                         onChange={(e) => setSelectedDirectionIndex(Number(e.target.value))}
@@ -503,7 +503,7 @@
                                         disabled={directions.length === 0}
                                     >
                                         {directions.length === 0 ? (
-                                            <option value="">No directions available</option>
+                                            <option value="">Нет доступных направлений</option>
                                         ) : (
                                             directions.map((direction, index) => (
                                                 <option key={index} value={index}>{direction.name}</option>
@@ -514,14 +514,14 @@
             
                                 <div className="mb-4">
                                     <label className="block mb-2 font-medium">
-                                        {isEditingCriterion ? `Editing Criterion: ${directions[selectedDirectionIndex]?.criteria[editingCriterionIndex]?.name}` : 'New Criterion'}
+                                        {isEditingCriterion ? `Редактирование критерия: ${directions[selectedDirectionIndex]?.criteria[editingCriterionIndex]?.name}` : 'Новый критерий'}
                                     </label>
                                     <div className="flex flex-col space-y-2">
                                         <input
                                             type="text"
                                             value={newCriterionName}
                                             onChange={(e) => setNewCriterionName(e.target.value)}
-                                            placeholder="Criterion name"
+                                            placeholder="Название критерия"
                                             className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                             disabled={directions.length === 0}
                                         />
@@ -530,7 +530,7 @@
                                                 type="number"
                                                 value={newCriterionWeight}
                                                 onChange={(e) => setNewCriterionWeight(e.target.value)}
-                                                placeholder="Weight"
+                                                placeholder="Вес критерия"
                                                 min="1"
                                                 className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                 disabled={directions.length === 0}
@@ -539,7 +539,7 @@
                                         <textarea
                                             value={newCriterionValue}
                                             onChange={(e) => setNewCriterionValue(e.target.value)}
-                                            placeholder="Criterion description (optional)"
+                                            placeholder="Описание критерия"
                                             className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                             rows={3}
                                             disabled={directions.length === 0}
@@ -580,14 +580,14 @@
                                                     type="number"
                                                     value={newDeficiencyWeight}
                                                     onChange={(e) => setNewDeficiencyWeight(e.target.value)}
-                                                    placeholder="Deficiency weight"
+                                                    placeholder="Вес недочета"
                                                     min="1"
                                                     className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                 />
                                                 <textarea
                                                     value={newDeficiencyDescription}
                                                     onChange={(e) => setNewDeficiencyDescription(e.target.value)}
-                                                    placeholder="Deficiency description"
+                                                    placeholder="Описание недочета"
                                                     className="w-full p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     rows={2}
                                                 />
@@ -602,14 +602,14 @@
                                                 } ${directions.length === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
                                                 disabled={directions.length === 0}
                                             >
-                                                {isEditingCriterion ? 'Save Changes' : 'Add Criterion'}
+                                                {isEditingCriterion ? 'Сохранить изменения' : 'Добавить критерий'}
                                             </button>
                                             {isEditingCriterion && (
                                                 <button
                                                     onClick={resetCriterionForm}
                                                     className="w-full p-2 bg-gray-500 text-white rounded hover:bg-gray-600"
                                                 >
-                                                    Cancel Editing
+                                                    Отмена редактирования
                                                 </button>
                                             )}
                                         </div>
@@ -617,9 +617,9 @@
                                 </div>
             
                                 <div className="mb-4 max-h-80 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100">
-                                    <h3 className="text-lg font-medium mb-2">Criteria</h3>
+                                    <h3 className="text-lg font-medium mb-2">Критерии</h3>
                                     {directions.length === 0 || directions[selectedDirectionIndex].criteria.length === 0 ? (
-                                        <p className="text-gray-500 italic">No criteria added for this direction.</p>
+                                        <p className="text-gray-500 italic">Нет добавленных критериев для этого направления.</p>
                                     ) : (
                                         <ul className="space-y-2">
                                             {directions[selectedDirectionIndex].criteria.map((criterion, critIndex) => (
@@ -655,7 +655,7 @@
                                                         <button
                                                             onClick={() => handleStartEditCriterion(critIndex)}
                                                             className="text-blue-500 hover:text-blue-700 p-1"
-                                                            title="Edit criterion"
+                                                            title="Править критерий"
                                                         >
                                                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.29 2.29 0 113.232 3.232L6.5 20.5l-3.5 1 1-3.5L17.768 4.232z" />
@@ -664,7 +664,7 @@
                                                         <button
                                                             onClick={() => handleDeleteCriterion(critIndex)}
                                                             className="text-red-500 hover:text-red-700 p-1"
-                                                            title="Delete criterion"
+                                                            title="Удалить критерий"
                                                         >
                                                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
@@ -692,17 +692,17 @@
                             >
                                 {isLoading ? (
                                     <>
-                                        <i className="fas fa-spinner fa-spin"></i> Saving...
+                                        <i className="fas fa-spinner fa-spin"></i> Сохранение...
                                     </>
                                 ) : (
-                                    'Save'
+                                    'Сохранить'
                                 )}
                             </button>
                             <button
                                 onClick={onClose}
                                 className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
                             >
-                                Cancel
+                                Отмена
                             </button>
                         </div>
                     </div>
@@ -728,9 +728,9 @@
                     return (
                         <div className="min-h-screen flex items-center justify-center bg-gray-100">
                             <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-                                <h1 className="text-2xl font-bold mb-4 text-center text-red-500">Application Error</h1>
-                                <p className="text-center">An error occurred: {this.state.error?.message || 'Unknown error'}</p>
-                                <p className="text-center">Please check the console for details or try refreshing the page.</p>
+                                <h1 className="text-2xl font-bold mb-4 text-center text-red-500">Ошибка приложения</h1>
+                                <p className="text-center">Произошла ошибка: {this.state.error?.message || 'Неизвестная ошибка'}</p>
+                                <p className="text-center">Пожалуйста, напишите Руслану или попробуйте обновить страницу.</p>
                             </div>
                         </div>
                     );
@@ -3455,7 +3455,7 @@
             
             const handleLogin = async () => {
                 if (!login.trim() || !password.trim()) {
-                    setErrorMessage('Please enter both login and password');
+                    setErrorMessage('Пожалуйста, введите логин и пароль');
                     setTimeout(() => setErrorMessage(''), 5000);
                     return;
                 }
@@ -3481,12 +3481,12 @@
                         setPassword('');
                         showToast('Logged in successfully', 'success');
                     } else {
-                        setErrorMessage('Invalid login or password');
+                        setErrorMessage('Неправильный логин или пароль');
                         setTimeout(() => setErrorMessage(''), 5000);
                     }
                 } catch (err) {
                     console.error('Login error:', err);
-                    setErrorMessage(err.response?.data?.error || 'Failed to connect to server');
+                    setErrorMessage(err.response?.data?.error || 'Ошибка сети');
                     setTimeout(() => setErrorMessage(''), 5000);
                 } finally {
                     if (isMounted.current) setIsLoading(false);
@@ -3938,7 +3938,7 @@
                 
                       <input
                         type="text"
-                        placeholder="Login"
+                        placeholder="Логин"
                         value={login}
                         onChange={(e) => setLogin(e.target.value)}
                         onKeyPress={handleKeyPress}
@@ -3948,7 +3948,7 @@
                 
                       <input
                         type="password"
-                        placeholder="Password"
+                        placeholder="Пароль"
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
                         onKeyPress={handleKeyPress}
@@ -3972,7 +3972,7 @@
                         }`}
                         disabled={isLoading}
                       >
-                        {isLoading ? "Logging in..." : "Login"}
+                        {isLoading ? "Вход..." : "Войти"}
                       </button>
                 
                       <div className="mt-4 text-center">
@@ -4400,31 +4400,31 @@
                                 )}
                                 {view === 'view_scores' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">View Operator Scores</h2>
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Оценка операторов</h2>
                                         <select
                                             value={selectedSvId}
                                             onChange={(e) => setSelectedSvId(e.target.value)}
                                             className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             disabled={isLoading || isAdminDataLoading}
                                         >
-                                            <option value="">Select Supervisor</option>
+                                            <option value="">Выберите супервайзера</option>
                                             {svList.map(sv => (
                                                 <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
                                             ))}
                                         </select>
                                         {isAdminDataLoading ? (
-                                            <p className="text-center text-gray-600">Loading...</p>
+                                            <p className="text-center text-gray-600">Загрузка...</p>
                                         ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
                                             <div className="overflow-x-auto rounded-lg border border-gray-200">
                                                 <table className="min-w-full divide-y divide-gray-200">
                                                     <thead className="bg-gray-50">
                                                         <tr>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Calls</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Expected</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg Score</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Link</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Звонки</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ожидаемые</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Средний балл</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ссылка</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
                                                         </tr>
                                                     </thead>
                                                     <tbody className="bg-white divide-y divide-gray-200">
@@ -4447,17 +4447,18 @@
                                                                     </td>
                                                                     <td className="px-6 py-4 whitespace-nowrap">
                                                                         {op.link ? (
-                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">View</a>
+                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">Просмотр</a>
                                                                         ) : '-'}
                                                                     </td>
                                                                     <td className="px-6 py-4 whitespace-nowrap space-x-2">
                                                                         {hasIssue && (
                                                                             <button
                                                                                 onClick={() => notifySupervisor(selectedSvId, op.name)}
+                                                                                title="Уведомить супервайзера о низком количестве оценок"
                                                                                 className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm transition-all duration-200"
                                                                                 disabled={isLoading}
                                                                             >
-                                                                                Notify
+                                                                                Уведомить
                                                                             </button>
                                                                         )}
                                                                         <button
@@ -4479,7 +4480,7 @@
                                                                             className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
                                                                             title="Listen to operator calls"
                                                                         >
-                                                                            Listen Calls
+                                                                            Оценки
                                                                         </button>
                                                                     </td>
                                                                 </tr>
@@ -4489,7 +4490,7 @@
                                                 </table>
                                             </div>
                                         ) : selectedSvId ? (
-                                            <p className="text-center text-gray-600">No operators found for this supervisor.</p>
+                                            <p className="text-center text-gray-600">Операторы не найдены для этого супервайзера.</p>
                                         ) : null}
                                     </div>
                                 )}
@@ -4504,17 +4505,18 @@
                                 {view === 'manage_users' && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex items-center justify-between mb-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800">Manage Users</h2>
+                                    <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
 
                                     {/* Generate Report Button */}
                                     <button
                                         onClick={handleGenerateReport}
                                         className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${
-                                        isLoading ? "opacity-50 cursor-not-allowed" : ""
+                                            isLoading ? "opacity-50 cursor-not-allowed" : ""
                                         }`}
                                         disabled={isLoading}
                                     >
-                                        {isLoading ? "Generating..." : "Generate Report"}
+                                        <i className="fas fa-arrow-down mr-2"></i>
+                                        {isLoading ? "Генерация..." : "Сгенерировать отчет"}
                                     </button>
                                     </div>
 
@@ -4528,7 +4530,7 @@
                                             : "bg-gray-200 text-gray-700 hover:bg-gray-300"
                                         }`}
                                     >
-                                        Active
+                                        Активные
                                     </button>
                                     <button
                                         onClick={() => setActiveUserTab("fired")}
@@ -4538,12 +4540,12 @@
                                             : "bg-gray-200 text-gray-700 hover:bg-gray-300"
                                         }`}
                                     >
-                                        Fired
+                                        Уволенные
                                     </button>
                                     </div>
 
                                     {isAdminDataLoading ? (
-                                    <p className="text-center text-gray-600">Loading...</p>
+                                    <p className="text-center text-gray-600">Загрузка...</p>
                                     ) : (
                                     (() => {
                                         // Фильтруем по статусу
@@ -4563,7 +4565,7 @@
                                             <div className="mb-4">
                                             <input
                                                 type="text"
-                                                placeholder="Search by name, direction, or supervisor..."
+                                                placeholder="Поиск по имени, направлению или супервайзеру..."
                                                 value={searchQuery}
                                                 onChange={(e) => setSearchQuery(e.target.value.toLowerCase())}
                                                 className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
@@ -4575,7 +4577,7 @@
                                             filteredUsers
                                                 .filter((u) => filteredByStatus.includes(u))
                                                 .reduce((acc, u) => {
-                                                const key = u.supervisor_name || "No Supervisor";
+                                                const key = u.supervisor_name || "Без супервайзера";
                                                 if (!acc[key]) acc[key] = [];
                                                 acc[key].push(u);
                                                 return acc;
@@ -4598,19 +4600,19 @@
                                                 <thead className="bg-gray-50">
                                                     <tr>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                                                        Name
+                                                        Имя
                                                     </th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                                                        Direction
+                                                        Направление
                                                     </th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                                                        Status
+                                                        Статус
                                                     </th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                                                        Hire Date
+                                                        Дата найма
                                                     </th>
                                                     <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">
-                                                        Rate
+                                                        Ставка
                                                     </th>
                                                     <th className="px-6 py-3"></th>
                                                     </tr>
@@ -4627,15 +4629,15 @@
                                                         <td className="px-6 py-4">
                                                         {u.status === "working" || !u.status ? (
                                                             <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">
-                                                            Working
+                                                            Работает
                                                             </span>
                                                         ) : u.status === "unpaid_leave" ? (
                                                             <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">
-                                                            UL
+                                                            БС
                                                             </span>
                                                         ) : u.status === "fired" ? (
                                                             <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">
-                                                            Fired
+                                                            Уволен
                                                             </span>
                                                         ) : (
                                                             <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">
@@ -4678,7 +4680,7 @@
                                                                 }}
                                                                 className="block w-full text-left px-4 py-2 hover:bg-gray-100"
                                                                 >
-                                                                <i className="fas fa-edit mr-2"></i>Edit
+                                                                <i className="fas fa-edit mr-2"></i>Править
                                                                 </button>
                                                                 <button
                                                                 onClick={() => {
@@ -4692,12 +4694,12 @@
                                                                 {loadingHistoryId === u.id ? (
                                                                     <>
                                                                     <i className="fas fa-spinner fa-spin mr-2"></i>
-                                                                    Loading...
+                                                                    Загрузка...
                                                                     </>
                                                                 ) : (
                                                                     <>
                                                                     <i className="fas fa-history mr-2"></i>
-                                                                    History
+                                                                    История
                                                                     </>
                                                                 )}
                                                                 </button>
@@ -4712,7 +4714,7 @@
                                                 <tfoot className="bg-gray-50">
                                                     <tr>
                                                     <td className="px-6 py-3 font-medium text-gray-700">
-                                                        {svUsers.length} users
+                                                        {svUsers.length} операторов
                                                     </td>
                                                     <td className="px-6 py-3 text-gray-700">
                                                         {Array.from(new Set(svUsers.map((u) => u.direction || "-"))).join(
@@ -4730,7 +4732,15 @@
                                                         ).map(([status, count]) => (
                                                             <span
                                                             key={status}
-                                                            title={status}
+                                                            title={
+                                                                status === "working" || !status
+                                                                ? "Работает"
+                                                                : status === "unpaid_leave"
+                                                                ? "БС"
+                                                                : status === "fired"
+                                                                ? "Уволен"
+                                                                : status
+                                                            }
                                                             className={`px-2 py-1 rounded-full text-xs font-medium border
                                                                 ${
                                                                 status === "working" || !status
@@ -5014,7 +5024,7 @@
                                         onClick={() => setActiveOperatorsTab("active")}
                                         className={`px-4 py-2 rounded-lg font-medium ${
                                         activeOperatorsTab === "active"
-                                            ? "bg-blue-600 text-white"
+                                            ? "bg-green-600 text-white"
                                             : "bg-gray-200 text-gray-700 hover:bg-gray-300"
                                         }`}
                                     >
