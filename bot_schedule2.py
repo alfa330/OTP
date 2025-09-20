@@ -1143,15 +1143,18 @@ def handle_monthly_report():
         user_id = int(request.headers.get('X-User-Id'))
         user = db.get_user(id=user_id)
         if user[3]=="sv":
-            svs=[(user[0], user[2], "", "")]
+            # get_user returns tuple: (id, telegram_id, name, role, ... , status)
+            if user[5] == "fired":
+                return jsonify({"error": "Your status is fired. No report available."}), 403
+            svs=[(user[0], user[2], "", "", "", user[5])]
         elif user[3]=="admin":
-            svs = db.get_supervisors()
+            svs = [sv for sv in db.get_supervisors() if len(sv) > 5 and sv[5] != "fired"]
         else:
             return jsonify({"error": "Only admin or SV can access to this report"}), 404
-            
+
         if not svs:
             return jsonify({"error": "No supervisors found"}), 404
-        
+
         output = BytesIO()
         workbook = xlsxwriter.Workbook(output, {'in_memory': True})
 
@@ -1173,26 +1176,32 @@ def handle_monthly_report():
         total_format = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#E2EFDA', 'num_format': '0.00', 'align': 'center'})
         total_int_format = workbook.add_format({'border': 1, 'bold': True, 'bg_color': '#E2EFDA', 'num_format': '0', 'align': 'center'})
 
-        for sv_id, sv_name, _, _, _, _ in svs:
+        for sv in svs:
+            sv_id, sv_name = sv[0], sv[1]
+            # Exclude supervisors with status 'fired' (should already be filtered above, but double check)
+            if len(sv) > 5 and sv[5] == "fired":
+                continue
             operators = db.get_operators_by_supervisor(sv_id)
-            
+            # Exclude operators with status 'fired'
+            operators = [op for op in operators if op.get('status', '').lower() != 'fired']
+
             safe_sheet_name = sv_name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
             worksheet = workbook.add_worksheet(safe_sheet_name)
-            
+
             # Headers
             headers = ['ФИО']
             for i in range(1, 21):
                 headers.append(f'{i}')
             headers.append('Средний балл')
             headers.append('Кол-во оцененных звонков')
-            
+
             for col, header in enumerate(headers):
                 worksheet.write(0, col, header, header_format)
-            
+
             for row_idx, op in enumerate(operators, start=1):
                 op_id = op['id']
                 op_name = op['name']
-                
+
                 # Get scores
                 with db._get_cursor() as cursor:
                     cursor.execute("""
@@ -1208,13 +1217,13 @@ def handle_monthly_report():
                         ORDER BY c.created_at ASC
                     """, (op_id, month))
                     scores = [row[0] for row in cursor.fetchall()]
-                
+
                 count = len(scores)
                 avg_score = sum(scores) / count if count > 0 else 0.0
 
                 # ФИО
                 worksheet.write(row_idx, 0, op_name, fio_format)
-                
+
                 # Оценки с цветом
                 for col in range(1, 21):
                     if col-1 < count:
@@ -1228,20 +1237,20 @@ def handle_monthly_report():
                         worksheet.write(row_idx, col, score, fmt)
                     else:
                         worksheet.write(row_idx, col, '', float_format)
-                
+
                 # Итоговые колонки
                 worksheet.write(row_idx, 21, avg_score, total_format)
                 worksheet.write(row_idx, 22, count, total_int_format)
-            
+
             worksheet.set_column('A:A', 30)
             for i in range(1, 21):
                 worksheet.set_column(i, i, 12)
             worksheet.set_column(21, 21, 15)
             worksheet.set_column(22, 22, 20)
-        
+
         workbook.close()
         output.seek(0)
-        
+
         if output.getvalue():
             filename = f"Monthly_Report_{month}.xlsx"
             return send_file(
@@ -1253,7 +1262,7 @@ def handle_monthly_report():
         else:
             logging.error("Report is empty")
             return jsonify({"error": "Generated report is empty"}), 500
-            
+
     except Exception as e:
         logging.error(f"Error in monthly_report: {e}")
         return jsonify({"error": str(e)}), 500
