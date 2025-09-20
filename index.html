@@ -4782,78 +4782,122 @@
                                 {view === 'manage_operators' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Manage Your Operators</h2>
+
+                                        {/* Tabs */}
+                                        <div className="flex space-x-4 mb-6">
+                                        <button
+                                            onClick={() => setActiveTab("active")}
+                                            className={`px-4 py-2 rounded-lg font-medium ${
+                                            activeTab === "active"
+                                                ? "bg-blue-600 text-white"
+                                                : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                                            }`}
+                                        >
+                                            Active (Working / Unpaid Leave)
+                                        </button>
+                                        <button
+                                            onClick={() => setActiveTab("fired")}
+                                            className={`px-4 py-2 rounded-lg font-medium ${
+                                            activeTab === "fired"
+                                                ? "bg-red-600 text-white"
+                                                : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                                            }`}
+                                        >
+                                            Fired
+                                        </button>
+                                        </div>
+
                                         {isLoading ? (
-                                            <p className="text-center text-gray-600">Loading...</p>
-                                        ) : svData?.operators?.length > 0 ? ( 
+                                        <p className="text-center text-gray-600">Loading...</p>
+                                        ) : (
+                                        (() => {
+                                            const filteredOperators =
+                                            activeTab === "active"
+                                                ? svData?.operators?.filter(
+                                                    (op) => op.status === "working" || op.status === "unpaid_leave" || !op.status
+                                                )
+                                                : svData?.operators?.filter((op) => op.status === "fired");
+
+                                            return filteredOperators?.length > 0 ? (
                                             <div className="overflow-x-auto rounded-lg border border-gray-200">
                                                 <table className="min-w-full divide-y divide-gray-200">
-                                                    <thead className="bg-gray-50">
-                                                        <tr>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Direction</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"> Rate</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody className="bg-white divide-y divide-gray-200">
-                                                        {svData.operators.map(op => (
-                                                            <tr key={op.id} className="hover:bg-gray-50 transition-colors duration-200">
-                                                                <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
-                                                                <td className="px-6 py-4 whitespace-nowrap">{op.direction_id ? directions.find(d => d.id === op.direction_id)?.name || '-' : '-'}</td>
-                                                                <td className="px-6 py-4 whitespace-nowrap">
-                                                                  {op.status === 'working' || !op.status ? (
-                                                                    <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Working</span>
-                                                                  ) : op.status === 'unpaid_leave' ? (
-                                                                    <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">UL</span>
-                                                                  ) : op.status === 'fired' ? (
-                                                                    <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Fired</span>
-                                                                  ) : (
-                                                                    <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{op.status}</span>
-                                                                  )}
-                                                                </td>
-                                                                <td className="px-6 py-4 whitespace-nowrap"><RateCircle rate={op.rate || 1.0} /></td>
-                                                                <td className="px-6 py-4 whitespace-nowrap">
-                                                                    <div className="flex space-x-2"> 
-                                                                        <button
-                                                                            onClick={() => {
-                                                                                setUserToEdit({ ...op, supervisor_id: user.id });
-                                                                                setShowUserEditModal(true);
-                                                                            }}
-                                                                            className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
-                                                                        >
-                                                                            <i className="fas fa-edit"></i> Edit
-                                                                        </button>
-                                                                        <button
-                                                                            onClick={() => {
-                                                                                setSelectedUserForHistory(op);
-                                                                                fetchUserHistory(op.id);
-                                                                            }}
-                                                                            disabled={loadingHistoryId === op.id}
-                                                                            className={`bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700 text-sm transition-all duration-200 flex items-center gap-1 ${loadingHistoryId === op.id ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                                                            >
-                                                                            {loadingHistoryId === op.id ? (
-                                                                                <>
-                                                                                <i className="fas fa-spinner fa-spin"></i> Loading...
-                                                                                </>
-                                                                            ) : (
-                                                                                <>
-                                                                                <i className="fas fa-history"></i> History
-                                                                                </>
-                                                                            )}
-                                                                        </button>
-                                                                    </div>
-                                                                </td>
-                                                            </tr>
-                                                        ))}
-                                                    </tbody>
+                                                <thead className="bg-gray-50">
+                                                    <tr>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Direction</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Rate</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="bg-white divide-y divide-gray-200">
+                                                    {filteredOperators.map((op) => (
+                                                    <tr key={op.id} className="hover:bg-gray-50 transition-colors duration-200">
+                                                        <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
+                                                        <td className="px-6 py-4 whitespace-nowrap">
+                                                        {op.direction_id
+                                                            ? directions.find((d) => d.id === op.direction_id)?.name || "-"
+                                                            : "-"}
+                                                        </td>
+                                                        <td className="px-6 py-4 whitespace-nowrap">
+                                                        {op.status === "working" || !op.status ? (
+                                                            <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Working</span>
+                                                        ) : op.status === "unpaid_leave" ? (
+                                                            <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">UL</span>
+                                                        ) : op.status === "fired" ? (
+                                                            <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Fired</span>
+                                                        ) : (
+                                                            <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{op.status}</span>
+                                                        )}
+                                                        </td>
+                                                        <td className="px-6 py-4 whitespace-nowrap">
+                                                        <RateCircle rate={op.rate || 1.0} />
+                                                        </td>
+                                                        <td className="px-6 py-4 whitespace-nowrap">
+                                                        <div className="flex space-x-2">
+                                                            <button
+                                                            onClick={() => {
+                                                                setUserToEdit({ ...op, supervisor_id: user.id });
+                                                                setShowUserEditModal(true);
+                                                            }}
+                                                            className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
+                                                            >
+                                                            <i className="fas fa-edit"></i> Edit
+                                                            </button>
+                                                            <button
+                                                            onClick={() => {
+                                                                setSelectedUserForHistory(op);
+                                                                fetchUserHistory(op.id);
+                                                            }}
+                                                            disabled={loadingHistoryId === op.id}
+                                                            className={`bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700 text-sm transition-all duration-200 flex items-center gap-1 ${
+                                                                loadingHistoryId === op.id ? "opacity-50 cursor-not-allowed" : ""
+                                                            }`}
+                                                            >
+                                                            {loadingHistoryId === op.id ? (
+                                                                <>
+                                                                <i className="fas fa-spinner fa-spin"></i> Loading...
+                                                                </>
+                                                            ) : (
+                                                                <>
+                                                                <i className="fas fa-history"></i> History
+                                                                </>
+                                                            )}
+                                                            </button>
+                                                        </div>
+                                                        </td>
+                                                    </tr>
+                                                    ))}
+                                                </tbody>
                                                 </table>
                                             </div>
-                                        ) : (
+                                            ) : (
                                             <p className="text-center text-gray-600">No operators found.</p>
+                                            );
+                                        })()
                                         )}
                                     </div>
-                                )}
+                                    )}
                                 {view === 'operators' && (
                                   <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex justify-between items-center mb-6">
