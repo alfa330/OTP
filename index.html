@@ -1711,6 +1711,7 @@
             const [isClosing, setIsClosing] = useState(false);
             const [activeTab, setActiveTab] = useState("active");
             const [activeUserTab, setActiveUserTab] = useState("active");
+            const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
 
             const handleToggleDropdown = (forceClose = null) => {
             if (forceClose === true) {
@@ -4772,12 +4773,12 @@
                             <>
                                 {view === 'update_table' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Update Table</h2>
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Обновить таблицу</h2>
                                         {!showPreview ? (
                                             <>
                                                 <input
                                                     type="text"
-                                                    placeholder="Enter Google Sheets URL"
+                                                    placeholder="Вставьте ссылку таблицы часов"
                                                     value={tableUrl}
                                                     onChange={(e) => setTableUrl(e.target.value)}
                                                     className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
@@ -4788,27 +4789,27 @@
                                                     className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
                                                     disabled={isLoading || !tableUrl}
                                                 >
-                                                    {isLoading ? 'Previewing...' : 'Preview Table'}
+                                                    {isLoading ? 'Предварительный просмотр...' : 'Предварительный просмотр таблицы'}
                                                 </button>
                                             </>
                                         ) : (
                                             <>
-                                                <h3 className="text-xl font-semibold mb-4">Preview Data</h3>
-                                                <p className="mb-4">Sheet Name: {previewData.sheet_name}</p>
-                                                <h4 className="font-medium mb-2">Operators:</h4>
+                                                <h3 className="text-xl font-semibold mb-4">Предварительный просмотр данных</h3>
+                                                <p className="mb-4">Название листа: {previewData.sheet_name}</p>
+                                                <h4 className="font-medium mb-2">Операторы:</h4>
                                                 <ul className="mb-4 list-disc pl-5">
                                                     {previewData.operators.map((op, idx) => (
                                                         <li key={idx}>{op.name}</li>
                                                     ))}
                                                 </ul>
-                                                <label className="block mb-2 font-semibold text-gray-700">Select Direction:</label>
+                                                <label className="block mb-2 font-semibold text-gray-700">Выберите направление:</label>
                                                 <select
                                                     value={selectedDirection}
                                                     onChange={(e) => setSelectedDirection(e.target.value)}
                                                     className="w-full p-3 mb-6 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                     disabled={isLoading}
                                                 >
-                                                    <option value="">Select Direction</option>
+                                                    <option value="">Выберите направление</option>
                                                     {directions.map(dir => (
                                                         <option key={dir.id} value={dir.id}>{dir.name}</option>
                                                     ))}
@@ -4819,7 +4820,7 @@
                                                         className={`bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200 ${isLoading || !selectedDirection ? 'cursor-not-allowed opacity-50' : ''}`}
                                                         disabled={isLoading || !selectedDirection}
                                                     >
-                                                        {isLoading ? 'Saving...' : 'Confirm and Save'}
+                                                        {isLoading ? 'Сохранение...' : 'Подтвердить и сохранить'}
                                                     </button>
                                                     <button
                                                         onClick={() => {
@@ -4838,7 +4839,7 @@
                                 )}
                                 {view === 'manage_operators' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Manage Your Operators</h2>
+                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Управлять операторами</h2>
 
                                         {/* Tabs */}
                                         <div className="flex space-x-4 mb-6">
@@ -4850,7 +4851,7 @@
                                                 : "bg-gray-200 text-gray-700 hover:bg-gray-300"
                                             }`}
                                         >
-                                            Active
+                                            Активные
                                         </button>
                                         <button
                                             onClick={() => setActiveTab("fired")}
@@ -4860,12 +4861,12 @@
                                                 : "bg-gray-200 text-gray-700 hover:bg-gray-300"
                                             }`}
                                         >
-                                            Fired
+                                            Уволенные
                                         </button>
                                         </div>
 
                                         {isLoading ? (
-                                        <p className="text-center text-gray-600">Loading...</p>
+                                        <p className="text-center text-gray-600">Загрузка...</p>
                                         ) : (
                                         (() => {
                                             const filteredOperators =
@@ -4880,11 +4881,11 @@
                                                 <table className="min-w-full divide-y divide-gray-200">
                                                 <thead className="bg-gray-50">
                                                     <tr>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Direction</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Rate</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Направление</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Статус</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ставка</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody className="bg-white divide-y divide-gray-200">
@@ -4898,11 +4899,11 @@
                                                         </td>
                                                         <td className="px-6 py-4 whitespace-nowrap">
                                                         {op.status === "working" || !op.status ? (
-                                                            <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Working</span>
+                                                            <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Работает</span>
                                                         ) : op.status === "unpaid_leave" ? (
-                                                            <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">UL</span>
+                                                            <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">БС</span>
                                                         ) : op.status === "fired" ? (
-                                                            <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Fired</span>
+                                                            <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Уволен</span>
                                                         ) : (
                                                             <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{op.status}</span>
                                                         )}
@@ -4919,7 +4920,7 @@
                                                             }}
                                                             className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
                                                             >
-                                                            <i className="fas fa-edit"></i> Edit
+                                                            <i className="fas fa-edit"></i> Править
                                                             </button>
                                                             <button
                                                             onClick={() => {
@@ -4933,11 +4934,11 @@
                                                             >
                                                             {loadingHistoryId === op.id ? (
                                                                 <>
-                                                                <i className="fas fa-spinner fa-spin"></i> Loading...
+                                                                <i className="fas fa-spinner fa-spin"></i> Загрузка...
                                                                 </>
                                                             ) : (
                                                                 <>
-                                                                <i className="fas fa-history"></i> History
+                                                                <i className="fas fa-history"></i> История
                                                                 </>
                                                             )}
                                                             </button>
@@ -4949,170 +4950,197 @@
                                                 </table>
                                             </div>
                                             ) : (
-                                            <p className="text-center text-gray-600">No operators found.</p>
+                                            <p className="text-center text-gray-600">Операторы не найдены.</p>
                                             );
                                         })()
                                         )}
                                     </div>
                                     )}
                                 {view === 'operators' && (
-                                  <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex justify-between items-center mb-6">
-                                      <h2 className="text-2xl font-semibold text-gray-800">Your Operators</h2>
-                                      <div className="flex items-end gap-4">
+                                    <h2 className="text-2xl font-semibold text-gray-800">Ваши операторы</h2>
+                                    <div className="flex items-end gap-4">
                                         <div>
-                                          <select
+                                        <select
                                             value={selectedReportMonth}
                                             onChange={(e) => setSelectedReportMonth(e.target.value)}
                                             className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                             disabled={isAdminDataLoading}
-                                          >
-                                            {getMonthOptions()}
-                                          </select>
-                                        </div>
-                                
-                                        <button
-                                          onClick={generateMonthlyReport}
-                                          className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                          disabled={isLoading}
                                         >
-                                          {isLoading ? 'Generating...' : 'Generate Report'}
+                                            {getMonthOptions()}
+                                        </select>
+                                        </div>
+
+                                        <button
+                                            onClick={generateMonthlyReport}
+                                            className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${
+                                                isLoading ? "cursor-not-allowed opacity-50" : ""
+                                            }`}
+                                            disabled={isLoading}
+                                        >
+                                            <i className="fas fa-arrow-down mr-2"></i>
+                                            {isLoading ? "Скачивание..." : "Сгенерировать отчет"}
                                         </button>
-                                
+
                                         {/* Новая кнопка для загрузки Excel */}
                                         <button
-                                          onClick={() => document.getElementById("callsFileInput").click()}
-                                          className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200"
+                                            onClick={() => document.getElementById("callsFileInput").click()}
+                                            className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200"
                                         >
-                                          Upload Calls Table
+                                            <i className="fas fa-arrow-up mr-2"></i>
+                                            Загрузить таблицу КВЗ
                                         </button>
-                                
-                                        {/* Скрытый input */}
+
                                         <input
-                                          type="file"
-                                          id="callsFileInput"
-                                          accept=".xlsx,.xls,.csv"
-                                          style={{ display: "none" }}
-                                          onChange={(e) => {
+                                        type="file"
+                                        id="callsFileInput"
+                                        accept=".xlsx,.xls,.csv"
+                                        style={{ display: "none" }}
+                                        onChange={(e) => {
                                             if (e.target.files.length > 0) {
-                                              const file = e.target.files[0];
-                                              setCallsTableFile(file);
-                                              handlePreviewCallsTable(file); // превью сразу
+                                            const file = e.target.files[0];
+                                            setCallsTableFile(file);
+                                            handlePreviewCallsTable(file);
                                             }
-                                          }}
+                                        }}
                                         />
-                                      </div>
                                     </div>
-                                
+                                    </div>
+
+                                    {/* Tabs */}
+                                    <div className="flex space-x-4 mb-6">
+                                    <button
+                                        onClick={() => setActiveOperatorsTab("active")}
+                                        className={`px-4 py-2 rounded-lg font-medium ${
+                                        activeOperatorsTab === "active"
+                                            ? "bg-blue-600 text-white"
+                                            : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                                        }`}
+                                    >
+                                        Активные
+                                    </button>
+                                    <button
+                                        onClick={() => setActiveOperatorsTab("fired")}
+                                        className={`px-4 py-2 rounded-lg font-medium ${
+                                        activeOperatorsTab === "fired"
+                                            ? "bg-red-600 text-white"
+                                            : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                                        }`}
+                                    >
+                                        Уволенные
+                                    </button>
+                                    </div>
+
                                     {isLoading ? (
-                                      <p className="text-center text-gray-600">Loading...</p>
+                                    <p className="text-center text-gray-600">Загрузка...</p>
                                     ) : svData && svData.operators && svData.operators.length > 0 ? (
-                                      <div className="overflow-x-auto rounded-lg border border-gray-200">
-                                        <table className="min-w-full divide-y divide-gray-200">
-                                          <thead className="bg-gray-50">
-                                            <tr>
-                                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Calls</th>
-                                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg Score</th>
-                                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Link</th>
-                                              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-                                            </tr>
-                                          </thead>
-                                          <tbody className="bg-white divide-y divide-gray-200">
-                                            {svData.operators.map((op, index) => {
-                                              const callCount = parseInt(op.call_count) || 0;
-                                              return (
-                                                <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
-                                                  <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
-                                                  <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
-                                                    {callCount}
-                                                  </td>
-                                                  <td className="px-6 py-4 whitespace-nowrap">
-                                                    <span className={getScoreColor(op.avg_score)}>
-                                                      {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                    </span>
-                                                  </td>
-                                                  <td className="px-6 py-4 whitespace-nowrap">
-                                                    {op.link ? (
-                                                      <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">
-                                                        View
-                                                      </a>
-                                                    ) : '-'}
-                                                  </td>
-                                                  <td className="px-6 py-4 whitespace-nowrap space-x-2">
-                                                    <button
-                                                      onClick={() => {
-                                                        const tokenData = {
-                                                          apiKey: user.apiKey,
-                                                          userId: user.id,
-                                                          role: user.role,
-                                                          name: user.name,
-                                                          operatorId: op.id,
-                                                          operatorName: op.name,
-                                                          timestamp: Date.now()
-                                                        };
-                                                        const token = safeBtoa(JSON.stringify(tokenData));
-                                                        window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
-                                                      }}
-                                                      className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
-                                                      title="Listen to operator calls"
-                                                    >
-                                                      Listen Calls
-                                                    </button>
-                                                  </td>
+                                    (() => {
+                                        const filteredOperators =
+                                        activeOperatorsTab === "active"
+                                            ? svData.operators.filter(
+                                                (op) => op.status === "working" || op.status === "unpaid_leave" || !op.status
+                                            )
+                                            : svData.operators.filter((op) => op.status === "fired");
+
+                                        return filteredOperators.length > 0 ? (
+                                        <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                            <table className="min-w-full divide-y divide-gray-200">
+                                            <thead className="bg-gray-50">
+                                                <tr>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                    Имя
+                                                </th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                    Звонки
+                                                </th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                    Средний балл
+                                                </th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                    Ссылка
+                                                </th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                    Действия
+                                                </th>
                                                 </tr>
-                                              );
-                                            })}
-                                          </tbody>
-                                        </table>
-                                      </div>
-                                    ) : (
-                                      <p className="text-center text-gray-600">No operators found.</p>
-                                    )}
-                                
-                                    {/* Модалка превью */}
-                                    {showCallsPreview && previewCallsData && (
-                                      <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50">
-                                        <div className="bg-white rounded-xl shadow-lg p-6 w-2/3 max-h-[80vh] overflow-y-auto">
-                                          <h3 className="text-lg font-semibold mb-4">
-                                            Preview: {previewCallsData.sheet_name}
-                                          </h3>
-                                
-                                          <table className="w-full border-collapse border border-gray-300">
-                                            <thead>
-                                              <tr className="bg-gray-100">
-                                                <th className="border border-gray-300 p-2 text-left">Operator</th>
-                                                <th className="border border-gray-300 p-2 text-left">Calls per Hour</th>
-                                              </tr>
                                             </thead>
-                                            <tbody>
-                                              {previewCallsData.operators.map((op, i) => (
-                                                <tr key={i} className="hover:bg-gray-50">
-                                                  <td className="border border-gray-300 p-2">{op.name ?? op[0]}</td>
-                                                  <td className="border border-gray-300 p-2">{op.cph ?? op[1]}</td>
-                                                </tr>
-                                              ))}
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                                {filteredOperators.map((op, index) => {
+                                                const callCount = parseInt(op.call_count) || 0;
+                                                return (
+                                                    <tr
+                                                    key={index}
+                                                    className="hover:bg-gray-50 transition-colors duration-200"
+                                                    >
+                                                    <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
+                                                    <td
+                                                        className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(
+                                                        callCount,
+                                                        svData.expected_calls || 5
+                                                        )}`}
+                                                    >
+                                                        {callCount}
+                                                    </td>
+                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                        <span className={getScoreColor(op.avg_score)}>
+                                                        {op.avg_score ? op.avg_score.toFixed(2) : "-"}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                        {op.link ? (
+                                                        <a
+                                                            href={op.link}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="text-blue-600 hover:text-blue-800"
+                                                        >
+                                                            Просмотр
+                                                        </a>
+                                                        ) : (
+                                                        "-"
+                                                        )}
+                                                    </td>
+                                                    <td className="px-6 py-4 whitespace-nowrap space-x-2">
+                                                        <button
+                                                        onClick={() => {
+                                                            const tokenData = {
+                                                            apiKey: user.apiKey,
+                                                            userId: user.id,
+                                                            role: user.role,
+                                                            name: user.name,
+                                                            operatorId: op.id,
+                                                            operatorName: op.name,
+                                                            timestamp: Date.now(),
+                                                            };
+                                                            const token = safeBtoa(JSON.stringify(tokenData));
+                                                            window.open(
+                                                            `https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(
+                                                                token
+                                                            )}`,
+                                                            "_blank"
+                                                            );
+                                                        }}
+                                                        className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
+                                                        title="Listen to operator calls"
+                                                        >
+                                                        Оценить
+                                                        </button>
+                                                    </td>
+                                                    </tr>
+                                                );
+                                                })}
                                             </tbody>
-                                          </table>
-                                
-                                          {previewCallsData.error && (
-                                            <div className="mt-4 text-red-600">
-                                              Errors: {previewCallsData.error}
-                                            </div>
-                                          )}
-                                
-                                          <div className="mt-6 flex justify-end">
-                                            <button
-                                              onClick={() => setShowCallsPreview(false)}
-                                              className="bg-gray-500 text-white py-2 px-4 rounded hover:bg-gray-600 transition-all duration-200"
-                                            >
-                                              Close
-                                            </button>
-                                          </div>
+                                            </table>
                                         </div>
-                                      </div>
+                                        ) : (
+                                        <p className="text-center text-gray-600">Операторы не найдены.</p>
+                                        );
+                                    })()
+                                    ) : (
+                                    <p className="text-center text-gray-600">Операторы не найдены.</p>
                                     )}
-                                  </div>
+                                </div>
                                 )}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                             </>
