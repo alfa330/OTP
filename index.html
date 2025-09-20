@@ -901,46 +901,165 @@
           );
         };
 
-        const HistoryModal = ({ isOpen, onClose, history }) => {
-            if (!isOpen) return null;
+        const HistoryModal = ({ isOpen, onClose, history = [] }) => {
+        const [query, setQuery] = useState("");
+        const searchRef = React.useRef(null);
 
-            return (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-4xl max-h-[80vh] overflow-y-auto">
-                        <h2 className="text-xl font-semibold mb-4">User Change History</h2>
-                        {history && history.length > 0 ? (
-                            <table className="min-w-full divide-y divide-gray-200">
-                                <thead className="bg-gray-50">
-                                    <tr>
-                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Field</th>
-                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Old Value</th>
-                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">New Value</th>
-                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Changed By</th>
-                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="bg-white divide-y divide-gray-200">
-                                    {history.map((entry, index) => (
-                                        <tr key={index}>
-                                            <td className="px-6 py-4 whitespace-nowrap">{entry.field}</td>
-                                            <td className="px-6 py-4 whitespace-nowrap">{entry.old_value || '-'}</td>
-                                            <td className="px-6 py-4 whitespace-nowrap">{entry.new_value || '-'}</td>
-                                            <td className="px-6 py-4 whitespace-nowrap">{entry.changed_by}</td>
-                                            <td className="px-6 py-4 whitespace-nowrap">{entry.changed_at}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        ) : (
-                            <p className="text-center text-gray-600">No history available.</p>
-                        )}
-                        <div className="flex justify-end mt-4">
-                            <button onClick={onClose} className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600">Close</button>
-                        </div>
-                    </div>
-                </div>
-            );
+        // Фокус на строку поиска при открытии
+        useEffect(() => {
+            if (isOpen) {
+            setTimeout(() => searchRef.current?.focus(), 50);
+            }
+        }, [isOpen]);
+
+        // Закрытие по Escape
+        useEffect(() => {
+            const onKey = (e) => {
+            if (e.key === "Escape") onClose();
+            };
+            if (isOpen) window.addEventListener("keydown", onKey);
+            return () => window.removeEventListener("keydown", onKey);
+        }, [isOpen, onClose]);
+
+        const formatDate = (raw) => {
+            if (!raw) return "-";
+            const d = new Date(raw);
+            if (!isNaN(d)) return d.toLocaleString("ru-RU");
+            // Попытка распарсить вручную (если приходит в формате dd-mm-yyyy)
+            const parts = String(raw).split(/[-/. ]/);
+            if (parts.length === 3) {
+            const [a, b, c] = parts;
+            const maybe = new Date(`${c}-${b}-${a}`);
+            if (!isNaN(maybe)) return maybe.toLocaleString("ru-RU");
+            }
+            return String(raw);
         };
+
+        const filtered = useMemo(() => {
+            const q = query.trim().toLowerCase();
+            if (!q) return history;
+            return history.filter((e) =>
+            [e.field, e.old_value, e.new_value, e.changed_by, e.changed_at]
+                .map((v) => (v == null ? "" : String(v).toLowerCase()))
+                .some((s) => s.includes(q))
+            );
+        }, [history, query]);
+
+        const exportCsv = () => {
+            if (!history || history.length === 0) return;
+            const headers = ["Поле", "Старое значение", "Новое значение", "Изменено пользователем", "Дата"];
+            const rows = history.map((e) => [
+            `"${(e.field ?? "").toString().replace(/"/g, '""')}"`,
+            `"${(e.old_value ?? "").toString().replace(/"/g, '""')}"`,
+            `"${(e.new_value ?? "").toString().replace(/"/g, '""')}"`,
+            `"${(e.changed_by ?? "").toString().replace(/"/g, '""')}"`,
+            `"${formatDate(e.changed_at).toString().replace(/"/g, '""')}"`,
+            ]);
+            const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\r\n");
+            const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `user_history_${new Date().toISOString().slice(0,10)}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        };
+
+        if (!isOpen) return null;
+
+        return (
+            <>
+            {/* Backdrop */}
+            <div
+                className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-200"
+                onClick={onClose}
+                aria-hidden="true"
+            />
+
+            {/* Modal */}
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="history-modal-title"
+                className="w-full max-w-4xl bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-200"
+                onClick={(e) => e.stopPropagation()}
+                >
+                <div className="px-6 py-4">
+                    {/* Header */}
+                    <div className="flex items-center justify-between gap-4">
+                    <h2 id="history-modal-title" className="text-xl font-semibold text-gray-800 dark:text-gray-100">
+                        История изменений пользователя
+                    </h2>
+
+                    <div className="flex items-center gap-3">
+                        <input
+                        ref={searchRef}
+                        type="search"
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        placeholder="Поиск по полю, значению, пользователю или дате..."
+                        className="px-3 py-2 border border-gray-300 rounded-lg w-80 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        aria-label="Поиск в истории"
+                        />
+                        <button
+                        onClick={exportCsv}
+                        className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
+                        title="Скачать CSV"
+                        >
+                        Экспорт CSV
+                        </button>
+                        <button
+                        onClick={onClose}
+                        className="px-3 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 transition"
+                        aria-label="Закрыть"
+                        >
+                        Закрыть
+                        </button>
+                    </div>
+                    </div>
+
+                    {/* Content */}
+                    <div className="mt-4 max-h-[60vh] overflow-auto rounded-lg border border-gray-200 bg-white">
+                    {filtered && filtered.length > 0 ? (
+                        <table className="min-w-full divide-y divide-gray-200">
+                        <thead className="bg-gray-50 sticky top-0 z-10">
+                            <tr>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Поле</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Старое значение</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Новое значение</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Кто изменил</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Дата</th>
+                            </tr>
+                        </thead>
+                        <tbody className="bg-white divide-y divide-gray-200">
+                            {filtered.map((entry, i) => (
+                            <tr key={i} className="group hover:bg-gray-50">
+                                <td className="px-6 py-3 whitespace-nowrap align-top">{entry.field}</td>
+                                <td className="px-6 py-3 whitespace-pre-line align-top text-sm text-gray-700">{entry.old_value ?? "-"}</td>
+                                <td className="px-6 py-3 whitespace-pre-line align-top text-sm text-gray-700">{entry.new_value ?? "-"}</td>
+                                <td className="px-6 py-3 whitespace-nowrap align-top">{entry.changed_by ?? "-"}</td>
+                                <td className="px-6 py-3 whitespace-nowrap align-top">{formatDate(entry.changed_at)}</td>
+                            </tr>
+                            ))}
+                        </tbody>
+                        </table>
+                    ) : (
+                        <div className="p-6 text-center text-gray-600">История пуста.</div>
+                    )}
+                    </div>
+
+                    {/* Footer note */}
+                    <p className="mt-3 text-xs text-gray-400">Поиск фильтрует по всем колонкам. ESC или клик по фону — закрыть.</p>
+                </div>
+                </div>
+            </div>
+            </>
+        );
+        };
+
         
         const UserEditModal = ({ isOpen, onClose, userToEdit, svList, directions, onSave, user }) => {
             const [editedUser, setEditedUser] = useState(userToEdit || {});
