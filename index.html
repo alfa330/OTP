@@ -5468,7 +5468,6 @@
                         )}
                         {user.role === 'sv' && (
                             <>
-
                                 {view === 'update_table' && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <h2 className="text-2xl font-semibold mb-6 text-gray-800">Обновить таблицу</h2>
@@ -5489,6 +5488,21 @@
                                             aria-label="Ссылка на таблицу часов"
                                             />
 
+                                            {/* Посмотреть шаблон — теперь слева от кнопки предпросмотра */}
+                                            {(() => {
+                                            const TEMPLATE_PREVIEW_LINK = 'https://example.com/your-template.xlsx'; // <- замените на свою ссылку
+                                            return (
+                                                <button
+                                                onClick={() => window.open(TEMPLATE_PREVIEW_LINK, '_blank')}
+                                                className="inline-flex items-center px-4 py-3 text-sm rounded-lg border hover:bg-gray-50 text-gray-700"
+                                                aria-label="Посмотреть шаблон"
+                                                type="button"
+                                                >
+                                                Посмотреть шаблон
+                                                </button>
+                                            );
+                                            })()}
+
                                             <button
                                             onClick={handlePreviewTable}
                                             disabled={isLoading || !tableUrl}
@@ -5497,25 +5511,6 @@
                                             >
                                             {isLoading ? 'Предварительный просмотр...' : 'Предварительный просмотр таблицы'}
                                             </button>
-                                        </div>
-
-                                        <div className="mt-2">
-                                            {/* Замените ссылку TEMPLATE_PREVIEW_LINK на вашу фактическую ссылку */}
-                                            {(() => {
-                                            const TEMPLATE_PREVIEW_LINK = 'https://example.com/your-template.xlsx'; // <- замените на свою ссылку
-                                            return (
-                                                <a
-                                                href="#"
-                                                onClick={(e) => {
-                                                    e.preventDefault();
-                                                    window.open(TEMPLATE_PREVIEW_LINK, '_blank');
-                                                }}
-                                                className="inline-flex items-center px-4 py-2 text-sm rounded-lg border hover:bg-gray-50 text-gray-700"
-                                                >
-                                                Посмотреть шаблон
-                                                </a>
-                                            );
-                                            })()}
                                         </div>
                                         </div>
                                     </>
@@ -5629,7 +5624,7 @@
                                     </>
                                     )}
                                 </div>
-                                )}
+                                )}                            
                                 {view === 'manage_operators' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Управлять операторами</h2>
