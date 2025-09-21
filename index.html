@@ -1574,67 +1574,6 @@
             );
           };
 
-            const SalaryCalculationResultChat = ({ result }) => {
-              if (!result) return null;
-            
-              return (
-                <div className="mt-6 flex justify-center">
-                  <div className="w-full max-w-md bg-white shadow-md rounded-2xl p-6 border border-gray-200">
-                    <h3 className="text-lg font-bold mb-5 text-gray-800 text-center">
-                       Calculation Result
-                    </h3>
-            
-                    <div className="space-y-3 text-sm">
-                      <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Направление:</span>
-                        <span className="text-gray-800">Чат</span>
-                      </div>
-                      <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Баллы KPI:</span>
-                        <span className="text-gray-800">{result.points}</span>
-                      </div>
-                      <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Коэффициент премии:</span>
-                        <span className="text-gray-800">{result.premiumCoefficient}</span>
-                      </div>
-                      <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Норма часов:</span>
-                        <span className="text-gray-800">{result.hoursNorm}</span>
-                      </div>
-                      <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Выполнение нормы:</span>
-                        <span className="text-gray-800">{result.hoursPercentage}%</span>
-                      </div>
-                      <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Оклад:</span>
-                        <span className="text-gray-800">{result.baseSalary} ТГ</span>
-                      </div>
-                      <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Премия:</span>
-                        <span className="text-gray-800">{result.premiumPart} ТГ</span>
-                      </div>
-                      <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Бонусы:</span>
-                        <span className="text-gray-800">
-                          {result.bonuses} ТГ{" "}
-                          {result.bonusDetails ? (
-                            <span className="text-gray-500 italic">({result.bonusDetails})</span>
-                          ) : (
-                            ""
-                          )}
-                        </span>
-                      </div>
-                      <div className="flex justify-between pt-2">
-                        <span className="text-gray-700 font-semibold">Общая сумма:</span>
-                        <span className="text-green-600 font-bold text-base">
-                          {result.finalSalary} ТГ
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              );
-            };
             
           return (
                 <div>
@@ -1836,7 +1775,7 @@
                         </button>
                     </div>
                     <div className="mt-8">
-                        <SalaryCalculationResultChat result={result} />
+                        <SalaryCalculationResult result={result} />
                     </div>
                     <div className={`mt-8 ${showTable ? '' : 'hidden'}`}> 
                         {result && generatePointsTable(result.tableData)}
@@ -3921,7 +3860,7 @@
                         <thead>
                             <tr className="bg-blue-50">
                                 <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Категория</th>
-                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Варианты</th>
+                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Условие</th>
                                 <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Баллы</th>
                             </tr>
                         </thead>
@@ -4853,7 +4792,7 @@
                                         </li>
                                         <li>
                                             <button onClick={() => setView('evaluation')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'evaluation' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-phone-alt"></i> Мои оценки
+                                                <i className="fas fa-chart-bar"></i> Мои оценки
                                             </button>
                                         </li>
                                         <li>
@@ -6123,7 +6062,7 @@
                                     {view === 'evaluation' && (
                                       <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-3xl font-bold mb-8 text-gray-900 flex items-center gap-2">
-                                          <i className="fas fa-headset text-blue-600"></i>
+                                          <i className="fas fa-chart-bar text-blue-600"></i>
                                           <span className="text-blue-600">Ваши оценки</span>
                                         </h2>
                                     
