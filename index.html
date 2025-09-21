@@ -2678,34 +2678,34 @@
                         };
 
                     // Refresh trainings (centralized)
-                    const refreshTrainings = React.useCallback(async (silent = false) => {
-                        if (!user?.apiKey) return;
-                        setLoadingTrainings(true);
-                        setError(null);
-                        console.log("Loading trainings for month", month);
-                        try {
-                        const res = await axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
-                            headers: { "X-API-Key": user.apiKey, "X-User-Id": user.id },
-                        });
-                        const grouped = {};
-                        (res.data.trainings || []).forEach((t) => {
-                            if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
-                            grouped[t.operator_id].push(t);
-                        });
-                        if (isMounted.current) setTrainings(grouped);
-                        } catch (err) {
-                        console.error("Error loading trainings:", err);
-                        if (!silent) showToast?.("Не удалось загрузить тренинги", "error");
-                        if (isMounted.current) setError("Ошибка загрузки тренингов");
-                        } finally {
-                        if (isMounted.current) setLoadingTrainings(false);
-                        }
-                    }, [month, user]);
+                    // const refreshTrainings = React.useCallback(async (silent = false) => {
+                    //     if (!user?.apiKey) return;
+                    //     setLoadingTrainings(true);
+                    //     setError(null);
+                    //     console.log("Loading trainings for month", month);
+                    //     try {
+                    //     const res = await axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                    //         headers: { "X-API-Key": user.apiKey, "X-User-Id": user.id },
+                    //     });
+                    //     const grouped = {};
+                    //     (res.data.trainings || []).forEach((t) => {
+                    //         if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                    //         grouped[t.operator_id].push(t);
+                    //     });
+                    //     if (isMounted.current) setTrainings(grouped);
+                    //     } catch (err) {
+                    //     console.error("Error loading trainings:", err);
+                    //     if (!silent) showToast?.("Не удалось загрузить тренинги", "error");
+                    //     if (isMounted.current) setError("Ошибка загрузки тренингов");
+                    //     } finally {
+                    //     if (isMounted.current) setLoadingTrainings(false);
+                    //     }
+                    // }, [month, user]);
 
-                    // initial & month change
-                    useEffect(() => {
-                        refreshTrainings();
-                    }, [refreshTrainings]);
+                    // // initial & month change
+                    // useEffect(() => {
+                    //     refreshTrainings();
+                    // }, [refreshTrainings]);
 
                     // SV grouping memoized: { svName: [operators] }
                     const svGroups = React.useMemo(() => {
