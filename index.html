@@ -5746,174 +5746,159 @@
                                     )}
                                 {view === 'operators' && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                    <div className="flex justify-between items-center mb-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800">Ваши операторы</h2>
-                                    <div className="flex items-end gap-4">
-                                        <div>
-                                        <select
-                                            value={selectedReportMonth}
-                                            onChange={(e) => setSelectedReportMonth(e.target.value)}
-                                            className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                            disabled={isAdminDataLoading}
-                                        >
-                                            {getMonthOptions()}
-                                        </select>
-                                        </div>
+                                    {/* Header: title + controls */}
+                                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+                                    <h2 className="text-2xl font-semibold text-gray-800">Оценки операторов</h2>
 
-                                        <button
-                                            onClick={generateMonthlyReport}
-                                            className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${
-                                                isLoading ? "cursor-not-allowed opacity-50" : ""
-                                            }`}
-                                            disabled={isLoading}
+                                    <div className="flex items-end gap-3 flex-wrap">
+                                        {/* Month select */}
+                                        <select
+                                        value={selectedReportMonth}
+                                        onChange={(e) => setSelectedReportMonth(e.target.value)}
+                                        className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        disabled={isAdminDataLoading}
+                                        aria-label="Выберите месяц для отчета"
                                         >
-                                            <i className="fas fa-arrow-down mr-2"></i>
-                                            {isLoading ? "Скачивание..." : "Сгенерировать отчет"}
+                                        {getMonthOptions()}
+                                        </select>
+
+                                        {/* Generate report */}
+                                        <button
+                                        onClick={generateMonthlyReport}
+                                        disabled={isLoading}
+                                        className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isLoading ? 'bg-blue-600 opacity-60 cursor-not-allowed text-white' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+                                        aria-disabled={isLoading}
+                                        title="Сгенерировать месячный отчет"
+                                        >
+                                        <i className="fas fa-arrow-down" />
+                                        <span>{isLoading ? 'Скачивание...' : 'Сгенерировать отчет'}</span>
                                         </button>
 
-                                        {/* Новая кнопка для загрузки Excel */}
+                                        {/* Upload calls table (hidden input triggered) */}
                                         <button
-                                            onClick={() => document.getElementById("callsFileInput").click()}
-                                            className="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200"
+                                        onClick={() => document.getElementById('callsFileInput')?.click()}
+                                        className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-green-600 text-white hover:bg-green-700 transition"
+                                        title="Загрузить таблицу КВЗ"
                                         >
-                                            <i className="fas fa-arrow-up mr-2"></i>
-                                            Загрузить таблицу КВЗ
+                                        <i className="fas fa-arrow-up" />
+                                        Загрузить таблицу КВЗ
                                         </button>
 
                                         <input
                                         type="file"
                                         id="callsFileInput"
                                         accept=".xlsx,.xls,.csv"
-                                        style={{ display: "none" }}
+                                        className="hidden"
                                         onChange={(e) => {
-                                            if (e.target.files.length > 0) {
+                                            if (!e.target.files || e.target.files.length === 0) return;
                                             const file = e.target.files[0];
                                             setCallsTableFile(file);
                                             handlePreviewCallsTable(file);
-                                            }
+                                            e.target.value = '';
                                         }}
                                         />
                                     </div>
                                     </div>
 
                                     {/* Tabs */}
-                                    <div className="flex space-x-4 mb-6">
-                                    <button
-                                        onClick={() => setActiveOperatorsTab("active")}
-                                        className={`px-4 py-2 rounded-lg font-medium ${
-                                        activeOperatorsTab === "active"
-                                            ? "bg-green-600 text-white"
-                                            : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                                        }`}
-                                    >
-                                        Активные
-                                    </button>
-                                    <button
-                                        onClick={() => setActiveOperatorsTab("fired")}
-                                        className={`px-4 py-2 rounded-lg font-medium ${
-                                        activeOperatorsTab === "fired"
-                                            ? "bg-red-600 text-white"
-                                            : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                                        }`}
-                                    >
-                                        Уволенные
-                                    </button>
+                                    <div className="flex items-center space-x-3 mb-6">
+                                    {(() => {
+                                        const all = svData?.operators ?? [];
+                                        const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
+                                        const firedCount = all.filter(op => op.status === 'fired').length;
+                                        return (
+                                        <>
+                                            <button
+                                            onClick={() => setActiveOperatorsTab('active')}
+                                            className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeOperatorsTab === 'active' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                                            role="tab"
+                                            aria-selected={activeOperatorsTab === 'active'}
+                                            aria-controls="operators-active"
+                                            >
+                                            Активные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{activeCount}</span>
+                                            </button>
+
+                                            <button
+                                            onClick={() => setActiveOperatorsTab('fired')}
+                                            className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeOperatorsTab === 'fired' ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                                            role="tab"
+                                            aria-selected={activeOperatorsTab === 'fired'}
+                                            aria-controls="operators-fired"
+                                            >
+                                            Уволенные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{firedCount}</span>
+                                            </button>
+                                        </>
+                                        );
+                                    })()}
                                     </div>
 
+                                    {/* Content */}
                                     {isLoading ? (
-                                    <p className="text-center text-gray-600">Загрузка...</p>
-                                    ) : svData && svData.operators && svData.operators.length > 0 ? (
+                                    <p className="text-center text-gray-600 py-12">Загрузка...</p>
+                                    ) : (svData && svData.operators && svData.operators.length > 0) ? (
                                     (() => {
-                                        const filteredOperators =
-                                        activeOperatorsTab === "active"
-                                            ? svData.operators.filter(
-                                                (op) => op.status === "working" || op.status === "unpaid_leave" || !op.status
-                                            )
-                                            : svData.operators.filter((op) => op.status === "fired");
+                                        const allOps = svData.operators;
+                                        const filteredOperators = activeOperatorsTab === 'active'
+                                        ? allOps.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
+                                        : allOps.filter(op => op.status === 'fired');
 
-                                        return filteredOperators.length > 0 ? (
+                                        if (filteredOperators.length === 0) {
+                                        return <p className="text-center text-gray-600 py-8">Операторы не найдены.</p>;
+                                        }
+
+                                        return (
                                         <div className="overflow-x-auto rounded-lg border border-gray-200">
                                             <table className="min-w-full divide-y divide-gray-200">
                                             <thead className="bg-gray-50">
                                                 <tr>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Имя
-                                                </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Оценок
-                                                </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Средний балл
-                                                </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Ссылка
-                                                </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Действия
-                                                </th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Оценок</th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Средний балл</th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
                                                 </tr>
                                             </thead>
+
                                             <tbody className="bg-white divide-y divide-gray-200">
-                                                {filteredOperators.map((op, index) => {
+                                                {filteredOperators.map((op, idx) => {
                                                 const callCount = parseInt(op.call_count) || 0;
                                                 return (
-                                                    <tr
-                                                    key={index}
-                                                    className="hover:bg-gray-50 transition-colors duration-200"
-                                                    >
-                                                    <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
-                                                    <td
-                                                        className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(
-                                                        callCount,
-                                                        svData.expected_calls || 5
-                                                        )}`}
-                                                    >
+                                                    <tr key={op.id ?? idx} className="hover:bg-gray-50 transition-colors duration-200">
+                                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{op.name}</td>
+
+                                                    <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
                                                         {callCount}
                                                     </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap">
+
+                                                    <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                         <span className={getScoreColor(op.avg_score)}>
-                                                        {op.avg_score ? op.avg_score.toFixed(2) : "-"}
+                                                        {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
                                                         </span>
                                                     </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap">
-                                                        {op.link ? (
-                                                        <a
-                                                            href={op.link}
-                                                            target="_blank"
-                                                            rel="noopener noreferrer"
-                                                            className="text-blue-600 hover:text-blue-800"
-                                                        >
-                                                            Просмотр
-                                                        </a>
-                                                        ) : (
-                                                        "-"
-                                                        )}
-                                                    </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap space-x-2">
+
+                                                    <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                        <div className="flex items-center gap-2">
                                                         <button
-                                                        onClick={() => {
+                                                            onClick={() => {
                                                             const tokenData = {
-                                                            apiKey: user.apiKey,
-                                                            userId: user.id,
-                                                            role: user.role,
-                                                            name: user.name,
-                                                            operatorId: op.id,
-                                                            operatorName: op.name,
-                                                            timestamp: Date.now(),
+                                                                apiKey: user.apiKey,
+                                                                userId: user.id,
+                                                                role: user.role,
+                                                                name: user.name,
+                                                                operatorId: op.id,
+                                                                operatorName: op.name,
+                                                                timestamp: Date.now()
                                                             };
                                                             const token = safeBtoa(JSON.stringify(tokenData));
-                                                            window.open(
-                                                            `https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(
-                                                                token
-                                                            )}`,
-                                                            "_blank"
-                                                            );
-                                                        }}
-                                                        className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
-                                                        title="Listen to operator calls"
+                                                            window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
+                                                            }}
+                                                            className="inline-flex items-center gap-2 bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition"
+                                                            title={`Оценить оператора ${op.name}`}
                                                         >
-                                                        Оценить
+                                                            <i className="fas fa-play-circle" /> Оценить
                                                         </button>
+
+                                                        {/* Дополнительные действия: редактировать, история и т.д. (опционально) */}
+                                                        </div>
                                                     </td>
                                                     </tr>
                                                 );
@@ -5921,12 +5906,10 @@
                                             </tbody>
                                             </table>
                                         </div>
-                                        ) : (
-                                        <p className="text-center text-gray-600">Операторы не найдены.</p>
                                         );
                                     })()
                                     ) : (
-                                    <p className="text-center text-gray-600">Операторы не найдены.</p>
+                                    <p className="text-center text-gray-600 py-8">Операторы не найдены.</p>
                                     )}
                                 </div>
                                 )}
