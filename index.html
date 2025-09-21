@@ -5468,7 +5468,8 @@
                         )}
                         {user.role === 'sv' && (
                             <>
-                               {view === 'update_table' && (
+
+                                {view === 'update_table' && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <h2 className="text-2xl font-semibold mb-6 text-gray-800">Обновить таблицу</h2>
 
@@ -5476,8 +5477,8 @@
                                     {!showPreview ? (
                                     <>
                                         <div className="space-y-3">
-                                        <label className="block text-sm font-medium text-gray-700">Ссылка на таблицу (или загрузите файл)</label>
-                                        <div className="flex gap-3">
+                                        <label className="block text-sm font-medium text-gray-700">Ссылка на таблицу</label>
+                                        <div className="flex gap-3 items-center">
                                             <input
                                             type="text"
                                             placeholder="Вставьте ссылку таблицы часов"
@@ -5488,43 +5489,33 @@
                                             aria-label="Ссылка на таблицу часов"
                                             />
 
-                                            {/* Если у вас есть обработчик загрузки файлов на стороне, можно заменить этот input на реальный file input */}
-                                            <label className={`inline-flex items-center px-4 py-3 border rounded-lg cursor-pointer text-sm ${isLoading ? 'opacity-50 pointer-events-none' : 'hover:bg-gray-100'}`}>
-                                            <input
-                                                type="file"
-                                                accept=".xlsx,.xls,.csv"
-                                                onChange={(e) => {
-                                                // если вы хотите поддержать загрузку файла, можно сохранить файл в state родителя в обработчике
-                                                // здесь просто пытаемся показать имя файла в поле ссылки
-                                                const f = e.target.files && e.target.files[0];
-                                                if (f) setTableUrl(f.name);
-                                                // если у вас есть handler для file -> preview, вызовите его здесь
-                                                }}
-                                                className="hidden"
-                                                disabled={isLoading}
-                                                aria-label="Загрузить файл таблицы"
-                                            />
-                                            Загрузить файл
-                                            </label>
-                                        </div>
-
-                                        <div className="flex gap-3 mt-2">
                                             <button
                                             onClick={handlePreviewTable}
                                             disabled={isLoading || !tableUrl}
-                                            className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 text-sm ${isLoading || !tableUrl ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                            className={`bg-blue-600 text-white px-4 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 text-sm ${isLoading || !tableUrl ? 'opacity-50 cursor-not-allowed' : ''}`}
                                             aria-disabled={isLoading || !tableUrl}
                                             >
                                             {isLoading ? 'Предварительный просмотр...' : 'Предварительный просмотр таблицы'}
                                             </button>
+                                        </div>
 
-                                            <a
-                                            href="#"
-                                            onClick={(e) => { e.preventDefault(); /* при желании: показать инструкцию или скачать шаблон */ }}
-                                            className="inline-flex items-center px-4 py-3 text-sm rounded-lg border hover:bg-gray-50 text-gray-700"
-                                            >
-                                            Скачать шаблон
-                                            </a>
+                                        <div className="mt-2">
+                                            {/* Замените ссылку TEMPLATE_PREVIEW_LINK на вашу фактическую ссылку */}
+                                            {(() => {
+                                            const TEMPLATE_PREVIEW_LINK = 'https://example.com/your-template.xlsx'; // <- замените на свою ссылку
+                                            return (
+                                                <a
+                                                href="#"
+                                                onClick={(e) => {
+                                                    e.preventDefault();
+                                                    window.open(TEMPLATE_PREVIEW_LINK, '_blank');
+                                                }}
+                                                className="inline-flex items-center px-4 py-2 text-sm rounded-lg border hover:bg-gray-50 text-gray-700"
+                                                >
+                                                Посмотреть шаблон
+                                                </a>
+                                            );
+                                            })()}
                                         </div>
                                         </div>
                                     </>
@@ -5559,7 +5550,7 @@
                                         </div>
                                         </div>
 
-                                        {/* Operators preview: normalize input and show table */}
+                                        {/* Operators preview: normalize input and show table (only names) */}
                                         <div className="rounded-lg border overflow-hidden shadow-sm">
                                         <div className="max-h-[360px] overflow-auto">
                                             <table className="min-w-full table-auto">
@@ -5567,7 +5558,6 @@
                                                 <tr>
                                                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">#</th>
                                                 <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Оператор</th>
-                                                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Calls / Hour</th>
                                                 </tr>
                                             </thead>
 
@@ -5577,28 +5567,27 @@
                                                 if (!raw || raw.length === 0) {
                                                     return (
                                                     <tr>
-                                                        <td colSpan={3} className="px-4 py-6 text-center text-sm text-gray-500">Нет операторов в предварительном просмотре.</td>
+                                                        <td colSpan={2} className="px-4 py-6 text-center text-sm text-gray-500">Нет операторов в предварительном просмотре.</td>
                                                     </tr>
                                                     );
                                                 }
 
-                                                // Normalize row format to { name, cph }
+                                                // Normalize row format to { name }
                                                 const rows = raw.map((r) => {
-                                                    if (r == null) return { name: "-", cph: "-" };
+                                                    if (r == null) return { name: "-" };
                                                     if (typeof r === 'object' && !Array.isArray(r)) {
-                                                    return { name: r.name ?? r[0] ?? "-", cph: r.cph ?? r.calls_per_hour ?? r[1] ?? "-" };
+                                                    return { name: r.name ?? r[0] ?? "-" };
                                                     }
                                                     if (Array.isArray(r)) {
-                                                    return { name: r[0] ?? "-", cph: r[1] ?? "-" };
+                                                    return { name: r[0] ?? "-" };
                                                     }
-                                                    return { name: String(r), cph: "-" };
+                                                    return { name: String(r) };
                                                 });
 
                                                 return rows.map((row, idx) => (
                                                     <tr key={idx} className="hover:bg-gray-50">
                                                     <td className="px-4 py-3 text-sm text-gray-600">{idx + 1}</td>
                                                     <td className="px-4 py-3 text-sm text-gray-800 break-words">{row.name}</td>
-                                                    <td className="px-4 py-3 text-sm text-gray-800">{row.cph}</td>
                                                     </tr>
                                                 ));
                                                 })()}
