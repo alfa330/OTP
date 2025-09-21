@@ -3680,15 +3680,7 @@
                                     <div className="bg-white border rounded shadow p-3 text-sm text-gray-700">
                                     <div className="font-medium mb-1">Коэффициент премии</div>
                                     <div className="text-xs text-gray-600">
-                                        {hoursPercentage < 90 ? (
-                                        <>
-                                            Выполнение нормы {hoursPercentage}% &lt; 90% → коэффициент принудительно = <b>0.75</b>
-                                        </>
-                                        ) : (
-                                        <>
-                                            Используется значение из данных: <b>{premiumCoefficientRaw}</b>
-                                        </>
-                                        )}
+                                        Если выполнение нормы часов меньше чем 90% → коэффициент премии = <b>0.75</b>  
                                     </div>
                                     </div>
                                 </div>
@@ -3722,12 +3714,7 @@
                                         <div className="text-sm">
                                         {Number.isFinite(hoursWorked) ? (
                                             <>
-                                            Подстановка: <b>{hoursWorked} × 700</b> = <b>{fmtNum(baseSalaryCalc)}</b>
-                                            <div className="text-xs text-gray-500 mt-1">
-                                                {baseSalaryProvided ? (
-                                                <>Примечание: в данных указан Оклад = <b>{fmtNum(baseSalaryProvided)}</b></>
-                                                ) : null}
-                                            </div>
+                                            Подстановка: <b>{baseSalaryProvided/700} × 700</b> = <b>{fmtNum(baseSalaryProvided)}</b>
                                             </>
                                         ) : (
                                             <span className="text-xs text-gray-500">Количество отработанных часов неизвестно.</span>
@@ -3759,13 +3746,9 @@
 
                                         <div className="text-sm">
                                         <div>Оклад для расчёта: <b>{money(baseForPremium)}</b></div>
-                                        <div>Баллы KPI (фактор): <b>{kpiFactor}</b> ({simple(pointsRaw)} {pointsRaw > 1 ? "→ %" : ""})</div>
+                                        <div>Баллы KPI: <b>{kpiFactor}</b> ({simple(pointsRaw)} {pointsRaw > 1 ? "%" : ""})</div>
                                         <div>Коэффициент премии: <b>{displayPremiumCoefficient}</b></div>
                                         <div className="mt-2 font-semibold">Подстановка: {fmtNum(baseForPremium)} × {kpiFactor} × {displayPremiumCoefficient} = <b>{fmtNum(premiumCalc)}</b></div>
-
-                                        {premiumPartProvided ? (
-                                            <div className="text-xs text-gray-500 mt-1">Примечание: в данных указана премия = <b>{fmtNum(premiumPartProvided)}</b></div>
-                                        ) : null}
                                         </div>
                                     </div>
                                     </div>
@@ -3834,26 +3817,6 @@
                                 <div className="text-sm text-gray-600">Бонусы</div>
                                 <div className="font-medium text-gray-800">{money(bonuses)}</div>
                             </div>
-                            </div>
-                        </div>
-
-                        {/* Group: Корректировки / Примечания */}
-                        <div>
-                            <div className="text-xs text-gray-500 font-medium mb-2">Корректировки / Примечания</div>
-                            <div className="rounded-lg border divide-y divide-gray-100 overflow-hidden">
-                            {salaryResult.adjustments && salaryResult.adjustments.length > 0 ? (
-                                salaryResult.adjustments.map((adj, idx) => (
-                                <div key={idx} className={idx % 2 === 0 ? "px-4 py-2 bg-white" : "px-4 py-2 bg-gray-50"}>
-                                    <div className="flex justify-between items-start gap-3">
-                                    <div className="text-sm text-gray-700">{adj.label ?? adj.type ?? "Корректировка"}</div>
-                                    <div className="text-sm font-medium text-gray-800">{adj.amount ? money(adj.amount) : "-"}</div>
-                                    </div>
-                                    {adj.note && <div className="mt-1 text-xs text-gray-500">{adj.note}</div>}
-                                </div>
-                                ))
-                            ) : (
-                                <div className="px-4 py-3 bg-white text-sm text-gray-600">Корректировок нет.</div>
-                            )}
                             </div>
                         </div>
                         </div>
