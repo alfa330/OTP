@@ -1115,12 +1115,13 @@
                     <div className="px-6 py-5">
                         {/* Header */}
                         <div className="flex items-start justify-between gap-4">
-                        <h2 id="edit-user-title" className="text-2xl font-bold text-gray-800 dark:text-gray-100">
-                            Редактировать пользователя:
+                        <h2 id="edit-user-title" className="text-2xl font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
+                            <i className="fas fa-pen text-blue-600"></i>
+                            Редактировать пользователя
                         </h2>
-                        <h2 id="edit-user-title" className="text-2xl font-bold text-gray-800 dark:text-gray-100">
-                            {editedUser?.name ? `${editedUser.name}` : ""}
-                        </h2>
+                        {editedUser?.name && (
+                            <div className="mt-1 text-lg font-semibold text-blue-700">{editedUser.name}</div>
+                        )}
 
                         <button
                             type="button"
