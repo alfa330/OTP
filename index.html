@@ -5107,7 +5107,7 @@
                                                     <thead className="bg-gray-50">
                                                         <tr>
                                                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Звонки</th>
+                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Оценки</th>
                                                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ожидаемые</th>
                                                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Средний балл</th>
                                                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ссылка</th>
@@ -5749,7 +5749,7 @@
                                                     Имя
                                                 </th>
                                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Звонки
+                                                    Оценок
                                                 </th>
                                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                                     Средний балл
@@ -5837,6 +5837,119 @@
                                     ) : (
                                     <p className="text-center text-gray-600">Операторы не найдены.</p>
                                     )}
+                                </div>
+                                )}
+                                {showCallsPreview && previewCallsData && (
+                                <div
+                                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+                                    onClick={() => setShowCallsPreview(false)} // клик по фону закрывает
+                                >
+                                    <div
+                                    role="dialog"
+                                    aria-modal="true"
+                                    aria-labelledby="calls-preview-title"
+                                    className="bg-white rounded-2xl shadow-2xl w-full max-w-[900px] max-h-[80vh] overflow-hidden flex flex-col"
+                                    onClick={(e) => e.stopPropagation()} // предотвратить закрытие при клике внутри
+                                    tabIndex={0}
+                                    onKeyDown={(e) => { if (e.key === "Escape") setShowCallsPreview(false); }}
+                                    >
+                                    {/* Header */}
+                                    <div className="flex items-start justify-between px-6 py-4 border-b">
+                                        <div className="pr-4">
+                                        <h3 id="calls-preview-title" className="text-lg font-semibold text-gray-800">
+                                            Preview: {previewCallsData.sheet_name ?? "Calls table"}
+                                        </h3>
+                                        <p className="text-sm text-gray-500 mt-1">
+                                            Операторы: <span className="font-medium text-gray-700">{(previewCallsData.operators || []).length}</span>
+                                            {previewCallsData.expected_calls != null && (
+                                            <> · Ожидаемые: <span className="font-medium text-gray-700">{previewCallsData.expected_calls}</span></>
+                                            )}
+                                        </p>
+                                        </div>
+
+                                        <div className="flex items-center gap-3">
+                                        <button
+                                            onClick={() => setShowCallsPreview(false)}
+                                            className="px-3 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 text-sm"
+                                            aria-label="Закрыть превью"
+                                        >
+                                            Закрыть
+                                        </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Content: нормализация данных внутри IIFE */}
+                                    <div className="p-4 overflow-auto">
+                                        {previewCallsData.error && (
+                                        <div className="mb-3 p-3 bg-red-50 border border-red-200 text-red-700 rounded">
+                                            Ошибка при обработке файла: {previewCallsData.error}
+                                        </div>
+                                        )}
+
+                                        {(() => {
+                                        const raw = previewCallsData.operators || [];
+                                        const rows = raw.map((op) => {
+                                            if (op == null) return { name: "-", cph: "-" };
+                                            if (typeof op === "object" && !Array.isArray(op)) {
+                                            return { name: op.name ?? op[0] ?? "-", cph: op.cph ?? op.calls_per_hour ?? op[1] ?? "-" };
+                                            }
+                                            if (Array.isArray(op)) {
+                                            return { name: op[0] ?? "-", cph: op[1] ?? "-" };
+                                            }
+                                            return { name: String(op), cph: "-" };
+                                        });
+
+                                        return (
+                                            <div className="rounded-lg overflow-hidden border">
+                                            <table className="min-w-full table-fixed">
+                                                <thead className="bg-gray-50 sticky top-0 z-10">
+                                                <tr>
+                                                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Оператор</th>
+                                                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Calls / Hour</th>
+                                                </tr>
+                                                </thead>
+
+                                                <tbody className="bg-white divide-y">
+                                                {rows.length === 0 ? (
+                                                    <tr>
+                                                    <td colSpan={2} className="px-4 py-6 text-center text-sm text-gray-500">Нет данных для отображения.</td>
+                                                    </tr>
+                                                ) : (
+                                                    rows.map((r, i) => (
+                                                    <tr key={i} className="hover:bg-gray-50">
+                                                        <td className="px-4 py-3 text-sm text-gray-800 break-words">{r.name}</td>
+                                                        <td className="px-4 py-3 text-sm text-gray-800">{r.cph}</td>
+                                                    </tr>
+                                                    ))
+                                                )}
+                                                </tbody>
+                                            </table>
+                                            </div>
+                                        );
+                                        })()}
+                                    </div>
+
+                                    {/* Footer */}
+                                    <div className="px-6 py-4 border-t bg-gray-50 flex items-center justify-between gap-4">
+                                        <div className="text-sm text-gray-600">
+                                        {previewCallsData.processed_at ? `Обновлено: ${new Date(previewCallsData.processed_at).toLocaleString()}` : ""}
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => { /* принять превью — добавьте обработчик здесь, если нужно */ setShowCallsPreview(false); }}
+                                            className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"
+                                        >
+                                            Принять
+                                        </button>
+                                        <button
+                                            onClick={() => setShowCallsPreview(false)}
+                                            className="px-3 py-2 bg-white border rounded-lg hover:bg-gray-50 text-sm"
+                                        >
+                                            Отмена
+                                        </button>
+                                        </div>
+                                    </div>
+                                    </div>
                                 </div>
                                 )}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
