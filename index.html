@@ -1586,37 +1586,37 @@
             
                     <div className="space-y-3 text-sm">
                       <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Direction:</span>
-                        <span className="text-gray-800">Chat</span>
+                        <span className="text-gray-600 font-medium">Направление:</span>
+                        <span className="text-gray-800">Чат</span>
                       </div>
                       <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Points:</span>
+                        <span className="text-gray-600 font-medium">Баллы KPI:</span>
                         <span className="text-gray-800">{result.points}</span>
                       </div>
                       <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Premium Coefficient:</span>
+                        <span className="text-gray-600 font-medium">Коэффициент премии:</span>
                         <span className="text-gray-800">{result.premiumCoefficient}</span>
                       </div>
                       <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Monthly Hours Norm:</span>
+                        <span className="text-gray-600 font-medium">Норма часов:</span>
                         <span className="text-gray-800">{result.hoursNorm}</span>
                       </div>
                       <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Hours Percentage:</span>
+                        <span className="text-gray-600 font-medium">Выполнение нормы:</span>
                         <span className="text-gray-800">{result.hoursPercentage}%</span>
                       </div>
                       <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Base Salary:</span>
-                        <span className="text-gray-800">{result.baseSalary} KZT</span>
+                        <span className="text-gray-600 font-medium">Оклад:</span>
+                        <span className="text-gray-800">{result.baseSalary} ТГ</span>
                       </div>
                       <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Premium Part:</span>
-                        <span className="text-gray-800">{result.premiumPart} KZT</span>
+                        <span className="text-gray-600 font-medium">Премия:</span>
+                        <span className="text-gray-800">{result.premiumPart} ТГ</span>
                       </div>
                       <div className="flex justify-between border-b pb-1">
-                        <span className="text-gray-600 font-medium">Bonuses:</span>
+                        <span className="text-gray-600 font-medium">Бонусы:</span>
                         <span className="text-gray-800">
-                          {result.bonuses} KZT{" "}
+                          {result.bonuses} ТГ{" "}
                           {result.bonusDetails ? (
                             <span className="text-gray-500 italic">({result.bonusDetails})</span>
                           ) : (
@@ -1625,9 +1625,9 @@
                         </span>
                       </div>
                       <div className="flex justify-between pt-2">
-                        <span className="text-gray-700 font-semibold">Total Salary:</span>
+                        <span className="text-gray-700 font-semibold">Общая сумма:</span>
                         <span className="text-green-600 font-bold text-base">
-                          {result.finalSalary} KZT
+                          {result.finalSalary} ТГ
                         </span>
                       </div>
                     </div>
@@ -1642,26 +1642,26 @@
                         <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                             <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                 <i className="fas fa-user-clock text-blue-500"></i>
-                                Employee Experience (months):
+                                Стаж работы (месяцев):
                             </label>
               <select
                 value={experience}
                 onChange={(e) => setExperience(e.target.value)}
                 className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
-                <option value="">Select Experience</option>
-                <option value="0-2">0-2 months</option>
-                <option value="3-5">3-5 months</option>
-                <option value="6-9">6-9 months</option>
-                <option value="10-12">10-12 months</option>
-                <option value="13-17">13-17 months</option>
-                <option value="18+">≥18 months</option>
+                <option value="">Выберете ваш стаж</option>
+                <option value="0-2">0-2 месяцев</option>
+                <option value="3-5">3-5 месяцев</option>
+                <option value="6-9">6-9 месяцев</option>
+                <option value="10-12">10-12 месяцев</option>
+                <option value="13-17">13-17 месяцев</option>
+                <option value="18+">≥18 месяцев</option>
               </select>
             </div>
                         <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                             <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                 <i className="fas fa-star text-yellow-500"></i>
-                                Quality (%):
+                                Качество %):
                             </label>
               <input
                 type="number"
@@ -1676,7 +1676,7 @@
                         <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                             <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                 <i className="fas fa-chart-line text-green-500"></i>
-                                Average Score per Chat:
+                                Средний балл по чатам:
                             </label>
               <input
                 type="number"
@@ -1691,7 +1691,7 @@
                         <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                             <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                 <i className="fas fa-clock text-purple-500"></i>
-                                Average Response Time (minutes):
+                                Среднее время ответа (минуты):
                             </label>
               <input
                 type="number"
@@ -1706,7 +1706,7 @@
                         <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                             <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                 <i className="fas fa-comments text-blue-500"></i>
-                                Chats per Hour:
+                                Кол-во чатов в час:
                             </label>
               <input
                 type="number"
@@ -1721,7 +1721,7 @@
                         <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                             <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                 <i className="fas fa-bullseye text-indigo-500"></i>
-                                Monthly Hours Norm:
+                                Норма часов:
                             </label>
               <input
                 type="number"
@@ -1736,7 +1736,7 @@
                         <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                             <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                 <i className="fas fa-briefcase text-pink-500"></i>
-                                Total Hours Worked:
+                                Отработанные часы:
                             </label>
               <input
                 type="number"
@@ -1751,7 +1751,7 @@
                         <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                             <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                 <i className="fas fa-gift text-red-500"></i>
-                                Bonuses:
+                                Бонусы:
                             </label>
                             <div className="space-y-4 mt-2">
                                 <div className="flex items-center gap-4">
@@ -1761,7 +1761,7 @@
                                         onChange={(e) => setBonusTraining(e.target.checked)}
                                         className="w-5 h-5"
                                     />
-                                    <label className="text-sm font-medium text-blue-700">Training (6000 KZT)</label>
+                                    <label className="text-sm font-medium text-blue-700">Тренинг (6000 ТГ)</label>
                                 </div>
                                 <div className="flex items-center gap-4">
                                     <input
@@ -1770,7 +1770,7 @@
                                         onChange={(e) => setBonusRefer(e.target.checked)}
                                         className="w-5 h-5"
                                     />
-                                    <label className="text-sm font-medium text-green-700">Refer a Friend (5000 KZT per friend)</label>
+                                    <label className="text-sm font-medium text-green-700">Пригласи друга (5000 ТГ за друга)</label>
                                     {bonusRefer && (
                                         <input
                                             type="number"
@@ -1778,7 +1778,7 @@
                                             onChange={(e) => setBonusReferQuantity(e.target.value)}
                                             min="1"
                                             step="1"
-                                            placeholder="Quantity"
+                                            placeholder="Кол-во"
                                             className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         />
                                     )}
@@ -1790,7 +1790,7 @@
                                         onChange={(e) => setBonusFilming(e.target.checked)}
                                         className="w-5 h-5"
                                     />
-                                    <label className="text-sm font-medium text-purple-700">Filming (5000 KZT per session)</label>
+                                    <label className="text-sm font-medium text-purple-700">Съемки (5000 ТГ)</label>
                                     {bonusFilming && (
                                         <input
                                             type="number"
@@ -1798,7 +1798,7 @@
                                             onChange={(e) => setBonusFilmingQuantity(e.target.value)}
                                             min="1"
                                             step="1"
-                                            placeholder="Quantity"
+                                            placeholder="Кол-во"
                                             className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         />
                                     )}
@@ -1814,7 +1814,7 @@
                             }`}
                             disabled={!validateForm()}
                         >
-                            <i className="fas fa-calculator mr-2"></i> Calculate
+                            <i className="fas fa-calculator mr-2"></i> Расчетать
                         </button>
                         <button
                             onClick={togglePointsTable}
@@ -1823,7 +1823,7 @@
                             }`}
                             disabled={!result}
                         >
-                            <i className="fas fa-table mr-2"></i> {showTable ? 'Hide Points Table' : 'Show Points Table'}
+                            <i className="fas fa-table mr-2"></i> {showTable ? 'Скрыть таблицу' : 'Показать таблицу баллов'}
                         </button>
                         <button
                             onClick={clearForm}
@@ -1832,7 +1832,7 @@
                             }`}
                             disabled={!hasInput()}
                         >
-                            <i className="fas fa-eraser mr-2"></i> Clear
+                            <i className="fas fa-eraser mr-2"></i> Очистить
                         </button>
                     </div>
                     <div className="mt-8">
@@ -6021,7 +6021,7 @@
                                                               className="bg-yellow-500 text-white px-3 py-1.5 rounded-lg hover:bg-yellow-600 text-xs font-medium transition-all duration-200"
                                                             >
                                                               <i className="fas fa-exclamation-circle mr-1"></i>
-                                                              Dispute
+                                                              Оспорить
                                                             </button>
                                                           )}
                                                         </td>
@@ -6032,13 +6032,13 @@
                                                           <td colSpan={8} className="p-4 bg-gray-50 border-t text-sm">
                                                             {loadingAudioId === eval1.id ? (
                                                               <p className="text-gray-500 italic flex items-center gap-2">
-                                                                <i className="fas fa-spinner fa-spin"></i> Loading audio...
+                                                                <i className="fas fa-spinner fa-spin"></i> Загрузка аудио...
                                                               </p>
                                                             ) : audioUrl ? (
                                                               <audio controls src={audioUrl} className="w-full" />
                                                             ) : (
                                                               <p className="text-red-500 flex items-center gap-2">
-                                                                <i className="fas fa-times-circle"></i> Audio not available
+                                                                <i className="fas fa-times-circle"></i> Файлов не имеется
                                                               </p>
                                                             )}
                                                           </td>
@@ -6053,7 +6053,7 @@
                                         ) : (
                                           <p className="text-center text-gray-600 flex items-center justify-center">
                                             <i className="fas fa-times-circle mr-2 text-red-500"></i>
-                                            No evaluations found for this period.
+                                            Нет оценок за выбранный период.
                                           </p>
                                         )}
                                       </div>
@@ -6062,26 +6062,26 @@
                                             <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                                 <h2 className="text-3xl font-bold mb-8 text-gray-900 flex items-center gap-2">
                                                     <i className="fas fa-calculator text-blue-600"></i>
-                                                    <span className="text-blue-600">Salary Calculator</span>
+                                                    <span className="text-blue-600">Калькулятор зарплаты</span>
                                                 </h2>
                                                 <div className="flex mb-4">
                                                     <button
                                                         className={`px-4 py-2 mr-2 rounded ${calculatorType === 'call' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
                                                         onClick={() => setCalculatorType('call')}
                                                     >
-                                                        Call
+                                                        Линия
                                                     </button>
                                                     <button
                                                         className={`px-4 py-2 mr-2 rounded ${calculatorType === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
                                                         onClick={() => setCalculatorType('chat')}
                                                     >
-                                                        Chat
+                                                        Чат
                                                     </button>
                                                     <button
                                                         className={`px-4 py-2 rounded ${calculatorType === 'converter' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
                                                         onClick={() => setCalculatorType('converter')}
                                                       >
-                                                        Converter
+                                                        Конвертер
                                                     </button>
                                                 </div>
                                                 {calculatorType === 'call' ? (
@@ -6090,7 +6090,7 @@
                                                             <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                     <i className="fas fa-user-clock text-blue-500"></i>
-                                                                    Employee Experience (months):
+                                                                    Стаж работы (месяцы):
                                                                 </label>
                                                                 <select
                                                                     value={salaryData.experience}
@@ -6098,17 +6098,17 @@
                                                                     className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                     disabled={isLoading}
                                                                 >
-                                                                    <option value="">Select Experience</option>
-                                                                    <option value="0-3">0-3 months</option>
-                                                                    <option value="4-9">4-9 months</option>
-                                                                    <option value="10-15">10-15 months</option>
-                                                                    <option value="16+">≥16 months</option>
+                                                                    <option value="">Выберете ваш стаж</option>
+                                                                    <option value="0-3">0-3 месяцев</option>
+                                                                    <option value="4-9">4-9 месяцев</option>
+                                                                    <option value="10-15">10-15 месяцев</option>
+                                                                    <option value="16+">≥16 месяцев</option>
                                                                 </select>
                                                             </div>
                                                             <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                     <i className="fas fa-star text-yellow-500"></i>
-                                                                    Quality (%):
+                                                                    Качество (%):
                                                                 </label>
                                                                 <input
                                                                     type="number"
@@ -6124,7 +6124,7 @@
                                                             <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                     <i className="fas fa-phone-alt text-green-500"></i>
-                                                                    Calls per Hour:
+                                                                    Кол-во звонков в час:
                                                                 </label>
                                                                 <input
                                                                     type="number"
@@ -6140,7 +6140,7 @@
                                                             <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                     <i className="fas fa-bullseye text-purple-500"></i>
-                                                                    Monthly Hours Norm:
+                                                                    Норма часов:
                                                                 </label>
                                                                 <input
                                                                     type="number"
@@ -6156,7 +6156,7 @@
                                                             <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                     <i className="fas fa-briefcase text-indigo-500"></i>
-                                                                    Total Hours Worked:
+                                                                    Отработанные часы:
                                                                 </label>
                                                                 <input
                                                                     type="number"
@@ -6172,7 +6172,7 @@
                                                             <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                                                     <i className="fas fa-gift text-pink-500"></i>
-                                                                    Bonuses:
+                                                                    Бонусы:
                                                                 </label>
                                                                 <div className="space-y-4 mt-2">
                                                                     <div className="flex items-center gap-4">
@@ -6183,7 +6183,7 @@
                                                                             className="w-5 h-5"
                                                                             disabled={isLoading}
                                                                         />
-                                                                        <label className="text-sm font-medium text-blue-700">Training (6000 KZT)</label>
+                                                                        <label className="text-sm font-medium text-blue-700">Стажировка (6000 ТГ)</label>
                                                                     </div>
                                                                     <div className="flex items-center gap-4">
                                                                         <input
@@ -6193,7 +6193,7 @@
                                                                             className="w-5 h-5"
                                                                             disabled={isLoading}
                                                                         />
-                                                                        <label className="text-sm font-medium text-green-700">Refer a Friend (5000 KZT per friend)</label>
+                                                                        <label className="text-sm font-medium text-green-700">Пригласи друга (5000 ТГ за друга)</label>
                                                                         {salaryData.bonusRefer && (
                                                                             <input
                                                                                 type="number"
@@ -6201,7 +6201,7 @@
                                                                                 onChange={(e) => setSalaryData({ ...salaryData, bonusReferQuantity: e.target.value })}
                                                                                 min="1"
                                                                                 step="1"
-                                                                                placeholder="Quantity"
+                                                                                placeholder="Кол-во"
                                                                                 className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                                 disabled={isLoading}
                                                                             />
@@ -6215,7 +6215,7 @@
                                                                             className="w-5 h-5"
                                                                             disabled={isLoading}
                                                                         />
-                                                                        <label className="text-sm font-medium text-purple-700">Filming (5000 KZT per session)</label>
+                                                                        <label className="text-sm font-medium text-purple-700">Съемки (5000 ТГ)</label>
                                                                         {salaryData.bonusFilming && (
                                                                             <input
                                                                                 type="number"
@@ -6223,7 +6223,7 @@
                                                                                 onChange={(e) => setSalaryData({ ...salaryData, bonusFilmingQuantity: e.target.value })}
                                                                                 min="1"
                                                                                 step="1"
-                                                                                placeholder="Quantity"
+                                                                                placeholder="Кол-во"
                                                                                 className="w-24 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                                                 disabled={isLoading}
                                                                             />
@@ -6267,7 +6267,7 @@
                                                                 }`}
                                                                 disabled={!salaryResult}
                                                             >
-                                                                <i className="fas fa-table mr-2"></i> {showPointsTable ? 'Hide Points Table' : 'Show Points Table'}
+                                                                <i className="fas fa-table mr-2"></i> {showPointsTable ? 'Скрыть таблицу баллов' : 'Показать таблицу баллов'}
                                                             </button>
                                                             <button
                                                                 onClick={clearSalaryForm}
@@ -6294,7 +6294,7 @@
                                                                     !salaryData.bonusFilming
                                                                 }
                                                             >
-                                                                <i className="fas fa-eraser mr-2"></i> Clear
+                                                                <i className="fas fa-eraser mr-2"></i> Очистить
                                                             </button>
                                                         </div>
 
@@ -6311,7 +6311,7 @@
                                                     <div className="grid grid-cols-1 gap-6">
                                                             <div className="form-group">
                                                               <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                                                                Desired Amount (KZT)
+                                                                Целевая сумма (ТГ)
                                                                 <span className="relative">
                                                                   <span className="w-4 h-4 flex items-center justify-center rounded-full bg-gray-300 text-xs font-bold cursor-pointer group">
                                                                     i
@@ -6338,7 +6338,7 @@
                                                               />
                                                             </div>
                                                             <div className="form-group">
-                                                              <label className="block mb-2 font-semibold text-gray-700">KPI (max 2.5):</label>
+                                                              <label className="block mb-2 font-semibold text-gray-700">KPI (макс 2.5):</label>
                                                               <input
                                                                 type="number"
                                                                 value={converterData.kpi}
