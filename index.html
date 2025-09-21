@@ -3582,9 +3582,43 @@
                     return Number.isInteger(n) ? n.toString() : n.toFixed(2);
                 };
 
+                // --- Входные данные (с устойчивыми нэйминг-фоллбэками) ---
+                const pointsRaw = salaryResult.points ?? salaryResult.kpi_points ?? 0; // может быть 85 или 0.85
+                const premiumCoefficientRaw = salaryResult.premiumCoefficient ?? salaryResult.premium_coefficient ?? 1;
+                const hoursNorm = num(salaryResult.hoursNorm ?? salaryResult.hours_norm ?? 0);
+                const hoursPercentage = num(salaryResult.hoursPercentage ?? salaryResult.hours_percentage ?? 0);
+                const hoursWorked = num(salaryResult.hoursWorked ?? salaryResult.hours_worked ?? salaryResult.hours ?? hoursNorm);
+                const baseSalaryProvided = num(salaryResult.baseSalary ?? salaryResult.base_salary ?? 0);
+                const premiumPartProvided = num(salaryResult.premiumPart ?? salaryResult.premium_part ?? 0);
+                const bonuses = num(salaryResult.bonuses ?? salaryResult.bonuses_amount ?? salaryResult.bonus ?? 0);
+                const finalSalary = num(salaryResult.finalSalary ?? salaryResult.final_salary ?? 0);
+
+                // --- Логика KPI: если pointsRaw > 1 и <=100, считаем как проценты (85 -> 0.85) ---
+                const kpiFactor = (() => {
+                    const p = Number(pointsRaw);
+                    if (!Number.isFinite(p)) return 0;
+                    if (p > 1 && p <= 100) return p / 100;
+                    return p; // если уже 0.85 или 0.9
+                })();
+
+                // --- Коэффициент премии: если выполнение нормы < 90% -> 0.75 (как просили) ---
+                const displayPremiumCoefficient = hoursPercentage < 90 ? 0.75 : num(premiumCoefficientRaw || 1);
+
+                // --- Рассчитанный оклад по формуле: hoursWorked * 700 ---
+                const baseSalaryCalc = (() => {
+                    const h = hoursWorked;
+                    // умножаем цифры точно (js Number), показываем 2 знака
+                    return Number.isFinite(h) ? h * 700 : 0;
+                })();
+
+                // --- Рассчитанная премия по формуле: (используем baseSalaryProvided если он задан, иначе baseSalaryCalc) ---
+                const baseForPremium = baseSalaryProvided || baseSalaryCalc || 0;
+                const premiumCalc = baseForPremium * kpiFactor * displayPremiumCoefficient;
+
+                // --- Копирование итоговой суммы ---
                 const handleCopyTotal = async () => {
                     try {
-                    await navigator.clipboard.writeText(String(salaryResult.finalSalary ?? salaryResult.final_salary ?? ""));
+                    await navigator.clipboard.writeText(String(finalSalary));
                     setCopyMsg("Скопировано!");
                     setTimeout(() => setCopyMsg(""), 2000);
                     } catch (e) {
@@ -3593,14 +3627,9 @@
                     }
                 };
 
-                const points = salaryResult.points ?? salaryResult.kpi_points ?? 0;
-                const premiumCoefficient = salaryResult.premiumCoefficient ?? salaryResult.premium_coefficient ?? 0;
-                const hoursNorm = num(salaryResult.hoursNorm ?? salaryResult.hours_norm ?? 0);
-                const hoursPercentage = num(salaryResult.hoursPercentage ?? salaryResult.hours_percentage ?? 0);
-                const baseSalary = num(salaryResult.baseSalary ?? salaryResult.base_salary ?? 0);
-                const premiumPart = num(salaryResult.premiumPart ?? salaryResult.premium_part ?? 0);
-                const bonuses = num(salaryResult.bonuses ?? salaryResult.bonuses_amount ?? salaryResult.bonus ?? 0);
-                const finalSalary = num(salaryResult.finalSalary ?? salaryResult.final_salary ?? 0);
+                // Небольшой helper для тултипа (отображение валидной строки)
+                const fmtNum = (v) =>
+                    new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(num(v));
 
                 return (
                     <div className="mt-6 p-6 bg-gray-50 rounded-lg shadow-sm border border-gray-200">
@@ -3637,11 +3666,34 @@
                             </div>
                             <div>
                             <div className="text-sm text-gray-600">Баллы KPI</div>
-                            <div className="font-medium text-gray-800 mt-1">{simple(points)}</div>
+                            <div className="font-medium text-gray-800 mt-1">{simple(pointsRaw)}</div>
                             </div>
                             <div>
                             <div className="text-sm text-gray-600">Коэффициент премии</div>
-                            <div className="font-medium text-gray-800 mt-1">{simple(premiumCoefficient)}</div>
+                            <div className="flex items-center gap-2 mt-1">
+                                <div className="font-medium text-gray-800">{displayPremiumCoefficient}</div>
+
+                                {/* Tooltip i для коэффициента премии */}
+                                <div className="relative group inline-block">
+                                <span className="inline-flex items-center justify-center w-5 h-5 text-xs rounded-full bg-gray-200 text-gray-700">i</span>
+                                <div className="pointer-events-none opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-all duration-150 absolute right-0 top-full mt-2 w-64 z-50">
+                                    <div className="bg-white border rounded shadow p-3 text-sm text-gray-700">
+                                    <div className="font-medium mb-1">Коэффициент премии</div>
+                                    <div className="text-xs text-gray-600">
+                                        {hoursPercentage < 90 ? (
+                                        <>
+                                            Выполнение нормы {hoursPercentage}% &lt; 90% → коэффициент принудительно = <b>0.75</b>
+                                        </>
+                                        ) : (
+                                        <>
+                                            Используется значение из данных: <b>{premiumCoefficientRaw}</b>
+                                        </>
+                                        )}
+                                    </div>
+                                    </div>
+                                </div>
+                                </div>
+                            </div>
                             </div>
                         </div>
                         </div>
@@ -3651,16 +3703,78 @@
                         <h4 className="text-sm font-semibold text-gray-700 mb-3">Компоненты выплаты</h4>
 
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            <div className="p-3 rounded border border-gray-50 bg-gray-50">
-                            <div className="text-xs text-gray-500">Оклад (базовая часть)</div>
-                            <div className="mt-2 text-lg font-semibold text-gray-800">{money(baseSalary)}</div>
+                            {/* Оклад */}
+                            <div className="p-3 rounded border border-gray-50 bg-gray-50 relative">
+                            <div className="flex items-start justify-between">
+                                <div>
+                                <div className="text-xs text-gray-500">Оклад (базовая часть)</div>
+                                <div className="mt-2 text-lg font-semibold text-gray-800">{money(baseSalaryProvided || baseSalaryCalc)}</div>
+                                </div>
+
+                                {/* i icon + tooltip */}
+                                <div className="ml-2">
+                                <div className="relative group inline-block">
+                                    <span className="inline-flex items-center justify-center w-5 h-5 text-xs rounded-full bg-gray-200 text-gray-700">i</span>
+                                    <div className="pointer-events-none opacity-0 group-hover:opacity-100 transition-all duration-150 absolute -right-1 top-full mt-2 w-72 z-50">
+                                    <div className="bg-white border rounded shadow p-3 text-sm text-gray-700">
+                                        <div className="font-medium mb-1">Формула</div>
+                                        <div className="text-xs text-gray-600 mb-2">Оклад = отработанные часы × 700</div>
+                                        <div className="text-sm">
+                                        {Number.isFinite(hoursWorked) ? (
+                                            <>
+                                            Подстановка: <b>{hoursWorked} × 700</b> = <b>{fmtNum(baseSalaryCalc)}</b>
+                                            <div className="text-xs text-gray-500 mt-1">
+                                                {baseSalaryProvided ? (
+                                                <>Примечание: в данных указан Оклад = <b>{fmtNum(baseSalaryProvided)}</b></>
+                                                ) : null}
+                                            </div>
+                                            </>
+                                        ) : (
+                                            <span className="text-xs text-gray-500">Количество отработанных часов неизвестно.</span>
+                                        )}
+                                        </div>
+                                    </div>
+                                    </div>
+                                </div>
+                                </div>
+                            </div>
                             </div>
 
-                            <div className="p-3 rounded border border-gray-50 bg-gray-50">
-                            <div className="text-xs text-gray-500">Премия (часть)</div>
-                            <div className="mt-2 text-lg font-semibold text-gray-800">{money(premiumPart)}</div>
+                            {/* Премия */}
+                            <div className="p-3 rounded border border-gray-50 bg-gray-50 relative">
+                            <div className="flex items-start justify-between">
+                                <div>
+                                <div className="text-xs text-gray-500">Премия (часть)</div>
+                                <div className="mt-2 text-lg font-semibold text-gray-800">{money(premiumPartProvided || premiumCalc)}</div>
+                                </div>
+
+                                {/* i icon + tooltip (формула + подстановка) */}
+                                <div className="ml-2">
+                                <div className="relative group inline-block">
+                                    <span className="inline-flex items-center justify-center w-5 h-5 text-xs rounded-full bg-gray-200 text-gray-700">i</span>
+                                    <div className="pointer-events-none opacity-0 group-hover:opacity-100 transition-all duration-150 absolute -right-1 top-full mt-2 w-80 z-50">
+                                    <div className="bg-white border rounded shadow p-3 text-sm text-gray-700">
+                                        <div className="font-medium mb-1">Формула</div>
+                                        <div className="text-xs text-gray-600 mb-2">Премия = Оклад × Баллы KPI × Коэффициент премии</div>
+
+                                        <div className="text-sm">
+                                        <div>Оклад для расчёта: <b>{money(baseForPremium)}</b></div>
+                                        <div>Баллы KPI (фактор): <b>{kpiFactor}</b> ({simple(pointsRaw)} {pointsRaw > 1 ? "→ %" : ""})</div>
+                                        <div>Коэффициент премии: <b>{displayPremiumCoefficient}</b></div>
+                                        <div className="mt-2 font-semibold">Подстановка: {fmtNum(baseForPremium)} × {kpiFactor} × {displayPremiumCoefficient} = <b>{fmtNum(premiumCalc)}</b></div>
+
+                                        {premiumPartProvided ? (
+                                            <div className="text-xs text-gray-500 mt-1">Примечание: в данных указана премия = <b>{fmtNum(premiumPartProvided)}</b></div>
+                                        ) : null}
+                                        </div>
+                                    </div>
+                                    </div>
+                                </div>
+                                </div>
+                            </div>
                             </div>
 
+                            {/* Бонусы (без тултипа) */}
                             <div className="p-3 rounded border border-gray-50 bg-gray-50">
                             <div className="text-xs text-gray-500">Бонусы</div>
                             <div className="mt-2 text-lg font-semibold text-gray-800">{shortMoney(bonuses)}</div>
@@ -3699,7 +3813,7 @@
                             </div>
                             <div className="flex items-center justify-between px-4 py-2 bg-white">
                                 <div className="text-sm text-gray-600">Баллы KPI</div>
-                                <div className="font-medium text-gray-800">{simple(points)}</div>
+                                <div className="font-medium text-gray-800">{simple(pointsRaw)}</div>
                             </div>
                             </div>
                         </div>
@@ -3710,11 +3824,11 @@
                             <div className="divide-y divide-gray-100 rounded-lg overflow-hidden border">
                             <div className="flex items-center justify-between px-4 py-2 bg-white">
                                 <div className="text-sm text-gray-600">Базовый оклад</div>
-                                <div className="font-medium text-gray-800">{money(baseSalary)}</div>
+                                <div className="font-medium text-gray-800">{money(baseForPremium)}</div>
                             </div>
                             <div className="flex items-center justify-between px-4 py-2 bg-gray-50">
                                 <div className="text-sm text-gray-600">Премия</div>
-                                <div className="font-medium text-gray-800">{money(premiumPart)}</div>
+                                <div className="font-medium text-gray-800">{money(premiumCalc)}</div>
                             </div>
                             <div className="flex items-center justify-between px-4 py-2 bg-white">
                                 <div className="text-sm text-gray-600">Бонусы</div>
@@ -3727,8 +3841,6 @@
                         <div>
                             <div className="text-xs text-gray-500 font-medium mb-2">Корректировки / Примечания</div>
                             <div className="rounded-lg border divide-y divide-gray-100 overflow-hidden">
-                            {/* Если в salaryResult есть дополнительные поля с корректировками, покажем их.
-                                Иначе — выводим заметку о том, что корректировок нет. */}
                             {salaryResult.adjustments && salaryResult.adjustments.length > 0 ? (
                                 salaryResult.adjustments.map((adj, idx) => (
                                 <div key={idx} className={idx % 2 === 0 ? "px-4 py-2 bg-white" : "px-4 py-2 bg-gray-50"}>
@@ -3749,7 +3861,6 @@
                     </div>
                 );
                 };
-
 
             const calculateSalary = () => {
                 const hoursNorm = parseFloat(salaryData.hoursNorm) || 0;
