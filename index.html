@@ -2702,6 +2702,10 @@
                         }
                     }, [month, user]);
 
+                    useEffect(() => {
+                    refreshTrainings();
+                    }, []);
+
                     // SV grouping memoized: { svName: [operators] }
                     const svGroups = React.useMemo(() => {
                         const map = {};
@@ -2740,7 +2744,7 @@
                         await axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
                             headers: { "X-API-Key": user.apiKey, "X-User-Id": user.id },
                         });
-                        await refreshTrainings(true);
+                        await refreshTrainings();
                         showToast?.("Тренинг успешно удалён", "success");
                         } catch (err) {
                         console.error("Error deleting training:", err);
@@ -2761,7 +2765,7 @@
                             });
                             showToast?.("Тренинг успешно добавлен", "success");
                         }
-                        await refreshTrainings(true);
+                        await refreshTrainings();
                         setShowModal(false);
                         } catch (err) {
                         console.error("Error saving training:", err);
@@ -2809,7 +2813,7 @@
                             <input
                                 type="month"
                                 value={month}
-                                onChange={(e) => setMonth(e.target.value)}
+                                onChange={(e) => {setMonth(e.target.value); refreshTrainings(); }}
                                 className="p-1 border rounded text-xs"
                                 aria-label="Выберите месяц"
                             />
