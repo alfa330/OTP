@@ -3562,54 +3562,143 @@
             };
             
             const SalaryCalculationResult = ({ salaryResult }) => {
-            if (!salaryResult) return null;
+                const [copyMsg, setCopyMsg] = useState("");
 
-            return (
-                <div className="mt-6 p-6 bg-gray-50 rounded-lg">
-                <h3 className="text-xl font-semibold mb-4">Calculation Result</h3>
-                <div className="space-y-2">
-                    <div className="flex justify-between">
-                    <span className="font-medium">Direction:</span>
-                    <span>Operator</span>
+                if (!salaryResult) return null;
+
+                // Удобные форматтеры (без ошибок при пустых значениях)
+                const num = (v) => {
+                    const n = Number(v);
+                    return Number.isFinite(n) ? n : 0;
+                };
+                const money = (v) =>
+                    new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(
+                    num(v)
+                    ) + " ТГ";
+                const shortMoney = (v) =>
+                    new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(Math.round(num(v))) + " ТГ";
+                const percent = (v) => `${(num(v) * 1).toFixed(2)}%`;
+                const simple = (v) => {
+                    const n = num(v);
+                    return Number.isInteger(n) ? n.toString() : n.toFixed(2);
+                };
+
+                const handleCopyTotal = async () => {
+                    try {
+                    await navigator.clipboard.writeText(String(salaryResult.finalSalary ?? salaryResult.final_salary ?? ""));
+                    setCopyMsg("Скопировано!");
+                    setTimeout(() => setCopyMsg(""), 2000);
+                    } catch (e) {
+                    setCopyMsg("Не удалось скопировать");
+                    setTimeout(() => setCopyMsg(""), 2000);
+                    }
+                };
+
+                // Поддержка разных названий полей (чтобы компонент был устойчивее)
+                const points = salaryResult.points ?? salaryResult.kpi_points ?? 0;
+                const premiumCoefficient = salaryResult.premiumCoefficient ?? salaryResult.premium_coefficient ?? 0;
+                const hoursNorm = num(salaryResult.hoursNorm ?? salaryResult.hours_norm ?? 0);
+                const hoursPercentage = num(salaryResult.hoursPercentage ?? salaryResult.hoursPercentage ?? salaryResult.hours_percentage ?? 0);
+                const baseSalary = num(salaryResult.baseSalary ?? salaryResult.base_salary ?? 0);
+                const premiumPart = num(salaryResult.premiumPart ?? salaryResult.premium_part ?? 0);
+                const bonuses = num(salaryResult.bonuses ?? salaryResult.bonuses_amount ?? salaryResult.bonus ?? 0);
+                const finalSalary = num(salaryResult.finalSalary ?? salaryResult.final_salary ?? 0);
+
+                return (
+                    <div className="mt-6 p-6 bg-gray-50 rounded-lg shadow-sm border border-gray-200">
+                    <div className="flex items-start justify-between gap-4">
+                        <div>
+                        <h3 className="text-xl font-semibold mb-1 text-gray-800">Результат расчёта</h3>
+                        <p className="text-sm text-gray-500">Краткая сводка по KPI и выплате</p>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                        <button
+                            onClick={handleCopyTotal}
+                            className="inline-flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 transition text-sm"
+                            title="Скопировать итоговую сумму"
+                        >
+                            <i className="fas fa-copy"></i>
+                            Копировать итого
+                        </button>
+                        <div className="text-sm text-green-600 font-medium min-w-[90px] text-right">
+                            {copyMsg ? copyMsg : ""}
+                        </div>
+                        </div>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Points:</span>
-                    <span>{salaryResult.points}</span>
+
+                    <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="bg-white p-3 rounded border border-gray-100">
+                        <div className="flex justify-between text-sm text-gray-600">
+                            <span>Направление</span>
+                            <span className="text-gray-800">Оператор</span>
+                        </div>
+                        <div className="flex justify-between mt-2">
+                            <span className="text-sm text-gray-600">Баллы KPI</span>
+                            <span className="font-medium text-gray-800">{simple(points)}</span>
+                        </div>
+                        <div className="flex justify-between mt-1">
+                            <span className="text-sm text-gray-600">Коэффициент премии</span>
+                            <span className="font-medium text-gray-800">{simple(premiumCoefficient)}</span>
+                        </div>
+                        </div>
+
+                        <div className="bg-white p-3 rounded border border-gray-100">
+                        <div className="flex justify-between text-sm text-gray-600">
+                            <span>Норма часов</span>
+                            <span className="text-gray-800">{isNaN(hoursNorm) ? "-" : hoursNorm.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between mt-2">
+                            <span className="text-sm text-gray-600">Выполнение нормы</span>
+                            <span className="font-medium text-gray-800">{hoursPercentage.toFixed(2)}%</span>
+                        </div>
+                        </div>
+
+                        <div className="bg-white p-3 rounded border border-gray-100">
+                        <div className="flex justify-between text-sm text-gray-600">
+                            <span>Оклад (базовая часть)</span>
+                            <span className="font-medium text-gray-800">{money(baseSalary)}</span>
+                        </div>
+                        <div className="flex justify-between mt-2">
+                            <span className="text-sm text-gray-600">Премия (часть)</span>
+                            <span className="font-medium text-gray-800">{money(premiumPart)}</span>
+                        </div>
+                        </div>
+
+                        <div className="bg-white p-3 rounded border border-gray-100">
+                        <div className="flex justify-between text-sm text-gray-600">
+                            <span>Бонусы</span>
+                            <span className="font-medium text-gray-800">{shortMoney(bonuses)}</span>
+                        </div>
+                        <div className="flex justify-between mt-2 items-center">
+                            <span className="text-sm text-gray-600">Общая сумма</span>
+                            <div className="text-right">
+                            <div className="text-lg font-bold text-green-600">{money(finalSalary)}</div>
+                            <div className="text-xs text-gray-500">Net</div>
+                            </div>
+                        </div>
+                        </div>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Premium Coefficient:</span>
-                    <span>{salaryResult.premiumCoefficient}</span>
+
+                    {/* Детальный разбор (если есть ненулевые значения) */}
+                    <div className="mt-4 bg-white p-3 rounded border border-gray-100">
+                        <h4 className="text-sm font-semibold text-gray-700 mb-2">Детали расчёта</h4>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm text-gray-600">
+                        <div className="flex justify-between"><span>Баллы KPI</span><span className="font-medium text-gray-800">{simple(points)}</span></div>
+                        <div className="flex justify-between"><span>Коэффициент премии</span><span className="font-medium text-gray-800">{simple(premiumCoefficient)}</span></div>
+                        <div className="flex justify-between"><span>Норма часов</span><span className="font-medium text-gray-800">{hoursNorm.toFixed(2)}</span></div>
+
+                        <div className="flex justify-between"><span>Выполнение нормы</span><span className="font-medium text-gray-800">{hoursPercentage.toFixed(2)}%</span></div>
+                        <div className="flex justify-between"><span>Базовый оклад</span><span className="font-medium text-gray-800">{money(baseSalary)}</span></div>
+                        <div className="flex justify-between"><span>Премия</span><span className="font-medium text-gray-800">{money(premiumPart)}</span></div>
+
+                        <div className="flex justify-between"><span>Бонусы</span><span className="font-medium text-gray-800">{money(bonuses)}</span></div>
+                        <div className="flex justify-between"><span>Итого</span><span className="font-medium text-green-600">{money(finalSalary)}</span></div>
+                        </div>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Monthly Hours Norm:</span>
-                    <span>{salaryResult.hoursNorm.toFixed(2)}</span>
                     </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Hours Percentage:</span>
-                    <span>{salaryResult.hoursPercentage.toFixed(2)}%</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Base Salary:</span>
-                    <span>{salaryResult.baseSalary.toFixed(2)} KZT</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Premium Part:</span>
-                    <span>{salaryResult.premiumPart.toFixed(2)} KZT</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Bonuses:</span>
-                    <span>{salaryResult.bonuses} KZT</span>
-                    </div>
-                    <div className="flex justify-between">
-                    <span className="font-medium">Total Salary:</span>
-                    <span className="text-green-600 font-semibold">
-                        {salaryResult.finalSalary.toFixed(2)} KZT
-                    </span>
-                    </div>
-                </div>
-                </div>
-            );
-            };
+                );
+                };
 
 
             const calculateSalary = () => {
@@ -3707,14 +3796,14 @@
                     <table className="min-w-full bg-white border-collapse">
                         <thead>
                             <tr className="bg-blue-50">
-                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Category</th>
-                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Condition</th>
-                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Points</th>
+                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Категория</th>
+                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Варианты</th>
+                                <th className="p-4 border-b text-left text-sm font-semibold text-gray-700">Баллы</th>
                             </tr>
                         </thead>
                         <tbody>
                             <tr className="bg-gray-100 font-semibold">
-                                <td className="p-4 border-b" colSpan="3">Experience</td>
+                                <td className="p-4 border-b" colSpan="3">Стаж</td>
                             </tr>
                             {experienceRanges.map((row, index) => (
                                 <tr key={`exp-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
@@ -3724,7 +3813,7 @@
                                 </tr>
                             ))}
                             <tr className="bg-gray-100 font-semibold">
-                                <td className="p-4 border-b" colSpan="3">Quality</td>
+                                <td className="p-4 border-b" colSpan="3">Качество</td>
                             </tr>
                             {qualityRanges.map((row, index) => (
                                 <tr key={`qual-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
@@ -3734,7 +3823,7 @@
                                 </tr>
                             ))}
                             <tr className="bg-gray-100 font-semibold">
-                                <td className="p-4 border-b" colSpan="3">Calls per Hour</td>
+                                <td className="p-4 border-b" colSpan="3">Кол-во звонков в час</td>
                             </tr>
                             {callsPerHourRanges.map((row, index) => (
                                 <tr key={`cph-${index}`} className={row.selected ? 'bg-blue-100' : ''}>
