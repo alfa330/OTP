@@ -5468,71 +5468,178 @@
                         )}
                         {user.role === 'sv' && (
                             <>
-                                {view === 'update_table' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Обновить таблицу</h2>
-                                        {!showPreview ? (
-                                            <>
-                                                <input
-                                                    type="text"
-                                                    placeholder="Вставьте ссылку таблицы часов"
-                                                    value={tableUrl}
-                                                    onChange={(e) => setTableUrl(e.target.value)}
-                                                    className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                                    disabled={isLoading}
-                                                />
-                                                <button
-                                                    onClick={handlePreviewTable}
-                                                    className={`w-full bg-blue-600 text-white p-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${isLoading ? 'cursor-not-allowed opacity-50' : ''}`}
-                                                    disabled={isLoading || !tableUrl}
-                                                >
-                                                    {isLoading ? 'Предварительный просмотр...' : 'Предварительный просмотр таблицы'}
-                                                </button>
-                                            </>
-                                        ) : (
-                                            <>
-                                                <h3 className="text-xl font-semibold mb-4">Предварительный просмотр данных</h3>
-                                                <p className="mb-4">Название листа: {previewData.sheet_name}</p>
-                                                <h4 className="font-medium mb-2">Операторы:</h4>
-                                                <ul className="mb-4 list-disc pl-5">
-                                                    {previewData.operators.map((op, idx) => (
-                                                        <li key={idx}>{op.name}</li>
-                                                    ))}
-                                                </ul>
-                                                <label className="block mb-2 font-semibold text-gray-700">Выберите направление:</label>
-                                                <select
-                                                    value={selectedDirection}
-                                                    onChange={(e) => setSelectedDirection(e.target.value)}
-                                                    className="w-full p-3 mb-6 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                                    disabled={isLoading}
-                                                >
-                                                    <option value="">Выберите направление</option>
-                                                    {directions.map(dir => (
-                                                        <option key={dir.id} value={dir.id}>{dir.name}</option>
-                                                    ))}
-                                                </select>
-                                                <div className="flex justify-between">
-                                                    <button
-                                                        onClick={handleSaveTable}
-                                                        className={`bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200 ${isLoading || !selectedDirection ? 'cursor-not-allowed opacity-50' : ''}`}
-                                                        disabled={isLoading || !selectedDirection}
-                                                    >
-                                                        {isLoading ? 'Сохранение...' : 'Подтвердить и сохранить'}
-                                                    </button>
-                                                    <button
-                                                        onClick={() => {
-                                                            setShowPreview(false);
-                                                            setPreviewData(null);
-                                                            setSelectedDirection('');
-                                                        }}
-                                                        className="bg-gray-600 text-white px-6 py-3 rounded-lg hover:bg-gray-700 transition-all duration-200"
-                                                    >
-                                                        Cancel
-                                                    </button>
-                                                </div>
-                                            </>
+                               {view === 'update_table' && (
+                                <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                    <h2 className="text-2xl font-semibold mb-6 text-gray-800">Обновить таблицу</h2>
+
+                                    {/* INPUT / PREVIEW SWITCH */}
+                                    {!showPreview ? (
+                                    <>
+                                        <div className="space-y-3">
+                                        <label className="block text-sm font-medium text-gray-700">Ссылка на таблицу (или загрузите файл)</label>
+                                        <div className="flex gap-3">
+                                            <input
+                                            type="text"
+                                            placeholder="Вставьте ссылку таблицы часов"
+                                            value={tableUrl}
+                                            onChange={(e) => setTableUrl(e.target.value)}
+                                            className="flex-1 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                            disabled={isLoading}
+                                            aria-label="Ссылка на таблицу часов"
+                                            />
+
+                                            {/* Если у вас есть обработчик загрузки файлов на стороне, можно заменить этот input на реальный file input */}
+                                            <label className={`inline-flex items-center px-4 py-3 border rounded-lg cursor-pointer text-sm ${isLoading ? 'opacity-50 pointer-events-none' : 'hover:bg-gray-100'}`}>
+                                            <input
+                                                type="file"
+                                                accept=".xlsx,.xls,.csv"
+                                                onChange={(e) => {
+                                                // если вы хотите поддержать загрузку файла, можно сохранить файл в state родителя в обработчике
+                                                // здесь просто пытаемся показать имя файла в поле ссылки
+                                                const f = e.target.files && e.target.files[0];
+                                                if (f) setTableUrl(f.name);
+                                                // если у вас есть handler для file -> preview, вызовите его здесь
+                                                }}
+                                                className="hidden"
+                                                disabled={isLoading}
+                                                aria-label="Загрузить файл таблицы"
+                                            />
+                                            Загрузить файл
+                                            </label>
+                                        </div>
+
+                                        <div className="flex gap-3 mt-2">
+                                            <button
+                                            onClick={handlePreviewTable}
+                                            disabled={isLoading || !tableUrl}
+                                            className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 text-sm ${isLoading || !tableUrl ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                            aria-disabled={isLoading || !tableUrl}
+                                            >
+                                            {isLoading ? 'Предварительный просмотр...' : 'Предварительный просмотр таблицы'}
+                                            </button>
+
+                                            <a
+                                            href="#"
+                                            onClick={(e) => { e.preventDefault(); /* при желании: показать инструкцию или скачать шаблон */ }}
+                                            className="inline-flex items-center px-4 py-3 text-sm rounded-lg border hover:bg-gray-50 text-gray-700"
+                                            >
+                                            Скачать шаблон
+                                            </a>
+                                        </div>
+                                        </div>
+                                    </>
+                                    ) : (
+                                    <>
+                                        {/* PREVIEW MODE */}
+                                        <div className="mb-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                        <div>
+                                            <h3 className="text-xl font-semibold text-gray-800">Предварительный просмотр данных</h3>
+                                            <p className="text-sm text-gray-500 mt-1">
+                                            Лист: <span className="font-medium text-gray-700">{previewData?.sheet_name ?? '—'}</span>
+                                            {previewData?.expected_calls != null && (
+                                                <span className="ml-3 text-sm text-gray-500">Ожидаемые: <span className="font-medium text-gray-700">{previewData.expected_calls}</span></span>
+                                            )}
+                                            </p>
+                                        </div>
+
+                                        <div className="flex items-center gap-3">
+                                            <label className="text-sm font-medium text-gray-700 mr-2">Выберите направление</label>
+                                            <select
+                                            value={selectedDirection}
+                                            onChange={(e) => setSelectedDirection(e.target.value)}
+                                            className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isLoading}
+                                            aria-label="Выбор направления"
+                                            >
+                                            <option value="">Выберите направление</option>
+                                            {directions.map(dir => (
+                                                <option key={dir.id} value={dir.id}>{dir.name}</option>
+                                            ))}
+                                            </select>
+                                        </div>
+                                        </div>
+
+                                        {/* Operators preview: normalize input and show table */}
+                                        <div className="rounded-lg border overflow-hidden shadow-sm">
+                                        <div className="max-h-[360px] overflow-auto">
+                                            <table className="min-w-full table-auto">
+                                            <thead className="bg-gray-50 sticky top-0">
+                                                <tr>
+                                                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">#</th>
+                                                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Оператор</th>
+                                                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Calls / Hour</th>
+                                                </tr>
+                                            </thead>
+
+                                            <tbody className="bg-white divide-y">
+                                                {(() => {
+                                                const raw = previewData?.operators || [];
+                                                if (!raw || raw.length === 0) {
+                                                    return (
+                                                    <tr>
+                                                        <td colSpan={3} className="px-4 py-6 text-center text-sm text-gray-500">Нет операторов в предварительном просмотре.</td>
+                                                    </tr>
+                                                    );
+                                                }
+
+                                                // Normalize row format to { name, cph }
+                                                const rows = raw.map((r) => {
+                                                    if (r == null) return { name: "-", cph: "-" };
+                                                    if (typeof r === 'object' && !Array.isArray(r)) {
+                                                    return { name: r.name ?? r[0] ?? "-", cph: r.cph ?? r.calls_per_hour ?? r[1] ?? "-" };
+                                                    }
+                                                    if (Array.isArray(r)) {
+                                                    return { name: r[0] ?? "-", cph: r[1] ?? "-" };
+                                                    }
+                                                    return { name: String(r), cph: "-" };
+                                                });
+
+                                                return rows.map((row, idx) => (
+                                                    <tr key={idx} className="hover:bg-gray-50">
+                                                    <td className="px-4 py-3 text-sm text-gray-600">{idx + 1}</td>
+                                                    <td className="px-4 py-3 text-sm text-gray-800 break-words">{row.name}</td>
+                                                    <td className="px-4 py-3 text-sm text-gray-800">{row.cph}</td>
+                                                    </tr>
+                                                ));
+                                                })()}
+                                            </tbody>
+                                            </table>
+                                        </div>
+                                        </div>
+
+                                        {/* Error block (если есть) */}
+                                        {previewData?.error && (
+                                        <div className="mt-4 p-3 rounded bg-red-50 border border-red-200 text-red-700">
+                                            Ошибка при чтении файла: {previewData.error}
+                                        </div>
                                         )}
-                                    </div>
+
+                                        {/* Actions */}
+                                        <div className="mt-6 flex flex-col md:flex-row items-center justify-end gap-3">
+                                        <button
+                                            onClick={handleSaveTable}
+                                            disabled={isLoading || !selectedDirection}
+                                            className={`px-6 py-3 rounded-lg text-white ${isLoading || !selectedDirection ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}
+                                            aria-disabled={isLoading || !selectedDirection}
+                                        >
+                                            {isLoading ? 'Сохранение...' : 'Подтвердить и сохранить'}
+                                        </button>
+
+                                        <button
+                                            onClick={() => {
+                                            setShowPreview(false);
+                                            setPreviewData(null);
+                                            setSelectedDirection('');
+                                            }}
+                                            className="px-6 py-3 rounded-lg bg-gray-600 text-white hover:bg-gray-700"
+                                            disabled={isLoading}
+                                        >
+                                            Отмена
+                                        </button>
+                                        </div>
+                                    </>
+                                    )}
+                                </div>
                                 )}
                                 {view === 'manage_operators' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
