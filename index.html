@@ -1301,7 +1301,7 @@
                 </>
             );
             };
-
+            
             const SalaryCalculationResult = ({ salaryResult }) => {
                 const [copyMsg, setCopyMsg] = useState("");
 
@@ -2435,637 +2435,572 @@
                 );
                 };
 
-                const TrainingsView = ({ user, operators = [] }) => {
-                    const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
-                    const [trainings, setTrainings] = useState({}); // { operator_id: [trainings] }
-                    const [loadingTrainings, setLoadingTrainings] = useState(false);
-                    const [error, setError] = useState(null);
+            const TrainingsView = ({ user, operators }) => {  // operators - список операторов (все для админа, свои для св)
+                const [month, setMonth] = useState(new Date().toISOString().slice(0,7));
+                const [trainings, setTrainings] = useState({}); // {operator_id: [trainings]}
+                const [showModal, setShowModal] = useState(false);
+                const [currentOperator, setCurrentOperator] = useState(null);
+                const [editingTraining, setEditingTraining] = useState(null);
+                // Группировка операторов по SV
+                const [svGroups, setSvGroups] = useState([]);
+                const [search, setSearch] = useState("");
+                const [operatorsLoaded, setOperatorsLoaded] = useState(false);
+                const [calendarView, setCalendarView] = useState(false);
+                const [calendarModal, setCalendarModal] = useState({ open: false, date: '', trainings: [] });
+                const [selectedCalendarTraining, setSelectedCalendarTraining] = useState(null);
+                // Цвета для SV
+                // Более контрастные цвета для SV
+                const svColors = ["#FF5722", "#4CAF50", "#2196F3", "#FFC107", "#9C27B0", "#E91E63", "#00BCD4", "#8BC34A", "#FF9800", "#3F51B5"];
+                function getSvColor(svName) {
+                    // Детерминированно по имени SV
+                    let hash = 0;
+                    for (let i = 0; i < svName.length; i++) hash = svName.charCodeAt(i) + ((hash << 5) - hash);
+                    return svColors[Math.abs(hash) % svColors.length];
+                }
 
-                    const [showModal, setShowModal] = useState(false);
-                    const [currentOperator, setCurrentOperator] = useState(null);
-                    const [editingTraining, setEditingTraining] = useState(null);
-
-                    const [search, setSearch] = useState("");
-                    const [searchDebounced, setSearchDebounced] = useState("");
-                    const searchTimerRef = React.useRef(null);
-
-                    const [calendarView, setCalendarView] = useState(false);
-                    const [calendarModal, setCalendarModal] = useState({ open: false, date: "", trainings: {} });
-                    const [selectedCalendarTraining, setSelectedCalendarTraining] = useState(null);
-
-                    const isMounted = React.useRef(true);
-                    useEffect(() => {
-                        return () => { isMounted.current = false; };
-                    }, []);
-
-                    // SV colors (deterministic)
-                    const svColors = ["#FF5722", "#4CAF50", "#2196F3", "#FFC107", "#9C27B0", "#E91E63", "#00BCD4", "#8BC34A", "#FF9800", "#3F51B5"];
-                    function getSvColor(svName = "") {
-                        let hash = 0;
-                        for (let i = 0; i < svName.length; i++) hash = svName.charCodeAt(i) + ((hash << 5) - hash);
-                        return svColors[Math.abs(hash) % svColors.length];
+                useEffect(() => {
+                    // Флаг, что операторы загружены (не пустой массив)
+                    if (operators && operators.length > 0) {
+                        setOperatorsLoaded(true);
                     }
+                }, [operators]);
 
-                    // Debounce search
-                    useEffect(() => {
-                        if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
-                        searchTimerRef.current = setTimeout(() => setSearchDebounced(search.trim().toLowerCase()), 300);
-                        return () => clearTimeout(searchTimerRef.current);
-                    }, [search]);
-
-                    const TrainingBox = ({ training, onEdit, onDelete }) => {
-                        const [showDetails, setShowDetails] = useState(false);
-                        const [confirmDelete, setConfirmDelete] = useState(false);
-                        const maxCommentLength = 50;
-                        const isLongComment = training?.comment && training.comment.length > maxCommentLength;
-                        const shortComment = isLongComment ? training.comment.slice(0, maxCommentLength) + "..." : training.comment || "";
-
-                        useEffect(() => {
-                            if (!showDetails) {
-                            setConfirmDelete(false);
-                            }
-                        }, [showDetails]);
-
-                        // Закрытие модалки по Escape
-                        useEffect(() => {
-                            const onKey = (e) => {
-                            if (e.key === "Escape") setShowDetails(false);
-                            };
-                            if (showDetails) window.addEventListener("keydown", onKey);
-                            return () => window.removeEventListener("keydown", onKey);
-                        }, [showDetails]);
-
-                        const parseMinutes = (start, end) => {
-                            if (!start || !end) return "";
-                            const [sh, sm] = start.split(":").map(Number);
-                            const [eh, em] = end.split(":").map(Number);
-                            if ([sh, sm, eh, em].some((n) => Number.isNaN(n))) return "";
-                            const mins = (eh * 60 + em) - (sh * 60 + sm);
-                            return mins > 0 ? mins : "";
-                        };
-
-                        const minutes = parseMinutes(training?.start_time, training?.end_time);
-
-                        const formatDate = (dateStr) => {
-                            if (!dateStr) return "";
-                            const parts = dateStr.split("-");
-                            if (parts.length === 3) {
-                            const [y, m, d] = parts;
-                            return `${d}.${m}.${y}`;
-                            }
-                            return dateStr;
-                        };
-
-                        const formattedDate = formatDate(training?.date);
-
-                        return (
-                            <>
-                            {/* Карточка */}
-                            <div
-                                role="button"
-                                tabIndex={0}
-                                onClick={() => setShowDetails(true)}
-                                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setShowDetails(true); }}
-                                className="flex flex-col bg-white border border-gray-300 rounded-lg shadow px-3 py-2 mx-1 w-40 min-w-[140px] max-w-[160px] cursor-pointer hover:ring-2 hover:ring-blue-300 transition focus:outline-none focus:ring-4 focus:ring-blue-200"
-                                aria-label={`Тренинг ${training?.reason} ${formattedDate}`}
-                            >
-                                <div className="flex items-center justify-between mb-1">
-                                <span className="border border-blue-400 rounded px-1 py-0.5 text-xs font-medium text-blue-700 bg-blue-50">
-                                    {minutes ? `${minutes} мин.` : "—"}
-                                </span>
-                                <span className="border border-gray-400 rounded px-1 py-0.5 text-xs font-medium text-gray-700 bg-gray-50">
-                                    {formattedDate || "—"}
-                                </span>
-                                </div>
-
-                                <div className="mb-1">
-                                <span className="block text-xs font-semibold text-green-700 bg-green-50 border border-green-500 rounded px-1 py-0.5 text-center truncate">
-                                    {training?.reason || "—"}
-                                </span>
-                                </div>
-
-                                {training?.comment ? (
-                                <div className="mt-1 text-xs text-gray-500 w-full text-center truncate" style={{ maxWidth: "120px" }}>
-                                    {shortComment}
-                                    {isLongComment && <span className="text-blue-500 ml-1"> (ещё)</span>}
-                                </div>
-                                ) : (
-                                <div className="mt-1 text-xs text-gray-400 text-center">Нет комментария</div>
-                                )}
-                            </div>
-
-                            {/* Детальная модалка */}
-                            {showDetails && (
-                                <>
-                                {/* Backdrop */}
-                                <div
-                                    className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity"
-                                    onClick={() => setShowDetails(false)}
-                                    aria-hidden="true"
-                                />
-
-                                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-                                    <div
-                                    className="bg-white rounded-lg shadow-2xl max-w-md w-full p-5 relative transform transition-all"
-                                    role="dialog"
-                                    aria-modal="true"
-                                    aria-labelledby="training-details-title"
-                                    onClick={(e) => e.stopPropagation()}
-                                    >
-                                    {/* Верхняя панель: кнопка удаления + заголовок */}
-                                    <button
-                                        onClick={() => setConfirmDelete(true)}
-                                        title="Удалить"
-                                        className="absolute top-3 right-3 bg-red-500 hover:bg-red-600 text-white p-2 rounded-full shadow border-2 border-white flex items-center justify-center"
-                                        style={{ width: 40, height: 40 }}
-                                        aria-label="Удалить тренинг"
-                                    >
-                                        <i className="fas fa-trash" />
-                                    </button>
-
-                                    <h3 id="training-details-title" className="text-xl font-semibold mb-4 text-center">
-                                        Детали тренинга
-                                    </h3>
-
-                                    <div className="space-y-3">
-                                        <div className="flex justify-between gap-3">
-                                        <div>
-                                            <label className="block text-sm text-gray-600">Время</label>
-                                            <input value={minutes ? `${minutes} мин.` : ""} disabled className="w-28 p-2 border rounded bg-gray-100 text-blue-700 font-semibold" />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm text-gray-600">Дата</label>
-                                            <input value={formattedDate} disabled className="w-28 p-2 border rounded bg-gray-100 text-gray-700" />
-                                        </div>
-                                        </div>
-
-                                        <div>
-                                        <label className="block text-sm text-gray-600">Причина</label>
-                                        <input value={training?.reason || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-green-700 font-semibold" />
-                                        </div>
-
-                                        <div className="grid grid-cols-2 gap-3">
-                                        <div>
-                                            <label className="block text-sm text-gray-600">Время начала</label>
-                                            <input value={training?.start_time || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
-                                        </div>
-                                        <div>
-                                            <label className="block text-sm text-gray-600">Время окончания</label>
-                                            <input value={training?.end_time || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
-                                        </div>
-                                        </div>
-
-                                        <div>
-                                        <label className="block text-sm text-gray-600">Комментарий</label>
-                                        <textarea value={training?.comment || ""} disabled rows={3} className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
-                                        </div>
-
-                                        <div>
-                                        <label className="block text-sm text-gray-600">Создал</label>
-                                        <input value={training?.created_by_name || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700 font-semibold" />
-                                        </div>
-                                    </div>
-
-                                    {/* Действия */}
-                                    <div className="flex justify-center gap-3 mt-5">
-                                        <button
-                                        onClick={() => { setShowDetails(false); onEdit && onEdit(training); }}
-                                        className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded flex items-center gap-2"
-                                        >
-                                        <i className="fas fa-pen"></i> Редактировать
-                                        </button>
-                                        <button
-                                        onClick={() => setShowDetails(false)}
-                                        className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded"
-                                        >
-                                        Закрыть
-                                        </button>
-                                    </div>
-
-                                    {/* Подтверждение удаления */}
-                                    {confirmDelete && (
-                                        <div className="mt-4 bg-red-50 border border-red-200 p-3 rounded text-center">
-                                        <p className="text-sm text-red-700 mb-3">Подтвердите удаление тренинга — это действие нельзя отменить.</p>
-                                        <div className="flex justify-center gap-3">
-                                            <button
-                                            onClick={() => {
-                                                try {
-                                                onDelete && onDelete(training);
-                                                } finally {
-                                                setConfirmDelete(false);
-                                                setShowDetails(false);
-                                                }
-                                            }}
-                                            className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded"
-                                            >
-                                            Удалить
-                                            </button>
-                                            <button
-                                            onClick={() => setConfirmDelete(false)}
-                                            className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded"
-                                            >
-                                            Отмена
-                                            </button>
-                                        </div>
-                                        </div>
-                                    )}
-                                    </div>
-                                </div>
-                                </>
-                            )}
-                            </>
-                        );
-                        };
-
-                    // Refresh trainings (centralized)
-                    const refreshTrainings = React.useCallback(async (silent = false) => {
-                        if (!user?.apiKey) return;
-                        setLoadingTrainings(true);
-                        setError(null);
-                        console.log("Loading trainings for month", month);
-                        try {
-                        const res = await axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
-                            headers: { "X-API-Key": user.apiKey, "X-User-Id": user.id },
-                        });
+                useEffect(() => {
+                    // Получаем тренинги только если операторы загружены
+                    if (!operatorsLoaded) return;
+                    axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                        headers: {
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
+                    }).then(res => {
                         const grouped = {};
-                        (res.data.trainings || []).forEach((t) => {
+                        (res.data.trainings || []).forEach(t => {
                             if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
                             grouped[t.operator_id].push(t);
                         });
-                        if (isMounted.current) setTrainings(grouped);
-                        } catch (err) {
-                        console.error("Error loading trainings:", err);
-                        if (!silent) showToast?.("Не удалось загрузить тренинги", "error");
-                        if (isMounted.current) setError("Ошибка загрузки тренингов");
-                        } finally {
-                        if (isMounted.current) setLoadingTrainings(false);
+                        setTrainings(grouped);
+                    });
+                }, [month, operatorsLoaded]);
+
+                useEffect(() => {
+                    // Группируем операторов по SV (supervisor)
+                    const svMap = {};
+                    operators.forEach(op => {
+                        if (!svMap[op.supervisor_name]) svMap[op.supervisor_name] = [];
+                        svMap[op.supervisor_name].push(op);
+                    });
+                    setSvGroups(Object.entries(svMap)); // [[svName, [operators]]]
+                }, [operators]);
+
+                const handleAdd = (opId) => {
+                    setCurrentOperator(opId);
+                    setEditingTraining(null);
+                    setShowModal(true);
+                };
+
+                const handleEdit = (opId, training) => {
+                    setCurrentOperator(opId);
+                    // Передаём копию объекта, чтобы не было мутаций
+                    setEditingTraining({ ...training });
+                    setShowModal(true);
+                };
+
+                const handleDelete = (trainingId) => {
+                    axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
+                        headers: {
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
                         }
-                    }, [month, user]);
-
-                    // useEffect(() => {
-                    //  refreshTrainings();
-                    // }, []);
-
-                    // SV grouping memoized: { svName: [operators] }
-                    const svGroups = React.useMemo(() => {
-                        const map = {};
-                        (operators || []).forEach((op) => {
-                        const svName = op.supervisor_name || "No Supervisor";
-                        if (!map[svName]) map[svName] = [];
-                        map[svName].push(op);
+                    })
+                        .then(() => {
+                            // Обновляем только тренинги
+                            axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                                headers: {
+                                    'X-API-Key': user.apiKey,
+                                    'X-User-Id': user.id
+                                }
+                            })
+                                .then(res => {
+                                    const grouped = {};
+                                    (res.data.trainings || []).forEach(t => {
+                                        if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                                        grouped[t.operator_id].push(t);
+                                    });
+                                    setTrainings(grouped);
+                                    showToast('Тренинг успешно удален', 'success');
+                                })
+                                .catch(err => {
+                                    console.error('Error updating trainings after delete:', err);
+                                    showToast('Ошибка при обновлении списка тренингов', 'error');
+                                });
+                        })
+                        .catch(err => {
+                            console.error('Error deleting training:', err);
+                            showToast('Ошибка при удалении тренинга', 'error');
                         });
-                        return Object.entries(map); // [[svName, [ops]]]
-                    }, [operators]);
+                };
 
-                    // Find operator name by id (helper)
-                    const operatorById = React.useMemo(() => {
-                        const m = {};
-                        operators.forEach((o) => { m[o.id] = o; });
-                        return m;
-                    }, [operators]);
-
-                    // Handlers
-                    const handleAdd = (opId) => {
-                        setCurrentOperator(opId);
-                        setEditingTraining(null);
-                        setShowModal(true);
-                    };
-
-                    const handleEdit = (opId, training) => {
-                        setCurrentOperator(opId);
-                        setEditingTraining({ ...training });
-                        setShowModal(true);
-                    };
-
-                    const handleDelete = async (trainingOrId) => {
-                        const trainingId = typeof trainingOrId === "object" ? trainingOrId.id : trainingOrId;
-                        if (!trainingId) return;
-                        try {
-                        await axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
-                            headers: { "X-API-Key": user.apiKey, "X-User-Id": user.id },
-                        });
-                        await refreshTrainings(false);
-                        showToast?.("Тренинг успешно удалён", "success");
-                        } catch (err) {
-                        console.error("Error deleting training:", err);
-                        showToast?.("Ошибка при удалении тренинга", "error");
-                        }
-                    };
-
-                    const handleSave = async (data) => {
-                        try {
-                        if (editingTraining) {
-                            await axios.put(`${API_BASE_URL}/api/trainings/${editingTraining.id}`, data, {
-                            headers: { "X-API-Key": user.apiKey, "X-User-Id": user.id },
+                const handleSave = (data) => {
+                    const updateTrainings = () => {
+                        axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                            headers: {
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        })
+                            .then(res => {
+                                const grouped = {};
+                                (res.data.trainings || []).forEach(t => {
+                                    if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                                    grouped[t.operator_id].push(t);
+                                });
+                                setTrainings(grouped);
+                                setShowModal(false);
+                            })
+                            .catch(err => {
+                                console.error('Error updating trainings:', err);
+                                showToast('Ошибка при обновлении списка тренингов','error')
                             });
-                            showToast?.("Тренинг успешно обновлён", "success");
-                        } else {
-                            await axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: currentOperator }, {
-                            headers: { "X-API-Key": user.apiKey, "X-User-Id": user.id },
+                    };
+                    if (editingTraining) {
+                        axios.put(`${API_BASE_URL}/api/trainings/${editingTraining.id}`, data, {
+                            headers: {
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        })
+                            .then(() => {
+                                updateTrainings();
+                                showToast('Тренинг успешно обновлен','success');
+                            })
+                            .catch(err => {
+                                console.error('Error updating training:', err);
+                                showToast('Ошибка при обновлении тренинга','error');
                             });
-                            showToast?.("Тренинг успешно добавлен", "success");
-                        }
-                        await refreshTrainings(false);
-                        setShowModal(false);
-                        } catch (err) {
-                        console.error("Error saving training:", err);
-                        showToast?.("Ошибка при сохранении тренинга", "error");
-                        }
+                    } else {
+                        axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: currentOperator }, {
+                            headers: {
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        })
+                            .then(() => {
+                                updateTrainings();
+                                showToast('Тренинг успешно добавлен','success');
+                            })
+                            .catch(err => {
+                                console.error('Error adding training:', err);
+                                showToast('Ошибка при добавлении тренинга','error');
+                            });
+                    }
+                };
+
+                // ...existing code...
+            // Компонент тренинга с useState
+            const TrainingBox = ({ training, onEdit, onDelete }) => {
+                const [showDetails, setShowDetails] = useState(false);
+                const [confirmDelete, setConfirmDelete] = useState(false);
+                const maxCommentLength = 50;
+                const isLongComment = training?.comment && training.comment.length > maxCommentLength;
+                const shortComment = isLongComment ? training.comment.slice(0, maxCommentLength) + "..." : training.comment || "";
+
+                useEffect(() => {
+                    if (!showDetails) {
+                    setConfirmDelete(false);
+                    }
+                }, [showDetails]);
+
+                // Закрытие модалки по Escape
+                useEffect(() => {
+                    const onKey = (e) => {
+                    if (e.key === "Escape") setShowDetails(false);
                     };
+                    if (showDetails) window.addEventListener("keydown", onKey);
+                    return () => window.removeEventListener("keydown", onKey);
+                }, [showDetails]);
 
-                    // Build calendar data when calendarView is active
-                    const calendarData = React.useMemo(() => {
-                        // { date: { svName: [trainings] } }
-                        const map = {};
-                        Object.entries(trainings).forEach(([opId, list]) => {
-                        const operator = operatorById[opId];
-                        const svName = operator?.supervisor_name || "No Supervisor";
-                        list.forEach((t) => {
-                            if (!map[t.date]) map[t.date] = {};
-                            if (!map[t.date][svName]) map[t.date][svName] = [];
-                            map[t.date][svName].push({ ...t, operator: operator?.name });
-                        });
-                        });
-                        return map;
-                    }, [trainings, operatorById]);
+                const parseMinutes = (start, end) => {
+                    if (!start || !end) return "";
+                    const [sh, sm] = start.split(":").map(Number);
+                    const [eh, em] = end.split(":").map(Number);
+                    if ([sh, sm, eh, em].some((n) => Number.isNaN(n))) return "";
+                    const mins = (eh * 60 + em) - (sh * 60 + sm);
+                    return mins > 0 ? mins : "";
+                };
 
-                    // UI helpers
-                    const monthLabelShort = (m) => {
-                        const [y, mm] = m.split("-");
-                        const idx = Number(mm) - 1;
-                        const names = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
-                        return `${names[idx] ?? mm} ${y}`;
-                    };
+                const minutes = parseMinutes(training?.start_time, training?.end_time);
 
-                    // Filter helpers
-                    const matchesSearch = (str) => {
-                        if (!searchDebounced) return true;
-                        return (str || "").toLowerCase().includes(searchDebounced);
-                    };
+                const formatDate = (dateStr) => {
+                    if (!dateStr) return "";
+                    const parts = dateStr.split("-");
+                    if (parts.length === 3) {
+                    const [y, m, d] = parts;
+                    return `${d}.${m}.${y}`;
+                    }
+                    return dateStr;
+                };
 
-                    // Render
-                    return (
-                        <div className="mt-6">
-                        {/* Controls */}
-                        <div className="sticky top-0 z-10 bg-blue-50 py-3 px-4 rounded-xl shadow mb-4 flex flex-col md:flex-row md:items-center gap-3 border border-blue-200">
-                            <div className="flex items-center gap-3">
-                            <label className="text-xs text-gray-700">Месяц:</label>
-                            <input
-                                type="month"
-                                value={month}
-                                onChange={(e) => {setMonth(e.target.value); refreshTrainings(false); }}
-                                className="p-1 border rounded text-xs"
-                                aria-label="Выберите месяц"
-                            />
-                            </div>
+                const formattedDate = formatDate(training?.date);
 
-                            <div className="flex-1">
-                            <label className="text-xs text-gray-700 block">Поиск:</label>
-                            <input
-                                type="text"
-                                value={search}
-                                onChange={(e) => setSearch(e.target.value)}
-                                placeholder="Поиск по оператору или супервайзеру..."
-                                className="p-1 border rounded w-full text-xs"
-                                aria-label="Поиск операторов или супервайзеров"
-                            />
-                            </div>
-
-                            <div className="flex items-center gap-2">
-                            <button
-                                onClick={() => setCalendarView((v) => !v)}
-                                className={`px-3 py-1 rounded-lg text-xs font-semibold ${calendarView ? "bg-blue-500 text-white" : "bg-white text-blue-700 border border-blue-400"}`}
-                                aria-pressed={calendarView}
-                            >
-                                {calendarView ? "Список" : "Календарь"}
-                            </button>
-
-                            <button
-                                onClick={() => refreshTrainings(false)}
-                                className="px-3 py-1 rounded-lg text-xs bg-white border hover:bg-gray-50"
-                                title="Обновить"
-                                aria-label="Обновить список тренингов"
-                            >
-                                <i className="fas fa-sync-alt" />
-                            </button>
-                            </div>
+                return (
+                    <>
+                    {/* Карточка */}
+                    <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setShowDetails(true)}
+                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setShowDetails(true); }}
+                        className="flex flex-col bg-white border border-gray-300 rounded-lg shadow px-3 py-2 mx-1 w-40 min-w-[140px] max-w-[160px] cursor-pointer hover:ring-2 hover:ring-blue-300 transition focus:outline-none focus:ring-4 focus:ring-blue-200"
+                        aria-label={`Тренинг ${training?.reason} ${formattedDate}`}
+                    >
+                        <div className="flex items-center justify-between mb-1">
+                        <span className="border border-blue-400 rounded px-1 py-0.5 text-xs font-medium text-blue-700 bg-blue-50">
+                            {minutes ? `${minutes} мин.` : "—"}
+                        </span>
+                        <span className="border border-gray-400 rounded px-1 py-0.5 text-xs font-medium text-gray-700 bg-gray-50">
+                            {formattedDate || "—"}
+                        </span>
                         </div>
 
-                        {/* Loader / Error */}
-                        {loadingTrainings && <div className="text-center py-4 text-gray-600">Загружаю тренинги...</div>}
-                        {error && <div className="text-center py-2 text-red-600">{error}</div>}
+                        <div className="mb-1">
+                        <span className="block text-xs font-semibold text-green-700 bg-green-50 border border-green-500 rounded px-1 py-0.5 text-center truncate">
+                            {training?.reason || "—"}
+                        </span>
+                        </div>
 
-                        {/* Calendar View */}
-                        {calendarView ? (
-                            (() => {
-                            const [yearStr, monthNumStr] = month.split("-");
-                            const year = Number(yearStr);
-                            const monthNum = Number(monthNumStr);
-                            const daysInMonth = new Date(year, monthNum, 0).getDate();
-                            const daysArr = Array.from({ length: daysInMonth }, (_, i) => i + 1);
-                            const svNames = Array.from(new Set(operators.map((o) => o.supervisor_name || "No Supervisor")));
-
-                            return (
-                                <div className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
-                                <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">
-                                    Календарь тренингов — {monthLabelShort(month)}
-                                </h2>
-
-                                {/* Legend */}
-                                <div className="flex flex-wrap gap-3 mb-4">
-                                    {svNames.map((sv) => (
-                                    <div key={sv} className="flex items-center gap-2">
-                                        <span style={{ width: 12, height: 12, background: getSvColor(sv), borderRadius: 4 }} />
-                                        <span className="text-sm text-gray-700">{sv === user.name ? "Вы" : sv}</span>
-                                    </div>
-                                    ))}
-                                </div>
-
-                                <div className="grid grid-cols-7 gap-2 mb-4">
-                                    {daysArr.map((day) => {
-                                    const dateStr = `${year}-${String(monthNum).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-                                    const svTrainings = calendarData[dateStr] || {};
-                                    const totalCount = Object.values(svTrainings).reduce((acc, arr) => acc + arr.length, 0);
-                                    return (
-                                        <div
-                                        key={dateStr}
-                                        className={`bg-white rounded-lg shadow-sm p-2 cursor-pointer min-h-[64px] flex flex-col justify-between border ${totalCount ? "border-blue-500" : "border-gray-200"} hover:ring-2 hover:ring-blue-300`}
-                                        onClick={() => totalCount && setCalendarModal({ open: true, date: dateStr, trainings: svTrainings })}
-                                        role="button"
-                                        tabIndex={0}
-                                        onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && totalCount) setCalendarModal({ open: true, date: dateStr, trainings: svTrainings }); }}
-                                        aria-label={`Тренинги ${dateStr}`}
-                                        >
-                                        <div className="flex flex-wrap justify-center gap-1" style={{ minHeight: 22 }}>
-                                            {svNames.map((sv) => {
-                                            const cnt = svTrainings[sv]?.length || 0;
-                                            return cnt > 0 ? (
-                                                <span key={sv} title={sv} className="inline-flex items-center justify-center rounded-full text-white text-xs font-bold" style={{ width: 22, height: 22, background: getSvColor(sv) }}>
-                                                {cnt}
-                                                </span>
-                                            ) : null;
-                                            })}
-                                        </div>
-                                        <div className="text-center text-xs font-bold text-gray-700 mt-1">{day}-{String(monthNum).padStart(2, "0")}</div>
-                                        </div>
-                                    );
-                                    })}
-                                </div>
-                                </div>
-                            );
-                            })()
+                        {training?.comment ? (
+                        <div className="mt-1 text-xs text-gray-500 w-full text-center truncate" style={{ maxWidth: "120px" }}>
+                            {shortComment}
+                            {isLongComment && <span className="text-blue-500 ml-1"> (ещё)</span>}
+                        </div>
                         ) : (
-                            // List view grouped by SV
-                            svGroups.map(([svName, ops]) => {
-                            // apply search filter: svName OR op.name
-                            const svMatch = matchesSearch(svName);
-                            const filteredOps = (ops || []).filter((op) => matchesSearch(op.name) || svMatch);
-                            if (filteredOps.length === 0 && !svMatch) return null;
-
-                            return (
-                                <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
-                                <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">
-                                    Супервайзер: {svName === user.name ? "Вы" : svName}
-                                </h2>
-
-                                <div className="space-y-4">
-                                    {filteredOps.map((op) => (
-                                    <div key={op.id} className="flex items-start bg-white rounded-lg shadow p-3 mb-2 border border-gray-200">
-                                        <div className="w-40 min-w-[120px]">
-                                        <div className="text-sm font-semibold text-gray-900 truncate">{op.name}</div>
-                                        <div className="text-xs text-gray-500 mt-1">{op.direction || "-"}</div>
-                                        </div>
-
-                                        <div className="flex-1 flex flex-row flex-wrap items-center ml-2 gap-2">
-                                        {(trainings[op.id] || []).length > 0 ? (
-                                            (trainings[op.id] || []).map((t) => (
-                                            <TrainingBox
-                                                key={t.id}
-                                                training={t}
-                                                onEdit={() => handleEdit(op.id, t)}
-                                                onDelete={() => handleDelete(t.id)}
-                                            />
-                                            ))
-                                        ) : (
-                                            <div className="text-xs text-gray-500">Тренингов нет</div>
-                                        )}
-
-                                        <button
-                                            onClick={() => handleAdd(op.id)}
-                                            className="ml-2 px-2 py-1 rounded-lg border border-dashed border-green-400 text-green-600 bg-white hover:bg-green-50 transition text-xs"
-                                            aria-label={`Добавить тренинг оператору ${op.name}`}
-                                        >
-                                            +
-                                        </button>
-                                        </div>
-                                    </div>
-                                    ))}
-                                </div>
-                                </div>
-                            );
-                            })
+                        <div className="mt-1 text-xs text-gray-400 text-center">Нет комментария</div>
                         )}
+                    </div>
 
-                        {/* Training modal */}
-                        <TrainingModal isOpen={showModal} onClose={() => setShowModal(false)} onSave={handleSave} initialData={editingTraining || {}} />
+                    {/* Детальная модалка */}
+                    {showDetails && (
+                        <>
+                        {/* Backdrop */}
+                        <div
+                            className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity"
+                            onClick={() => setShowDetails(false)}
+                            aria-hidden="true"
+                        />
 
-                        {/* Calendar day modal */}
-                        {calendarModal.open && (
-                            <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => { setCalendarModal({ open: false, date: "", trainings: {} }); setSelectedCalendarTraining(null); }}>
-                            <div className="bg-white p-6 rounded-2xl shadow-2xl max-w-3xl w-full relative" onClick={(e) => e.stopPropagation()}>
-                                <button onClick={() => { setCalendarModal({ open: false, date: "", trainings: {} }); setSelectedCalendarTraining(null); }} className="absolute top-4 right-4 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
-                                <i className="fas fa-times fa-lg" />
-                                </button>
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                            <div
+                            className="bg-white rounded-lg shadow-2xl max-w-md w-full p-5 relative transform transition-all"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="training-details-title"
+                            onClick={(e) => e.stopPropagation()}
+                            >
+                            {/* Верхняя панель: кнопка удаления + заголовок */}
+                            <button
+                                onClick={() => setConfirmDelete(true)}
+                                title="Удалить"
+                                className="absolute top-3 right-3 bg-red-500 hover:bg-red-600 text-white p-2 rounded-full shadow border-2 border-white flex items-center justify-center"
+                                style={{ width: 40, height: 40 }}
+                                aria-label="Удалить тренинг"
+                            >
+                                <i className="fas fa-trash" />
+                            </button>
 
-                                <h3 className="text-2xl font-bold mb-3 text-center text-blue-800">Тренинги за {(() => { const [y,m,d] = calendarModal.date.split("-"); return `${d}.${m}.${y}`; })()}</h3>
+                            <h3 id="training-details-title" className="text-xl font-semibold mb-4 text-center">
+                                Детали тренинга
+                            </h3>
 
-                                <div className="space-y-4 max-h-[60vh] overflow-auto">
-                                {Object.entries(calendarModal.trainings).map(([svName, list]) => (
-                                    <div key={svName} className="mb-3">
-                                    <div className="flex items-center gap-3 mb-2">
-                                        <span style={{ border: `2px solid ${getSvColor(svName)}`, padding: "4px 8px", borderRadius: 6, color: getSvColor(svName), fontWeight: 700 }}>{svName === user.name ? "Вы" : svName}</span>
-                                    </div>
+                            <div className="space-y-3">
+                                <div className="flex justify-between gap-3">
+                                <div>
+                                    <label className="block text-sm text-gray-600">Время</label>
+                                    <input value={minutes ? `${minutes} мин.` : ""} disabled className="w-28 p-2 border rounded bg-gray-100 text-blue-700 font-semibold" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm text-gray-600">Дата</label>
+                                    <input value={formattedDate} disabled className="w-28 p-2 border rounded bg-gray-100 text-gray-700" />
+                                </div>
+                                </div>
 
-                                    <div className="flex flex-wrap gap-3">
-                                        {list.map((t) => (
-                                        <div key={t.id} className="bg-gray-50 border border-gray-200 rounded-xl shadow px-3 py-3 min-w-[160px] max-w-[220px] cursor-pointer hover:ring-2 hover:ring-blue-300 transition" onClick={() => setSelectedCalendarTraining({ ...t })}>
-                                            <div className="flex justify-between items-center mb-2">
-                                            <div className="text-xs text-blue-700 font-bold">{(() => { const [sh,sm] = t.start_time.split(":").map(Number); const [eh,em] = t.end_time.split(":").map(Number); const mins = (eh*60+em)-(sh*60+sm); return (Number.isFinite(mins) && mins>0) ? `${mins} мин.` : ""; })()}</div>
-                                            <div className="text-xs text-gray-500">{(() => { const [y,m,d] = t.date.split("-"); return `${d}.${m}.${y}`; })()}</div>
-                                            </div>
-                                            <div className="mb-1">
-                                            <div className="text-xs font-semibold text-green-700 border border-green-400 rounded px-1 py-0.5 text-center">{t.reason}</div>
-                                            </div>
-                                            <div className="mb-1">
-                                            <div className="text-xs text-gray-700 border border-gray-200 rounded px-1 py-0.5 text-center">{t.operator || ""}</div>
-                                            </div>
-                                            {t.comment && <div className="text-xs text-gray-500 truncate">{t.comment.length > 60 ? t.comment.slice(0, 60) + "..." : t.comment}</div>}
-                                        </div>
-                                        ))}
-                                    </div>
-                                    </div>
-                                ))}
+                                <div>
+                                <label className="block text-sm text-gray-600">Причина</label>
+                                <input value={training?.reason || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-green-700 font-semibold" />
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-sm text-gray-600">Время начала</label>
+                                    <input value={training?.start_time || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
+                                </div>
+                                <div>
+                                    <label className="block text-sm text-gray-600">Время окончания</label>
+                                    <input value={training?.end_time || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
+                                </div>
+                                </div>
+
+                                <div>
+                                <label className="block text-sm text-gray-600">Комментарий</label>
+                                <textarea value={training?.comment || ""} disabled rows={3} className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
+                                </div>
+
+                                <div>
+                                <label className="block text-sm text-gray-600">Создал</label>
+                                <input value={training?.created_by_name || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700 font-semibold" />
                                 </div>
                             </div>
 
-                            {/* Side detail pane for selected calendar training */}
-                            {selectedCalendarTraining && (
-                                <div className="bg-white p-6 rounded-lg shadow-lg max-w-md w-full relative ml-4" onClick={(e) => e.stopPropagation()}>
-                                <button onClick={() => setSelectedCalendarTraining(null)} className="absolute top-3 right-3 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
-                                    <i className="fas fa-times fa-lg" />
+                            {/* Действия */}
+                            <div className="flex justify-center gap-3 mt-5">
+                                <button
+                                onClick={() => { setShowDetails(false); onEdit && onEdit(training); }}
+                                className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded flex items-center gap-2"
+                                >
+                                <i className="fas fa-pen"></i> Редактировать
                                 </button>
-                                <h3 className="text-xl font-semibold mb-4 text-center">Детали тренинга</h3>
-                                <div className="space-y-3">
-                                    <div className="flex justify-between items-center">
-                                    <div>
-                                        <label className="block text-sm text-gray-600">Оператор</label>
-                                        <input type="text" value={selectedCalendarTraining.operator || selectedCalendarTraining.operatorName || ""} disabled className="w-36 p-2 border rounded bg-gray-100 text-blue-700 font-semibold" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm text-gray-600">Дата</label>
-                                        <input type="text" value={(() => { const [y,m,d] = selectedCalendarTraining.date.split("-"); return `${d}.${m}.${y}`; })()} disabled className="w-28 p-2 border rounded bg-gray-100 text-gray-700" />
-                                    </div>
-                                    </div>
+                                <button
+                                onClick={() => setShowDetails(false)}
+                                className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded"
+                                >
+                                Закрыть
+                                </button>
+                            </div>
 
-                                    <div>
-                                    <label className="block text-sm text-gray-600">Причина</label>
-                                    <input type="text" value={selectedCalendarTraining.reason} disabled className="w-full p-2 border rounded bg-gray-100 text-green-700 font-semibold" />
-                                    </div>
-
-                                    <div className="grid grid-cols-2 gap-3">
-                                    <div>
-                                        <label className="block text-sm text-gray-600">Время начала</label>
-                                        <input type="text" value={selectedCalendarTraining.start_time} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm text-gray-600">Время окончания</label>
-                                        <input type="text" value={selectedCalendarTraining.end_time} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
-                                    </div>
-                                    </div>
-
-                                    <div>
-                                    <label className="block text-sm text-gray-600">Комментарий</label>
-                                    <textarea value={selectedCalendarTraining.comment || ""} disabled rows={3} className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
-                                    </div>
-
-                                    <div>
-                                    <label className="block text-sm text-gray-600">Создал</label>
-                                    <input type="text" value={selectedCalendarTraining.created_by_name || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700 font-semibold" />
-                                    </div>
-
-                                    <div className="flex justify-center gap-3 mt-3">
-                                    <button onClick={() => { setSelectedCalendarTraining(null); handleEdit(selectedCalendarTraining.operator_id, selectedCalendarTraining); }} className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded">Редактировать</button>
-                                    <button onClick={() => { handleDelete(selectedCalendarTraining.id); setSelectedCalendarTraining(null); }} className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded">Удалить</button>
-                                    </div>
+                            {/* Подтверждение удаления */}
+                            {confirmDelete && (
+                                <div className="mt-4 bg-red-50 border border-red-200 p-3 rounded text-center">
+                                <p className="text-sm text-red-700 mb-3">Подтвердите удаление тренинга — это действие нельзя отменить.</p>
+                                <div className="flex justify-center gap-3">
+                                    <button
+                                    onClick={() => {
+                                        try {
+                                        onDelete && onDelete(training);
+                                        } finally {
+                                        setConfirmDelete(false);
+                                        setShowDetails(false);
+                                        }
+                                    }}
+                                    className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded"
+                                    >
+                                    Удалить
+                                    </button>
+                                    <button
+                                    onClick={() => setConfirmDelete(false)}
+                                    className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded"
+                                    >
+                                    Отмена
+                                    </button>
                                 </div>
                                 </div>
                             )}
                             </div>
-                        )}
-
                         </div>
-                    );
-                    };            
+                        </>
+                    )}
+                    </>
+                );
+                };
+
+                return (
+                    <div className="mt-6">
+                        <div className="sticky top-0 z-10 bg-blue-50 py-2 px-4 rounded-xl shadow mb-4 flex flex-col md:flex-row md:items-center gap-4 border border-blue-200">
+                            <div>
+                                <label className="block text-xs font-medium text-gray-700 mb-1">Месяц:</label>
+                                <input type="month" value={month} onChange={e => setMonth(e.target.value)} className="p-1 border rounded text-xs" />
+                            </div>
+                            <div className="flex-1">
+                                <label className="block text-xs font-medium text-gray-700 mb-1">Поиск:</label>
+                                <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Поиск по оператору или супервайзеру..." className="p-1 border rounded w-full text-xs" />
+                            </div>
+                            <button onClick={() => setCalendarView(v => !v)} className={`ml-4 px-3 py-1 rounded-lg border text-xs font-semibold ${calendarView ? 'bg-blue-500 text-white' : 'bg-white text-blue-700 border-blue-400'} hover:bg-blue-100 transition`}>
+                                {calendarView ? 'Список' : 'Календарь'}
+                            </button>
+                        </div>
+                        {calendarView ? (
+                            (() => {
+                                // Общий календарь по всем SV
+                                const searchLower = search.trim().toLowerCase();
+                                // Собираем SV по id
+                                const svById = {};
+                                operators.forEach(op => {
+                                    svById[op.id] = op.supervisor_name;
+                                });
+                                // Собираем тренинги по датам и SV
+                                const calendarData = {}; // {date: {svName: [trainings]}}
+                                Object.entries(trainings).forEach(([opId, list]) => {
+                                    const svName = svById[opId] || "";
+                                    list.forEach(t => {
+                                        if (!calendarData[t.date]) calendarData[t.date] = {};
+                                        if (!calendarData[t.date][svName]) calendarData[t.date][svName] = [];
+                                        calendarData[t.date][svName].push({ ...t, operator: operators.find(o => o.id == opId)?.name || "" });
+                                    });
+                                });
+                                // Календарь месяца
+                                const [year, monthNum] = month.split('-').map(Number);
+                                const daysInMonth = new Date(year, monthNum, 0).getDate();
+                                const daysArr = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+                                const monthLabel = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"][monthNum-1];
+                                // Собираем все SV, которые есть в этом месяце
+                                const svNames = Array.from(new Set(operators.map(op => op.supervisor_name)));
+                                return (
+                                    <div className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
+                                        <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Календарь тренингов по всем супервайзерам</h2>
+                                        {/* Легенда цветов SV */}
+                                        <div className="flex flex-wrap gap-4 mb-4 items-center">
+                                            {svNames.map(svName => (
+                                                <div key={svName} className="flex items-center gap-2">
+                                                    {/* Цветной маркер убран, только имя супервайзера */}
+                                                    <span className="text-sm font-medium text-gray-700 px-2 py-0.5 rounded" style={{border:`2px solid ${getSvColor(svName)}`}}>{svName === user.name ? 'Вы' : svName}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <div className="grid grid-cols-7 gap-2 mb-4">
+                                            {daysArr.map(day => {
+                                                const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                                                const svTrainings = calendarData[dateStr] || {};
+                                                const totalCount = Object.values(svTrainings).reduce((acc, arr) => acc + arr.length, 0);
+                                                return (
+                                                    <div key={dateStr} className={`bg-white rounded-lg shadow flex flex-col items-center justify-between p-1 cursor-pointer border ${totalCount ? 'border-blue-500' : 'border-gray-200'} hover:ring-2 hover:ring-blue-300 min-h-[60px]`} onClick={() => {
+                                                        if (totalCount) setCalendarModal({ open: true, date: dateStr, trainings: svTrainings });
+                                                    }}>
+                                                        {/* Цветные счетчики по SV */}
+                                                        <div className="flex flex-row flex-wrap justify-center items-center w-full mt-1 mb-1 gap-1" style={{minHeight:'22px'}}>
+                                                            {svNames.map(svName => {
+                                                                const count = svTrainings[svName]?.length || 0;
+                                                                return count > 0 ? (
+                                                                    <span key={svName} title={svName} className="inline-flex items-center justify-center rounded-full text-white text-xs font-bold" style={{width:'22px',height:'22px',background:getSvColor(svName)}}>{count}</span>
+                                                                ) : null;
+                                                            })}
+                                                        </div>
+                                                        {/* День-месяц снизу */}
+                                                        <span className="text-xs font-bold text-gray-700 mb-1">{day}-{monthLabel}</span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                );
+                            })()
+                        ) : (
+                            svGroups.map(([svName, ops]) => {
+                                const searchLower = search.trim().toLowerCase();
+                                const filteredOps = ops.filter(op => op.name.toLowerCase().includes(searchLower) || searchLower === "");
+                                const showGroup = svName && svName.toLowerCase().includes(searchLower) || filteredOps.length > 0 || searchLower === "";
+                                if (!showGroup) return null;
+                                return (
+                                    <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
+                                        <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Супервайзер: {svName === user.name ? 'Вы' : svName}</h2>
+                                        <div className="space-y-4">
+                                            {filteredOps.map(op => (
+                                                <div key={op.id} className="flex items-center bg-white rounded-lg shadow p-2 mb-2 border border-gray-200">
+                                                    <span className="font-semibold text-gray-900 w-36 min-w-[80px] text-sm truncate">{op.name}</span>
+                                                    <div className="flex flex-row flex-wrap items-center ml-2">
+                                                        {(trainings[op.id] || []).map(t => (
+                                                            <TrainingBox
+                                                                key={t.id}
+                                                                training={t}
+                                                                onEdit={() => handleEdit(op.id, t)}
+                                                                onDelete={() => handleDelete(t.id)}
+                                                            />
+                                                        ))}
+                                                        <button onClick={() => handleAdd(op.id)} className="ml-2 px-2 py-1 rounded-lg border border-dashed border-green-400 text-green-600 bg-white hover:bg-green-50 transition text-xs">+</button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                );
+                            })
+                        )}
+                        <TrainingModal isOpen={showModal} onClose={() => setShowModal(false)} onSave={handleSave} initialData={editingTraining || {}} />
+                        {/* Модальное окно календаря по дню (общий) */}
+                        {calendarModal.open && (
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setCalendarModal({ open: false, date: '', trainings: [] }); setSelectedCalendarTraining(null); }}>
+                                <div className="bg-white p-8 rounded-2xl shadow-2xl max-w-2xl w-full relative flex flex-col gap-4" style={{marginLeft: '0px'}} onClick={e => e.stopPropagation()}>
+                                    <button onClick={() => { setCalendarModal({ open: false, date: '', trainings: [] }); setSelectedCalendarTraining(null); }} className="absolute top-4 right-4 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
+                                        <i className="fas fa-times fa-lg"></i>
+                                    </button>
+                                    <h3 className="text-2xl font-bold mb-2 text-center text-blue-800">Тренинги за {(() => { const [y,m,d]=calendarModal.date.split('-'); return `${d}.${m}.${y}`; })()}</h3>
+                                    <div className="space-y-6">
+                                        {(() => {
+                                            // calendarModal.trainings: {svName: [trainings]}
+                                            return Object.entries(calendarModal.trainings).map(([svName, list]) => (
+                                                <div key={svName} className="mb-2">
+                                                    <div className="font-semibold mb-2 flex items-center gap-2">
+                                                        {/* Цветной маркер убран, только имя супервайзера */}
+                                                        <span style={{border:`2px solid ${getSvColor(svName)}`,padding:'2px 8px',borderRadius:'6px',color:getSvColor(svName),fontWeight:'bold'}}>{svName}</span>
+                                                    </div>
+                                                    <div className="flex flex-wrap gap-3">
+                                                        {list.map(t => (
+                                                            <div key={t.id} className="bg-gray-50 border border-gray-300 rounded-xl shadow px-3 py-3 min-w-[160px] max-w-[200px] cursor-pointer hover:ring-2 hover:ring-blue-300 transition flex flex-col gap-1" onClick={() => { setSelectedCalendarTraining({ ...t, operator: t.operator }); }}>
+                                                                <div className="flex flex-row items-center justify-between w-full mb-1">
+                                                                    <span className="border border-blue-400 rounded px-1 py-0.5 text-xs font-medium text-blue-700 bg-blue-50">{(() => { const [sh,sm]=t.start_time.split(':').map(Number); const [eh,em]=t.end_time.split(':').map(Number); let mins=(eh*60+em)-(sh*60+sm); return !isNaN(mins)&&mins>=0?`${mins} мин.`:''; })()}</span>
+                                                                    <span className="border border-gray-400 rounded px-1 py-0.5 text-xs font-medium text-gray-700 bg-gray-50">{(() => { const [y,m,d]=t.date.split('-'); return `${d}.${m}.${y}`; })()}</span>
+                                                                </div>
+                                                                <div className="w-full mb-1">
+                                                                    <span className="border border-green-500 rounded px-1 py-0.5 text-xs font-semibold text-green-700 bg-green-50 truncate w-full block text-center">{t.reason}</span>
+                                                                </div>
+                                                                <div className="w-full mb-1">
+                                                                    <span className="border border-gray-400 rounded px-1 py-0.5 text-xs font-medium text-gray-700 bg-gray-100 block text-center">{t.operator}</span>
+                                                                </div>
+                                                                {t.comment && (
+                                                                    <div className="mt-0.5 text-xs text-gray-500 w-full text-center truncate" style={{maxWidth:'160px'}}>{t.comment.length>50?t.comment.slice(0,50)+'...':t.comment}</div>
+                                                                )}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            ));
+                                        })()}
+                                    </div>
+                                </div>
+                                {selectedCalendarTraining && (
+                                    <div className="bg-white p-6 rounded-lg shadow-lg max-w-md w-full relative ml-4" style={{marginRight: '40px'}} onClick={e => e.stopPropagation()}>
+                                        <button onClick={() => setSelectedCalendarTraining(null)} className="absolute top-3 right-3 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
+                                            <i className="fas fa-times fa-lg"></i>
+                                        </button>
+                                        <h3 className="text-xl font-semibold mb-4 text-center">Детали тренинга</h3>
+                                        <div className="space-y-4">
+                                            <div className="flex justify-between items-center">
+                                                <div>
+                                                    <label className="block text-sm font-medium text-gray-700 mb-1">Оператор</label>
+                                                    <input type="text" value={selectedCalendarTraining.operator || selectedCalendarTraining.operatorName || ''} disabled className="w-32 p-2 border rounded bg-gray-100 text-blue-700 font-semibold" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm font-medium text-gray-700 mb-1">Дата</label>
+                                                    <input type="text" value={(() => { const [y,m,d]=selectedCalendarTraining.date.split('-'); return `${d}.${m}.${y}`; })()} disabled className="w-28 p-2 border rounded bg-gray-100 text-gray-500" />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">Причина</label>
+                                                <input type="text" value={selectedCalendarTraining.reason} disabled className="w-full p-2 border rounded bg-gray-100 text-green-700 font-semibold" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">Время начала</label>
+                                                <input type="text" value={selectedCalendarTraining.start_time} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-500" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">Время окончания</label>
+                                                <input type="text" value={selectedCalendarTraining.end_time} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-500" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">Комментарий</label>
+                                                <textarea value={selectedCalendarTraining.comment || ''} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-500" rows={3} />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-1">Создал</label>
+                                                <input type="text" value={selectedCalendarTraining.created_by_name || ''} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700 font-semibold" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                );
+            };
+            
             // Load user from localStorage on mount
             useEffect(() => {
                 const storedUser = localStorage.getItem('user');
@@ -4636,12 +4571,10 @@
                         fetchSvList();
                         fetchDirections();
                         fetchUsers();
-                        fetchTrainings();
                     } else if (user.role === 'sv') {
                         fetchSvData();
                         fetchUsers();
                         fetchDirections();
-                        fetchTrainings();
                     } else if (user.role === 'operator') {
                         fetchProfileData();
                         fetchHoursData();
