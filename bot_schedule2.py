@@ -104,7 +104,7 @@ def index():
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', 'https://alfa330.github.io')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, X-User-Id')
-    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE, PUT')
     return response
 
 @app.route('/api/health', methods=['GET'])
