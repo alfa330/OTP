@@ -2682,6 +2682,7 @@
                         if (!user?.apiKey) return;
                         setLoadingTrainings(true);
                         setError(null);
+                        console.log("Loading trainings for month", month);
                         try {
                         const res = await axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                             headers: { "X-API-Key": user.apiKey, "X-User-Id": user.id },
