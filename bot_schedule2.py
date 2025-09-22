@@ -849,13 +849,19 @@ def add_sv():
 def add_user():
     try:
         data = request.get_json()
-        required_fields = ['name', 'role', 'supervisor_id', 'rate', 'direction_id']  # Removed 'telegram_id' from required fields
+        required_fields = ['name', 'role', 'supervisor_id', 'rate', 'direction_id', 'hire_date']  
         if not data or not all(field in data for field in required_fields):
             return jsonify({"error": "Missing required field"}), 400
 
         name = data['name']
         role = data['role']
         supervisor_id = int(data['supervisor_id']) if data['supervisor_id'] else None
+        hire_date = data['hire_date']
+        if hire_date:
+            try:
+                datetime.strptime(hire_date, '%Y-%m-%d')
+            except ValueError:
+                return jsonify({"error": "Invalid hire_date format. Use YYYY-MM-DD"}), 400
         rate = float(data['rate']) if data['rate'] else 1.0
         direction_id = int(data['direction_id']) if data['direction_id'] else None
         
@@ -867,6 +873,7 @@ def add_user():
             telegram_id=None,  # Explicitly set to None
             name=name,
             role= role,
+            hire_date=hire_date,
             supervisor_id=supervisor_id,
             rate=rate,
             direction_id=direction_id,
