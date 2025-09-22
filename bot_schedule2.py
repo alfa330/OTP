@@ -844,6 +844,47 @@ def add_sv():
         logging.error(f"Error adding SV: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/admin/add_user', methods=['POST'])
+@require_api_key
+def add_user():
+    try:
+        data = request.get_json()
+        required_fields = ['name', 'role', 'supervisor_id', 'rate', 'direction_id']  # Removed 'telegram_id' from required fields
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required field"}), 400
+
+        name = data['name']
+        role = data['role']
+        supervisor_id = int(data['supervisor_id']) if data['supervisor_id'] else None
+        rate = float(data['rate']) if data['rate'] else 1.0
+        direction_id = int(data['direction_id']) if data['direction_id'] else None
+        
+        login = f"user_{str(uuid.uuid4())[:8]}"
+        password = str(uuid.uuid4())[:8]  
+        
+        # Create supervisor with login and hashed_password, telegram_id set to None
+        user_id = db.create_user(
+            telegram_id=None,  # Explicitly set to None
+            name=name,
+            role= role,
+            supervisor_id=supervisor_id,
+            rate=rate,
+            direction_id=direction_id,
+            login=login,
+            password=password
+        )
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Оператор {name} добавлен",
+            "id": user_id,
+            "login": login,  # Return plain login
+            "password": password  # Return plain password for admin to share
+        })
+    except Exception as e:
+        logging.error(f"Error adding user: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/admin/directions', methods=['GET'])
 @require_api_key
 def get_directions():

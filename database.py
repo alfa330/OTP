@@ -373,17 +373,7 @@ class Database:
                     UNIQUE(operator_id, month)
                 );
             """)
-            cursor.execute("""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns 
-                        WHERE table_name = 'work_hours' AND column_name = 'calls_per_hour'
-                    ) THEN
-                        ALTER TABLE work_hours ADD COLUMN calls_per_hour FLOAT NOT NULL DEFAULT 0.0;
-                    END IF;
-                END $$;
-            """)
+
             # Processed sheets table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS processed_sheets (
