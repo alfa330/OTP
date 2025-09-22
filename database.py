@@ -443,7 +443,7 @@ class Database:
             try:
                 cursor.execute("""
                     INSERT INTO users (telegram_id, name, role, direction_id, rate, hire_date, supervisor_id, login, password_hash, hours_table_url)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (telegram_id, name, role, direction_id, rate, hire_date, supervisor_id, login, password_hash, hours_table_url))
                 return cursor.fetchone()[0]

@@ -849,30 +849,38 @@ def add_sv():
 def add_user():
     try:
         data = request.get_json()
-        required_fields = ['name', 'role', 'supervisor_id', 'rate', 'direction_id', 'hire_date']  
-        if not data or not all(field in data for field in required_fields):
+        # теперь обязательные только эти поля
+        required_fields = ['name', 'rate', 'direction_id', 'hire_date']
+        if not data or not all(field in data and data[field] for field in required_fields):
             return jsonify({"error": "Missing required field"}), 400
 
-        name = data['name']
-        role = data['role']
-        supervisor_id = int(data['supervisor_id']) if data['supervisor_id'] else None
+        name = data['name'].strip()
+        if not name:
+            return jsonify({"error": "Name cannot be empty"}), 400
+
+        # role всегда оператор
+        role = 'operator'
+
+        # supervisor_id опционален
+        supervisor_id = int(data['supervisor_id']) if data.get('supervisor_id') else None
+
         hire_date = data['hire_date']
-        if hire_date:
-            try:
-                datetime.strptime(hire_date, '%Y-%m-%d')
-            except ValueError:
-                return jsonify({"error": "Invalid hire_date format. Use YYYY-MM-DD"}), 400
-        rate = float(data['rate']) if data['rate'] else 1.0
-        direction_id = int(data['direction_id']) if data['direction_id'] else None
-        
+        try:
+            datetime.strptime(hire_date, '%Y-%m-%d')
+        except ValueError:
+            return jsonify({"error": "Invalid hire_date format. Use YYYY-MM-DD"}), 400
+
+        rate = float(data['rate']) if data.get('rate') else 1.0
+        direction_id = int(data['direction_id']) if data.get('direction_id') else None
+
         login = f"user_{str(uuid.uuid4())[:8]}"
-        password = str(uuid.uuid4())[:8]  
-        
-        # Create supervisor with login and hashed_password, telegram_id set to None
+        password = str(uuid.uuid4())[:8]
+
+        # Создаём оператора
         user_id = db.create_user(
-            telegram_id=None,  # Explicitly set to None
+            telegram_id=None,
             name=name,
-            role= role,
+            role=role,
             hire_date=hire_date,
             supervisor_id=supervisor_id,
             rate=rate,
@@ -880,13 +888,13 @@ def add_user():
             login=login,
             password=password
         )
-        
+
         return jsonify({
             "status": "success",
             "message": f"Оператор {name} добавлен",
             "id": user_id,
-            "login": login,  # Return plain login
-            "password": password  # Return plain password for admin to share
+            "login": login,
+            "password": password
         })
     except Exception as e:
         logging.error(f"Error adding user: {e}")
