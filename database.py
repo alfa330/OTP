@@ -422,7 +422,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_trainings_training_date ON trainings(training_date);
             """)
 
-    def create_user(self, telegram_id, name, role, direction_id=None, hire_date=None, supervisor_id=None, login=None, password=None, hours_table_url=None):
+    def create_user(self, telegram_id, name, role, direction_id=None, rate=None, hire_date=None, supervisor_id=None, login=None, password=None, hours_table_url=None):
         if login is None:
             base_login = f"user_{str(uuid.uuid4())[:8]}"
             with self._get_cursor() as cursor:
@@ -442,10 +442,10 @@ class Database:
             cursor.execute("SAVEPOINT before_insert")
             try:
                 cursor.execute("""
-                    INSERT INTO users (telegram_id, name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url)
+                    INSERT INTO users (telegram_id, name, role, direction_id, rate, hire_date, supervisor_id, login, password_hash, hours_table_url)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
-                """, (telegram_id, name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url))
+                """, (telegram_id, name, role, direction_id, rate, hire_date, supervisor_id, login, password_hash, hours_table_url))
                 return cursor.fetchone()[0]
             except psycopg2.IntegrityError as e:
                 cursor.execute("ROLLBACK TO SAVEPOINT before_insert")
