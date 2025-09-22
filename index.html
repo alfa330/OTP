@@ -5860,29 +5860,27 @@
                                 )}                            
                                 {view === 'manage_operators' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Управлять операторами</h2>
-
-                                        {/* Tabs */}
-                                        <div className="flex justify-end mb-4">
+                                        <div className="flex justify-between items-center mb-6">
+                                        <h2 className="text-2xl font-semibold text-gray-800">Управлять операторами</h2>
                                         <button
                                             onClick={() => {
-                                            // инициализируем пустого пользователя для создания
                                             setUserToEdit({
                                                 name: "",
-                                                role: "operator",
-                                                supervisor_id: user?.id || "",
                                                 rate: 1.0,
+                                                direction_id: "",
+                                                hire_date: "",
+                                                supervisor_id: user?.id || "",
                                                 status: "working",
-                                                direction_id: ""
                                             });
                                             setShowUserEditModal(true);
                                             }}
-                                            className="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 text-sm transition"
-                                            title="Добавить нового оператора"
+                                            className="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 text-sm transition flex items-center gap-2"
                                         >
-                                            <i className="fas fa-user-plus mr-2"></i> Добавить оператора
+                                            <i className="fas fa-user-plus"></i> Добавить оператора
                                         </button>
                                         </div>
+
+                                        {/* Tabs */}
                                         <div className="flex space-x-4 mb-6">
                                         <button
                                             onClick={() => setActiveTab("active")}
