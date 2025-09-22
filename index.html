@@ -1102,6 +1102,11 @@
                 return;
                 }
 
+                if (!editedUser.direction_id) {
+                setModalError("Направление обязательно.");
+                return;
+                }
+
                 setModalError("");
                 setIsLoading(true);
 
