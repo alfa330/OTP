@@ -2245,7 +2245,6 @@
             { key: "efficiency", label: "Эффективность", unit: "ч" }
             ];
 
-
         const HoursAccountingView = ({ user, onUploaded, showToast }) => {
             const [month, setMonth] = useState(() => {
                 const d = new Date();
@@ -2253,6 +2252,7 @@
             });
 
             const [operators, setOperators] = useState([]);
+            const [trainingsMap, setTrainingsMap] = useState({}); // { operatorId: { "1":[{...}], "2":[...] } }
             const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
             const [isLoading, setIsLoading] = useState(false);
 
@@ -2294,7 +2294,7 @@
 
             useEffect(() => {
                 if (!user) return;
-                fetchDailyHours();
+                fetchDailyHoursAndTrainings();
                 // eslint-disable-next-line
             }, [user, selectedSvId, month]);
 
@@ -2302,22 +2302,49 @@
                 try { if (showToast) showToast(msg, type); else if (window.showToast) window.showToast(msg, type); else alert(msg); } catch(e){alert(msg);}
             }
 
-            async function fetchDailyHours() {
+            // ---- fetch daily hours + trainings ----
+            async function fetchDailyHoursAndTrainings() {
                 if (!user) return;
                 setIsLoading(true);
                 try {
                 const url = `${API_BASE_URL}/api/sv/daily_hours?month=${encodeURIComponent(month)}`;
-                const resp = await axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
-                if (resp.data && resp.data.status === 'success' && Array.isArray(resp.data.operators)) {
-                    setOperators(resp.data.operators);
+                const [hoursResp, trainingsResp] = await Promise.all([
+                    axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
+                    // trainings endpoint — pass month and optional sv_id
+                    axios.get(`${API_BASE_URL}/api/trainings?month=${encodeURIComponent(month)}${selectedSvId ? `&sv_id=${selectedSvId}` : ''}`, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
+                ]);
+
+                if (hoursResp.data && hoursResp.data.status === 'success' && Array.isArray(hoursResp.data.operators)) {
+                    setOperators(hoursResp.data.operators);
                 } else {
                     setOperators([]);
                     fallbackToast('Не удалось загрузить daily hours', 'error');
                 }
+
+                // Trainings response expected to be an array as you showed; map it to trainingsMap
+                const trainingsList = Array.isArray(trainingsResp.data) ? trainingsResp.data : (trainingsResp.data?.trainings || []);
+                const tmap = {};
+                for (const t of trainingsList) {
+                    // t: {id, operator_id, date: 'YYYY-MM-DD', start_time, end_time, reason, comment, created_at, created_by_name}
+                    const op = t.operator_id;
+                    let dayNum;
+                    try {
+                    dayNum = new Date(t.date + 'T00:00:00').getDate(); // safe parse
+                    } catch (e) {
+                    // fallback: take last two chars
+                    dayNum = parseInt(t.date.slice(-2), 10);
+                    }
+                    if (!tmap[op]) tmap[op] = {};
+                    if (!tmap[op][dayNum]) tmap[op][dayNum] = [];
+                    tmap[op][dayNum].push(t);
+                }
+                setTrainingsMap(tmap);
+
                 } catch (err) {
-                console.error('fetchDailyHours error', err);
-                fallbackToast('Ошибка загрузки часов', 'error');
+                console.error('fetchDailyHoursAndTrainings error', err);
+                fallbackToast('Ошибка загрузки данных', 'error');
                 setOperators([]);
+                setTrainingsMap({});
                 } finally {
                 setIsLoading(false);
                 }
@@ -2396,7 +2423,8 @@
                 });
                 if (resp.data && resp.data.status === 'success') {
                     fallbackToast('Данные сохранены', 'success');
-                    fetchDailyHours();
+                    // reload both hours and trainings to reflect possible changes
+                    await fetchDailyHoursAndTrainings();
                     setSelectedDayUpload(null);
                     setPreviewOperators([]);
                 } else {
@@ -2466,20 +2494,8 @@
                 });
                 if (resp.data && resp.data.status === 'success') {
                     fallbackToast('Данные сохранены', 'success');
-                    setOperators(prev => prev.map(op => {
-                    if (op.operator_id !== cellModel.operator_id) return op;
-                    const daily = { ...(op.daily || {}) };
-                    daily[String(cellModel.day)] = {
-                        work_time: Number(cellModel.work_time) || 0,
-                        break_time: Number(cellModel.break_time) || 0,
-                        talk_time: Number(cellModel.talk_time) || 0,
-                        calls: parseInt(cellModel.calls,10) || 0,
-                        efficiency: Number(cellModel.efficiency) || 0
-                    };
-                    const newOp = { ...op, daily };
-                    if (resp.data.aggregations && resp.data.aggregations[cellModel.operator_id]) newOp.aggregates = resp.data.aggregations[cellModel.operator_id];
-                    return newOp;
-                    }));
+                    // reload both hours and trainings (to reflect training-related changes if any)
+                    await fetchDailyHoursAndTrainings();
                     if (onUploaded) onUploaded(resp.data);
                     closeCellModal();
                 } else {
@@ -2511,10 +2527,8 @@
             }
 
             // ====== Render helpers & coloring logic ======
-
-            // compute maximum work_time in the table (used to scale green intensity)
             const maxWork = useMemo(() => {
-                let max = 8; // default baseline (8 hours)
+                let max = 8;
                 for (const op of operators) {
                 if (!op.daily) continue;
                 for (const k of Object.keys(op.daily)) {
@@ -2525,7 +2539,6 @@
                 return max;
             }, [operators]);
 
-            // determine if month is before/after current
             function monthRelationToToday() {
                 if (monthParts.year < todayY) return -1;
                 if (monthParts.year > todayY) return 1;
@@ -2533,9 +2546,24 @@
                 if (monthParts.monthNum > todayM) return 1;
                 return 0;
             }
-            const monthRel = monthRelationToToday(); // -1 = past month, 0 = this month, 1 = future month
+            const monthRel = monthRelationToToday();
 
-            function renderCellByMetricWithStyle(op, day, metricKey) {
+            function productionColorClass(diff, norm) {
+                if (norm <= 0) return diff < 0 ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700';
+                const pct = (diff / norm) * 100;
+                if (diff < 0) return 'bg-red-100 text-red-700';
+                if (pct < 10) return 'bg-yellow-100 text-yellow-800';
+                return 'bg-green-100 text-green-700';
+            }
+
+            function formatNumber(n, decimals=1) {
+                const num = Number(n || 0);
+                if (!Number.isFinite(num)) return '0';
+                return num.toFixed(decimals);
+            }
+
+            // render cell with trainings marker
+            function renderCellByMetricWithStyleAndMarker(op, day, metricKey) {
                 const dayKey = String(day);
                 const d = op.daily && op.daily[dayKey];
                 const isPast = (() => {
@@ -2549,73 +2577,84 @@
                 return day > todayD;
                 })();
 
-                // Only special coloring for work_time tab
+                // check trainings for marker
+                const hasTrainings = !!(trainingsMap[op.operator_id] && trainingsMap[op.operator_id][day]);
+
+                // For work_time tab coloring as before
                 if (selectedTab === 'work_time') {
                 const work = d ? Number(d.work_time || 0) : 0;
                 const hasData = d && Number(d.work_time || 0) > 0;
 
                 if (!hasData && isPast) {
-                    // dark gray for past days without data
                     return (
-                    <div className="w-full h-8 rounded-md flex items-center justify-center bg-gray-700 text-white">
-                        —
+                    <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-300 text-white">
+                        <span>—</span>
+                        {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
                     </div>
                     );
                 }
                 if (!hasData && isFuture) {
-                    // light gray for future days
                     return (
-                    <div className="w-full h-8 rounded-md flex items-center justify-center bg-gray-200 text-gray-600">
-                        —
+                    <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-200 text-gray-600">
+                        <span>—</span>
+                        {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
                     </div>
                     );
                 }
                 if (!hasData && !isPast && !isFuture) {
-                    // current day with no data: show pale gray
                     return (
-                    <div className="w-full h-8 rounded-md flex items-center justify-center bg-gray-100 text-gray-600">
-                        —
+                    <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-100 text-gray-600">
+                        <span>—</span>
+                        {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
                     </div>
                     );
                 }
 
                 // has data -> green intensity
                 const ratio = maxWork > 0 ? Math.max(0, Math.min(1, work / maxWork)) : 0;
-                // alpha from 0.18 to 0.95
                 const alpha = 0.18 + 0.77 * ratio;
-                const bg = `rgba(16,185,129,${alpha})`; // tailwind green-500 rgba
+                const bg = `rgba(16,185,129,${alpha})`;
                 const textClass = ratio > 0.5 ? 'text-white' : 'text-gray-900';
                 const display = work ? work.toFixed(2) : '0.00';
 
                 return (
-                    <div className={`w-full h-8 rounded-md flex items-center justify-center ${textClass}`} style={{ backgroundColor: bg }}>
+                    <div className={`relative w-full h-8 rounded-md flex items-center justify-center ${textClass}`} style={{ backgroundColor: bg }}>
                     <span className="text-sm font-medium">{display}</span>
+                    {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
                     </div>
                 );
                 }
 
-                // Non-work tabs: default rendering
-                if (!d) return <div className="text-sm text-gray-400">—</div>;
-                const val = d[metricKey];
-                if (metricKey === "calls") return <div className="text-sm font-medium">{Number(val || 0)}</div>;
-                const num = Number(val || 0);
-                return <div className="text-sm font-medium">{num ? num.toFixed(2) : '0.00'}</div>;
-            }
-
-            function formatNumber(n, decimals=1) {
-                const num = Number(n || 0);
-                if (!Number.isFinite(num)) return '0';
-                return num.toFixed(decimals);
-            }
-
-            function productionColorClass(diff, norm) {
-                if (norm <= 0) {
-                return diff < 0 ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700';
+                // Non-work tabs: default rendering, but keep trainings marker
+                if (!d) {
+                return (
+                    <div className="relative text-sm text-gray-400">
+                    —
+                    {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
+                    </div>
+                );
                 }
-                const pct = (diff / norm) * 100;
-                if (diff < 0) return 'bg-red-100 text-red-700';
-                if (pct < 10) return 'bg-yellow-100 text-yellow-800';
-                return 'bg-green-100 text-green-700';
+                const val = d[metricKey];
+                if (metricKey === "calls") {
+                return (
+                    <div className="relative text-sm font-medium">
+                    {Number(val || 0)}
+                    {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
+                    </div>
+                );
+                }
+                const num = Number(val || 0);
+                return (
+                <div className="relative text-sm font-medium">
+                    {num ? num.toFixed(2) : '0.00'}
+                    {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
+                </div>
+                );
+            }
+
+            // get trainings list for operator/day (array)
+            function getTrainingsFor(opId, day) {
+                return (trainingsMap[opId] && trainingsMap[opId][day]) ? trainingsMap[opId][day] : [];
             }
 
             return (
@@ -2632,7 +2671,7 @@
                         <option value="">Все супервайзеры</option>
                         </select>
                     )}
-                    <button onClick={fetchDailyHours} className="px-3 py-2 bg-blue-600 text-white rounded-md shadow-sm hover:bg-blue-700">Обновить</button>
+                    <button onClick={fetchDailyHoursAndTrainings} className="px-3 py-2 bg-blue-600 text-white rounded-md shadow-sm hover:bg-blue-700">Обновить</button>
                     </div>
                 </div>
 
@@ -2732,7 +2771,7 @@
                                     className="w-full h-8 rounded-md text-sm flex items-center justify-center"
                                     aria-label={`Данные ${op.name} за ${day}-${monthLabel}`}
                                 >
-                                    {renderCellByMetricWithStyle(op, day, selectedTab)}
+                                    {renderCellByMetricWithStyleAndMarker(op, day, selectedTab)}
                                 </button>
                                 </div>
                             ))}
@@ -2828,7 +2867,7 @@
                     </div>
                 )}
 
-                {/* Detail modal for a single cell */}
+                {/* Detail modal for a single cell (with trainings shown) */}
                 {selectedCell && cellModel && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
                     <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-lg" onClick={e=>e.stopPropagation()}>
@@ -2837,7 +2876,7 @@
                         <button onClick={closeCellModal} className="px-2 py-1 rounded-md border">Закрыть</button>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid grid-cols-2 gap-3 mb-4">
                         <label className="text-xs text-gray-600">Work time (ч)
                             <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.work_time} onChange={e=>updateCellField('work_time', e.target.value)} />
                         </label>
@@ -2856,6 +2895,27 @@
                         <label className="col-span-2 text-xs text-gray-600">Efficiency (ч)
                             <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.efficiency} onChange={e=>updateCellField('efficiency', e.target.value)} />
                         </label>
+                        </div>
+
+                        {/* Trainings list for this operator/day */}
+                        <div className="mb-4">
+                        <h4 className="text-sm font-semibold mb-2">Тренинги</h4>
+                        {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).length === 0 ? (
+                            <div className="text-sm text-gray-500">Тренингов нет.</div>
+                        ) : (
+                            <div className="space-y-2">
+                            {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).map(t => (
+                                <div key={t.id} className="p-2 border rounded-md bg-yellow-50">
+                                <div className="flex items-center justify-between">
+                                    <div className="text-sm font-medium">{t.start_time} — {t.end_time}</div>
+                                    <div className="text-xs text-gray-500">by {t.created_by_name}</div>
+                                </div>
+                                <div className="text-sm text-gray-700">{t.reason || '—'}</div>
+                                {t.comment && <div className="text-xs text-gray-600 mt-1">{t.comment}</div>}
+                                </div>
+                            ))}
+                            </div>
+                        )}
                         </div>
 
                         <div className="mt-4 flex items-center justify-end gap-3">
@@ -5618,7 +5678,7 @@
                                         <li>
                                             <button
                                                 onClick={() => setView('sv_hours')}
-                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-yellow-600' : ''}`}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <i className="fas fa-clock" /> Учет часов
                                             </button>
@@ -5660,7 +5720,7 @@
                                         <li>
                                             <button
                                                 onClick={() => setView('sv_hours')}
-                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-yellow-600 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-yellow-600' : ''}`}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <i className="fas fa-clock" /> Учет часов
                                             </button>
