@@ -539,7 +539,7 @@ class Database:
         efficiency ожидается в часах.
         """
         if isinstance(day, str):
-            day = _dt.strptime(day, "%Y-%m-%d").date()
+            day = datetime.strptime(day, "%Y-%m-%d").date()
         with self._get_cursor() as cursor:
             cursor.execute("""
                 INSERT INTO daily_hours (operator_id, day, work_time, break_time, talk_time, calls, efficiency)
