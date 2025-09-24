@@ -575,6 +575,96 @@ class Database:
                 "efficiency": float(row[5])   # часы
             } for row in cursor.fetchall()]
 
+    def get_daily_hours_by_supervisor_month(self, supervisor_id, month):
+        """
+        Возвращает все daily_hours для всех операторов, у которых supervisor_id = supervisor_id,
+        за месяц YYYY-MM. Возвращает список операторов со словарём daily по номерам дней.
+        """
+        import calendar as _py_calendar
+        from datetime import date as _date, datetime as _dt
+
+        # validate month format YYYY-MM
+        try:
+            year, mon = map(int, month.split('-'))
+            days = _py_calendar.monthrange(year, mon)[1]
+            start = _date(year, mon, 1)
+            end = _date(year, mon, days)
+        except Exception as e:
+            raise ValueError("Invalid month format, expected YYYY-MM") from e
+
+        with self._get_cursor() as cursor:
+            # Получаем все операторы этого супервайзера
+            cursor.execute("""
+                SELECT id, name
+                FROM users
+                WHERE role = 'operator' AND supervisor_id = %s
+                ORDER BY name
+            """, (supervisor_id,))
+            ops = cursor.fetchall()  # list of (id, name)
+
+            if not ops:
+                return {"month": month, "days_in_month": days, "operators": []}
+
+            op_ids = [row[0] for row in ops]
+
+            # Получаем daily_hours для этих операторов за месяц
+            cursor.execute(f"""
+                SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency
+                FROM daily_hours d
+                WHERE d.operator_id = ANY(%s)
+                AND d.day >= %s AND d.day <= %s
+                ORDER BY d.operator_id, d.day
+            """, (op_ids, start, end))
+            daily_rows = cursor.fetchall()
+
+            # Получаем агрегаты из work_hours (если есть)
+            cursor.execute(f"""
+                SELECT operator_id, regular_hours, total_break_time, total_talk_time, total_calls, total_efficiency_hours, calls_per_hour
+                FROM work_hours
+                WHERE operator_id = ANY(%s) AND month = %s
+            """, (op_ids, month))
+            agg_rows = cursor.fetchall()
+            agg_map = {r[0]: {
+                "regular_hours": float(r[1]) if r[1] is not None else 0.0,
+                "total_break_time": float(r[2]) if r[2] is not None else 0.0,
+                "total_talk_time": float(r[3]) if r[3] is not None else 0.0,
+                "total_calls": int(r[4]) if r[4] is not None else 0,
+                "total_efficiency_hours": float(r[5]) if r[5] is not None else 0.0,
+                "calls_per_hour": float(r[6]) if r[6] is not None else 0.0
+            } for r in agg_rows}
+
+            # Build operator dicts
+            operators = []
+            # prepare daily map: operator_id -> {day_number: {...}}
+            daily_map = {}
+            for op_id, day, work_time, break_time, talk_time, calls, eff in daily_rows:
+                day_num = int(day.day)
+                d = {
+                    "work_time": float(work_time) if work_time is not None else 0.0,
+                    "break_time": float(break_time) if break_time is not None else 0.0,
+                    "talk_time": float(talk_time) if talk_time is not None else 0.0,
+                    "calls": int(calls) if calls is not None else 0,
+                    "efficiency": float(eff) if eff is not None else 0.0
+                }
+                daily_map.setdefault(op_id, {})[str(day_num)] = d
+
+            for op_id, op_name in ops:
+                operators.append({
+                    "operator_id": op_id,
+                    "name": op_name,
+                    "daily": daily_map.get(op_id, {}),   # keys are day numbers as strings
+                    "aggregates": agg_map.get(op_id, {
+                        "regular_hours": 0.0,
+                        "total_break_time": 0.0,
+                        "total_talk_time": 0.0,
+                        "total_calls": 0,
+                        "total_efficiency_hours": 0.0,
+                        "calls_per_hour": 0.0
+                    })
+                })
+
+        return {"month": month, "days_in_month": days, "operators": operators}
+
     def aggregate_month_from_daily(self, operator_id, month):
         """
         Суммирует daily_hours за месяц и обновляет work_hours:
