@@ -2238,6 +2238,212 @@
             );
         };
 
+const HoursAccountingView = ({ user, onUploaded, showToast }) => {
+    const [month, setMonth] = useState(() => {
+        const d = new Date();
+        return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; // YYYY-MM
+    });
+
+    const [operators, setOperators] = useState([]); // [{id, name}]
+    const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
+    const [isLoading, setIsLoading] = useState(false);
+
+    // grid state
+    const [selectedDay, setSelectedDay] = useState(null); // {dateStr, day, monthLabel}
+    const [uploadFile, setUploadFile] = useState(null);
+    const [isUploading, setIsUploading] = useState(false);
+    const [uploadProgress, setUploadProgress] = useState(0);
+
+    // helpers
+    const monthParts = useMemo(() => {
+        const [y, m] = month.split('-').map(Number);
+        return { year: y, monthNum: m };
+    }, [month]);
+
+    const monthLabel = useMemo(() => {
+        const names = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
+        return names[monthParts.monthNum - 1] || '';
+    }, [monthParts]);
+
+    const daysInMonth = useMemo(() => new Date(monthParts.year, monthParts.monthNum, 0).getDate(), [monthParts]);
+    const daysArray = useMemo(() => Array.from({length: daysInMonth}, (_,i) => i+1), [daysInMonth]);
+
+    useEffect(() => {
+        if (!user) return;
+        fetchOperators();
+    }, [user, selectedSvId, month]);
+
+    async function fetchOperators() {
+        setIsLoading(true);
+        try {
+        // Try a couple of endpoints gracefully. Adjust to your backend API.
+        const svParam = selectedSvId ? `?sv_id=${selectedSvId}&month=${month}` : `?month=${month}`;
+        const url = `${API_BASE_URL}/api/sv/operators${svParam}`;
+        const resp = await axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
+        if (resp.data && resp.data.status === 'success' && Array.isArray(resp.data.operators)) {
+            setOperators(resp.data.operators);
+        } else if (resp.data && Array.isArray(resp.data)) {
+            // fallback if API returns plain array
+            setOperators(resp.data);
+        } else {
+            // fallback to generic users endpoint
+            const r2 = await axios.get(`${API_BASE_URL}/api/admin/users?role=operator`, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
+            setOperators(r2.data.users || []);
+        }
+        } catch (err) {
+        console.error('fetchOperators error', err);
+        (showToast || fallbackToast)("Не удалось загрузить список операторов", 'error');
+        } finally {
+        setIsLoading(false);
+        }
+    }
+
+    function fallbackToast(msg, type='success') {
+        try { if (window.showToast) window.showToast(msg, type); else alert(msg); } catch(e){alert(msg);} 
+    }
+
+    function formatHeaderLabel(day) {
+        return `${day}-${monthLabel}`; // e.g. 3-сен
+    }
+
+    function openUploadForDay(day) {
+        const dateStr = `${monthParts.year}-${String(monthParts.monthNum).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+        setSelectedDay({ dateStr, day, monthLabel });
+        setUploadFile(null);
+        setUploadProgress(0);
+    }
+
+    async function handleUpload(e) {
+        e.preventDefault();
+        if (!selectedDay) return;
+        if (!uploadFile) {
+        (showToast || fallbackToast)('Выберите файл для загрузки', 'error');
+        return;
+        }
+        setIsUploading(true);
+        setUploadProgress(0);
+        try {
+        const form = new FormData();
+        form.append('date', selectedDay.dateStr);
+        form.append('sv_id', selectedSvId || '');
+        form.append('file', uploadFile);
+
+        const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, form, {
+            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'multipart/form-data' },
+            onUploadProgress: (p) => {
+            if (p.total) setUploadProgress(Math.round((p.loaded / p.total) * 100));
+            }
+        });
+
+        if (resp.data && (resp.data.status === 'success' || resp.status === 200)) {
+            (showToast || fallbackToast)('Файл успешно загружен. Расчёт начат.', 'success');
+            if (onUploaded) onUploaded(resp.data);
+            // Optionally refresh operators/hours grid here
+        } else {
+            const errMsg = resp.data?.error || 'Сервер вернул ошибку';
+            (showToast || fallbackToast)(errMsg, 'error');
+        }
+        } catch (err) {
+        console.error('upload error', err);
+        const msg = err.response?.data?.error || err.message || 'Ошибка загрузки';
+        (showToast || fallbackToast)(msg, 'error');
+        } finally {
+        setIsUploading(false);
+        setUploadProgress(0);
+        setSelectedDay(null);
+        setUploadFile(null);
+        }
+    }
+
+    return (
+        <div className="bg-white p-6 rounded-lg shadow">
+        <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+            <label className="text-sm font-medium">Месяц</label>
+            <input type="month" className="p-2 border rounded" value={month} onChange={e => setMonth(e.target.value)} />
+            </div>
+
+            <div className="flex items-center gap-3">
+            {user?.role === 'admin' && (
+                <select value={selectedSvId || ''} onChange={e=>setSelectedSvId(e.target.value)} className="p-2 border rounded">
+                <option value="">Все супервайзеры</option>
+                {/* If you want to allow admin to pick specific SV, you'll need to fetch SV list and render here */}
+                </select>
+            )}
+            <button onClick={fetchOperators} className="px-3 py-2 bg-blue-600 text-white rounded">Обновить</button>
+            </div>
+        </div>
+
+        <div className="overflow-auto border rounded">
+            <div className="min-w-max">
+            {/* Header: days as buttons */}
+            <div className="flex sticky top-0 bg-gray-50 border-b">
+                <div className="w-48 p-2 border-r">Операторы</div>
+                {daysArray.map(day => (
+                <div key={day} className="p-2 min-w-[72px] text-center border-l">
+                    <button onClick={() => openUploadForDay(day)} className="text-xs font-semibold px-2 py-1 rounded hover:bg-gray-100">
+                    {formatHeaderLabel(day)}
+                    </button>
+                </div>
+                ))}
+            </div>
+
+            {/* Rows: operators */}
+            <div>
+                {isLoading ? (
+                <div className="p-4">Загрузка операторов...</div>
+                ) : operators.length === 0 ? (
+                <div className="p-4">Операторы не найдены.</div>
+                ) : operators.map(op => (
+                <div key={op.id} className="flex items-center border-b hover:bg-gray-50">
+                    <div className="w-48 p-2 text-sm font-medium">{op.name}</div>
+                    {daysArray.map(day => {
+                    const dateStr = `${monthParts.year}-${String(monthParts.monthNum).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+                    // You may want to show existing hours/flags per cell by fetching hours per operator
+                    return (
+                        <div key={day} className="p-2 min-w-[72px] text-center border-l">
+                        <button
+                            onClick={() => {
+                            // Clicking on a cell opens upload for this specific operator+day if desired
+                            // For group upload we open header; for operator-specific upload, set selectedDay and maybe selectedOperator
+                            openUploadForDay(day);
+                            }}
+                            className="w-full h-8 rounded hover:bg-gray-100 text-sm"
+                        >
+                            {/* placeholder: show "—" or hours */}
+                            —
+                        </button>
+                        </div>
+                    );
+                    })}
+                </div>
+                ))}
+            </div>
+            </div>
+        </div>
+
+        {/* Upload modal (simple inline panel) */}
+        {selectedDay && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+            <form onSubmit={handleUpload} className="bg-white p-6 rounded shadow-lg w-full max-w-md" onClick={e=>e.stopPropagation()}>
+                <h3 className="text-lg font-semibold mb-3">Загрузить файл для {selectedDay.dateStr}</h3>
+                <div className="mb-3">
+                <input type="file" accept=".xlsx,.xls,.csv" onChange={e=>setUploadFile(e.target.files?.[0]||null)} />
+                </div>
+                <div className="flex items-center gap-3 justify-end">
+                <button type="button" onClick={()=>{setSelectedDay(null); setUploadFile(null);}} className="px-3 py-2 rounded border">Отмена</button>
+                <button type="submit" disabled={isUploading} className="px-4 py-2 bg-blue-600 text-white rounded">
+                    {isUploading ? `Загрузка ${uploadProgress}%` : 'Загрузить и рассчитать'}
+                </button>
+                </div>
+            </form>
+            </div>
+        )}
+        </div>
+    );
+    }
+
+
         const App = () => {
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
@@ -4983,6 +5189,14 @@
                                             </button>
                                         </li>
                                         <li>
+                                            <button
+                                                onClick={() => setView('sv_hours')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-yellow-600 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-yellow-600' : ''}`}
+                                            >
+                                                <i className="fas fa-clock" /> Учет часов
+                                            </button>
+                                        </li>
+                                        <li>
                                             <button onClick={() => setView('trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-book"></i> Учет тренингов
                                             </button>
@@ -5014,6 +5228,14 @@
                                         <li>
                                             <button onClick={() => setView('trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-book"></i> Учет тренингов
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button
+                                                onClick={() => setView('sv_hours')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-yellow-600 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-yellow-600' : ''}`}
+                                            >
+                                                <i className="fas fa-clock" /> Учет часов
                                             </button>
                                         </li>
                                     </>
@@ -5697,6 +5919,7 @@
                                 </div>
                                 )}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
+                                {( view === "sv_hours" && (<HoursAccountingView user={user} showToast={showToast} />))}
                             </>
                         )}
                         {user.role === 'sv' && (
@@ -6278,6 +6501,7 @@
                                 </div>
                                 )}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
+                                {( view === "sv_hours" && (<HoursAccountingView user={user} showToast={showToast} />))}
                             </>
                         )}
                         {user.role === 'operator' && (
