@@ -96,16 +96,23 @@ def require_api_key(f):
             return jsonify({"error": "Invalid or missing API key", "provided_key": api_key}), 401
     return decorated
 
+def _build_cors_preflight_response():
+    response = jsonify({"status": "ok"})
+    response.headers.add("Access-Control-Allow-Origin", "https://alfa330.github.io")
+    response.headers.add("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-User-Id")
+    response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+    return response
+
 @app.route('/')
 def index():
     return "Bot is alive!", 200
 
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', 'https://alfa330.github.io')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, X-User-Id')
-    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE, PUT')
-    return response
+# @app.after_request
+# def after_request(response):
+#     response.headers.add('Access-Control-Allow-Origin', 'https://alfa330.github.io')
+#     response.headers.add('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, X-User-Id')
+#     response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE, PUT')
+#     return response
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -2319,13 +2326,6 @@ def get_access_keyboard():
     kb.add(KeyboardButton('Выход🚪')) 
     kb.add(KeyboardButton('Отмена ❌'))
     return kb
-
-def _build_cors_preflight_response():
-    response = jsonify({"status": "ok"})
-    response.headers.add("Access-Control-Allow-Origin", "https://alfa330.github.io")
-    response.headers.add("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-User-Id")
-    response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
-    return response
 
 def get_current_week_of_month():
     today = datetime.now()
