@@ -2286,6 +2286,12 @@
             const daysInMonth = useMemo(() => new Date(monthParts.year, monthParts.monthNum, 0).getDate(), [monthParts]);
             const daysArray = useMemo(() => Array.from({length: daysInMonth}, (_,i) => i+1), [daysInMonth]);
 
+            // compute "today" relative to user's environment
+            const today = useMemo(() => new Date(), []);
+            const todayY = today.getFullYear();
+            const todayM = today.getMonth() + 1;
+            const todayD = today.getDate();
+
             useEffect(() => {
                 if (!user) return;
                 fetchDailyHours();
@@ -2460,7 +2466,6 @@
                 });
                 if (resp.data && resp.data.status === 'success') {
                     fallbackToast('Данные сохранены', 'success');
-                    // update local UI quickly
                     setOperators(prev => prev.map(op => {
                     if (op.operator_id !== cellModel.operator_id) return op;
                     const daily = { ...(op.daily || {}) };
@@ -2505,10 +2510,91 @@
                 }
             }
 
-            // ====== Render helpers ======
-            function renderCellByMetric(op, day, metricKey) {
+            // ====== Render helpers & coloring logic ======
+
+            // compute maximum work_time in the table (used to scale green intensity)
+            const maxWork = useMemo(() => {
+                let max = 8; // default baseline (8 hours)
+                for (const op of operators) {
+                if (!op.daily) continue;
+                for (const k of Object.keys(op.daily)) {
+                    const v = Number(op.daily[k]?.work_time || 0);
+                    if (v > max) max = v;
+                }
+                }
+                return max;
+            }, [operators]);
+
+            // determine if month is before/after current
+            function monthRelationToToday() {
+                if (monthParts.year < todayY) return -1;
+                if (monthParts.year > todayY) return 1;
+                if (monthParts.monthNum < todayM) return -1;
+                if (monthParts.monthNum > todayM) return 1;
+                return 0;
+            }
+            const monthRel = monthRelationToToday(); // -1 = past month, 0 = this month, 1 = future month
+
+            function renderCellByMetricWithStyle(op, day, metricKey) {
                 const dayKey = String(day);
                 const d = op.daily && op.daily[dayKey];
+                const isPast = (() => {
+                if (monthRel < 0) return true;
+                if (monthRel > 0) return false;
+                return day < todayD;
+                })();
+                const isFuture = (() => {
+                if (monthRel > 0) return true;
+                if (monthRel < 0) return false;
+                return day > todayD;
+                })();
+
+                // Only special coloring for work_time tab
+                if (selectedTab === 'work_time') {
+                const work = d ? Number(d.work_time || 0) : 0;
+                const hasData = d && Number(d.work_time || 0) > 0;
+
+                if (!hasData && isPast) {
+                    // dark gray for past days without data
+                    return (
+                    <div className="w-full h-8 rounded-md flex items-center justify-center bg-gray-700 text-white">
+                        —
+                    </div>
+                    );
+                }
+                if (!hasData && isFuture) {
+                    // light gray for future days
+                    return (
+                    <div className="w-full h-8 rounded-md flex items-center justify-center bg-gray-200 text-gray-600">
+                        —
+                    </div>
+                    );
+                }
+                if (!hasData && !isPast && !isFuture) {
+                    // current day with no data: show pale gray
+                    return (
+                    <div className="w-full h-8 rounded-md flex items-center justify-center bg-gray-100 text-gray-600">
+                        —
+                    </div>
+                    );
+                }
+
+                // has data -> green intensity
+                const ratio = maxWork > 0 ? Math.max(0, Math.min(1, work / maxWork)) : 0;
+                // alpha from 0.18 to 0.95
+                const alpha = 0.18 + 0.77 * ratio;
+                const bg = `rgba(16,185,129,${alpha})`; // tailwind green-500 rgba
+                const textClass = ratio > 0.5 ? 'text-white' : 'text-gray-900';
+                const display = work ? work.toFixed(2) : '0.00';
+
+                return (
+                    <div className={`w-full h-8 rounded-md flex items-center justify-center ${textClass}`} style={{ backgroundColor: bg }}>
+                    <span className="text-sm font-medium">{display}</span>
+                    </div>
+                );
+                }
+
+                // Non-work tabs: default rendering
                 if (!d) return <div className="text-sm text-gray-400">—</div>;
                 const val = d[metricKey];
                 if (metricKey === "calls") return <div className="text-sm font-medium">{Number(val || 0)}</div>;
@@ -2522,7 +2608,6 @@
                 return num.toFixed(decimals);
             }
 
-            // color for "Выработка" badge
             function productionColorClass(diff, norm) {
                 if (norm <= 0) {
                 return diff < 0 ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700';
@@ -2644,9 +2729,10 @@
                                 <div key={day} className="p-2 min-w-[72px] text-center border-l">
                                 <button
                                     onClick={() => openCellDetail(op, day)}
-                                    className="w-full h-8 rounded-md hover:bg-gray-100 text-sm flex items-center justify-center"
+                                    className="w-full h-8 rounded-md text-sm flex items-center justify-center"
+                                    aria-label={`Данные ${op.name} за ${day}-${monthLabel}`}
                                 >
-                                    {renderCellByMetric(op, day, selectedTab)}
+                                    {renderCellByMetricWithStyle(op, day, selectedTab)}
                                 </button>
                                 </div>
                             ))}
@@ -2759,7 +2845,6 @@
                             <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.break_time} onChange={e=>updateCellField('break_time', e.target.value)} />
                         </label>
 
-                        {/* talk_time still editable but no tab */}
                         <label className="text-xs text-gray-600">Talk time (ч)
                             <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.talk_time} onChange={e=>updateCellField('talk_time', e.target.value)} />
                         </label>
