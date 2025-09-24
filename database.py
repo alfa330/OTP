@@ -359,18 +359,38 @@ class Database:
             
             # Work hours table with fines column
             cursor.execute("""
+                DROP TABLE IF EXISTS work_hours CASCADE;
                 CREATE TABLE IF NOT EXISTS work_hours (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     operator_id INTEGER NOT NULL REFERENCES users(id),
                     month VARCHAR(7) NOT NULL DEFAULT TO_CHAR(CURRENT_DATE, 'YYYY-MM'),
-                    regular_hours FLOAT NOT NULL DEFAULT 0,
+                    regular_hours FLOAT NOT NULL DEFAULT 0,    
                     training_hours FLOAT NOT NULL DEFAULT 0,
                     fines FLOAT NOT NULL DEFAULT 0,
                     norm_hours FLOAT NOT NULL DEFAULT 0,
-                    daily_hours FLOAT[] NOT NULL DEFAULT ARRAY[]::FLOAT[],
+                    total_break_time FLOAT NOT NULL DEFAULT 0,
+                    total_talk_time FLOAT NOT NULL DEFAULT 0,
+                    total_calls INTEGER NOT NULL DEFAULT 0,
+                    total_efficiency_hours FLOAT NOT NULL DEFAULT 0, 
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     calls_per_hour FLOAT NOT NULL DEFAULT 0.0,
                     UNIQUE(operator_id, month)
+                );
+            """)
+
+            cursor.execute("""
+                CREATE EXTENSION IF NOT EXISTS pgcrypto;
+                CREATE TABLE IF NOT EXISTS daily_hours (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    day DATE NOT NULL,
+                    work_time FLOAT NOT NULL DEFAULT 0,   -- часы работы
+                    break_time FLOAT NOT NULL DEFAULT 0,
+                    talk_time FLOAT NOT NULL DEFAULT 0,
+                    calls INTEGER NOT NULL DEFAULT 0,
+                    efficiency FLOAT NOT NULL DEFAULT 0,  -- **часы**, не доля
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(operator_id, day)
                 );
             """)
 
@@ -512,6 +532,117 @@ class Database:
                     "isActive": row[4]
                 } for row in cursor.fetchall()
             ]
+
+    def insert_or_update_daily_hours(self, operator_id, day, work_time=0.0, break_time=0.0, talk_time=0.0, calls=0, efficiency=0.0):
+        """
+        Вставляет/обновляет запись daily_hours (operator_id + day).
+        efficiency ожидается в часах.
+        """
+        if isinstance(day, str):
+            day = _dt.strptime(day, "%Y-%m-%d").date()
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO daily_hours (operator_id, day, work_time, break_time, talk_time, calls, efficiency)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (operator_id, day)
+                DO UPDATE SET
+                    work_time = EXCLUDED.work_time,
+                    break_time = EXCLUDED.break_time,
+                    talk_time = EXCLUDED.talk_time,
+                    calls = EXCLUDED.calls,
+                    efficiency = EXCLUDED.efficiency,
+                    created_at = CURRENT_TIMESTAMP
+            """, (operator_id, day, work_time, break_time, talk_time, calls, efficiency))
+
+    def get_daily_hours_for_operator_month(self, operator_id, month):
+        """Возвращает список daily_hours для оператора за месяц YYYY-MM."""
+        year, mon = map(int, month.split('-'))
+        start = date(year, mon, 1)
+        end = date(year, mon, _py_calendar.monthrange(year, mon)[1])
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT day, work_time, break_time, talk_time, calls, efficiency
+                FROM daily_hours
+                WHERE operator_id = %s AND day >= %s AND day <= %s
+                ORDER BY day
+            """, (operator_id, start, end))
+            return [{
+                "day": row[0].isoformat(),
+                "work_time": float(row[1]),
+                "break_time": float(row[2]),
+                "talk_time": float(row[3]),
+                "calls": int(row[4]),
+                "efficiency": float(row[5])   # часы
+            } for row in cursor.fetchall()]
+
+    def aggregate_month_from_daily(self, operator_id, month):
+        """
+        Суммирует daily_hours за месяц и обновляет work_hours:
+        - regular_hours <- SUM(work_time)
+        - total_break_time <- SUM(break_time)
+        - total_talk_time <- SUM(talk_time)
+        - total_calls <- SUM(calls)
+        - total_efficiency_hours <- SUM(efficiency)  <-- теперь суммируем часы
+        - calls_per_hour = total_calls / regular_hours (0 если regular_hours == 0)
+        Возвращает агрегаты.
+        """
+        year, mon = map(int, month.split('-'))
+        start = date(year, mon, 1)
+        end = date(year, mon, calendar.monthrange(year, mon)[1])
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    COALESCE(SUM(work_time),0),
+                    COALESCE(SUM(break_time),0),
+                    COALESCE(SUM(talk_time),0),
+                    COALESCE(SUM(calls),0),
+                    COALESCE(SUM(efficiency),0)  -- суммируем часы эффективности
+                FROM daily_hours
+                WHERE operator_id = %s AND day >= %s AND day <= %s
+            """, (operator_id, start, end))
+            row = cursor.fetchone()
+            total_work_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours = row
+
+            # Защита от деления на ноль
+            if total_work_time and float(total_work_time) > 0:
+                calls_per_hour = float(total_calls) / float(total_work_time)
+            else:
+                calls_per_hour = 0.0
+
+            # Вставляем/обновляем work_hours:
+            cursor.execute("""
+                INSERT INTO work_hours (
+                    operator_id, month, regular_hours, total_break_time, total_talk_time, total_calls, total_efficiency_hours, calls_per_hour
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (operator_id, month)
+                DO UPDATE SET
+                    regular_hours = EXCLUDED.regular_hours,
+                    total_break_time = EXCLUDED.total_break_time,
+                    total_talk_time = EXCLUDED.total_talk_time,
+                    total_calls = EXCLUDED.total_calls,
+                    total_efficiency_hours = EXCLUDED.total_efficiency_hours,
+                    calls_per_hour = EXCLUDED.calls_per_hour,
+                    created_at = CURRENT_TIMESTAMP
+            """, (
+                operator_id,
+                month,
+                float(total_work_time),
+                float(total_break_time),
+                float(total_talk_time),
+                int(total_calls),
+                float(total_efficiency_hours),
+                float(calls_per_hour)
+            ))
+
+        return {
+            "regular_hours": float(total_work_time),
+            "total_break_time": float(total_break_time),
+            "total_talk_time": float(total_talk_time),
+            "total_calls": int(total_calls),
+            "total_efficiency_hours": float(total_efficiency_hours),
+            "calls_per_hour": float(calls_per_hour)
+        }
 
     def save_directions(self, directions):
         """Сохранить направления в таблицу directions, создавая новые версии при изменениях."""
@@ -845,11 +976,10 @@ class Database:
                     norm_hours = EXCLUDED.norm_hours
             """, (operator_id, month, regular_hours, training_hours, fines, norm_hours))
 
-    def process_calls_sheet(self, file):
+    def parse_calls_file(self, file):
         try:
             filename = file.filename.lower()
-    
-            # Загружаем файл в DataFrame
+
             if filename.endswith(".csv"):
                 df = pd.read_csv(file, sep=";")
                 sheet_name = "CSV"
@@ -859,65 +989,62 @@ class Database:
                 df = pd.read_excel(excel, sheet_name=sheet_name)
             else:
                 return None, None, "Неверный формат файла. Поддерживаются только CSV, XLS, XLSX"
-    
-            # Проверяем обязательные колонки
+
             required_columns = [
-                "Name", 
-                "Количество поступивших", 
-                "Время в работе", 
+                "Name",
+                "Количество поступивших",
+                "Время в работе",
                 "Всего перерыва",
                 "Тех. причина",
-                "Тренинг"
+                "Тренинг",
+                "Время в разговоре",
+                "На удержании"
             ]
             for col in required_columns:
                 if col not in df.columns:
                     return None, None, f"Не найдена колонка: {col}"
-    
+
             operators = []
             month = date.today().strftime("%Y-%m")
-    
-            with self._get_cursor() as cursor:
-                for _, row in df.iterrows():
-                    try:
-                        name = str(row["Name"]).strip()
-                        calls = int(row["Количество поступивших"])
-    
-                        # Конвертация времени в секунды
-                        work_time = pd.to_timedelta(str(row["Время в работе"])).total_seconds()
-                        break_time = pd.to_timedelta(str(row["Всего перерыва"])).total_seconds()
-                        tech_time = pd.to_timedelta(str(row["Тех. причина"])).total_seconds()
-                        training_time = pd.to_timedelta(str(row["Тренинг"])).total_seconds()
-    
-                        # Чистое рабочее время
-                        net_hours = (work_time - break_time - tech_time - training_time) / 3600
-                        cph = round(calls / net_hours, 1) if net_hours > 0 else 0
-    
-                        # Проверяем, есть ли оператор в БД
-                        cursor.execute(
-                            "SELECT id FROM users WHERE name = %s AND role = 'operator'",
-                            (name,)
-                        )
-                        result = cursor.fetchone()
-                        if not result:
-                            continue
-                        operator_id = result[0]
-    
-                        # Обновляем / вставляем данные по звонкам
-                        cursor.execute("""
-                            INSERT INTO work_hours (operator_id, month, calls_per_hour)
-                            VALUES (%s, %s, %s)
-                            ON CONFLICT (operator_id, month)
-                            DO UPDATE SET calls_per_hour = EXCLUDED.calls_per_hour;
-                        """, (operator_id, month, cph))
-    
-                        operators.append((name, cph))
-    
-                    except Exception as e:
-                        print(f"Ошибка при обработке строки {row}: {e}")
-                        continue
-    
+
+            for _, row in df.iterrows():
+                try:
+                    name = str(row["Name"]).strip()
+                    calls = int(row["Количество поступивших"]) if not pd.isna(row["Количество поступивших"]) else 0
+
+                    def to_seconds(cell):
+                        try:
+                            return pd.to_timedelta(str(cell)).total_seconds()
+                        except Exception:
+                            return 0.0
+
+                    work_time_s = to_seconds(row["Время в работе"])
+                    break_time_s = to_seconds(row["Всего перерыва"])
+                    tech_time_s = to_seconds(row["Тех. причина"])
+                    training_time_s = to_seconds(row["Тренинг"])
+                    talk_time_s = to_seconds(row["Время в разговоре"])
+                    on_hold_s = to_seconds(row["На удержании"])
+
+                    work_time_h = max((work_time_s - break_time_s - tech_time_s - training_time_s) / 3600.0, 0.0)
+                    break_time_h = break_time_s / 3600.0
+                    talk_time_h = talk_time_s / 3600.0
+                    efficiency_h = (talk_time_s + on_hold_s) / 3600.0
+
+                    operators.append({
+                        "name": name,
+                        "work_time": round(work_time_h, 3),
+                        "break_time": round(break_time_h, 3),
+                        "talk_time": round(talk_time_h, 3),
+                        "calls": int(calls),
+                        "efficiency": round(efficiency_h, 3),
+                        "month": month
+                    })
+                except Exception as e:
+                    print(f"Ошибка при обработке строки {row}: {e}")
+                    continue
+
             return sheet_name, operators, None
-    
+
         except Exception as e:
             return None, None, str(e)
 
