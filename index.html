@@ -2238,299 +2238,329 @@
             );
         };
 
+        const TABS = [
+            { key: "work_time", label: "Отработанные часы", unit: "ч" },
+            { key: "break_time", label: "Перерыв", unit: "ч" },
+            { key: "talk_time", label: "Разговор", unit: "ч" },
+            { key: "calls", label: "Звонки", unit: "" },
+            { key: "efficiency", label: "Эффективность", unit: "ч" }
+            ];
+
         const HoursAccountingView = ({ user, onUploaded, showToast }) => {
 
-            const [month, setMonth] = useState(() => {
-                const d = new Date();
-                return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; // YYYY-MM
+        const [month, setMonth] = useState(() => {
+            const d = new Date();
+            return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; // YYYY-MM
+        });
+
+        // operators will now contain objects from /api/sv/daily_hours:
+        // { operator_id, name, daily: { "1": {...}, ... }, aggregates: {...} }
+        const [operators, setOperators] = useState([]);
+        const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
+        const [isLoading, setIsLoading] = useState(false);
+
+        // grid / detail modal states
+        const [selectedCell, setSelectedCell] = useState(null); // { operator, day (number), dateStr }
+        const [cellModel, setCellModel] = useState(null); // editable model for modal
+        const [isSavingCell, setIsSavingCell] = useState(false);
+
+        // currently selected tab/metric
+        const [selectedTab, setSelectedTab] = useState("work_time");
+
+        const monthParts = useMemo(() => {
+            const [y, m] = month.split('-').map(Number);
+            return { year: y, monthNum: m };
+        }, [month]);
+
+        const monthLabel = useMemo(() => {
+            const names = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
+            return names[monthParts.monthNum - 1] || '';
+        }, [monthParts]);
+
+        const daysInMonth = useMemo(() => new Date(monthParts.year, monthParts.monthNum, 0).getDate(), [monthParts]);
+        const daysArray = useMemo(() => Array.from({length: daysInMonth}, (_,i) => i+1), [daysInMonth]);
+
+        useEffect(() => {
+            if (!user) return;
+            fetchDailyHours();
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [user, selectedSvId, month]);
+
+        function fallbackToast(msg, type='success') {
+            try { if (window.showToast) window.showToast(msg, type); else alert(msg); } catch(e){alert(msg);} 
+        }
+
+        // Fetch daily_hours for this supervisor and month
+        async function fetchDailyHours() {
+            if (!user) return;
+            setIsLoading(true);
+            try {
+            const url = `${API_BASE_URL}/api/sv/daily_hours?month=${encodeURIComponent(month)}`;
+            const resp = await axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
+            if (resp.data && resp.data.status === 'success' && Array.isArray(resp.data.operators)) {
+                setOperators(resp.data.operators);
+            } else {
+                setOperators([]);
+                (showToast || fallbackToast)('Не удалось загрузить daily hours', 'error');
+            }
+            } catch (err) {
+            console.error('fetchDailyHours error', err);
+            (showToast || fallbackToast)('Ошибка загрузки часов', 'error');
+            setOperators([]);
+            } finally {
+            setIsLoading(false);
+            }
+        }
+
+        // helpers to format
+        function formatHeaderLabel(day) {
+            return `${day}-${monthLabel}`;
+        }
+
+        function dayToDateStr(day) {
+            // returns YYYY-MM-DD
+            return `${monthParts.year}-${String(monthParts.monthNum).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+        }
+
+        // When clicking a cell -> open modal with detail (create editable model)
+        function openCellDetail(operator, day) {
+            const dayKey = String(day);
+            const dayData = (operator.daily && operator.daily[dayKey]) ? operator.daily[dayKey] : {
+            work_time: 0, break_time: 0, talk_time: 0, calls: 0, efficiency: 0
+            };
+            setSelectedCell({ operator, day, dateStr: dayToDateStr(day) });
+            // clone numeric values into editable model
+            setCellModel({
+            operator_id: operator.operator_id,
+            name: operator.name,
+            day: day,
+            dateStr: dayToDateStr(day),
+            work_time: Number(dayData.work_time || 0),
+            break_time: Number(dayData.break_time || 0),
+            talk_time: Number(dayData.talk_time || 0),
+            calls: Number(dayData.calls || 0),
+            efficiency: Number(dayData.efficiency || 0),
+            month: month
+            });
+        }
+
+        function closeCellModal() {
+            setSelectedCell(null);
+            setCellModel(null);
+        }
+
+        function updateCellField(field, value) {
+            setCellModel(prev => {
+            if (!prev) return prev;
+            const next = { ...prev };
+            if (['work_time','break_time','talk_time','efficiency'].includes(field)) {
+                next[field] = value === '' ? '' : Number(value);
+            } else if (field === 'calls') {
+                next[field] = value === '' ? '' : parseInt(value, 10) || 0;
+            } else {
+                next[field] = value;
+            }
+            return next;
+            });
+        }
+
+        // Save single cell: call /api/hours/upload_group_day with one operator row
+        async function saveCell() {
+            if (!cellModel || !user) return;
+            setIsSavingCell(true);
+            try {
+            // prepare payload: date = YYYY-MM-DD, sv_id optional, operators = [ ... ]
+            const payload = {
+                date: cellModel.dateStr,
+                sv_id: selectedSvId || null,
+                operators: [
+                {
+                    operator_id: cellModel.operator_id,
+                    name: cellModel.name,
+                    work_time: Number(cellModel.work_time) || 0,
+                    break_time: Number(cellModel.break_time) || 0,
+                    talk_time: Number(cellModel.talk_time) || 0,
+                    calls: parseInt(cellModel.calls, 10) || 0,
+                    efficiency: Number(cellModel.efficiency) || 0,
+                    month: cellModel.month
+                }
+                ]
+            };
+
+            const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, payload, {
+                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'application/json' },
+                timeout: 60000
             });
 
-            // operators will now contain objects from /api/sv/daily_hours:
-            // { operator_id, name, daily: { "1": {...}, ... }, aggregates: {...} }
-            const [operators, setOperators] = useState([]);
-            const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
-            const [isLoading, setIsLoading] = useState(false);
+            if (resp.data && resp.data.status === 'success') {
+                (showToast || fallbackToast)('Данные сохранены', 'success');
 
-            // grid / preview states
-            const [selectedCell, setSelectedCell] = useState(null); // { operator, day (number), dateStr }
-            const [cellModel, setCellModel] = useState(null); // editable model for modal
-            const [isSavingCell, setIsSavingCell] = useState(false);
-
-            const monthParts = useMemo(() => {
-                const [y, m] = month.split('-').map(Number);
-                return { year: y, monthNum: m };
-            }, [month]);
-
-            const monthLabel = useMemo(() => {
-                const names = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
-                return names[monthParts.monthNum - 1] || '';
-            }, [monthParts]);
-
-            const daysInMonth = useMemo(() => new Date(monthParts.year, monthParts.monthNum, 0).getDate(), [monthParts]);
-            const daysArray = useMemo(() => Array.from({length: daysInMonth}, (_,i) => i+1), [daysInMonth]);
-
-            useEffect(() => {
-                if (!user) return;
-                fetchDailyHours();
-                // eslint-disable-next-line react-hooks/exhaustive-deps
-            }, [user, selectedSvId, month]);
-
-            function fallbackToast(msg, type='success') {
-                try { if (window.showToast) window.showToast(msg, type); else alert(msg); } catch(e){alert(msg);} 
-            }
-
-            // Fetch daily_hours for this supervisor and month
-            async function fetchDailyHours() {
-                if (!user) return;
-                setIsLoading(true);
-                try {
-                const url = `${API_BASE_URL}/api/sv/daily_hours?month=${encodeURIComponent(month)}`;
-                const resp = await axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
-                if (resp.data && resp.data.status === 'success' && Array.isArray(resp.data.operators)) {
-                    setOperators(resp.data.operators);
-                } else {
-                    setOperators([]);
-                    (showToast || fallbackToast)('Не удалось загрузить daily hours', 'error');
-                }
-                } catch (err) {
-                console.error('fetchDailyHours error', err);
-                (showToast || fallbackToast)('Ошибка загрузки часов', 'error');
-                setOperators([]);
-                } finally {
-                setIsLoading(false);
-                }
-            }
-
-            // helpers to format
-            function formatHeaderLabel(day) {
-                return `${day}-${monthLabel}`;
-            }
-
-            function dayToDateStr(day) {
-                // returns YYYY-MM-DD
-                return `${monthParts.year}-${String(monthParts.monthNum).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-            }
-
-            // When clicking a cell -> open modal with detail (create editable model)
-            function openCellDetail(operator, day) {
-                const dayKey = String(day);
-                const dayData = (operator.daily && operator.daily[dayKey]) ? operator.daily[dayKey] : {
-                work_time: 0, break_time: 0, talk_time: 0, calls: 0, efficiency: 0
-                };
-                setSelectedCell({ operator, day, dateStr: dayToDateStr(day) });
-                // clone numeric values into editable model
-                setCellModel({
-                operator_id: operator.operator_id,
-                name: operator.name,
-                day: day,
-                dateStr: dayToDateStr(day),
-                work_time: Number(dayData.work_time || 0),
-                break_time: Number(dayData.break_time || 0),
-                talk_time: Number(dayData.talk_time || 0),
-                calls: Number(dayData.calls || 0),
-                efficiency: Number(dayData.efficiency || 0),
-                month: month
-                });
-            }
-
-            function closeCellModal() {
-                setSelectedCell(null);
-                setCellModel(null);
-            }
-
-            function updateCellField(field, value) {
-                setCellModel(prev => {
-                if (!prev) return prev;
-                const next = { ...prev };
-                if (['work_time','break_time','talk_time','efficiency'].includes(field)) {
-                    next[field] = value === '' ? '' : Number(value);
-                } else if (field === 'calls') {
-                    next[field] = value === '' ? '' : parseInt(value, 10) || 0;
-                } else {
-                    next[field] = value;
-                }
-                return next;
-                });
-            }
-
-            // Save single cell: call /api/hours/upload_group_day with one operator row
-            async function saveCell() {
-                if (!cellModel || !user) return;
-                setIsSavingCell(true);
-                try {
-                // prepare payload: date = YYYY-MM-DD, sv_id optional, operators = [ ... ]
-                const payload = {
-                    date: cellModel.dateStr,
-                    sv_id: selectedSvId || null,
-                    operators: [
-                    {
-                        operator_id: cellModel.operator_id,
-                        name: cellModel.name,
-                        work_time: Number(cellModel.work_time) || 0,
-                        break_time: Number(cellModel.break_time) || 0,
-                        talk_time: Number(cellModel.talk_time) || 0,
-                        calls: parseInt(cellModel.calls, 10) || 0,
-                        efficiency: Number(cellModel.efficiency) || 0,
-                        month: cellModel.month
+                // Update local operators state for immediate UI feedback:
+                setOperators(prev => {
+                return prev.map(op => {
+                    if (op.operator_id !== cellModel.operator_id) return op;
+                    const daily = { ...(op.daily || {}) };
+                    daily[String(cellModel.day)] = {
+                    work_time: Number(cellModel.work_time) || 0,
+                    break_time: Number(cellModel.break_time) || 0,
+                    talk_time: Number(cellModel.talk_time) || 0,
+                    calls: parseInt(cellModel.calls, 10) || 0,
+                    efficiency: Number(cellModel.efficiency) || 0
+                    };
+                    // Optionally update aggregates if response contains them in resp.data.aggregations
+                    const newOp = { ...op, daily };
+                    if (resp.data.aggregations && resp.data.aggregations[cellModel.operator_id]) {
+                    newOp.aggregates = resp.data.aggregations[cellModel.operator_id];
                     }
-                    ]
-                };
-
-                const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, payload, {
-                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'application/json' },
-                    timeout: 60000
+                    return newOp;
+                });
                 });
 
-                if (resp.data && resp.data.status === 'success') {
-                    (showToast || fallbackToast)('Данные сохранены', 'success');
+                if (onUploaded) onUploaded(resp.data);
 
-                    // Update local operators state for immediate UI feedback:
-                    setOperators(prev => {
-                    return prev.map(op => {
-                        if (op.operator_id !== cellModel.operator_id) return op;
-                        const daily = { ...(op.daily || {}) };
-                        daily[String(cellModel.day)] = {
-                        work_time: Number(cellModel.work_time) || 0,
-                        break_time: Number(cellModel.break_time) || 0,
-                        talk_time: Number(cellModel.talk_time) || 0,
-                        calls: parseInt(cellModel.calls, 10) || 0,
-                        efficiency: Number(cellModel.efficiency) || 0
-                        };
-                        // Optionally update aggregates if response contains them in resp.data.aggregations
-                        const newOp = { ...op, daily };
-                        if (resp.data.aggregations && resp.data.aggregations[cellModel.operator_id]) {
-                        newOp.aggregates = resp.data.aggregations[cellModel.operator_id];
-                        }
-                        return newOp;
-                    });
-                    });
-
-                    // also call onUploaded callback if provided
-                    if (onUploaded) onUploaded(resp.data);
-
-                    closeCellModal();
-                } else {
-                    const err = resp.data?.error || 'Ошибка сохранения';
-                    (showToast || fallbackToast)(err, 'error');
-                }
-                } catch (err) {
-                console.error('saveCell error', err);
-                const msg = err.response?.data?.error || err.message || 'Ошибка при сохранении';
-                (showToast || fallbackToast)(msg, 'error');
-                } finally {
-                setIsSavingCell(false);
-                }
+                closeCellModal();
+            } else {
+                const err = resp.data?.error || 'Ошибка сохранения';
+                (showToast || fallbackToast)(err, 'error');
             }
-
-            // Render cell content: show work_time (rounded) or '-' if 0
-            function renderCellWorkTime(op, day) {
-                const dayKey = String(day);
-                const d = op.daily && op.daily[dayKey];
-                if (!d) return <div className="text-sm text-gray-400">—</div>;
-                const wt = Number(d.work_time || 0);
-                return <div className="text-sm font-medium">{wt ? wt.toFixed(2) : '0.00'}</div>;
+            } catch (err) {
+            console.error('saveCell error', err);
+            const msg = err.response?.data?.error || err.message || 'Ошибка при сохранении';
+            (showToast || fallbackToast)(msg, 'error');
+            } finally {
+            setIsSavingCell(false);
             }
+        }
 
-            return (
-                <div className="bg-white p-6 rounded-lg shadow">
-                <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-3">
-                    <label className="text-sm font-medium">Месяц</label>
-                    <input type="month" className="p-2 border rounded" value={month} onChange={e => setMonth(e.target.value)} />
-                    </div>
+        // Render cell content for the currently selected tab/metric
+        function renderCellByMetric(op, day, metricKey) {
+            const dayKey = String(day);
+            const d = op.daily && op.daily[dayKey];
+            if (!d) return <div className="text-sm text-gray-400">—</div>;
 
-                    <div className="flex items-center gap-3">
-                    {user?.role === 'admin' && (
-                        <select value={selectedSvId || ''} onChange={e=>setSelectedSvId(e.target.value)} className="p-2 border rounded">
-                        <option value="">Все супервайзеры</option>
-                        </select>
-                    )}
-                    <button onClick={fetchDailyHours} className="px-3 py-2 bg-blue-600 text-white rounded">Обновить</button>
-                    </div>
+            const val = d[metricKey];
+            if (metricKey === "calls") {
+            return <div className="text-sm font-medium">{Number(val || 0)}</div>;
+            } else {
+            const num = Number(val || 0);
+            return <div className="text-sm font-medium">{num ? num.toFixed(2) : '0.00'}</div>;
+            }
+        }
+
+        return (
+            <div className="bg-white p-6 rounded-lg shadow">
+            <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                <label className="text-sm font-medium">Месяц</label>
+                <input type="month" className="p-2 border rounded" value={month} onChange={e => setMonth(e.target.value)} />
                 </div>
 
-                <div className="overflow-auto border rounded">
-                    <div className="min-w-max">
-                    {/* Header: days as buttons */}
-                    <div className="flex sticky top-0 bg-gray-50 border-b z-30">
-                        <div className="w-48 p-2 border-r sticky left-0 z-40 bg-gray-50">Операторы</div>
+                <div className="flex items-center gap-3">
+                {user?.role === 'admin' && (
+                    <select value={selectedSvId || ''} onChange={e=>setSelectedSvId(e.target.value)} className="p-2 border rounded">
+                    <option value="">Все супервайзеры</option>
+                    </select>
+                )}
+                <button onClick={fetchDailyHours} className="px-3 py-2 bg-blue-600 text-white rounded">Обновить</button>
+                </div>
+            </div>
+
+            {/* Tabs */}
+            <div className="mb-3 flex items-center gap-2">
+                {TABS.map(tab => (
+                <button
+                    key={tab.key}
+                    onClick={() => setSelectedTab(tab.key)}
+                    className={`px-3 py-1 rounded ${selectedTab === tab.key ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700'}`}
+                    title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
+                >
+                    {tab.label}
+                </button>
+                ))}
+            </div>
+
+            <div className="overflow-auto border rounded">
+                <div className="min-w-max">
+                {/* Header: days as buttons */}
+                <div className="flex sticky top-0 bg-gray-50 border-b z-30">
+                    <div className="w-48 p-2 border-r sticky left-0 z-40 bg-gray-50">Операторы</div>
+
+                    {daysArray.map(day => (
+                    <div key={day} className="p-2 min-w-[72px] text-center border-l">
+                        <div className="text-xs font-semibold px-2 py-1 rounded">{formatHeaderLabel(day)}</div>
+                    </div>
+                    ))}
+                </div>
+
+                {/* Rows */}
+                <div>
+                    {isLoading ? (
+                    <div className="p-4">Загрузка данных...</div>
+                    ) : operators.length === 0 ? (
+                    <div className="p-4">Операторы не найдены.</div>
+                    ) : operators.map(op => (
+                    <div key={op.operator_id} className="flex items-center border-b hover:bg-gray-50 relative">
+                        <div className="w-48 p-2 text-sm font-medium border-r sticky left-0 z-20 bg-white">
+                        {op.name}
+                        </div>
 
                         {daysArray.map(day => (
                         <div key={day} className="p-2 min-w-[72px] text-center border-l">
-                            <div className="text-xs font-semibold px-2 py-1 rounded">{formatHeaderLabel(day)}</div>
+                            <button
+                            onClick={() => openCellDetail(op, day)}
+                            className="w-full h-8 rounded hover:bg-gray-100 text-sm flex items-center justify-center"
+                            >
+                            {renderCellByMetric(op, day, selectedTab)}
+                            </button>
                         </div>
                         ))}
                     </div>
+                    ))}
+                </div>
+                </div>
+            </div>
 
-                    {/* Rows */}
-                    <div>
-                        {isLoading ? (
-                        <div className="p-4">Загрузка данных...</div>
-                        ) : operators.length === 0 ? (
-                        <div className="p-4">Операторы не найдены.</div>
-                        ) : operators.map(op => (
-                        <div key={op.operator_id} className="flex items-center border-b hover:bg-gray-50 relative">
-                            <div className="w-48 p-2 text-sm font-medium border-r sticky left-0 z-20 bg-white">
-                            {op.name}
-                            </div>
-
-                            {daysArray.map(day => (
-                            <div key={day} className="p-2 min-w-[72px] text-center border-l">
-                                <button
-                                onClick={() => openCellDetail(op, day)}
-                                className="w-full h-8 rounded hover:bg-gray-100 text-sm flex items-center justify-center"
-                                >
-                                {renderCellWorkTime(op, day)}
-                                </button>
-                            </div>
-                            ))}
-                        </div>
-                        ))}
+            {/* Detail modal for a single cell */}
+            {selectedCell && cellModel && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                <div className="bg-white p-6 rounded shadow-lg w-full max-w-lg" onClick={e=>e.stopPropagation()}>
+                    <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold">Детали: {cellModel.name} — {cellModel.dateStr}</h3>
+                    <button onClick={closeCellModal} className="px-2 py-1 rounded border">Закрыть</button>
                     </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                    <label className="text-xs text-gray-600">Work time (ч)
+                        <input className="w-full p-2 mt-1 border rounded" type="number" step="0.01" value={cellModel.work_time} onChange={e=>updateCellField('work_time', e.target.value)} />
+                    </label>
+                    <label className="text-xs text-gray-600">Break time (ч)
+                        <input className="w-full p-2 mt-1 border rounded" type="number" step="0.01" value={cellModel.break_time} onChange={e=>updateCellField('break_time', e.target.value)} />
+                    </label>
+
+                    <label className="text-xs text-gray-600">Talk time (ч)
+                        <input className="w-full p-2 mt-1 border rounded" type="number" step="0.01" value={cellModel.talk_time} onChange={e=>updateCellField('talk_time', e.target.value)} />
+                    </label>
+                    <label className="text-xs text-gray-600">Calls
+                        <input className="w-full p-2 mt-1 border rounded" type="number" value={cellModel.calls} onChange={e=>updateCellField('calls', e.target.value)} />
+                    </label>
+
+                    <label className="col-span-2 text-xs text-gray-600">Efficiency (ч)
+                        <input className="w-full p-2 mt-1 border rounded" type="number" step="0.01" value={cellModel.efficiency} onChange={e=>updateCellField('efficiency', e.target.value)} />
+                    </label>
+                    </div>
+
+                    <div className="mt-4 flex items-center justify-end gap-3">
+                    <button onClick={closeCellModal} className="px-3 py-2 rounded border">Отмена</button>
+                    <button onClick={saveCell} disabled={isSavingCell} className="px-4 py-2 bg-green-600 text-white rounded">
+                        {isSavingCell ? 'Сохранение...' : 'Сохранить'}
+                    </button>
                     </div>
                 </div>
-
-                {/* Detail modal for a single cell */}
-                {selectedCell && cellModel && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-                    <div className="bg-white p-6 rounded shadow-lg w-full max-w-lg" onClick={e=>e.stopPropagation()}>
-                        <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-lg font-semibold">Детали: {cellModel.name} — {cellModel.dateStr}</h3>
-                        <button onClick={closeCellModal} className="px-2 py-1 rounded border">Закрыть</button>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                        <label className="text-xs text-gray-600">Work time (ч)
-                            <input className="w-full p-2 mt-1 border rounded" type="number" step="0.01" value={cellModel.work_time} onChange={e=>updateCellField('work_time', e.target.value)} />
-                        </label>
-                        <label className="text-xs text-gray-600">Break time (ч)
-                            <input className="w-full p-2 mt-1 border rounded" type="number" step="0.01" value={cellModel.break_time} onChange={e=>updateCellField('break_time', e.target.value)} />
-                        </label>
-
-                        <label className="text-xs text-gray-600">Talk time (ч)
-                            <input className="w-full p-2 mt-1 border rounded" type="number" step="0.01" value={cellModel.talk_time} onChange={e=>updateCellField('talk_time', e.target.value)} />
-                        </label>
-                        <label className="text-xs text-gray-600">Calls
-                            <input className="w-full p-2 mt-1 border rounded" type="number" value={cellModel.calls} onChange={e=>updateCellField('calls', e.target.value)} />
-                        </label>
-
-                        <label className="col-span-2 text-xs text-gray-600">Efficiency (ч)
-                            <input className="w-full p-2 mt-1 border rounded" type="number" step="0.01" value={cellModel.efficiency} onChange={e=>updateCellField('efficiency', e.target.value)} />
-                        </label>
-                        </div>
-
-                        <div className="mt-4 flex items-center justify-end gap-3">
-                        <button onClick={closeCellModal} className="px-3 py-2 rounded border">Отмена</button>
-                        <button onClick={saveCell} disabled={isSavingCell} className="px-4 py-2 bg-green-600 text-white rounded">
-                            {isSavingCell ? 'Сохранение...' : 'Сохранить'}
-                        </button>
-                        </div>
-                    </div>
-                    </div>
-                )}
                 </div>
-            );
-            };
+            )}
+            </div>
+        );
+        };
 
         const App = () => {
             const [user, setUser] = useState(null);
