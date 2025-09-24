@@ -2629,16 +2629,16 @@
                         </button>
                     </div>
                     ))}
-                     {activeTab === 'work_time' && (
+                     {selectedTab === 'work_time' && (
                         <>
                         <div className="w-32 p-2 text-center border-l bg-gray-50">Итого часов</div>
                         <div className="w-32 p-2 text-center border-l bg-gray-50">Вып. нормы (%)</div>
                         </>
                     )}
-                    {activeTab === 'calls' && (
+                    {selectedTab === 'calls' && (
                         <div className="w-32 p-2 text-center border-l bg-gray-50">КВЗ</div>
                     )}
-                    {activeTab === 'efficiency' && (
+                    {selectedTab === 'efficiency' && (
                         <>
                         <div className="w-32 p-2 text-center border-l bg-gray-50">Итого (ч)</div>
                         <div className="w-32 p-2 text-center border-l bg-gray-50">OCC (%)</div>
