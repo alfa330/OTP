@@ -408,6 +408,31 @@ def preview_calls_table():
         logging.error(f"Ошибка при предпросмотре таблицы звонков: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/sv/update_norm_hours', methods=['POST'])
+@require_api_key
+def update_norm_hours():
+    try:
+        data = request.get_json()
+        operator_id = data.get("operator_id")
+        month = data.get("month")
+        norm_hours = data.get("norm_hours")
+
+        if not operator_id or not month:
+            return jsonify({"error": "operator_id and month required"}), 400
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO work_hours (operator_id, month, norm_hours)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (operator_id, month)
+                DO UPDATE SET norm_hours = EXCLUDED.norm_hours
+            """, (operator_id, month, norm_hours))
+
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        logging.exception("update_norm_hours error")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/sv/daily_hours', methods=['GET'])
 @require_api_key
 def sv_daily_hours():
