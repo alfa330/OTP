@@ -2552,6 +2552,24 @@
             return <div className="text-sm font-medium">{num ? num.toFixed(2) : '0.00'}</div>;
             }
         }
+        async function handleNormChange(operatorId, value) {
+        try {
+            const norm = Number(value) || 0;
+            await axios.post(`${API_BASE_URL}/api/sv/update_norm_hours`, {
+            operator_id: operatorId,
+            month,
+            norm_hours: norm
+            }, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
+
+            setOperators(prev => prev.map(op =>
+            op.operator_id === operatorId ? { ...op, norm_hours: norm } : op
+            ));
+            (showToast || fallbackToast)('Норма часов обновлена', 'success');
+        } catch (err) {
+            console.error('update norm_hours error', err);
+            (showToast || fallbackToast)('Ошибка обновления нормы часов', 'error');
+        }
+        }
 
         return (
             <div className="bg-white p-6 rounded-lg shadow">
@@ -2591,6 +2609,16 @@
                 <div className="flex sticky top-0 bg-gray-50 border-b z-30">
                     <div className="w-48 p-2 border-r sticky left-0 z-40 bg-gray-50">Операторы</div>
 
+                    {/* Новый заголовок: ставка */}
+                    <div className="w-24 p-2 text-center border-r bg-gray-50">
+                        Ставка
+                    </div>
+
+                    {/* Новый заголовок: норма часов */}
+                    <div className="w-32 p-2 text-center border-r bg-gray-50">
+                        Норма часов
+                    </div>
+
                     {daysArray.map(day => (
                     <div key={day} className="p-2 min-w-[72px] text-center border-l">
                         <button
@@ -2613,6 +2641,20 @@
                     <div key={op.operator_id} className="flex items-center border-b hover:bg-gray-50 relative">
                         <div className="w-48 p-2 text-sm font-medium border-r sticky left-0 z-20 bg-white">
                         {op.name}
+                        </div>
+
+                        <div className="w-24 p-2 text-sm text-center border-r">
+                        {op.rate ?? '—'}
+                        </div>
+
+                        <div className="w-32 p-2 text-sm text-center border-r">
+                        <input
+                            type="number"
+                            step="0.1"
+                            className="w-full p-1 border rounded text-center"
+                            value={op.norm_hours ?? 0}
+                            onChange={e => handleNormChange(op.operator_id, e.target.value)}
+                        />
                         </div>
 
                         {daysArray.map(day => (
