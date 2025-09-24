@@ -2252,7 +2252,7 @@
             });
 
             const [operators, setOperators] = useState([]);
-            const [trainingsMap, setTrainingsMap] = useState({}); // { operatorId: { "1":[{...}], "2":[...] } }
+            const [trainingsMap, setTrainingsMap] = useState({}); // { operatorId: { dayNum: [trainings...] } }
             const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
             const [isLoading, setIsLoading] = useState(false);
 
@@ -2308,10 +2308,10 @@
                 setIsLoading(true);
                 try {
                 const url = `${API_BASE_URL}/api/sv/daily_hours?month=${encodeURIComponent(month)}`;
+                const trainingsUrl = `${API_BASE_URL}/api/trainings?month=${encodeURIComponent(month)}${selectedSvId ? `&sv_id=${selectedSvId}` : ''}`;
                 const [hoursResp, trainingsResp] = await Promise.all([
                     axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
-                    // trainings endpoint — pass month and optional sv_id
-                    axios.get(`${API_BASE_URL}/api/trainings?month=${encodeURIComponent(month)}${selectedSvId ? `&sv_id=${selectedSvId}` : ''}`, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
+                    axios.get(trainingsUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
                 ]);
 
                 if (hoursResp.data && hoursResp.data.status === 'success' && Array.isArray(hoursResp.data.operators)) {
@@ -2321,17 +2321,15 @@
                     fallbackToast('Не удалось загрузить daily hours', 'error');
                 }
 
-                // Trainings response expected to be an array as you showed; map it to trainingsMap
+                // Trainings response expected to be array of objects you showed
                 const trainingsList = Array.isArray(trainingsResp.data) ? trainingsResp.data : (trainingsResp.data?.trainings || []);
                 const tmap = {};
                 for (const t of trainingsList) {
-                    // t: {id, operator_id, date: 'YYYY-MM-DD', start_time, end_time, reason, comment, created_at, created_by_name}
                     const op = t.operator_id;
                     let dayNum;
                     try {
-                    dayNum = new Date(t.date + 'T00:00:00').getDate(); // safe parse
+                    dayNum = new Date(t.date + 'T00:00:00').getDate();
                     } catch (e) {
-                    // fallback: take last two chars
                     dayNum = parseInt(t.date.slice(-2), 10);
                     }
                     if (!tmap[op]) tmap[op] = {};
@@ -2423,7 +2421,6 @@
                 });
                 if (resp.data && resp.data.status === 'success') {
                     fallbackToast('Данные сохранены', 'success');
-                    // reload both hours and trainings to reflect possible changes
                     await fetchDailyHoursAndTrainings();
                     setSelectedDayUpload(null);
                     setPreviewOperators([]);
@@ -2494,7 +2491,6 @@
                 });
                 if (resp.data && resp.data.status === 'success') {
                     fallbackToast('Данные сохранены', 'success');
-                    // reload both hours and trainings (to reflect training-related changes if any)
                     await fetchDailyHoursAndTrainings();
                     if (onUploaded) onUploaded(resp.data);
                     closeCellModal();
@@ -2562,7 +2558,7 @@
                 return num.toFixed(decimals);
             }
 
-            // render cell with trainings marker
+            // render cell with trainings marker (marker only in work_time tab)
             function renderCellByMetricWithStyleAndMarker(op, day, metricKey) {
                 const dayKey = String(day);
                 const d = op.daily && op.daily[dayKey];
@@ -2580,16 +2576,19 @@
                 // check trainings for marker
                 const hasTrainings = !!(trainingsMap[op.operator_id] && trainingsMap[op.operator_id][day]);
 
-                // For work_time tab coloring as before
+                // Only show marker in work_time tab
+                const showMarker = selectedTab === 'work_time' && hasTrainings;
+
+                // For work_time tab coloring
                 if (selectedTab === 'work_time') {
                 const work = d ? Number(d.work_time || 0) : 0;
                 const hasData = d && Number(d.work_time || 0) > 0;
 
                 if (!hasData && isPast) {
                     return (
-                    <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-300 text-white">
+                    <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-700 text-white">
                         <span>—</span>
-                        {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
+                        {showMarker && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     </div>
                     );
                 }
@@ -2597,7 +2596,7 @@
                     return (
                     <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-200 text-gray-600">
                         <span>—</span>
-                        {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
+                        {showMarker && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     </div>
                     );
                 }
@@ -2605,7 +2604,7 @@
                     return (
                     <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-100 text-gray-600">
                         <span>—</span>
-                        {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
+                        {showMarker && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     </div>
                     );
                 }
@@ -2613,43 +2612,24 @@
                 // has data -> green intensity
                 const ratio = maxWork > 0 ? Math.max(0, Math.min(1, work / maxWork)) : 0;
                 const alpha = 0.18 + 0.77 * ratio;
-                const bg = `rgba(16,185,129,${alpha})`;
+                const bg = `rgba(16,185,129,${alpha})`; // green-500 rgba
                 const textClass = ratio > 0.5 ? 'text-white' : 'text-gray-900';
                 const display = work ? work.toFixed(2) : '0.00';
 
                 return (
                     <div className={`relative w-full h-8 rounded-md flex items-center justify-center ${textClass}`} style={{ backgroundColor: bg }}>
                     <span className="text-sm font-medium">{display}</span>
-                    {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
+                    {showMarker && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     </div>
                 );
                 }
 
-                // Non-work tabs: default rendering, but keep trainings marker
-                if (!d) {
-                return (
-                    <div className="relative text-sm text-gray-400">
-                    —
-                    {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
-                    </div>
-                );
-                }
+                // Non-work tabs: default rendering, no trainings marker
+                if (!d) return <div className="text-sm text-gray-400">—</div>;
                 const val = d[metricKey];
-                if (metricKey === "calls") {
-                return (
-                    <div className="relative text-sm font-medium">
-                    {Number(val || 0)}
-                    {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
-                    </div>
-                );
-                }
+                if (metricKey === "calls") return <div className="text-sm font-medium">{Number(val || 0)}</div>;
                 const num = Number(val || 0);
-                return (
-                <div className="relative text-sm font-medium">
-                    {num ? num.toFixed(2) : '0.00'}
-                    {hasTrainings && <div className="absolute top-1 right-1 w-3 h-3 rounded-full bg-yellow-400 ring-1 ring-yellow-600" title="Тренинг"></div>}
-                </div>
-                );
+                return <div className="text-sm font-medium">{num ? num.toFixed(2) : '0.00'}</div>;
             }
 
             // get trainings list for operator/day (array)
@@ -2867,7 +2847,7 @@
                     </div>
                 )}
 
-                {/* Detail modal for a single cell (with trainings shown) */}
+                {/* Detail modal for a single cell (trainings shown only in work_time tab) */}
                 {selectedCell && cellModel && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
                     <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-lg" onClick={e=>e.stopPropagation()}>
@@ -2897,26 +2877,28 @@
                         </label>
                         </div>
 
-                        {/* Trainings list for this operator/day */}
+                        {/* Trainings list — show ONLY if currently viewing work_time tab */}
+                        {selectedTab === 'work_time' && (
                         <div className="mb-4">
-                        <h4 className="text-sm font-semibold mb-2">Тренинги</h4>
-                        {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).length === 0 ? (
+                            <h4 className="text-sm font-semibold mb-2">Тренинги</h4>
+                            {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).length === 0 ? (
                             <div className="text-sm text-gray-500">Тренингов нет.</div>
-                        ) : (
+                            ) : (
                             <div className="space-y-2">
-                            {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).map(t => (
+                                {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).map(t => (
                                 <div key={t.id} className="p-2 border rounded-md bg-yellow-50">
-                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center justify-between">
                                     <div className="text-sm font-medium">{t.start_time} — {t.end_time}</div>
                                     <div className="text-xs text-gray-500">by {t.created_by_name}</div>
+                                    </div>
+                                    <div className="text-sm text-gray-700">{t.reason || '—'}</div>
+                                    {t.comment && <div className="text-xs text-gray-600 mt-1">{t.comment}</div>}
                                 </div>
-                                <div className="text-sm text-gray-700">{t.reason || '—'}</div>
-                                {t.comment && <div className="text-xs text-gray-600 mt-1">{t.comment}</div>}
-                                </div>
-                            ))}
+                                ))}
                             </div>
-                        )}
+                            )}
                         </div>
+                        )}
 
                         <div className="mt-4 flex items-center justify-end gap-3">
                         <button onClick={closeCellModal} className="px-3 py-2 rounded-md border">Отмена</button>
