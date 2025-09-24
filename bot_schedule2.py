@@ -107,12 +107,12 @@ def _build_cors_preflight_response():
 def index():
     return "Bot is alive!", 200
 
-# @app.after_request
-# def after_request(response):
-#     response.headers.add('Access-Control-Allow-Origin', 'https://alfa330.github.io')
-#     response.headers.add('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, X-User-Id')
-#     response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE, PUT')
-#     return response
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', 'https://alfa330.github.io')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, X-User-Id')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE, PUT')
+    return response
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -408,47 +408,47 @@ def preview_calls_table():
         logging.error(f"Ошибка при предпросмотре таблицы звонков: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-    @app.route('/api/sv/daily_hours', methods=['GET'])
-    @require_api_key
-    def sv_daily_hours():
-        """
-        Возвращает daily_hours за месяц для всех операторов текущего супервайзера.
-        Параметры:
-        - month (query param) — YYYY-MM (опционально, по умолчанию текущий месяц)
-        Заголовки:
-        - X-User-Id (обязательно) — id супервайзера (проверяется роль)
-        """
+@app.route('/api/sv/daily_hours', methods=['GET'])
+@require_api_key
+def sv_daily_hours():
+    """
+    Возвращает daily_hours за месяц для всех операторов текущего супервайзера.
+    Параметры:
+      - month (query param) — YYYY-MM (опционально, по умолчанию текущий месяц)
+    Заголовки:
+      - X-User-Id (обязательно) — id супервайзера (проверяется роль)
+    """
+    try:
+        # parse month
+        month = request.args.get('month')
+        if not month:
+            month = datetime.now().strftime('%Y-%m')
+
+        # requester
+        requester_header = request.headers.get('X-User-Id')
+        if not requester_header or not requester_header.isdigit():
+            return jsonify({"error": "Invalid or missing X-User-Id header"}), 400
+        requester_id = int(requester_header)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 403
+
+        role = requester[3]  # u.role
+        if role != 'sv':
+            return jsonify({"error": "Only supervisors can request this endpoint"}), 403
+
+        # fetch data
         try:
-            # parse month
-            month = request.args.get('month')
-            if not month:
-                month = datetime.now().strftime('%Y-%m')
+            result = db.get_daily_hours_by_supervisor_month(requester_id, month)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
 
-            # requester
-            requester_header = request.headers.get('X-User-Id')
-            if not requester_header or not requester_header.isdigit():
-                return jsonify({"error": "Invalid or missing X-User-Id header"}), 400
-            requester_id = int(requester_header)
+        return jsonify({"status": "success", "month": result["month"], "days_in_month": result["days_in_month"], "operators": result["operators"]}), 200
 
-            requester = db.get_user(id=requester_id)
-            if not requester:
-                return jsonify({"error": "Requester not found"}), 403
-
-            role = requester[3]  # u.role
-            if role != 'sv':
-                return jsonify({"error": "Only supervisors can request this endpoint"}), 403
-
-            # fetch data
-            try:
-                result = db.get_daily_hours_by_supervisor_month(requester_id, month)
-            except ValueError as e:
-                return jsonify({"error": str(e)}), 400
-
-            return jsonify({"status": "success", "month": result["month"], "days_in_month": result["days_in_month"], "operators": result["operators"]}), 200
-
-        except Exception as e:
-            logging.exception("Error in sv_daily_hours")
-            return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    except Exception as e:
+        logging.exception("Error in sv_daily_hours")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/hours/upload_group_day', methods=['POST'])
 @require_api_key
