@@ -2238,210 +2238,395 @@
             );
         };
 
-const HoursAccountingView = ({ user, onUploaded, showToast }) => {
-    const [month, setMonth] = useState(() => {
-        const d = new Date();
-        return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; // YYYY-MM
-    });
+        const HoursAccountingView = ({ user, onUploaded, showToast }) => {
+            const [month, setMonth] = useState(() => {
+                const d = new Date();
+                return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; // YYYY-MM
+            });
 
-    const [operators, setOperators] = useState([]); // [{id, name}]
-    const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
-    const [isLoading, setIsLoading] = useState(false);
+            const [operators, setOperators] = useState([]); // [{id, name}]
+            const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
+            const [isLoading, setIsLoading] = useState(false);
 
-    // grid state
-    const [selectedDay, setSelectedDay] = useState(null); // {dateStr, day, monthLabel}
-    const [uploadFile, setUploadFile] = useState(null);
-    const [isUploading, setIsUploading] = useState(false);
-    const [uploadProgress, setUploadProgress] = useState(0);
+            // grid state
+            const [selectedDay, setSelectedDay] = useState(null); // {dateStr, day, monthLabel}
+            const [uploadFile, setUploadFile] = useState(null);
+            const [isPreviewing, setIsPreviewing] = useState(false);
+            const [previewOperators, setPreviewOperators] = useState([]); // editable preview rows
+            const [previewSheetName, setPreviewSheetName] = useState(null);
+            const [isSavingPreview, setIsSavingPreview] = useState(false);
+            const [uploadProgress, setUploadProgress] = useState(0);
 
-    // helpers
-    const monthParts = useMemo(() => {
-        const [y, m] = month.split('-').map(Number);
-        return { year: y, monthNum: m };
-    }, [month]);
+            // helpers
+            const monthParts = useMemo(() => {
+                const [y, m] = month.split('-').map(Number);
+                return { year: y, monthNum: m };
+            }, [month]);
 
-    const monthLabel = useMemo(() => {
-        const names = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
-        return names[monthParts.monthNum - 1] || '';
-    }, [monthParts]);
+            const monthLabel = useMemo(() => {
+                const names = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
+                return names[monthParts.monthNum - 1] || '';
+            }, [monthParts]);
 
-    const daysInMonth = useMemo(() => new Date(monthParts.year, monthParts.monthNum, 0).getDate(), [monthParts]);
-    const daysArray = useMemo(() => Array.from({length: daysInMonth}, (_,i) => i+1), [daysInMonth]);
+            const daysInMonth = useMemo(() => new Date(monthParts.year, monthParts.monthNum, 0).getDate(), [monthParts]);
+            const daysArray = useMemo(() => Array.from({length: daysInMonth}, (_,i) => i+1), [daysInMonth]);
 
-    useEffect(() => {
-        if (!user) return;
-        fetchOperators();
-    }, [user, selectedSvId, month]);
+            useEffect(() => {
+                if (!user) return;
+                fetchOperators();
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, [user, selectedSvId, month]);
 
-    async function fetchOperators() {
-        setIsLoading(true);
-        try {
-        // Try a couple of endpoints gracefully. Adjust to your backend API.
-        const svParam = selectedSvId ? `?sv_id=${selectedSvId}&month=${month}` : `?month=${month}`;
-        const url = `${API_BASE_URL}/api/sv/operators${svParam}`;
-        const resp = await axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
-        if (resp.data && resp.data.status === 'success' && Array.isArray(resp.data.operators)) {
-            setOperators(resp.data.operators);
-        } else if (resp.data && Array.isArray(resp.data)) {
-            // fallback if API returns plain array
-            setOperators(resp.data);
-        } else {
-            // fallback to generic users endpoint
-            const r2 = await axios.get(`${API_BASE_URL}/api/admin/users?role=operator`, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
-            setOperators(r2.data.users || []);
-        }
-        } catch (err) {
-        console.error('fetchOperators error', err);
-        (showToast || fallbackToast)("Не удалось загрузить список операторов", 'error');
-        } finally {
-        setIsLoading(false);
-        }
-    }
-
-    function fallbackToast(msg, type='success') {
-        try { if (window.showToast) window.showToast(msg, type); else alert(msg); } catch(e){alert(msg);} 
-    }
-
-    function formatHeaderLabel(day) {
-        return `${day}-${monthLabel}`; // e.g. 3-сен
-    }
-
-    function openUploadForDay(day) {
-        const dateStr = `${monthParts.year}-${String(monthParts.monthNum).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-        setSelectedDay({ dateStr, day, monthLabel });
-        setUploadFile(null);
-        setUploadProgress(0);
-    }
-
-    async function handleUpload(e) {
-        e.preventDefault();
-        if (!selectedDay) return;
-        if (!uploadFile) {
-        (showToast || fallbackToast)('Выберите файл для загрузки', 'error');
-        return;
-        }
-        setIsUploading(true);
-        setUploadProgress(0);
-        try {
-        const form = new FormData();
-        form.append('date', selectedDay.dateStr);
-        form.append('sv_id', selectedSvId || '');
-        form.append('file', uploadFile);
-
-        const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, form, {
-            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'multipart/form-data' },
-            onUploadProgress: (p) => {
-            if (p.total) setUploadProgress(Math.round((p.loaded / p.total) * 100));
+            async function fetchOperators() {
+                setIsLoading(true);
+                try {
+                const svParam = selectedSvId ? `?sv_id=${selectedSvId}&month=${month}` : `?month=${month}`;
+                const url = `${API_BASE_URL}/api/sv/operators${svParam}`;
+                const resp = await axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
+                if (resp.data && resp.data.status === 'success' && Array.isArray(resp.data.operators)) {
+                    setOperators(resp.data.operators);
+                } else if (resp.data && Array.isArray(resp.data)) {
+                    setOperators(resp.data);
+                } else {
+                    const r2 = await axios.get(`${API_BASE_URL}/api/admin/users?role=operator`, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
+                    setOperators(r2.data.users || []);
+                }
+                } catch (err) {
+                console.error('fetchOperators error', err);
+                (showToast || fallbackToast)("Не удалось загрузить список операторов", 'error');
+                } finally {
+                setIsLoading(false);
+                }
             }
-        });
 
-        if (resp.data && (resp.data.status === 'success' || resp.status === 200)) {
-            (showToast || fallbackToast)('Файл успешно загружен. Расчёт начат.', 'success');
-            if (onUploaded) onUploaded(resp.data);
-            // Optionally refresh operators/hours grid here
-        } else {
-            const errMsg = resp.data?.error || 'Сервер вернул ошибку';
-            (showToast || fallbackToast)(errMsg, 'error');
-        }
-        } catch (err) {
-        console.error('upload error', err);
-        const msg = err.response?.data?.error || err.message || 'Ошибка загрузки';
-        (showToast || fallbackToast)(msg, 'error');
-        } finally {
-        setIsUploading(false);
-        setUploadProgress(0);
-        setSelectedDay(null);
-        setUploadFile(null);
-        }
-    }
+            function fallbackToast(msg, type='success') {
+                try { if (window.showToast) window.showToast(msg, type); else alert(msg); } catch(e){alert(msg);} 
+            }
 
-    return (
-        <div className="bg-white p-6 rounded-lg shadow">
-        <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-3">
-            <label className="text-sm font-medium">Месяц</label>
-            <input type="month" className="p-2 border rounded" value={month} onChange={e => setMonth(e.target.value)} />
-            </div>
+            function formatHeaderLabel(day) {
+                return `${day}-${monthLabel}`; // e.g. 3-сен
+            }
 
-            <div className="flex items-center gap-3">
-            {user?.role === 'admin' && (
-                <select value={selectedSvId || ''} onChange={e=>setSelectedSvId(e.target.value)} className="p-2 border rounded">
-                <option value="">Все супервайзеры</option>
-                {/* If you want to allow admin to pick specific SV, you'll need to fetch SV list and render here */}
-                </select>
-            )}
-            <button onClick={fetchOperators} className="px-3 py-2 bg-blue-600 text-white rounded">Обновить</button>
-            </div>
-        </div>
+            function openUploadForDay(day) {
+                const dateStr = `${monthParts.year}-${String(monthParts.monthNum).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+                setSelectedDay({ dateStr, day, monthLabel });
+                setUploadFile(null);
+                setPreviewOperators([]);
+                setPreviewSheetName(null);
+                setUploadProgress(0);
+            }
 
-        <div className="overflow-auto border rounded">
-            <div className="min-w-max">
-            {/* Header: days as buttons */}
-            <div className="flex sticky top-0 bg-gray-50 border-b">
-                <div className="w-48 p-2 border-r">Операторы</div>
-                {daysArray.map(day => (
-                <div key={day} className="p-2 min-w-[72px] text-center border-l">
-                    <button onClick={() => openUploadForDay(day)} className="text-xs font-semibold px-2 py-1 rounded hover:bg-gray-100">
-                    {formatHeaderLabel(day)}
-                    </button>
+            // ========== Preview (parse) ==========
+            async function handlePreviewUpload(e) {
+                e.preventDefault();
+                if (!selectedDay) return;
+                if (!uploadFile) {
+                (showToast || fallbackToast)('Выберите файл для предпросмотра', 'error');
+                return;
+                }
+                setIsPreviewing(true);
+                setPreviewOperators([]);
+                setPreviewSheetName(null);
+                try {
+                const form = new FormData();
+                form.append('file', uploadFile);
+
+                const resp = await axios.post(`${API_BASE_URL}/api/sv/preview_calls_table`, form, {
+                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'multipart/form-data' },
+                    onUploadProgress: (p) => {
+                    if (p.total) setUploadProgress(Math.round((p.loaded / p.total) * 100));
+                    }
+                });
+
+                if (resp.data && resp.data.status === 'success') {
+                    // ожидаем resp.data.operators = [{name, operator_id?, work_time, break_time, talk_time, calls, efficiency, month}]
+                    const parsed = Array.isArray(resp.data.operators) ? resp.data.operators : [];
+                    // normalize numeric fields to numbers
+                    const normalized = parsed.map((r, idx) => ({
+                    _rowIndex: idx,
+                    operator_id: r.operator_id ?? null,
+                    name: r.name ?? r.Name ?? '',
+                    work_time: Number(r.work_time ?? r.workTime ?? 0),
+                    break_time: Number(r.break_time ?? r.breakTime ?? 0),
+                    talk_time: Number(r.talk_time ?? r.talkTime ?? 0),
+                    calls: Number(r.calls ?? r.Calls ?? 0),
+                    efficiency: Number(r.efficiency ?? r.efficiency_h ?? 0),
+                    month: r.month ?? selectedDay.dateStr.slice(0,7)
+                    }));
+                    setPreviewOperators(normalized);
+                    setPreviewSheetName(resp.data.sheet_name || null);
+                } else {
+                    const err = resp.data?.error || 'Ошибка при парсинге файла';
+                    (showToast || fallbackToast)(err, 'error');
+                }
+                } catch (err) {
+                console.error('preview error', err);
+                const msg = err.response?.data?.error || err.message || 'Ошибка предпросмотра';
+                (showToast || fallbackToast)(msg, 'error');
+                } finally {
+                setIsPreviewing(false);
+                setUploadProgress(0);
+                }
+            }
+
+            // editing helpers
+            function updatePreviewField(index, field, value) {
+                setPreviewOperators(prev => {
+                const copy = [...prev];
+                const row = {...copy[index]};
+                // ensure numeric conversion for numeric fields
+                if (['work_time','break_time','talk_time','efficiency'].includes(field)) {
+                    row[field] = value === '' ? '' : Number(value);
+                } else if (field === 'calls') {
+                    row[field] = value === '' ? '' : parseInt(value, 10) || 0;
+                } else {
+                    row[field] = value;
+                }
+                copy[index] = row;
+                return copy;
+                });
+            }
+
+            function addMissingOperator(name) {
+                setPreviewOperators(prev => ([
+                ...prev,
+                {
+                    _rowIndex: prev.length,
+                    operator_id: null,
+                    name,
+                    work_time: 0,
+                    break_time: 0,
+                    talk_time: 0,
+                    calls: 0,
+                    efficiency: 0,
+                    month: selectedDay?.dateStr?.slice(0,7) || month
+                }
+                ]));
+            }
+
+            function removePreviewRow(idx) {
+                setPreviewOperators(prev => prev.filter((_,i)=>i!==idx));
+            }
+
+            // ========== Confirm & Save ==========
+            async function handleConfirmSave() {
+                if (!selectedDay) return;
+                if (previewOperators.length === 0) {
+                (showToast || fallbackToast)('Нет данных для сохранения', 'error');
+                return;
+                }
+
+                // Basic validation: ensure numbers
+                const cleaned = previewOperators.map(r => ({
+                operator_id: r.operator_id ?? null,
+                name: r.name ?? '',
+                work_time: Number(r.work_time) || 0,
+                break_time: Number(r.break_time) || 0,
+                talk_time: Number(r.talk_time) || 0,
+                calls: parseInt(r.calls, 10) || 0,
+                efficiency: Number(r.efficiency) || 0,
+                month: r.month || (selectedDay.dateStr.slice(0,7))
+                }));
+
+                setIsSavingPreview(true);
+                try {
+                // отправляем JSON; backend endpoint должен принимать такой JSON и сохранять записи в daily_hours + агрегировать
+                const payload = {
+                    date: selectedDay.dateStr,    // день, за который пришёл файл
+                    sv_id: selectedSvId || null,
+                    operators: cleaned
+                };
+
+                const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, payload, {
+                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'application/json' },
+                    timeout: 60000
+                });
+
+                if (resp.data && (resp.data.status === 'success' || resp.status === 200)) {
+                    (showToast || fallbackToast)('Данные успешно сохранены', 'success');
+                    // закрываем предпросмотр
+                    setSelectedDay(null);
+                    setPreviewOperators([]);
+                    // опционально вызов внешнего обработчика
+                    if (onUploaded) onUploaded(resp.data);
+                    // обновим список операторов (если это важно)
+                    fetchOperators();
+                } else {
+                    const err = resp.data?.error || 'Ошибка сохранения на сервере';
+                    (showToast || fallbackToast)(err, 'error');
+                }
+                } catch (err) {
+                console.error('save preview error', err);
+                const msg = err.response?.data?.error || err.message || 'Ошибка при сохранении';
+                (showToast || fallbackToast)(msg, 'error');
+                } finally {
+                setIsSavingPreview(false);
+                }
+            }
+
+            // old immediate upload button now triggers preview flow
+            async function handleUpload(e) {
+                // now we go to preview first
+                await handlePreviewUpload(e);
+                // after previewOperators are set, modal opens automatically below
+            }
+
+            return (
+                <div className="bg-white p-6 rounded-lg shadow">
+                <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                    <label className="text-sm font-medium">Месяц</label>
+                    <input type="month" className="p-2 border rounded" value={month} onChange={e => setMonth(e.target.value)} />
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                    {user?.role === 'admin' && (
+                        <select value={selectedSvId || ''} onChange={e=>setSelectedSvId(e.target.value)} className="p-2 border rounded">
+                        <option value="">Все супервайзеры</option>
+                        </select>
+                    )}
+                    <button onClick={fetchOperators} className="px-3 py-2 bg-blue-600 text-white rounded">Обновить</button>
+                    </div>
                 </div>
-                ))}
-            </div>
 
-            {/* Rows: operators */}
-            <div>
-                {isLoading ? (
-                <div className="p-4">Загрузка операторов...</div>
-                ) : operators.length === 0 ? (
-                <div className="p-4">Операторы не найдены.</div>
-                ) : operators.map(op => (
-                <div key={op.id} className="flex items-center border-b hover:bg-gray-50">
-                    <div className="w-48 p-2 text-sm font-medium">{op.name}</div>
-                    {daysArray.map(day => {
-                    const dateStr = `${monthParts.year}-${String(monthParts.monthNum).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-                    // You may want to show existing hours/flags per cell by fetching hours per operator
-                    return (
+                <div className="overflow-auto border rounded">
+                    <div className="min-w-max">
+                    {/* Header: days as buttons */}
+                    <div className="flex sticky top-0 bg-gray-50 border-b z-30">
+                        <div className="w-48 p-2 border-r sticky left-0 z-40 bg-gray-50">
+                        Операторы
+                        </div>
+
+                        {daysArray.map(day => (
                         <div key={day} className="p-2 min-w-[72px] text-center border-l">
-                        <button
-                            onClick={() => {
-                            // Clicking on a cell opens upload for this specific operator+day if desired
-                            // For group upload we open header; for operator-specific upload, set selectedDay and maybe selectedOperator
-                            openUploadForDay(day);
-                            }}
-                            className="w-full h-8 rounded hover:bg-gray-100 text-sm"
-                        >
-                            {/* placeholder: show "—" or hours */}
-                            —
+                            <button onClick={() => openUploadForDay(day)} className="text-xs font-semibold px-2 py-1 rounded hover:bg-gray-100">
+                            {formatHeaderLabel(day)}
+                            </button>
+                        </div>
+                        ))}
+                    </div>
+
+                    {/* Rows: operators */}
+                    <div>
+                        {isLoading ? (
+                        <div className="p-4">Загрузка операторов...</div>
+                        ) : operators.length === 0 ? (
+                        <div className="p-4">Операторы не найдены.</div>
+                        ) : operators.map(op => (
+                        <div key={op.id} className="flex items-center border-b hover:bg-gray-50 relative">
+                            <div className="w-48 p-2 text-sm font-medium border-r sticky left-0 z-20 bg-white">
+                            {op.name}
+                            </div>
+
+                            {daysArray.map(day => {
+                            return (
+                                <div key={day} className="p-2 min-w-[72px] text-center border-l">
+                                <button
+                                    onClick={() => openUploadForDay(day)}
+                                    className="w-full h-8 rounded hover:bg-gray-100 text-sm"
+                                >
+                                    —
+                                </button>
+                                </div>
+                            );
+                            })}
+                        </div>
+                        ))}
+                    </div>
+                    </div>
+                </div>
+
+                {/* Upload modal (file selector -> preview) */}
+                {selectedDay && !isPreviewing && previewOperators.length === 0 && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                    <form onSubmit={handleUpload} className="bg-white p-6 rounded shadow-lg w-full max-w-md" onClick={e=>e.stopPropagation()}>
+                        <h3 className="text-lg font-semibold mb-3">Загрузить файл для {selectedDay.dateStr}</h3>
+                        <div className="mb-3">
+                        <input type="file" accept=".xlsx,.xls,.csv" onChange={e=>setUploadFile(e.target.files?.[0]||null)} />
+                        </div>
+                        <div className="flex items-center gap-3 justify-end">
+                        <button type="button" onClick={()=>{setSelectedDay(null); setUploadFile(null);}} className="px-3 py-2 rounded border">Отмена</button>
+                        <button type="submit" disabled={isPreviewing} className="px-4 py-2 bg-blue-600 text-white rounded">
+                            {isPreviewing ? `Загрузка ${uploadProgress}%` : 'Загрузить и посмотреть'}
                         </button>
                         </div>
-                    );
-                    })}
-                </div>
-                ))}
-            </div>
-            </div>
-        </div>
+                    </form>
+                    </div>
+                )}
 
-        {/* Upload modal (simple inline panel) */}
-        {selectedDay && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-            <form onSubmit={handleUpload} className="bg-white p-6 rounded shadow-lg w-full max-w-md" onClick={e=>e.stopPropagation()}>
-                <h3 className="text-lg font-semibold mb-3">Загрузить файл для {selectedDay.dateStr}</h3>
-                <div className="mb-3">
-                <input type="file" accept=".xlsx,.xls,.csv" onChange={e=>setUploadFile(e.target.files?.[0]||null)} />
+                {/* Preview modal (editable table) */}
+                {selectedDay && previewOperators.length > 0 && (
+                    <div className="fixed inset-0 z-50 flex items-start pt-12 justify-center bg-black/40">
+                    <div className="bg-white p-4 rounded shadow-lg w-[95%] max-w-6xl" onClick={e=>e.stopPropagation()}>
+                        <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-lg font-semibold">Предпросмотр: {previewSheetName || 'файл'} — {selectedDay.dateStr}</h3>
+                        <div className="flex gap-2 items-center">
+                            <button onClick={()=>{ setSelectedDay(null); setPreviewOperators([]); setPreviewSheetName(null); }} className="px-3 py-1 rounded border">Отмена</button>
+                            <button onClick={handleConfirmSave} disabled={isSavingPreview} className="px-3 py-1 bg-green-600 text-white rounded">
+                            {isSavingPreview ? 'Сохранение...' : 'Подтвердить и сохранить'}
+                            </button>
+                        </div>
+                        </div>
+
+                        <div className="overflow-auto max-h-[60vh] border rounded">
+                        <table className="min-w-full table-auto">
+                            <thead className="bg-gray-100 sticky top-0">
+                            <tr>
+                                <th className="p-2 text-left">#</th>
+                                <th className="p-2 text-left">Имя (совпадение с DB)</th>
+                                <th className="p-2">work_time (ч)</th>
+                                <th className="p-2">break_time (ч)</th>
+                                <th className="p-2">talk_time (ч)</th>
+                                <th className="p-2">calls</th>
+                                <th className="p-2">efficiency (ч)</th>
+                                <th className="p-2">Действия</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            {previewOperators.map((r, idx) => (
+                                <tr key={r._rowIndex} className="border-b">
+                                <td className="p-2">{idx+1}</td>
+                                <td className="p-2 text-left">
+                                    <input className="w-full p-1 border rounded" value={r.name} onChange={e=>updatePreviewField(idx,'name',e.target.value)} />
+                                    <div className="text-xs text-gray-500 mt-1">{r.operator_id ? `ID:${r.operator_id}` : 'не найден в БД'}</div>
+                                </td>
+                                <td className="p-2">
+                                    <input type="number" step="0.01" className="w-full p-1 border rounded text-right" value={r.work_time} onChange={e=>updatePreviewField(idx,'work_time', e.target.value)} />
+                                </td>
+                                <td className="p-2">
+                                    <input type="number" step="0.01" className="w-full p-1 border rounded text-right" value={r.break_time} onChange={e=>updatePreviewField(idx,'break_time', e.target.value)} />
+                                </td>
+                                <td className="p-2">
+                                    <input type="number" step="0.01" className="w-full p-1 border rounded text-right" value={r.talk_time} onChange={e=>updatePreviewField(idx,'talk_time', e.target.value)} />
+                                </td>
+                                <td className="p-2">
+                                    <input type="number" className="w-full p-1 border rounded text-right" value={r.calls} onChange={e=>updatePreviewField(idx,'calls', e.target.value)} />
+                                </td>
+                                <td className="p-2">
+                                    <input type="number" step="0.01" className="w-full p-1 border rounded text-right" value={r.efficiency} onChange={e=>updatePreviewField(idx,'efficiency', e.target.value)} />
+                                </td>
+                                <td className="p-2">
+                                    <button onClick={()=>removePreviewRow(idx)} className="px-2 py-1 rounded border text-sm">Удалить</button>
+                                </td>
+                                </tr>
+                            ))}
+                            </tbody>
+                        </table>
+                        </div>
+
+                        <div className="mt-4 flex items-center justify-between">
+                        <div className="text-sm text-gray-600">Всего строк: {previewOperators.length}</div>
+                        <div className="flex items-center gap-2">
+                            <button onClick={()=>addMissingOperator('Новый оператор')} className="px-3 py-1 rounded border">Добавить строку</button>
+                            <button onClick={()=>{ setSelectedDay(null); setPreviewOperators([]); setPreviewSheetName(null); }} className="px-3 py-1 rounded border">Закрыть</button>
+                        </div>
+                        </div>
+                    </div>
+                    </div>
+                )}
                 </div>
-                <div className="flex items-center gap-3 justify-end">
-                <button type="button" onClick={()=>{setSelectedDay(null); setUploadFile(null);}} className="px-3 py-2 rounded border">Отмена</button>
-                <button type="submit" disabled={isUploading} className="px-4 py-2 bg-blue-600 text-white rounded">
-                    {isUploading ? `Загрузка ${uploadProgress}%` : 'Загрузить и рассчитать'}
-                </button>
-                </div>
-            </form>
-            </div>
-        )}
-        </div>
-    );
-    }
+            );
+            };
 
 
         const App = () => {
