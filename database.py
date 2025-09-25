@@ -1120,11 +1120,11 @@ class Database:
 
                     operators.append({
                         "name": name,
-                        "work_time": round(work_time_h, 3),
-                        "break_time": round(break_time_h, 3),
-                        "talk_time": round(talk_time_h, 3),
+                        "work_time": round(work_time_h, 1),
+                        "break_time": round(break_time_h, 1),
+                        "talk_time": round(talk_time_h, 1),
                         "calls": int(calls),
-                        "efficiency": round(efficiency_h, 3),
+                        "efficiency": round(efficiency_h, 1),
                         "month": month
                     })
                 except Exception as e:
