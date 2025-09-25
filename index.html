@@ -2693,7 +2693,7 @@
                     const alpha = 0.18 + 0.77 * ratio;
                     parts.push(
                     <div key="c" className="inline-flex items-center justify-center px-2 py-1 rounded-md text-sm font-medium" style={{ backgroundColor: `rgba(16,185,129,${alpha})` }}>
-                        <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{countedHours.toFixed(2)} ч</span>
+                        <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{countedHours.toFixed(2)}</span>
                     </div>
                     );
                 }
@@ -2702,7 +2702,7 @@
                     const alpha = 0.18 + 0.77 * ratio;
                     parts.push(
                     <div key="n" className="inline-flex items-center justify-center px-2 py-1 rounded-md text-sm font-medium ml-1" style={{ backgroundColor: `rgba(250,204,21,${alpha})` }}>
-                        <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{notCountedHours.toFixed(2)} ч</span>
+                        <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{notCountedHours.toFixed(2)}</span>
                     </div>
                     );
                 }
@@ -2999,7 +2999,7 @@
                         </div>
 
                         {/* Trainings list — show ONLY if currently viewing work_time tab */}
-                        {selectedTab === 'work_time' && (
+                        {selectedTab === 'work_time' || selectedTab === 'trainings' && (
                         <div className="mb-4">
                             <h4 className="text-sm font-semibold mb-2">Тренинги</h4>
                             {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).length === 0 ? (
