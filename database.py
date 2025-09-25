@@ -338,7 +338,6 @@ class Database:
             """)
             #Trainings table
             cursor.execute("""
-                DROP TABLE IF EXISTS trainings CASCADE;
                 CREATE TABLE IF NOT EXISTS trainings (
                     id SERIAL PRIMARY KEY,
                     operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
