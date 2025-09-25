@@ -3051,6 +3051,7 @@
                 const [comment, setComment] = useState(initialData.comment || "");
                 const [isLoading, setIsLoading] = useState(false);
                 const [error, setError] = useState("");
+                const [countInHours, setCountInHours] = useState(initialData.count_in_hours ?? true);
                 const dateRef = React.useRef(null);
 
                 const reasons = [
@@ -3064,6 +3065,7 @@
                     "Тренинг по продукту",
                     "Мониторинг",
                     "Практика в офисе таксопарка",
+                    "Другое"
                 ];
 
                 // Сброс/применение initialData при открытии
@@ -3074,6 +3076,7 @@
                     setReason(initialData.reason || "");
                     setComment(initialData.comment || "");
                     setError("");
+                    setCountInHours(initialData.count_in_hours ?? true);
                 }, [initialData, isOpen]);
 
                 // Фокус на дату при открытии
@@ -3137,6 +3140,7 @@
                         end_time: endTime,
                         reason,
                         comment,
+                        count_in_hours: countInHours,
                     });
                     setIsLoading(false);
                     onClose();
@@ -3258,6 +3262,20 @@
                                 rows={3}
                                 disabled={isLoading}
                                 />
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                            <input
+                                id="count-in-hours"
+                                type="checkbox"
+                                checked={countInHours}
+                                onChange={(e) => setCountInHours(e.target.checked)}
+                                disabled={isLoading}
+                                className="w-4 h-4"
+                            />
+                            <label htmlFor="count-in-hours" className="text-sm text-gray-700 dark:text-gray-200">
+                                Засчитывать в часы
+                            </label>
                             </div>
 
                             {error && <div className="text-sm text-red-600">{error}</div>}
@@ -3609,6 +3627,11 @@
                                 <div>
                                 <label className="block text-sm text-gray-600">Комментарий</label>
                                 <textarea value={training?.comment || ""} disabled rows={3} className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
+                                </div>
+
+                                <div>
+                                <label className="block text-sm text-gray-600">Засчитывать в часы</label>
+                                <input value={training?.count_in_hours ? 'Да' : 'Нет'} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
                                 </div>
 
                                 <div>
