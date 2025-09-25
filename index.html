@@ -2999,7 +2999,7 @@
                         </div>
 
                         {/* Trainings list — show ONLY if currently viewing work_time tab */}
-                        {selectedTab === 'work_time' || selectedTab === 'trainings' && (
+                        {(selectedTab === 'work_time' || selectedTab === 'trainings') && (
                         <div className="mb-4">
                             <h4 className="text-sm font-semibold mb-2">Тренинги</h4>
                             {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).length === 0 ? (
