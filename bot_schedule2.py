@@ -2178,7 +2178,7 @@ def add_training():
             "Обратная связь", "Собрание", "Тех. сбой", "Мотивационная беседа",
             "Дисциплинарный тренинг", "Тренинг по качеству. Разбор ошибок",
             "Тренинг по качеству. Объяснение МШ", "Тренинг по продукту",
-            "Мониторинг", "Практика в офисе таксопарка"
+            "Мониторинг", "Практика в офисе таксопарка", "Другое"
         ]
         if data['reason'] not in allowed_reasons:
             logging.warning(f"Invalid training reason: {data['reason']}")
@@ -2191,7 +2191,8 @@ def add_training():
             end_time=data['end_time'],
             reason=data['reason'],
             comment=data.get('comment'),
-            created_by=requester_id
+            created_by=requester_id,
+            count_in_hours=data.get("count_in_hours", True)
         )
         logging.info(f"Training added: ID {training_id} for operator {data['operator_id']}")
         return jsonify({"status": "success", "id": training_id}), 201
@@ -2253,7 +2254,7 @@ def update_training(training_id):
                 "Обратная связь", "Собрание", "Тех. сбой", "Мотивационная беседа",
                 "Дисциплинарный тренинг", "Тренинг по качеству. Разбор ошибок",
                 "Тренинг по качеству. Объяснение МШ", "Тренинг по продукту",
-                "Мониторинг", "Практика в офисе таксопарка"
+                "Мониторинг", "Практика в офисе таксопарка", "Другое"
             ]
             if data['reason'] not in allowed_reasons:
                 logging.warning(f"Invalid training reason: {data['reason']}")
@@ -2265,7 +2266,8 @@ def update_training(training_id):
             start_time=data.get('start_time'),
             end_time=data.get('end_time'),
             reason=data.get('reason'),
-            comment=data.get('comment')
+            comment=data.get('comment'),
+            count_in_hours=data.get('count_in_hours') 
         )
         if not success:
             logging.warning(f"Failed to update training {training_id}")
