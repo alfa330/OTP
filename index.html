@@ -2246,6 +2246,29 @@
             { key: "trainings", label: "Тренинги", unit: "" } // новый таб
             ];
 
+        function parseTimeToMinutes(t) {
+        // expects HH:mm or H:mm, returns minutes since 00:00, or null
+        if (!t) return null;
+        const m = t.match(/(\d{1,2}):(\d{2})/);
+        if (!m) return null;
+        const hh = parseInt(m[1], 10);
+        const mm = parseInt(m[2], 10);
+        return hh * 60 + mm;
+        }
+
+        function computeTrainingDurationHours(t) {
+        // First try explicit duration field (minutes or hours), then compute from start/end
+        if (t.duration_minutes != null) return Number((t.duration_minutes / 60).toFixed(2));
+        if (t.duration_hours != null) return Number(Number(t.duration_hours).toFixed(2));
+        const s = parseTimeToMinutes(t.start_time);
+        const e = parseTimeToMinutes(t.end_time);
+        if (s == null || e == null) return 0;
+        // handle overnight (end < start) by adding 24h
+        let diff = e - s;
+        if (diff < 0) diff += 24 * 60;
+        return Number((diff / 60).toFixed(2));
+        }
+
         const HoursAccountingView = ({ user, onUploaded, showToast }) => {
             const [month, setMonth] = useState(() => {
                 const d = new Date();
@@ -2272,9 +2295,6 @@
             const [uploadProgress, setUploadProgress] = useState(0);
 
             const [selectedTab, setSelectedTab] = useState('work_time');
-
-            // trainings-per-day modal (shows trainings for whole day across operators)
-            const [selectedDayTrainings, setSelectedDayTrainings] = useState(null); // { day, dateStr, trainings: [{...}] }
 
             // helpers: month parts
             const monthParts = useMemo(() => {
@@ -2331,7 +2351,6 @@
                     fallbackToast('Не удалось загрузить daily hours', 'error');
                 }
 
-                // Trainings response expected to be array of objects you showed
                 const trainingsList = Array.isArray(trainingsResp.data) ? trainingsResp.data : (trainingsResp.data?.trainings || []);
                 const tmap = {};
                 for (const t of trainingsList) {
@@ -2373,21 +2392,6 @@
                 setPreviewOperators([]);
                 setPreviewSheetName(null);
                 setUploadProgress(0);
-            }
-
-            function openDayTrainings(day) {
-                const dateStr = dayToDateStr(day);
-                // collect trainings across operators for this day
-                const list = [];
-                for (const [opId, byDay] of Object.entries(trainingsMap)) {
-                const arr = byDay?.[day] || [];
-                for (const t of arr) list.push({ ...t, operator_id: opId });
-                }
-                setSelectedDayTrainings({ day, dateStr, trainings: list });
-            }
-
-            function closeDayTrainings() {
-                setSelectedDayTrainings(null);
             }
 
             async function handlePreviewUpload(e) {
@@ -2575,13 +2579,13 @@
                 return max;
             }, [operators]);
 
-            // compute max trainings in a single cell to scale intensity if needed
-            const maxTrainings = useMemo(() => {
+            // compute max trainings-hours in a single cell to scale intensity if needed
+            const maxTrainingsHours = useMemo(() => {
                 let max = 0;
                 for (const opId of Object.keys(trainingsMap)) {
                 for (const dayKey of Object.keys(trainingsMap[opId] || {})) {
-                    const cnt = (trainingsMap[opId][dayKey] || []).length;
-                    if (cnt > max) max = cnt;
+                    const sum = (trainingsMap[opId][dayKey] || []).reduce((acc, t) => acc + computeTrainingDurationHours(t), 0);
+                    if (sum > max) max = sum;
                 }
                 }
                 return Math.max(1, max);
@@ -2610,7 +2614,7 @@
                 return num.toFixed(decimals);
             }
 
-            // render cell with trainings marker (marker only in work_time tab)
+            // render cell with trainings marker and trainings-tab rendering
             function renderCellByMetricWithStyleAndMarker(op, day, metricKey) {
                 const dayKey = String(day);
                 const d = op.daily && op.daily[dayKey];
@@ -2625,13 +2629,9 @@
                 return day > todayD;
                 })();
 
-                // check trainings for marker
                 const trainings = (trainingsMap[op.operator_id] && trainingsMap[op.operator_id][day]) || [];
 
-                // Only show marker in work_time tab
-                const showMarker = selectedTab === 'work_time' && trainings.length > 0;
-
-                // For work_time tab coloring
+                // For work_time tab coloring (unchanged)
                 if (selectedTab === 'work_time') {
                 const work = d ? Number(d.work_time || 0) : 0;
                 const hasData = d && Number(d.work_time || 0) > 0;
@@ -2640,7 +2640,7 @@
                     return (
                     <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-400 text-white">
                         <span>—</span>
-                        {showMarker && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                        {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     </div>
                     );
                 }
@@ -2648,7 +2648,7 @@
                     return (
                     <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-200 text-gray-600">
                         <span>—</span>
-                        {showMarker && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                        {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     </div>
                     );
                 }
@@ -2656,54 +2656,61 @@
                     return (
                     <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-100 text-gray-600">
                         <span>—</span>
-                        {showMarker && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                        {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     </div>
                     );
                 }
 
-                // has data -> green intensity
                 const ratio = maxWork > 0 ? Math.max(0, Math.min(1, work / maxWork)) : 0;
                 const alpha = 0.18 + 0.77 * ratio;
-                const bg = `rgba(16,185,129,${alpha})`; // green-500 rgba
+                const bg = `rgba(16,185,129,${alpha})`;
                 const textClass = ratio > 0.5 ? 'text-white' : 'text-gray-900';
                 const display = work ? work.toFixed(2) : '0.00';
 
                 return (
                     <div className={`relative w-full h-8 rounded-md flex items-center justify-center ${textClass}`} style={{ backgroundColor: bg }}>
                     <span className="text-sm font-medium">{display}</span>
-                    {showMarker && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                    {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     </div>
                 );
                 }
 
-                // Trainings tab special rendering
+                // Trainings tab: show SUM of training durations converted to hours
                 if (selectedTab === 'trainings') {
                 if (!trainings || trainings.length === 0) return <div className="text-sm text-gray-400">—</div>;
-                const counted = trainings.filter(t => t.count_in_hours).length;
-                const notCounted = trainings.length - counted;
+
+                // sum hours for counted and not-counted
+                let countedHours = 0;
+                let notCountedHours = 0;
+                for (const t of trainings) {
+                    const h = computeTrainingDurationHours(t);
+                    if (t.count_in_hours) countedHours += h; else notCountedHours += h;
+                }
+
                 const parts = [];
-                if (counted > 0) {
-                    const ratio = Math.min(1, counted / maxTrainings);
+                if (countedHours > 0) {
+                    const ratio = Math.min(1, countedHours / maxTrainingsHours);
                     const alpha = 0.18 + 0.77 * ratio;
                     parts.push(
                     <div key="c" className="inline-flex items-center justify-center px-2 py-1 rounded-md text-sm font-medium" style={{ backgroundColor: `rgba(16,185,129,${alpha})` }}>
-                        <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{counted}</span>
+                        <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{countedHours.toFixed(2)} ч</span>
                     </div>
                     );
                 }
-                if (notCounted > 0) {
-                    const ratio = Math.min(1, notCounted / maxTrainings);
+                if (notCountedHours > 0) {
+                    const ratio = Math.min(1, notCountedHours / maxTrainingsHours);
                     const alpha = 0.18 + 0.77 * ratio;
                     parts.push(
                     <div key="n" className="inline-flex items-center justify-center px-2 py-1 rounded-md text-sm font-medium ml-1" style={{ backgroundColor: `rgba(250,204,21,${alpha})` }}>
-                        <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{notCounted}</span>
+                        <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{notCountedHours.toFixed(2)} ч</span>
                     </div>
                     );
                 }
+
                 return <div className="flex items-center justify-center gap-1">{parts}</div>;
                 }
 
-                // Non-work tabs: default rendering, no trainings marker
+                // Non-work tabs: default rendering
                 if (!d) return <div className="text-sm text-gray-400">—</div>;
                 const val = d[metricKey];
                 if (metricKey === 'calls') return <div className="text-sm font-medium">{Number(val || 0)}</div>;
@@ -2711,12 +2718,11 @@
                 return <div className="text-sm font-medium">{num ? num.toFixed(2) : '0.00'}</div>;
             }
 
-            // get trainings list for operator/day (array)
             function getTrainingsFor(opId, day) {
                 return (trainingsMap[opId] && trainingsMap[opId][day]) ? trainingsMap[opId][day] : [];
             }
 
-            // gather trainings for a day across operators (used for day modal)
+            // gather trainings for a day across operators (used for day modal if needed)
             function getAllTrainingsForDay(day) {
                 const all = [];
                 for (const op of operators) {
@@ -2770,17 +2776,9 @@
 
                         {daysArray.map(day => (
                         <div key={day} className="p-2 min-w-[72px] text-center border-l">
-                            <div className="flex items-center justify-center gap-2">
                             <button onClick={() => openUploadForDay(day)} className="text-xs font-semibold px-2 py-1 rounded hover:bg-gray-100">
-                                {formatHeaderLabel(day)}
+                            {formatHeaderLabel(day)}
                             </button>
-                            {/* trainings quick-open */}
-                            <button title="Показать тренинги за день" onClick={() => { const all = getAllTrainingsForDay(day); setSelectedDayTrainings({ day, dateStr: dayToDateStr(day), trainings: all }); }} className="text-xs px-1 py-1 rounded hover:bg-gray-100">
-                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6M9 16h6M11 8h2M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                </svg>
-                            </button>
-                            </div>
                         </div>
                         ))}
 
@@ -2803,9 +2801,9 @@
                         )}
                         {selectedTab === 'trainings' && (
                         <>
-                            <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Тренингов (всего)</div>
-                            <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Засчитано</div>
-                            <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Не засчитано</div>
+                            <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Часы (всего)</div>
+                            <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Засчитано (ч)</div>
+                            <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Не засчитано (ч)</div>
                         </>
                         )}
                     </div>
@@ -2823,6 +2821,18 @@
                         const callsTotal = Number(aggr.total_calls || 0);
                         const effTotal = Number(aggr.total_efficiency_hours || 0);
                         const prodDiff = regular - norm;
+
+                        // precompute trainings summary for row (month-wide)
+                        let totalHoursAll = 0;
+                        let totalHoursCounted = 0;
+                        let totalHoursNotCounted = 0;
+                        for (const dKey of Object.keys(trainingsMap[op.operator_id] || {})) {
+                            for (const t of trainingsMap[op.operator_id][dKey]) {
+                            const h = computeTrainingDurationHours(t);
+                            totalHoursAll += h;
+                            if (t.count_in_hours) totalHoursCounted += h; else totalHoursNotCounted += h;
+                            }
+                        }
 
                         return (
                             <div key={op.operator_id} className="flex items-center border-b hover:bg-gray-50 relative">
@@ -2853,8 +2863,7 @@
                                 <button
                                     onClick={() => openCellDetail(op, day)}
                                     className="w-full h-8 rounded-md text-sm flex items-center justify-center"
-                                    aria-label={`Данные ${op.name} за ${day}-${monthLabel}`}
-                                >
+                                    aria-label={`Данные ${op.name} за ${day}-${monthLabel}`}>
                                     {renderCellByMetricWithStyleAndMarker(op, day, selectedTab)}
                                 </button>
                                 </div>
@@ -2868,7 +2877,7 @@
                                     {norm > 0 ? `${((regular / norm) * 100).toFixed(1)}%` : '—'}
                                 </div>
                                 <div className="w-36 p-2 text-sm text-center border-l">
-                                    <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-md ${productionColorClass(prodDiff, norm)}`}>
+                                    <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-md ${productionColorClass(prodDiff, norm)}`}> 
                                     <span className="font-medium">{formatNumber(prodDiff, 1)}</span>
                                     <span className="text-xs text-gray-500">ч</span>
                                     </div>
@@ -2891,12 +2900,9 @@
 
                             {selectedTab === 'trainings' && (
                                 <>
-                                <div className="w-36 p-2 text-sm text-center border-l">{(function(){
-                                    // total trainings for operator across month? here we render per-row summary: total trainings in current month
-                                    let total = 0; for (const d of Object.keys(trainingsMap[op.operator_id] || {})) total += (trainingsMap[op.operator_id][d] || []).length; return total;
-                                })()}</div>
-                                <div className="w-32 p-2 text-sm text-center border-l">{(function(){ let c=0; for (const d of Object.keys(trainingsMap[op.operator_id]||{})) c += (trainingsMap[op.operator_id][d]||[]).filter(t=>t.count_in_hours).length; return c; })()}</div>
-                                <div className="w-36 p-2 text-sm text-center border-l">{(function(){ let c=0; for (const d of Object.keys(trainingsMap[op.operator_id]||{})) c += (trainingsMap[op.operator_id][d]||[]).filter(t=>!t.count_in_hours).length; return c; })()}</div>
+                                <div className="w-36 p-2 text-sm text-center border-l">{totalHoursAll.toFixed(2)}</div>
+                                <div className="w-32 p-2 text-sm text-center border-l">{totalHoursCounted.toFixed(2)}</div>
+                                <div className="w-36 p-2 text-sm text-center border-l">{totalHoursNotCounted.toFixed(2)}</div>
                                 </>
                             )}
                             </div>
@@ -3000,16 +3006,19 @@
                             <div className="text-sm text-gray-500">Тренингов нет.</div>
                             ) : (
                             <div className="space-y-2">
-                                {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).map(t => (
-                                <div key={t.id} className={`p-2 border rounded-md ${t.count_in_hours ? 'bg-green-50' : 'bg-yellow-50'}`}>
+                                {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).map(t => {
+                                const dur = computeTrainingDurationHours(t);
+                                return (
+                                    <div key={t.id} className={`p-2 border rounded-md ${t.count_in_hours ? 'bg-green-50' : 'bg-yellow-50'}`}>
                                     <div className="flex items-center justify-between">
-                                    <div className="text-sm font-medium">{t.start_time} — {t.end_time}</div>
-                                    <div className="text-xs text-gray-500">by {t.created_by_name}</div>
+                                        <div className="text-sm font-medium">{t.start_time || '—'} — {t.end_time || '—'} · {dur.toFixed(2)} ч</div>
+                                        <div className="text-xs text-gray-500">by {t.created_by_name}</div>
                                     </div>
                                     <div className="text-sm text-gray-700">{t.reason || '—'}</div>
                                     {t.comment && <div className="text-xs text-gray-600 mt-1">{t.comment}</div>}
-                                </div>
-                                ))}
+                                    </div>
+                                );
+                                })}
                             </div>
                             )}
                         </div>
@@ -3021,36 +3030,6 @@
                             {isSavingCell ? 'Сохранение...' : 'Сохранить'}
                         </button>
                         </div>
-                    </div>
-                    </div>
-                )}
-
-                {/* Day trainings modal (shows trainings across operators for chosen day) */}
-                {selectedDayTrainings && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-3xl" onClick={e => e.stopPropagation()}>
-                        <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-lg font-semibold">Тренинги за {selectedDayTrainings.dateStr}</h3>
-                        <button onClick={closeDayTrainings} className="px-2 py-1 rounded-md border">Закрыть</button>
-                        </div>
-
-                        {selectedDayTrainings.trainings.length === 0 ? (
-                        <div className="text-sm text-gray-500">Тренингов нет.</div>
-                        ) : (
-                        <div className="space-y-2 max-h-[60vh] overflow-auto">
-                            {selectedDayTrainings.trainings.map(t => (
-                            <div key={`${t.id}-${t.operator_id}`} className={`p-3 border rounded-md ${t.count_in_hours ? 'bg-green-50' : 'bg-yellow-50'}`}>
-                                <div className="flex items-center justify-between">
-                                <div className="text-sm font-medium">{t.operator_name || t.operator_id} — {t.start_time} — {t.end_time}</div>
-                                <div className="text-xs text-gray-500">by {t.created_by_name}</div>
-                                </div>
-                                <div className="text-sm text-gray-700 mt-1">{t.reason || '—'}</div>
-                                {t.comment && <div className="text-xs text-gray-600 mt-1">{t.comment}</div>}
-                            </div>
-                            ))}
-                        </div>
-                        )}
-
                     </div>
                     </div>
                 )}
