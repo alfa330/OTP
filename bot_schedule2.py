@@ -2161,7 +2161,7 @@ def add_training():
             logging.warning(f"Operator not found: {data['operator_id']}")
             return jsonify({"error": "Operator not found"}), 404
         
-        if requester[3] != 'admin' and (operator[6] != requester_id or requester[3] != 'sv'):
+        if requester[3] != 'admin' and  requester[3] != 'sv':
             logging.warning(f"Unauthorized attempt to add training by user {requester_id}")
             return jsonify({"error": "Unauthorized"}), 403
 
