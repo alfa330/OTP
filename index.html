@@ -2732,6 +2732,13 @@
                 return all.sort((a, b) => (a.start_time || '').localeCompare(b.start_time || ''));
             }
 
+            function getCountedTrainingHoursForRow(opId) {
+                const all = trainingsMap[opId] || {};
+                let sum = 0;
+                for (const d of Object.keys(all)) sum += (all[d] || []).reduce((s, t) => s + (t.count_in_hours ? computeTrainingDurationHours(t) : 0), 0);
+                return sum;
+            }
+
             return (
                 <div className="bg-white p-5 rounded-xl shadow-md">
                 <div className="flex items-center justify-between mb-4 gap-4">
@@ -2786,6 +2793,7 @@
                         {selectedTab === 'work_time' && (
                         <>
                             <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Итого часов</div>
+                            <div className="w-28 p-2 text-center border-l bg-gray-50 text-sm font-medium">С выч. трен.</div>
                             <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Вып. нормы (%)</div>
                             <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Выработка</div>
                         </>
@@ -2818,21 +2826,29 @@
                         const aggr = op.aggregates || {};
                         const regular = Number(aggr.regular_hours || 0);
                         const norm = Number(op.norm_hours || 0);
-                        const callsTotal = Number(aggr.total_calls || 0);
-                        const effTotal = Number(aggr.total_efficiency_hours || 0);
-                        const prodDiff = regular - norm;
 
                         // precompute trainings summary for row (month-wide)
                         let totalHoursAll = 0;
-                        let totalHoursCounted = 0;
+                        let totalHoursCounted = 0;   // нужно менять — поэтому let
                         let totalHoursNotCounted = 0;
-                        for (const dKey of Object.keys(trainingsMap[op.operator_id] || {})) {
-                            for (const t of trainingsMap[op.operator_id][dKey]) {
-                            const h = computeTrainingDurationHours(t);
+
+                        const byDay = trainingsMap[op.operator_id] || {};
+                        for (const dKey of Object.keys(byDay)) {
+                        const arr = byDay[dKey] || [];
+                        for (const t of arr) {
+                            const h = computeTrainingDurationHours(t) || 0;
                             totalHoursAll += h;
-                            if (t.count_in_hours) totalHoursCounted += h; else totalHoursNotCounted += h;
-                            }
+                            if (t.count_in_hours) totalHoursCounted += h;
+                            else totalHoursNotCounted += h;
                         }
+                        }
+
+                        // итоговые величины для рендера
+                        const displayedTotal = regular + totalHoursCounted; // отработанные + засчитанные тренинги
+                        const prodDiff = displayedTotal - norm; // выработка относительно нормы (с учётом тренингов)
+
+                        const callsTotal = Number(aggr.total_calls || 0);
+                        const effTotal = Number(aggr.total_efficiency_hours || 0);
 
                         return (
                             <div key={op.operator_id} className="flex items-center border-b hover:bg-gray-50 relative">
@@ -2872,6 +2888,7 @@
                             {/* Right summary values */}
                             {selectedTab === 'work_time' && (
                                 <>
+                                <div className="w-36 p-2 text-sm text-center border-l">{displayedTotal.toFixed(2)}</div>
                                 <div className="w-36 p-2 text-sm text-center border-l">{formatNumber(regular, 1)}</div>
                                 <div className="w-32 p-2 text-sm text-center border-l">
                                     {norm > 0 ? `${((regular / norm) * 100).toFixed(1)}%` : '—'}
