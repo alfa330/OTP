@@ -7384,11 +7384,7 @@
                                                     <i className="fas fa-list-ol text-gray-400"></i> Количество оценок
                                                 </p>
                                                 <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
-                                                <p
-                                                    className={`mt-2 text-lg font-medium ${
-                                                    (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600'
-                                                    }`}
-                                                >
+                                                <p className={`mt-2 text-lg font-medium ${ (20 - operatorData.evaluations.length) <= 0 ? 'text-green-600' : 'text-yellow-600' }`}>
                                                     {20 - operatorData.evaluations.length} оценок из 20
                                                 </p>
                                                 </div>
@@ -7411,51 +7407,49 @@
                                                 <tr>
                                                     {['No.', 'Номер телефона', 'Дата обращения', 'Балл', 'Примечания', 'Месяц', 'Дата оценки', 'Действия'].map(
                                                     (head, idx) => (
-                                                        <th
-                                                        key={idx}
-                                                        className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide"
-                                                        >
+                                                        <th key={idx} className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">
                                                         {head}
                                                         </th>
                                                     )
                                                     )}
                                                 </tr>
                                                 </thead>
+
                                                 <tbody className="bg-white divide-y divide-gray-100">
                                                 {operatorData.evaluations.map((eval1, index) => {
-                                                    // защитные доступы к полям
-                                                    const scores = eval1.scores || eval1.score_list || [];
-                                                    const criterionComments = eval1.criterionComments || eval1.criterion_comments || [];
+                                                    // безопасные поля — некоторые API могут использовать разные наименования
+                                                    const scores = eval1.scores || eval1.score_list || []; // [ 'Correct', 'Incorrect', ... ] or values per criterion
+                                                    const criterionComments = eval1.criterionComments || eval1.criterion_comments || []; // [{name, comment}] or array aligned with criteria
                                                     const criteria = (eval1.directions && eval1.directions[0] && eval1.directions[0].criteria) || eval1.criteria || [];
-                                                    const combinedComment = eval1.comment || eval1.combinedComment || '';
+                                                    const shortNote = (eval1.short_note || eval1.summary || '').toString();
 
-                                                    // вычисление баллов для этой оценки (локально для отображения каждой строки)
-                                                    const computeCriterionPoints = (criterion, scoreValue) => {
-                                                    // если критерий критический — обычно его вес не суммируется в общий score (как в исходной логике),
-                                                    // но мы отобразим поведение: Error -> 0 и пометка.
+                                                    // local helper to compute displayed points for a criterion
+                                                    const computeCriterionPoints = (criterion = {}, scoreValue) => {
+                                                    // criterion: { name, weight, isCritical, deficiency: { weight } }
+                                                    if (!criterion) return { points: '-', note: '' };
+
                                                     if (criterion.isCritical) {
-                                                        if (scoreValue === 'Error') return { points: 0, note: 'Критический (ошибка)' };
-                                                        // пометка, что критический не учитывается в сумме
-                                                        return { points: '-', note: 'Критический (не учитывается)' };
+                                                        if (scoreValue === 'Error' || scoreValue === 'Incorrect') return { points: 0, note: 'Критический — ошибка' };
+                                                        return { points: '-', note: 'Критический (не начисляется)' };
                                                     }
 
-                                                    if (scoreValue === 'Correct' || scoreValue === 'N/A') {
-                                                        return { points: criterion.weight ?? '-', note: '' };
+                                                    if (scoreValue === 'Correct' || scoreValue === 'N/A' || scoreValue === true) {
+                                                        return { points: Number(criterion.weight ?? '-'), note: '' };
                                                     }
-                                                    if (scoreValue === 'Deficiency') {
+
+                                                    if (scoreValue === 'Deficiency' || scoreValue === 'Недочет') {
                                                         const defW = criterion.deficiency?.weight ?? '-';
                                                         return { points: defW, note: 'Недочет' };
                                                     }
-                                                    // Incorrect / Error / прочее
+
+                                                    // Incorrect / Error / false / 0
                                                     return { points: 0, note: scoreValue === 'Incorrect' ? 'Ошибка' : '' };
                                                     };
 
                                                     return (
                                                     <React.Fragment key={index}>
                                                         <tr
-                                                        className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${
-                                                            expandedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''
-                                                        }`}
+                                                        className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${expandedEvaluation?.id === eval1.id ? 'bg-blue-50' : ''}`}
                                                         onClick={() => handleEvaluationClick(eval1)}
                                                         >
                                                         <td className="px-6 py-4 whitespace-nowrap">{index + 1}</td>
@@ -7465,14 +7459,17 @@
                                                             {eval1.score !== null && eval1.score !== undefined ? Number(eval1.score).toFixed(2) : '-'}
                                                         </td>
                                                         <td className="px-6 py-4">
-                                                            {combinedComment ? (
+                                                            {/* Короткая заметка — если есть, иначе показываем первые 1–2 строк структурированных комментариев */}
+                                                            {shortNote ? (
+                                                            <p className="text-sm text-gray-700 truncate">{shortNote}</p>
+                                                            ) : (criterionComments && criterionComments.length > 0) ? (
                                                             <div className="space-y-1">
-                                                                {combinedComment.split('\n').slice(0, 2).map((line, i) => (
-                                                                <p key={i} className="text-sm text-gray-700 truncate">{line}</p>
+                                                                {criterionComments.slice(0, 2).map((c, i) => (
+                                                                <p key={i} className="text-sm text-gray-700 truncate">
+                                                                    {typeof c === 'string' ? c : (c.comment || c.text || c.note || '-')}
+                                                                </p>
                                                                 ))}
-                                                                {combinedComment.split('\n').length > 2 && (
-                                                                <p className="text-xs text-gray-500 italic">и ещё {combinedComment.split('\n').length - 2} строк...</p>
-                                                                )}
+                                                                {criterionComments.length > 2 && <p className="text-xs text-gray-500 italic">и ещё {criterionComments.length - 2} комментариев</p>}
                                                             </div>
                                                             ) : (
                                                             '-'
@@ -7497,18 +7494,18 @@
                                                         </td>
                                                         </tr>
 
-                                                        {/* Expanded details: критерии + комментарии + аудио */}
+                                                        {/* Expanded: полный разбор критериев + комментарии + аудио */}
                                                         {expandedEvaluation?.id === eval1.id && (
                                                         <tr>
                                                             <td colSpan={8} className="p-4 bg-gray-50 border-t text-sm">
-                                                            {/* Audio block */}
+                                                            {/* Audio */}
                                                             <div className="mb-4">
                                                                 {loadingAudioId === eval1.id ? (
                                                                 <p className="text-gray-500 italic flex items-center gap-2">
                                                                     <i className="fas fa-spinner fa-spin"></i> Загрузка аудио...
                                                                 </p>
-                                                                ) : ( (audioUrl && expandedEvaluation?.id === eval1.id) || (eval1.audio_url || eval1.audioUrl) ) ? (
-                                                                <audio controls src={ (audioUrl && expandedEvaluation?.id === eval1.id) ? audioUrl : (eval1.audio_url || eval1.audioUrl) } className="w-full mb-4" />
+                                                                ) : ((audioUrl && expandedEvaluation?.id === eval1.id) || (eval1.audio_url || eval1.audioUrl)) ? (
+                                                                <audio controls src={(audioUrl && expandedEvaluation?.id === eval1.id) ? audioUrl : (eval1.audio_url || eval1.audioUrl)} className="w-full mb-4" />
                                                                 ) : (
                                                                 <p className="text-red-500 flex items-center gap-2">
                                                                     <i className="fas fa-times-circle"></i> Файлов не имеется
@@ -7516,67 +7513,70 @@
                                                                 )}
                                                             </div>
 
-                                                            {/* Criteria breakdown */}
-                                                            <div className="overflow-x-auto">
-                                                                {criteria.length > 0 ? (
-                                                                <table className="min-w-full text-sm divide-y divide-gray-200 bg-white rounded-lg shadow-sm">
-                                                                    <thead className="bg-gray-100">
-                                                                    <tr>
-                                                                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Критерий</th>
-                                                                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Вес</th>
-                                                                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Выбранный результат</th>
-                                                                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Баллы</th>
-                                                                        <th className="px-4 py-2 text-left font-semibold text-gray-600">Комментарий</th>
+                                                            {/* Criteria breakdown table */}
+                                                            <div className="mb-4 overflow-auto">
+                                                                <table className="w-full text-sm table-auto border-collapse">
+                                                                <thead>
+                                                                    <tr className="bg-white border-b">
+                                                                    <th className="p-2 text-left text-xs text-gray-600">#</th>
+                                                                    <th className="p-2 text-left text-xs text-gray-600">Критерий</th>
+                                                                    <th className="p-2 text-left text-xs text-gray-600">Вес</th>
+                                                                    <th className="p-2 text-left text-xs text-gray-600">Результат</th>
+                                                                    <th className="p-2 text-left text-xs text-gray-600">Баллы</th>
+                                                                    <th className="p-2 text-left text-xs text-gray-600">Комментарий</th>
                                                                     </tr>
-                                                                    </thead>
-                                                                    <tbody>
-                                                                    {criteria.map((criterion, cIdx) => {
-                                                                        const scoreVal = scores[cIdx] || 'Correct';
-                                                                        const commentVal = criterionComments[cIdx] || '';
-                                                                        const { points, note } = computeCriterionPoints(criterion, scoreVal);
+                                                                </thead>
+                                                                <tbody>
+                                                                    { (criteria && criteria.length > 0) ? (
+                                                                    criteria.map((crit, ci) => {
+                                                                        const scoreValue = (Array.isArray(scores) && scores[ci] !== undefined) ? scores[ci] : (crit.score || eval1.scores?.[crit.name] || '-');
+                                                                        const { points, note } = computeCriterionPoints(crit, scoreValue);
+                                                                        const critCommentObj = Array.isArray(criterionComments) ? (criterionComments[ci] || {}) : {};
+                                                                        const commentText = typeof critCommentObj === 'string' ? critCommentObj : (critCommentObj.comment || critCommentObj.text || critCommentObj.note || '');
 
                                                                         return (
-                                                                        <tr key={cIdx} className="hover:bg-gray-50">
-                                                                            <td className="px-4 py-3 align-top text-gray-800">
-                                                                            <div className="font-medium">{criterion.name}</div>
-                                                                            {criterion.isCritical && <div className="text-xs text-red-600 mt-1">Критический критерий</div>}
-                                                                            </td>
-                                                                            <td className="px-4 py-3 align-top text-gray-700">
-                                                                            {criterion.isCritical ? '-' : (criterion.weight ?? '-')}
-                                                                            </td>
-                                                                            <td className="px-4 py-3 align-top">
-                                                                            <span className={`px-2 py-1 rounded-full text-xs font-semibold ${scoreVal === 'Correct' || scoreVal === 'N/A' ? 'bg-green-100 text-green-700' : scoreVal === 'Deficiency' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
-                                                                                {scoreVal}
-                                                                            </span>
-                                                                            {note && <div className="text-xs text-gray-500 mt-1">{note}</div>}
-                                                                            </td>
-                                                                            <td className="px-4 py-3 align-top font-semibold text-gray-900">
-                                                                            {points === '-' ? '-' : points}
-                                                                            </td>
-                                                                            <td className="px-4 py-3 align-top text-gray-700">
-                                                                            {commentVal ? (
-                                                                                <div className="whitespace-pre-wrap">{commentVal}</div>
-                                                                            ) : (
-                                                                                <span className="text-gray-400">—</span>
-                                                                            )}
-                                                                            </td>
+                                                                        <tr key={ci} className="odd:bg-white even:bg-gray-50">
+                                                                            <td className="p-2 align-top">{ci + 1}</td>
+                                                                            <td className="p-2 align-top font-medium">{crit.name || crit.title || `Критерий ${ci+1}`}</td>
+                                                                            <td className="p-2 align-top">{crit.isCritical ? 'Критический' : (crit.weight ?? '-')}</td>
+                                                                            <td className="p-2 align-top">{String(scoreValue)}</td>
+                                                                            <td className="p-2 align-top font-semibold">{points}{note ? ` — ${note}` : ''}</td>
+                                                                            <td className="p-2 align-top text-sm text-gray-700 whitespace-pre-line">{commentText || '-'}</td>
                                                                         </tr>
                                                                         );
-                                                                    })}
-                                                                    </tbody>
+                                                                    })
+                                                                    ) : (
+                                                                    <tr>
+                                                                        <td colSpan={6} className="p-3 text-gray-600">Нет данных по критериям.</td>
+                                                                    </tr>
+                                                                    )}
+                                                                </tbody>
                                                                 </table>
-                                                                ) : (
-                                                                <p className="text-gray-600">Нет данных по критериям для этой оценки.</p>
-                                                                )}
                                                             </div>
 
-                                                            {/* Full combined comment */}
-                                                            {combinedComment && (
-                                                                <div className="mt-4 p-4 bg-white border rounded-lg">
-                                                                <h4 className="text-sm font-semibold text-gray-700 mb-2">Полный комментарий</h4>
-                                                                <div className="text-sm text-gray-700 whitespace-pre-wrap">{combinedComment}</div>
+                                                            {/* Общие комментарии (структурированные) */}
+                                                            <div className="mb-2">
+                                                                <h4 className="text-sm font-semibold mb-2">Комментарии</h4>
+                                                                { (eval1.full_comments || eval1.structured_comments || criterionComments) ? (
+                                                                <div className="space-y-2 text-sm text-gray-700">
+                                                                    {/* Если есть поле full_comments — показываем его, иначе аккуратно рендерим criterionComments */}
+                                                                    {eval1.full_comments ? (
+                                                                    <div className="whitespace-pre-line">{eval1.full_comments}</div>
+                                                                    ) : Array.isArray(criterionComments) && criterionComments.length > 0 ? (
+                                                                    criterionComments.map((c, i) => (
+                                                                        <div key={i} className="text-sm">
+                                                                        <div className="font-semibold">{(c.name || criteria[i]?.name) ?? `Критерий ${i+1}`}</div>
+                                                                        <div className="text-gray-700 whitespace-pre-line">{typeof c === 'string' ? c : (c.comment || c.text || c.note || '-')}</div>
+                                                                        </div>
+                                                                    ))
+                                                                    ) : (
+                                                                    <div className="text-gray-600">Комментариев нет.</div>
+                                                                    )}
                                                                 </div>
-                                                            )}
+                                                                ) : (
+                                                                <div className="text-gray-600">Комментариев нет.</div>
+                                                                )}
+                                                            </div>
                                                             </td>
                                                         </tr>
                                                         )}
