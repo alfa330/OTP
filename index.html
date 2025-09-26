@@ -7449,7 +7449,7 @@
                                                         <React.Fragment key={id}>
                                                             <tr
                                                             className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${isExpanded ? 'bg-blue-50' : ''}`}
-                                                            onClick={() => setExpandedEvalId(isExpanded ? null : id)}
+                                                            onClick={() => {setExpandedEvalId(isExpanded ? null : id); handleEvaluationClick(ev) }}
                                                             >
                                                             <td className="px-6 py-4 whitespace-nowrap">{index + 1}</td>
                                                             <td className="px-6 py-4 whitespace-nowrap">{ev.phone_number || '-'}</td>
