@@ -7473,30 +7473,19 @@
                                                             <td className="px-6 py-4 whitespace-nowrap">{ev.month || '-'}</td>
                                                             <td className="px-6 py-4 whitespace-nowrap">{formatDate(ev.evaluation_date)}</td>
                                                             <td className="px-6 py-4 whitespace-nowrap">
-                                                                <div className="flex items-center gap-2">
+                                                            {ev.score < 100 && (
                                                                 <button
-                                                                    onClick={(e) => {
+                                                                onClick={(e) => {
                                                                     e.stopPropagation();
                                                                     setSelectedEvaluation(ev);
                                                                     setShowDisputeModal(true);
-                                                                    }}
-                                                                    className="bg-yellow-500 text-white px-3 py-1.5 rounded-lg hover:bg-yellow-600 text-xs font-medium transition-all duration-200"
+                                                                }}
+                                                                className="bg-yellow-500 text-white px-3 py-1.5 rounded-lg hover:bg-yellow-600 text-xs font-medium transition-all duration-200"
                                                                 >
-                                                                    <i className="fas fa-exclamation-circle mr-1"></i>
-                                                                    Оспорить
+                                                                <i className="fas fa-exclamation-circle mr-1"></i>
+                                                                Оспорить
                                                                 </button>
-                                                                {ev.audio_path ? (
-                                                                    <a
-                                                                    href={ev.audio_path}
-                                                                    onClick={(e) => e.stopPropagation()}
-                                                                    className="text-xs underline"
-                                                                    target="_blank"
-                                                                    rel="noopener noreferrer"
-                                                                    >
-                                                                    Аудио
-                                                                    </a>
-                                                                ) : null}
-                                                                </div>
+                                                            )}
                                                             </td>
                                                             </tr>
 
@@ -7589,8 +7578,8 @@
 
                                                                     <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Аудио</h4>
-                                                                    {ev.audio_path ? (
-                                                                        <audio controls src={ev.audio_path} className="w-full" />
+                                                                    {audioUrl ? (
+                                                                        <audio controls src={audioUrl} className="w-full" />
                                                                     ) : (
                                                                         <div className="text-sm text-red-500 flex items-center gap-2">
                                                                         <i className="fas fa-times-circle"></i> Файлов не имеется
