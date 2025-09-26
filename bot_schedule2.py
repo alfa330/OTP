@@ -96,6 +96,13 @@ def require_api_key(f):
             return jsonify({"error": "Invalid or missing API key", "provided_key": api_key}), 401
     return decorated
 
+def _build_cors_preflight_response():
+    response = jsonify({"status": "ok"})
+    response.headers.add("Access-Control-Allow-Origin", "https://alfa330.github.io")
+    response.headers.add("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-User-Id")
+    response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+    return response
+
 @app.route('/')
 def index():
     return "Bot is alive!", 200
@@ -386,19 +393,269 @@ def preview_calls_table():
         if not user or user[3] != 'sv':  # user[3] == role
             return jsonify({"error": "Unauthorized: только супервайзеры могут загружать таблицы"}), 403
 
-        # Обработка файла и обновление БД
-        sheet_name, operators, error = db.process_calls_sheet(file)
+        # Только парсим файл, не сохраняем
+        sheet_name, operators, error = db.parse_calls_file(file)
         if error:
             return jsonify({"error": error}), 400
 
         return jsonify({
             "status": "success",
             "sheet_name": sheet_name,
-            "operators": operators  # если process_calls_sheet вернёт словари
+            "operators": operators
         }), 200
 
     except Exception as e:
-        logging.error(f"Ошибка при загрузке таблицы звонков: {e}", exc_info=True)
+        logging.error(f"Ошибка при предпросмотре таблицы звонков: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/sv/update_norm_hours', methods=['POST'])
+@require_api_key
+def update_norm_hours():
+    try:
+        data = request.get_json()
+        operator_id = data.get("operator_id")
+        month = data.get("month")
+        norm_hours = data.get("norm_hours")
+
+        if not operator_id or not month:
+            return jsonify({"error": "operator_id and month required"}), 400
+
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO work_hours (operator_id, month, norm_hours)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (operator_id, month)
+                DO UPDATE SET norm_hours = EXCLUDED.norm_hours
+            """, (operator_id, month, norm_hours))
+
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        logging.exception("update_norm_hours error")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/sv/daily_hours', methods=['GET'])
+@require_api_key
+def sv_daily_hours():
+    """
+    Возвращает daily_hours за месяц для всех операторов текущего супервайзера.
+    Параметры:
+      - month (query param) — YYYY-MM (опционально, по умолчанию текущий месяц)
+    Заголовки:
+      - X-User-Id (обязательно) — id супервайзера (проверяется роль)
+    """
+    try:
+        # parse month
+        month = request.args.get('month')
+        if not month:
+            month = datetime.now().strftime('%Y-%m')
+
+        # requester
+        requester_header = request.headers.get('X-User-Id')
+        if not requester_header or not requester_header.isdigit():
+            return jsonify({"error": "Invalid or missing X-User-Id header"}), 400
+        requester_id = int(requester_header)
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 403
+
+        role = requester[3]  # u.role
+        if role != 'sv':
+            return jsonify({"error": "Only supervisors can request this endpoint"}), 403
+
+        # fetch data
+        try:
+            result = db.get_daily_hours_by_supervisor_month(requester_id, month)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
+        return jsonify({"status": "success", "month": result["month"], "days_in_month": result["days_in_month"], "operators": result["operators"]}), 200
+
+    except Exception as e:
+        logging.exception("Error in sv_daily_hours")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/hours/upload_group_day', methods=['POST'])
+@require_api_key
+def upload_group_day():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Empty payload"}), 400
+
+        # Парсим базовые поля
+        date_str = data.get('date')  # ожидаем YYYY-MM-DD
+        if not date_str:
+            return jsonify({"error": "Field 'date' is required (YYYY-MM-DD)"}), 400
+
+        try:
+            # проверяем формат даты
+            day_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except Exception:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+
+        default_month = date_str[:7]  # YYYY-MM
+
+        sv_id_payload = data.get('sv_id')  # может быть None
+        operators = data.get('operators')
+        if not operators or not isinstance(operators, list):
+            return jsonify({"error": "Field 'operators' must be a non-empty array"}), 400
+
+        # Получаем id запроса (и проверяем пользователя)
+        requester_header = request.headers.get('X-User-Id')
+        if not requester_header or not requester_header.isdigit():
+            return jsonify({"error": "Invalid or missing X-User-Id"}), 400
+        requester_id = int(requester_header)
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 403
+
+        requester_role = requester[3]  # согласно get_user селекту: u.role в позиции 3
+
+        # Если запрос делает супервайзер — разрешаем только для его id (или если payload sv_id указан, он должен совпадать)
+        if requester_role == 'sv':
+            sv_id = requester_id
+            if sv_id_payload and int(sv_id_payload) != sv_id:
+                return jsonify({"error": "Supervisors can only upload for their own team"}), 403
+        else:
+            # admin or others
+            sv_id = int(sv_id_payload) if sv_id_payload else None
+
+        processed = []
+        skipped = []
+        errors = []
+        processed_operator_ids = set()
+
+        for idx, row in enumerate(operators):
+            try:
+                # Normalize fields
+                op_id = row.get('operator_id')
+                name = (row.get('name') or '').strip()
+                # numeric fields: ensure floats/ints
+                try:
+                    work_time = float(row.get('work_time') or 0.0)
+                except Exception:
+                    work_time = 0.0
+                try:
+                    break_time = float(row.get('break_time') or 0.0)
+                except Exception:
+                    break_time = 0.0
+                try:
+                    talk_time = float(row.get('talk_time') or 0.0)
+                except Exception:
+                    talk_time = 0.0
+                try:
+                    calls = int(row.get('calls') or 0)
+                except Exception:
+                    calls = 0
+                try:
+                    efficiency = float(row.get('efficiency') or 0.0)  # в часах
+                except Exception:
+                    efficiency = 0.0
+
+                month = row.get('month') or default_month
+
+                # resolve operator_id if not provided
+                resolved_operator_id = None
+                if op_id:
+                    # verify operator exists
+                    try:
+                        op_id_int = int(op_id)
+                        user_row = db.get_user(id=op_id_int)
+                        if user_row and user_row[3] == 'operator':  # role == operator
+                            # if requester is sv, ensure operator belongs to that sv
+                            if requester_role == 'sv' and user_row[6] != requester_id:  # user_row[6] == supervisor_id in get_user select
+                                skipped.append({"row": idx, "reason": "operator not under this supervisor", "name": name, "operator_id": op_id})
+                                continue
+                            resolved_operator_id = op_id_int
+                        else:
+                            skipped.append({"row": idx, "reason": "operator_id not found or not operator", "name": name, "operator_id": op_id})
+                            continue
+                    except Exception:
+                        skipped.append({"row": idx, "reason": "invalid operator_id", "value": op_id})
+                        continue
+                else:
+                    # try find by name under sv_id (if sv_id is known)
+                    if sv_id:
+                        with db._get_cursor() as cursor:
+                            cursor.execute("""
+                                SELECT id FROM users
+                                WHERE name = %s AND role = 'operator' AND supervisor_id = %s
+                                LIMIT 1
+                            """, (name, sv_id))
+                            res = cursor.fetchone()
+                            if res:
+                                resolved_operator_id = res[0]
+                    # if still not found, try global lookup (admins may allow)
+                    if not resolved_operator_id:
+                        with db._get_cursor() as cursor:
+                            cursor.execute("""
+                                SELECT id FROM users
+                                WHERE name = %s AND role = 'operator'
+                                LIMIT 1
+                            """, (name,))
+                            res2 = cursor.fetchone()
+                            if res2:
+                                # if requester is sv, ensure operator belongs to them
+                                if requester_role == 'sv':
+                                    # check supervisor
+                                    with db._get_cursor() as c2:
+                                        c2.execute("SELECT supervisor_id FROM users WHERE id = %s", (res2[0],))
+                                        sp = c2.fetchone()
+                                        if sp and sp[0] == requester_id:
+                                            resolved_operator_id = res2[0]
+                                        else:
+                                            skipped.append({"row": idx, "reason": "operator found but not under this supervisor", "name": name})
+                                            continue
+                                else:
+                                    resolved_operator_id = res2[0]
+
+                if not resolved_operator_id:
+                    skipped.append({"row": idx, "reason": "operator not found", "name": name})
+                    continue
+
+                # Insert/update daily_hours
+                try:
+                    # use the Database helper (assumes method exists)
+                    db.insert_or_update_daily_hours(resolved_operator_id, date_str,
+                                                    work_time=work_time,
+                                                    break_time=break_time,
+                                                    talk_time=talk_time,
+                                                    calls=calls,
+                                                    efficiency=efficiency)
+                    processed.append({"row": idx, "operator_id": resolved_operator_id, "name": name})
+                    processed_operator_ids.add(resolved_operator_id)
+                except Exception as e:
+                    errors.append({"row": idx, "operator_id": resolved_operator_id, "error": str(e)})
+                    continue
+
+            except Exception as e:
+                errors.append({"row": idx, "error": str(e)})
+                continue
+
+        # После всех вставок — агрегируем месяц для каждого обработанного оператора
+        aggregations = {}
+        for opid in processed_operator_ids:
+            try:
+                agg = db.aggregate_month_from_daily(opid, default_month)
+                aggregations[opid] = agg
+            except Exception as e:
+                aggregations[opid] = {"error": str(e)}
+
+        return jsonify({
+            "status": "success",
+            "date": date_str,
+            "month": default_month,
+            "processed_count": len(processed),
+            "processed": processed,
+            "skipped_count": len(skipped),
+            "skipped": skipped,
+            "errors": errors,
+            "aggregations": aggregations
+        }), 200
+
+    except Exception as e:
+        logging.exception("Error in upload_group_day")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/sv/preview_table', methods=['POST'])
@@ -842,6 +1099,62 @@ def add_sv():
         })
     except Exception as e:
         logging.error(f"Error adding SV: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/admin/add_user', methods=['POST'])
+@require_api_key
+def add_user():
+    try:
+        data = request.get_json()
+        # теперь обязательные только эти поля
+        required_fields = ['name', 'rate', 'direction_id', 'hire_date']
+        if not data or not all(field in data and data[field] for field in required_fields):
+            return jsonify({"error": "Missing required field"}), 400
+
+        name = data['name'].strip()
+        if not name:
+            return jsonify({"error": "Name cannot be empty"}), 400
+
+        # role всегда оператор
+        role = 'operator'
+
+        # supervisor_id опционален
+        supervisor_id = int(data['supervisor_id']) if data.get('supervisor_id') else None
+
+        hire_date = data['hire_date']
+        try:
+            datetime.strptime(hire_date, '%Y-%m-%d')
+        except ValueError:
+            return jsonify({"error": "Invalid hire_date format. Use YYYY-MM-DD"}), 400
+
+        rate = float(data['rate']) if data.get('rate') else 1.0
+        direction_id = int(data['direction_id']) if data.get('direction_id') else None
+
+        login = f"user_{str(uuid.uuid4())[:8]}"
+        password = str(uuid.uuid4())[:8]
+
+        # Создаём оператора
+        user_id = db.create_user(
+            telegram_id=None,
+            name=name,
+            role=role,
+            hire_date=hire_date,
+            supervisor_id=supervisor_id,
+            rate=rate,
+            direction_id=direction_id,
+            login=login,
+            password=password
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": f"Оператор {name} добавлен",
+            "id": user_id,
+            "login": login,
+            "password": password
+        })
+    except Exception as e:
+        logging.error(f"Error adding user: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/admin/directions', methods=['GET'])
@@ -1848,7 +2161,7 @@ def add_training():
             logging.warning(f"Operator not found: {data['operator_id']}")
             return jsonify({"error": "Operator not found"}), 404
         
-        if requester[3] != 'admin' and (operator[6] != requester_id or requester[3] != 'sv'):
+        if requester[3] != 'admin' and  requester[3] != 'sv':
             logging.warning(f"Unauthorized attempt to add training by user {requester_id}")
             return jsonify({"error": "Unauthorized"}), 403
 
@@ -1865,7 +2178,7 @@ def add_training():
             "Обратная связь", "Собрание", "Тех. сбой", "Мотивационная беседа",
             "Дисциплинарный тренинг", "Тренинг по качеству. Разбор ошибок",
             "Тренинг по качеству. Объяснение МШ", "Тренинг по продукту",
-            "Мониторинг", "Практика в офисе таксопарка"
+            "Мониторинг", "Практика в офисе таксопарка", "Другое"
         ]
         if data['reason'] not in allowed_reasons:
             logging.warning(f"Invalid training reason: {data['reason']}")
@@ -1878,7 +2191,8 @@ def add_training():
             end_time=data['end_time'],
             reason=data['reason'],
             comment=data.get('comment'),
-            created_by=requester_id
+            created_by=requester_id,
+            count_in_hours=data.get("count_in_hours", True)
         )
         logging.info(f"Training added: ID {training_id} for operator {data['operator_id']}")
         return jsonify({"status": "success", "id": training_id}), 201
@@ -1940,7 +2254,7 @@ def update_training(training_id):
                 "Обратная связь", "Собрание", "Тех. сбой", "Мотивационная беседа",
                 "Дисциплинарный тренинг", "Тренинг по качеству. Разбор ошибок",
                 "Тренинг по качеству. Объяснение МШ", "Тренинг по продукту",
-                "Мониторинг", "Практика в офисе таксопарка"
+                "Мониторинг", "Практика в офисе таксопарка", "Другое"
             ]
             if data['reason'] not in allowed_reasons:
                 logging.warning(f"Invalid training reason: {data['reason']}")
@@ -1952,7 +2266,8 @@ def update_training(training_id):
             start_time=data.get('start_time'),
             end_time=data.get('end_time'),
             reason=data.get('reason'),
-            comment=data.get('comment')
+            comment=data.get('comment'),
+            count_in_hours=data.get('count_in_hours') 
         )
         if not success:
             logging.warning(f"Failed to update training {training_id}")
@@ -2038,13 +2353,6 @@ def get_access_keyboard():
     kb.add(KeyboardButton('Выход🚪')) 
     kb.add(KeyboardButton('Отмена ❌'))
     return kb
-
-def _build_cors_preflight_response():
-    response = jsonify({"status": "ok"})
-    response.headers.add("Access-Control-Allow-Origin", "https://alfa330.github.io")
-    response.headers.add("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-User-Id")
-    response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
-    return response
 
 def get_current_week_of_month():
     today = datetime.now()
@@ -3778,11 +4086,11 @@ if __name__ == '__main__':
         CronTrigger(day_of_week='mon', hour=9, minute=0),
         misfire_grace_time=3600
     )
-    scheduler.add_job(
-        db.process_and_upload_timesheet,
-        CronTrigger(minute='*/3'),
-        misfire_grace_time=3600
-    )
+    # scheduler.add_job(
+    #     db.process_and_upload_timesheet,
+    #     CronTrigger(minute='*/3'),
+    #     misfire_grace_time=3600
+    # )
     scheduler.start()
     
     logging.info("🔄 Планировщик запущен")
