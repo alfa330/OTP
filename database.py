@@ -556,6 +556,7 @@ class Database:
 
     def get_daily_hours_for_operator_month(self, operator_id, month):
         """Возвращает список daily_hours для оператора за месяц YYYY-MM."""
+        import calendar as _py_calendar
         year, mon = map(int, month.split('-'))
         start = date(year, mon, 1)
         end = date(year, mon, _py_calendar.monthrange(year, mon)[1])
