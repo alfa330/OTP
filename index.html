@@ -1544,8 +1544,7 @@
                 const kpiFactor = (() => {
                     const p = Number(pointsRaw);
                     if (!Number.isFinite(p)) return 0;
-                    if (p > 1 && p <= 100) return p / 100;
-                    return p; // если уже 0.85 или 0.9
+                    return p / 100;
                 })();
 
                 // --- Коэффициент премии: если выполнение нормы < 90% -> 0.75 (как просили) ---
