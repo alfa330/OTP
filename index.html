@@ -5445,23 +5445,43 @@
 
             const fetchHoursData = async () => {
                 setIsLoading(true);
-                
+
                 try {
                     const response = await axios.get(
-                        `${API_BASE_URL}/api/user/hours?operator_id=${user.id}&month=${selectedMonth}`,
+                        `${API_BASE_URL}/api/sv/daily_hours?month=${selectedMonth}`,
                         {
-                            headers: { 'X-API-Key': user.apiKey },
+                            headers: {
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': String(user.id), // обязательно для /api/sv/daily_hours
+                            },
                         }
                     );
+
                     const data = response.data;
+
                     if (data.status === 'success' && isMounted.current) {
-                        setHoursData(data.hours);
+                        // data.operators — массив операторов (для sv) или массив с одним оператором (для operator)
+                        let operatorObj = null;
+
+                        if (Array.isArray(data.operators) && data.operators.length > 0) {
+                            // пытаемся найти объект для текущего пользователя по id, иначе берём первый
+                            operatorObj = data.operators.find(op => Number(op.operator_id) === Number(user.id)) || data.operators[0];
+                        }
+
+                        if (operatorObj) {
+                            // в operatorObj.daily ожидается мапа вида { "1": {...}, "2": {...}, ... }
+                            setHoursData(operatorObj.daily || {});
+                        } else {
+                            // нет данных по операторам — чистим состояние и предупреждаем
+                            setHoursData({});
+                            showToast('No daily hours available for this user/month', 'warning');
+                        }
                     } else {
-                        showToast(data.error || 'Failed to fetch hours data', 'error');
+                        showToast(data.error || 'Failed to fetch daily hours', 'error');
                     }
                 } catch (err) {
-                    console.error('Fetch hours data error:', err);
-                    showToast(err.response?.data?.error || 'Failed to fetch hours data', 'error');
+                    console.error('Fetch daily hours error:', err);
+                    showToast(err.response?.data?.error || 'Failed to fetch daily hours', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
