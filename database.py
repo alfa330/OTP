@@ -1469,7 +1469,7 @@ class Database:
                 c.created_at
             FROM calls c
             JOIN latest_calls lc ON c.id = lc.id
-            LEFT JOIN directions d ON c.direction_id = d.id AND d.is_active = TRUE  -- Added is_active filter
+            LEFT JOIN directions d ON c.direction_id = d.id  
             LEFT JOIN users u ON c.evaluator_id = u.id
             WHERE c.operator_id = %s
         """
