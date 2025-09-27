@@ -143,6 +143,7 @@
             const [newCriterionHasDeficiency, setNewCriterionHasDeficiency] = useState(false);
             const [newDeficiencyWeight, setNewDeficiencyWeight] = useState('');
             const [newDeficiencyDescription, setNewDeficiencyDescription] = useState('');
+            const [toasts, setToasts] = useState([]);
 
             const showToast = (message, type = 'success') => {
                 const id = Date.now();
