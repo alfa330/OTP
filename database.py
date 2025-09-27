@@ -1361,7 +1361,6 @@ class Database:
                 wh.training_hours,
                 wh.fines,
                 wh.norm_hours,
-                wh.daily_hours,
                 wh.calls_per_hour
             FROM users u
             LEFT JOIN work_hours wh ON u.id = wh.operator_id
@@ -1377,7 +1376,7 @@ class Database:
         
         # Добавить группировку, если operator_id не указан
         if not operator_id:
-            query += " GROUP BY u.id, u.name, u.direction_id, wh.regular_hours, wh.training_hours, wh.fines, wh.norm_hours, wh.daily_hours, wh.calls_per_hour"
+            query += " GROUP BY u.id, u.name, u.direction_id, wh.regular_hours, wh.training_hours, wh.fines, wh.norm_hours, wh.calls_per_hour"
         
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
