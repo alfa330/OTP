@@ -1388,10 +1388,10 @@ class Database:
                     "direction": row[2],
                     "regular_hours": float(row[3]) if row[3] is not None else 0,
                     "training_hours": float(row[4]) if row[4] is not None else 0,
-                    "fines": float(row[5]) if row[5] is not None else 0,
-                    "norm_hours": float(row[6]) if row[6] is not None else 0,
-                    "daily_hours": row[7] if row[7] is not None else [0.0]*31,
-                    "calls_per_hour": row[8]
+                    "fines": float(row[4]) if row[4] is not None else 0,
+                    "norm_hours": float(row[5]) if row[5] is not None else 0,
+                    "daily_hours": row[6] if row[6] is not None else [0.0]*31,
+                    "calls_per_hour": row[7]
                 } for row in cursor.fetchall()
             ]
 
