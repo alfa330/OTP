@@ -1118,7 +1118,7 @@
                 return;
                 }
 
-                if (!editedUser.direction_id) {
+                if (!editedUser.direction_id && editedUser.role !== 'sv') {
                 setModalError("Направление обязательно.");
                 return;
                 }
