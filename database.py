@@ -614,7 +614,7 @@ class Database:
                     COALESCE(w.total_calls, 0) AS total_calls,
                     COALESCE(w.total_efficiency_hours, 0) AS total_efficiency_hours,
                     COALESCE(w.calls_per_hour, 0) AS calls_per_hour,
-                    COALESCE(w.fines, COALESCE(w.total_fines, 0)) AS fines
+                    COALESCE(w.fines, 0) AS fines
                 FROM users u
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
