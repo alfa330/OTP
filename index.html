@@ -4460,98 +4460,192 @@
 
                     {/* Модальное окно для запроса (показываем все данные дня) */}
                     {showModal && selectedDay && (
-                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                        <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-lg">
-                            <h3 className="text-xl font-bold mb-4 text-gray-800">
-                            Запрос по дню: {selectedDay.day} {monthLabel}
+                        <div
+                            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="day-modal-title"
+                        >
+                            <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-lg">
+                            <h3 id="day-modal-title" className="text-xl font-bold mb-4 text-gray-800">
+                                Запрос по дню: {selectedDay.day} {monthLabel}
                             </h3>
 
-                            {/* Информация о дне — теперь показываем все поля из selectedDay.dayData */}
+                            {/* --- Инфо по дню --- */}
                             <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
-                            <p className="text-sm text-gray-700">
+                                <p className="text-sm text-gray-700">
                                 <span className="font-semibold">Дата:</span> {selectedDay.dateStr}
-                            </p>
-                            <p className="text-sm text-gray-700">
+                                </p>
+                                <p className="text-sm text-gray-700">
                                 <span className="font-semibold">Выполненные часы:</span> {selectedDay.hours}
-                            </p>
+                                </p>
 
-                            {/* Полный список известных полей */}
-                            <div className="mt-2 space-y-1 text-sm text-gray-700">
-                                {/* отображаем только те поля, которые есть в dayData */}
+                                <div className="mt-2 space-y-1 text-sm text-gray-700">
                                 {selectedDay.dayData && Object.keys(selectedDay.dayData).length > 0 ? (
-                                Object.entries(selectedDay.dayData).map(([k, v]) => {
-                                    // избегаем повторного вывода work_time (уже показан)
+                                    Object.entries(selectedDay.dayData).map(([k, v]) => {
                                     if (k === "work_time" || k === "hours" || k === "time") return null;
                                     return (
-                                    <p key={k}>
+                                        <p key={k}>
                                         <span className="font-semibold">{k.replace(/_/g, " ")}:</span> {String(v)}
-                                    </p>
+                                        </p>
                                     );
-                                })
+                                    })
                                 ) : (
-                                <p className="text-sm text-gray-500">Деталей по этому дню нет.</p>
+                                    <p className="text-sm text-gray-500">Деталей по этому дню нет.</p>
                                 )}
-                            </div>
-                            </div>
-
-                            {/* Тренинги на этот день */}
-                            {trainings.filter((t) => t.date === selectedDay.dateStr).length > 0 && (
-                            <div className="mb-4">
-                                <h4 className="text-md font-semibold text-gray-800 mb-2">Тренинги</h4>
-                                <div className="space-y-2 max-h-40 overflow-y-auto pr-2">
-                                {trainings
-                                    .filter((t) => t.date === selectedDay.dateStr)
-                                    .map((t) => (
-                                    <div key={t.id} className="p-3 bg-yellow-50 border-l-4 border-yellow-400 rounded-md">
-                                        <p className="text-sm text-gray-800">
-                                        <span className="font-semibold">Время:</span> {t.start_time} – {t.end_time}
-                                        </p>
-                                        <p className="text-sm text-gray-800">
-                                        <span className="font-semibold">Причина:</span> {t.reason}
-                                        </p>
-                                        {t.comment && <p className="text-sm text-gray-600 italic">"{t.comment}"</p>}
-                                        <p className="text-xs text-gray-500 mt-1">
-                                        Создал: {t.created_by_name} ({t.created_at})
-                                        </p>
-                                    </div>
-                                    ))}
                                 </div>
                             </div>
-                            )}
+
+                            {/* --- Тренинги --- */}
+                            {(() => {
+                                // вспомогательные утилиты внутри JSX для компактности и читаемости
+                                const parseHMToMinutes = (hm) => {
+                                if (!hm || typeof hm !== "string") return null;
+                                const parts = hm.split(":");
+                                if (parts.length < 2) return null;
+                                const hh = parseInt(parts[0], 10);
+                                const mm = parseInt(parts[1], 10);
+                                if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+                                return hh * 60 + mm;
+                                };
+
+                                // вычисляет длительность в часах; возвращает { hours: number, source: 'time'|'field'|'fallback' }
+                                const computeTrainingDuration = (t) => {
+                                let hours = 0;
+                                let source = "fallback";
+
+                                const startMin = parseHMToMinutes(t.start_time);
+                                const endMin = parseHMToMinutes(t.end_time);
+
+                                if (startMin !== null && endMin !== null) {
+                                    let diff = endMin - startMin;
+                                    if (diff < 0) diff += 24 * 60; // переход через полночь
+                                    hours = diff / 60;
+                                    source = "time";
+                                } else {
+                                    const maybe = Number(t.hours ?? t.duration_hours ?? t.duration ?? t.count ?? 0);
+                                    if (Number.isFinite(maybe) && maybe > 0) {
+                                    hours = maybe;
+                                    source = "field";
+                                    } else {
+                                    // если не удалось определить — считаем 1 час как fallback (можно поменять)
+                                    hours = 1;
+                                    source = "fallback";
+                                    }
+                                }
+
+                                // Не округляем до 1h — оставляем реальную длительность (например 0.5)
+                                return { hours: Number(hours), source };
+                                };
+
+                                // все тренинги на выбранную дату
+                                const trainingsOnDay = Array.isArray(trainings)
+                                ? trainings.filter((t) => t.date === selectedDay.dateStr)
+                                : [];
+
+                                // суммарные часы которые будут засчитаны (только count_in_hours === true)
+                                const countedTrainingSummary = trainingsOnDay.reduce((acc, t) => {
+                                if (!t || !t.count_in_hours) return acc;
+                                const { hours } = computeTrainingDuration(t);
+                                return acc + hours;
+                                }, 0);
+
+                                if (trainingsOnDay.length === 0) return null;
+
+                                return (
+                                <div className="mb-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                    <h4 className="text-md font-semibold text-gray-800">Тренинги</h4>
+                                    <div className="text-sm text-gray-600">
+                                        Засчитывается в часы: <span className="font-medium">{countedTrainingSummary.toFixed(2)} ч</span>
+                                    </div>
+                                    </div>
+
+                                    <div className="space-y-2 max-h-56 overflow-y-auto pr-2">
+                                    {trainingsOnDay.map((t) => {
+                                        const { hours, source } = computeTrainingDuration(t);
+                                        return (
+                                        <div key={t.id} className="p-3 bg-yellow-50 border-l-4 border-yellow-400 rounded-md">
+                                            <div className="flex items-start justify-between">
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-sm text-gray-800">
+                                                <span className="font-semibold">Время:</span> {t.start_time || "—"} — {t.end_time || "—"}
+                                                </p>
+                                                <p className="text-sm text-gray-800">
+                                                <span className="font-semibold">Причина:</span> {t.reason || "—"}
+                                                </p>
+                                                {t.comment && <p className="text-sm text-gray-600 italic">"{t.comment}"</p>}
+                                                <p className="text-xs text-gray-500 mt-1">
+                                                Создал: {t.created_by_name} ({t.created_at})
+                                                </p>
+                                            </div>
+
+                                            <div className="ml-3 flex-shrink-0 text-right">
+                                                {/* бейдж — засчитывается или нет */}
+                                                <div className="mb-2">
+                                                {t.count_in_hours ? (
+                                                    <span className="inline-block px-2 py-1 text-xs font-semibold rounded-md bg-green-100 text-green-800">
+                                                    Засчитывается
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-block px-2 py-1 text-xs font-semibold rounded-md bg-gray-100 text-gray-800">
+                                                    Не засчитывается
+                                                    </span>
+                                                )}
+                                                </div>
+
+                                                {/* длительность */}
+                                                <div className="text-sm font-medium text-gray-800">
+                                                {hours.toFixed(2)} ч
+                                                {source !== "time" && (
+                                                    <div className="text-xs text-gray-500 mt-1">
+                                                    {source === "field" ? "По полю длительности" : "По умолчанию (fallback)"}
+                                                    </div>
+                                                )}
+                                                </div>
+                                            </div>
+                                            </div>
+                                        </div>
+                                        );
+                                    })}
+                                    </div>
+                                </div>
+                                );
+                            })()}
 
                             {/* Поле запроса */}
                             <textarea
-                            value={requestMessage}
-                            onChange={(e) => setRequestMessage(e.target.value)}
-                            placeholder="Введите текст запроса..."
-                            className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4 text-sm"
-                            rows={4}
-                            disabled={isSending}
+                                value={requestMessage}
+                                onChange={(e) => setRequestMessage(e.target.value)}
+                                placeholder="Введите текст запроса..."
+                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4 text-sm"
+                                rows={4}
+                                disabled={isSending}
                             />
 
                             {/* Кнопки */}
                             <div className="flex justify-end gap-2">
-                            <button
+                                <button
                                 onClick={handleSendRequest}
                                 className={`px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition ${isSending ? "opacity-50 cursor-not-allowed" : ""}`}
                                 disabled={isSending}
-                            >
+                                >
                                 {isSending ? "Отправка..." : "Отправить запрос"}
-                            </button>
-                            <button
+                                </button>
+                                <button
                                 onClick={() => {
-                                setShowModal(false);
-                                setSelectedDay(null);
+                                    setShowModal(false);
+                                    setSelectedDay(null);
                                 }}
                                 className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition"
                                 disabled={isSending}
-                            >
+                                >
                                 Отмена
-                            </button>
+                                </button>
+                            </div>
                             </div>
                         </div>
-                        </div>
-                    )}
+                        )}
                     </div>
                 );
                 };
