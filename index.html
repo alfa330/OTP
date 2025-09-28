@@ -4537,22 +4537,22 @@
                                     key: "total_calls",
                                     label: "Calls",
                                     icon: "fas fa-phone",
-                                    value: fmtNumber(normalize("total_calls"), 0),
+                                    value: fmtNumber(normalize("calls"), 0),
                                     hint: "Всего звонков",
                                     },
                                     {
                                     key: "efficiency",
                                     label: "Efficiency",
                                     icon: "fas fa-tachometer-alt",
-                                    value: fmtNumber(normalize("efficiency") ?? normalize("total_efficiency_hours") ?? normalize("efficiency_hours")),
+                                    value: fmtNumber(normalize("efficiency")),
                                     hint: "Эффективность (часы)",
                                     },
                                     {
                                     key: "talk_time",
                                     label: "Talk",
                                     icon: "fas fa-comments",
-                                    value: fmtTimeLike(normalize("talk_time") ?? normalize("talk_time_minutes") ?? normalize("talk_minutes")),
-                                    hint: "Говорильное время",
+                                    value: fmtTimeLike(normalize("talk_time")),
+                                    hint: "Время в разговоре",
                                     },
                                 ];
 
@@ -4575,24 +4575,6 @@
                                     </div>
                                 );
                                 })()}
-                            </div>
-
-                            {/* --- Доп. детали по дню (старый блок, немного отрефакторен) --- */}
-                            <div className="mb-4 p-3 bg-white rounded-lg border border-gray-200">
-                                <div className="text-sm text-gray-700 mb-2">
-                                {selectedDay.dayData && Object.keys(selectedDay.dayData).length > 0 ? (
-                                    Object.entries(selectedDay.dayData).map(([k, v]) => {
-                                    if (k === "work_time" || k === "hours" || k === "time") return null;
-                                    return (
-                                        <p key={k} className="mb-1">
-                                        <span className="font-semibold">{k.replace(/_/g, " ")}:</span> {String(v ?? "—")}
-                                        </p>
-                                    );
-                                    })
-                                ) : (
-                                    <p className="text-sm text-gray-500">Деталей по этому дню нет.</p>
-                                )}
-                                </div>
                             </div>
 
                             {/* --- Тренинги (оставил как был, с теми же утилитами) --- */}
