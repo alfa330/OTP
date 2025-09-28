@@ -7417,98 +7417,80 @@
                                         </p>
                                         ) : hoursData ? (
                                         (() => {
-                                            // Helper: безопасное числовое приведение и toFixed-safe
-                                            const safeNum = (v, def = 0) => {
-                                            const n = Number(v);
-                                            return Number.isFinite(n) ? n : def;
-                                            };
-                                            const fixed = (v, digits = 2, def = '0.00') => {
-                                            const n = safeNum(v, null);
-                                            return n === null ? def : n.toFixed(digits);
-                                            };
-
-                                            // Нормализация: поддерживаем разные форматы:
-                                            // - внешний operator (переменная operator, если она передана в scope)
-                                            // - hoursData.operator (один оператор)
-                                            // - hoursData.operators (массив — ищем по user.id или берем первый)
-                                            // - уже нормализованный объект (с regular_hours/aggregates)
-                                            // - просто daily map / daily_hours array
-                                            const normalize = (() => {
+                                            // --- Нормализация hoursData в hd (robust) ---
+                                            const hd = (() => {
                                             try {
-                                                // 0. Если в scope есть explicit operator (например props.operator), используем его
-                                                if (typeof operator !== 'undefined' && operator && (operator.operator_id || operator.id || operator.daily || operator.aggregates)) {
-                                                const op = operator;
+                                                // helper: попробуем найти оператор-источник в глобальном списке operators (если он есть)
+                                                const findOpFromOperators = () => {
+                                                try {
+                                                    if (typeof operators !== 'undefined' && Array.isArray(operators) && user) {
+                                                    return operators.find(o => Number(o.operator_id) === Number(user.id)) || operators[0];
+                                                    }
+                                                } catch (e) { /* ignore */ }
+                                                return null;
+                                                };
+
+                                                // 1) Если hoursData уже содержит агрегаты или norm непосредственно
+                                                if (hoursData && typeof hoursData === 'object' && (hoursData.regular_hours !== undefined || hoursData.aggregates || hoursData.norm_hours !== undefined)) {
+                                                const src = hoursData;
                                                 return {
-                                                    regular_hours: safeNum(op.aggregates?.regular_hours ?? op.regular_hours ?? 0),
-                                                    norm_hours: safeNum(op.norm_hours ?? 0),
-                                                    training_hours: safeNum(op.training_hours ?? op.training_time ?? 0),
-                                                    fines: safeNum(op.fines ?? op.total_fines ?? 0),
-                                                    calls_per_hour: safeNum(op.aggregates?.calls_per_hour ?? op.calls_per_hour ?? 0),
-                                                    _raw: op
+                                                    regular_hours: Number(src.aggregates?.regular_hours ?? src.regular_hours ?? 0),
+                                                    norm_hours: Number(src.norm_hours ?? src.aggregates?.norm_hours ?? 0),
+                                                    training_hours: Number(src.training_hours ?? 0),
+                                                    fines: Number(src.fines ?? 0),
+                                                    calls_per_hour: Number(src.aggregates?.calls_per_hour ?? src.calls_per_hour ?? 0),
+                                                    _raw: src
                                                 };
                                                 }
 
-                                                // 1. Если hoursData уже нормализован (есть regular_hours или aggregates на верхнем уровне)
-                                                if (hoursData && typeof hoursData === 'object' && (hoursData.regular_hours !== undefined || hoursData.aggregates !== undefined)) {
-                                                return {
-                                                    regular_hours: safeNum(hoursData.regular_hours ?? hoursData.aggregates?.regular_hours ?? 0),
-                                                    norm_hours: safeNum(hoursData.norm_hours ?? 0),
-                                                    training_hours: safeNum(hoursData.training_hours ?? hoursData.training_time ?? 0),
-                                                    fines: safeNum(hoursData.fines ?? hoursData.total_fines ?? 0),
-                                                    calls_per_hour: safeNum(hoursData.calls_per_hour ?? hoursData.aggregates?.calls_per_hour ?? 0),
-                                                    _raw: hoursData
-                                                };
-                                                }
-
-                                                // 2. Если пришёл wrapper с operators (supervisor) — найдём наш оператор по user.id
+                                                // 2) Если пришёл wrapper с operators (в hoursData.operators) — найдём нашего пользователя
                                                 if (hoursData.operators && Array.isArray(hoursData.operators)) {
-                                                const found = hoursData.operators.find(o => Number(o.operator_id) === Number(user?.id)) || hoursData.operators[0];
-                                                if (found) {
+                                                const op = hoursData.operators.find(o => Number(o.operator_id) === Number(user.id)) || hoursData.operators[0];
+                                                if (op) {
                                                     return {
-                                                    regular_hours: safeNum(found.aggregates?.regular_hours ?? found.regular_hours ?? 0),
-                                                    norm_hours: safeNum(found.norm_hours ?? 0),
-                                                    training_hours: safeNum(found.training_hours ?? found.training_time ?? 0),
-                                                    fines: safeNum(found.fines ?? found.total_fines ?? 0),
-                                                    calls_per_hour: safeNum(found.aggregates?.calls_per_hour ?? found.calls_per_hour ?? 0),
-                                                    _raw: found
+                                                    regular_hours: Number(op.aggregates?.regular_hours ?? op.regular_hours ?? 0),
+                                                    norm_hours: Number(op.norm_hours ?? op.aggregates?.norm_hours ?? 0),
+                                                    training_hours: Number(op.training_hours ?? 0),
+                                                    fines: Number(op.fines ?? 0),
+                                                    calls_per_hour: Number(op.aggregates?.calls_per_hour ?? op.calls_per_hour ?? 0),
+                                                    _raw: op
                                                     };
                                                 }
                                                 }
 
-                                                // 3. Если hoursData — объект, похожий на operator (operator_id, daily, aggregates)
+                                                // 3) Если пришёл оператор-подобный объект (опер + daily + aggregates)
                                                 if (hoursData.operator_id || hoursData.daily || hoursData.aggregates) {
                                                 const op = hoursData;
                                                 return {
-                                                    regular_hours: safeNum(op.aggregates?.regular_hours ?? op.regular_hours ?? 0),
-                                                    norm_hours: safeNum(op.norm_hours ?? 0),
-                                                    training_hours: safeNum(op.training_hours ?? op.training_time ?? 0),
-                                                    fines: safeNum(op.fines ?? op.total_fines ?? 0),
-                                                    calls_per_hour: safeNum(op.aggregates?.calls_per_hour ?? op.calls_per_hour ?? 0),
+                                                    regular_hours: Number(op.aggregates?.regular_hours ?? op.regular_hours ?? 0),
+                                                    norm_hours: Number(op.norm_hours ?? op.aggregates?.norm_hours ?? 0),
+                                                    training_hours: Number(op.training_hours ?? 0),
+                                                    fines: Number(op.fines ?? 0),
+                                                    calls_per_hour: Number(op.aggregates?.calls_per_hour ?? op.calls_per_hour ?? 0),
                                                     _raw: op
                                                 };
                                                 }
 
-                                                // 4. Если есть daily/daily_hours — агрегируем
+                                                // 4) Если пришла только мапа daily (например fetch установил operatorObj.daily)
+                                                //    — агрегируем и возьмём norm_hours из operators (fallback)
                                                 let dailyMap = null;
                                                 if (hoursData.daily && typeof hoursData.daily === 'object') {
                                                 dailyMap = hoursData.daily;
-                                                } else if (hoursData.daily_hours) {
+                                                } else if (Array.isArray(hoursData.daily_hours) || typeof hoursData.daily_hours === 'object') {
+                                                // поддержка старого daily_hours
                                                 if (Array.isArray(hoursData.daily_hours)) {
-                                                    // Превращаем массив в map по индексам (1-based)
                                                     const map = {};
                                                     for (let i = 0; i < hoursData.daily_hours.length; i++) {
                                                     const val = hoursData.daily_hours[i];
-                                                    if (val == null) continue;
                                                     const key = String(i + 1);
-                                                    if (typeof val === 'object') map[key] = val;
-                                                    else map[key] = { work_time: Number(val) || 0 };
+                                                    if (val == null) continue;
+                                                    map[key] = (typeof val === 'object') ? val : { work_time: Number(val) || 0 };
                                                     }
                                                     dailyMap = map;
                                                 } else if (typeof hoursData.daily_hours === 'object') {
                                                     dailyMap = hoursData.daily_hours;
                                                 }
                                                 } else if (typeof hoursData === 'object') {
-                                                // возможно hoursData уже является мапой по дням {"1": {...}, "2": {...}}
                                                 const keys = Object.keys(hoursData);
                                                 if (keys.length > 0 && keys.some(k => /^\d+$/.test(k))) {
                                                     dailyMap = hoursData;
@@ -7518,7 +7500,6 @@
                                                 if (dailyMap) {
                                                 let regular = 0;
                                                 let training = 0;
-                                                let talk = 0;
                                                 let calls = 0;
                                                 let efficiencyHours = 0;
 
@@ -7527,26 +7508,33 @@
                                                     if (typeof item === 'number') {
                                                     regular += item;
                                                     } else if (typeof item === 'object') {
-                                                    regular += safeNum(item.work_time ?? item.hours ?? item.time ?? 0);
-                                                    training += safeNum(item.training_time ?? item.training_hours ?? 0);
-                                                    talk += safeNum(item.talk_time ?? 0);
-                                                    calls += safeNum(item.calls ?? 0);
-                                                    efficiencyHours += safeNum(item.efficiency ?? 0);
+                                                    regular += Number(item.work_time ?? item.hours ?? item.time ?? 0);
+                                                    training += Number(item.training_time ?? item.training_hours ?? 0);
+                                                    calls += Number(item.calls ?? 0);
+                                                    efficiencyHours += Number(item.efficiency ?? 0);
                                                     }
                                                 });
 
-                                                const callsPerHour = regular > 0 ? calls / (regular || 1) : 0;
+                                                // попытка получить норму из operators (fallback)
+                                                const opFromOperators = findOpFromOperators();
+                                                const normFromOperators = opFromOperators ? Number(opFromOperators.norm_hours ?? opFromOperators.norm_hours ?? 0) : 0;
+
+                                                // Также попробуем увидеть, может быть hoursData._raw был передан (редко)
+                                                const normFromRaw = Number(hoursData._raw?.norm_hours ?? 0);
+
+                                                const callsPerHour = regular > 0 ? (calls / (regular || 1)) : 0;
+
                                                 return {
-                                                    regular_hours: safeNum(regular),
-                                                    norm_hours: safeNum(hoursData.norm_hours ?? 0),
-                                                    training_hours: safeNum(training),
-                                                    fines: safeNum(hoursData.fines ?? 0),
-                                                    calls_per_hour: safeNum(callsPerHour),
+                                                    regular_hours: Number(regular || 0),
+                                                    norm_hours: Number(hoursData.norm_hours ?? normFromRaw ?? normFromOperators ?? 0),
+                                                    training_hours: Number(training || 0),
+                                                    fines: Number(hoursData.fines ?? 0),
+                                                    calls_per_hour: Number(callsPerHour || 0),
                                                     _raw: { daily: dailyMap }
                                                 };
                                                 }
 
-                                                // фоллбек — пустая нормализация
+                                                // фоллбек — пустые значения
                                                 return {
                                                 regular_hours: 0,
                                                 norm_hours: 0,
@@ -7568,18 +7556,17 @@
                                             }
                                             })();
 
-                                            // Display values (safe & formatted)
-                                            const regularHoursNum = safeNum(normalize.regular_hours, 0);
-                                            const normHoursNum = safeNum(normalize.norm_hours, 0);
-                                            const trainingHoursNum = safeNum(normalize.training_hours, 0);
-                                            const finesNum = safeNum(normalize.fines, 0);
-                                            const callsPerHourNum = safeNum(normalize.calls_per_hour, 0);
+                                            // --- безопасное форматирование чисел ---
+                                            const safeNum = (v, def = 0) => {
+                                            const n = Number(v);
+                                            return Number.isFinite(n) ? n : def;
+                                            };
 
-                                            const regularHoursDisp = fixed(regularHoursNum, 2);
-                                            const normHoursDisp = fixed(normHoursNum, 2);
-                                            const trainingHoursDisp = fixed(trainingHoursNum, 2);
-                                            const finesDisp = fixed(finesNum, 2);
-                                            const callsPerHourDisp = fixed(callsPerHourNum, 1);
+                                            const regularHoursDisp = safeNum(hd.regular_hours).toFixed(2);
+                                            const normHoursDisp = safeNum(hd.norm_hours).toFixed(2);
+                                            const trainingHoursDisp = safeNum(hd.training_hours).toFixed(2);
+                                            const finesDisp = safeNum(hd.fines).toFixed(2);
+                                            const callsPerHourDisp = safeNum(hd.calls_per_hour).toFixed(1);
 
                                             return (
                                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -7590,7 +7577,7 @@
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                                     <i className="fas fa-briefcase text-gray-400"></i> Отработанные часы
                                                     </p>
-                                                    <p className={`text-xl font-bold ${getHoursPerformanceColor(regularHoursNum, normHoursNum)}`}>
+                                                    <p className={`text-xl font-bold ${getHoursPerformanceColor(Number(hd.regular_hours), Number(hd.norm_hours))}`}>
                                                     {regularHoursDisp} <span className="text-sm font-medium text-gray-500">час</span>
                                                     </p>
                                                 </div>
@@ -7628,13 +7615,15 @@
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                                     <i className="fas fa-phone-alt text-gray-400"></i> Звонки в час
                                                     </p>
-                                                    <p className={`text-xl font-bold ${getCallsPerHourColor(callsPerHourNum)}`}>{callsPerHourDisp}</p>
+                                                    <p className={`text-xl font-bold ${getCallsPerHourColor(Number(hd.calls_per_hour).toFixed(2))}`}>
+                                                    {callsPerHourDisp}
+                                                    </p>
                                                 </div>
 
                                                 {/* Полукруговая диаграмма */}
                                                 <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition flex justify-center">
                                                     <SemiCircleProgress
-                                                    percentage={(normHoursNum > 0 ? (regularHoursNum / normHoursNum) * 100 : 0)}
+                                                    percentage={(safeNum(hd.regular_hours) / (safeNum(hd.norm_hours) || 1)) * 100}
                                                     label="Выполнение нормы"
                                                     width={160}
                                                     height={90}
@@ -7644,14 +7633,7 @@
 
                                                 {/* Правая часть – календарь */}
                                                 <div className="col-span-1">
-                                                {/* WorkHoursCalendar умеет нормализовать daily/daily_hours/operator.daily.
-                                                    Передаём первоисточник normalize._raw если он есть, иначе hoursData */}
-                                                <WorkHoursCalendar
-                                                    hoursData={normalize._raw ?? hoursData}
-                                                    selectedMonth={selectedMonth}
-                                                    user={user}
-                                                    trainings={operatorTrainings}
-                                                />
+                                                <WorkHoursCalendar hoursData={hd._raw ?? hoursData} selectedMonth={selectedMonth} user={user} trainings={operatorTrainings} />
                                                 </div>
                                             </div>
                                             );
