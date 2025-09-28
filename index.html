@@ -7463,27 +7463,88 @@
                                             <i className="fas fa-spinner fa-spin mr-2 text-gray-500"></i>
                                             <span className="italic">Загрузка рабочих часов...</span>
                                         </p>
-                                        ) : hoursData && hoursData.operators && hoursData.operators.length > 0 ? (
+                                        ) : hoursData && Array.isArray(hoursData.operators) && hoursData.operators.length > 0 ? (
                                         (() => {
+                                            // На входе ожидаем стабильный формат от бекенда:
+                                            // { status, month, days_in_month, operators: [ { operator_id, name, rate, norm_hours, fines, daily, aggregates, training_hours? } ] }
                                             const op = hoursData.operators.find(o => Number(o.operator_id) === Number(user.id)) || hoursData.operators[0];
 
-                                            const regular = Number(op.aggregates?.regular_hours || 0);
-                                            const norm = Number(op.norm_hours || 0);
-                                            const training = Number(op.training_hours || 0); // если добавишь позже
-                                            const fines = Number(op.fines || 0);
-                                            const callsPerHour = Number(op.aggregates?.calls_per_hour || 0);
+                                            // --- базовые метрики из оператора ---
+                                            const regularBase = Number(op.aggregates?.regular_hours ?? 0);
+                                            const norm = Number(op.norm_hours ?? 0);
+                                            const fines = Number(op.fines ?? 0);
+                                            const callsPerHour = Number(op.aggregates?.calls_per_hour ?? 0);
+                                            const opTrainingField = Number(op.training_hours ?? 0); // если бек присылает предрасчитанные training_hours
 
+                                            // --- вспомогательные функции ---
                                             const safeNum = (v, def = 0) => {
                                             const n = Number(v);
                                             return Number.isFinite(n) ? n : def;
                                             };
 
+                                            // парсинг "HH:MM" -> минуты от 00:00
+                                            const parseHMToMinutes = (hm) => {
+                                            if (!hm || typeof hm !== 'string') return null;
+                                            const parts = hm.split(':');
+                                            if (parts.length < 2) return null;
+                                            const hh = parseInt(parts[0], 10);
+                                            const mm = parseInt(parts[1], 10);
+                                            if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+                                            return hh * 60 + mm;
+                                            };
+
+                                            // --- собираем релевантные тренинги для оператора в выбранном месяце ---
+                                            const trainingsForOp = Array.isArray(operatorTrainings)
+                                            ? operatorTrainings.filter(t => {
+                                                if (!t) return false;
+                                                // фильтрация по оператору (если указан)
+                                                if (t.operator_id && Number(t.operator_id) !== Number(op.operator_id)) return false;
+                                                // фильтрация по месяцу если есть поле date (формат YYYY-MM-DD)
+                                                if (t.date) {
+                                                    try {
+                                                    if (String(t.date).slice(0, 7) !== selectedMonth) return false;
+                                                    } catch (e) { /* ignore */ }
+                                                }
+                                                return true;
+                                                })
+                                            : [];
+
+                                            // --- суммируем часы только для count_in_hours === true ---
+                                            const trainingHoursFromList = trainingsForOp.reduce((sum, t) => {
+                                            if (!t || !t.count_in_hours) return sum;
+
+                                            // 1) пытаемся вычислить по start_time/end_time
+                                            const startMin = parseHMToMinutes(t.start_time);
+                                            const endMin = parseHMToMinutes(t.end_time);
+
+                                            let hours = 0;
+                                            if (startMin !== null && endMin !== null) {
+                                                let diff = endMin - startMin;
+                                                if (diff < 0) diff += 24 * 60; // переход через полночь
+                                                hours = diff / 60;
+                                            } else {
+                                                // 2) fallback: поля hours/duration/duration_hours/count
+                                                const maybe = Number(t.hours ?? t.duration_hours ?? t.duration ?? t.count ?? 0);
+                                                if (Number.isFinite(maybe) && maybe > 0) hours = maybe;
+                                            }
+
+                                            // 3) безопасный fallback: если не удалось посчитать или получилось 0 -> 1 час
+                                            if (!Number.isFinite(hours) || hours <= 0) hours = 1;
+
+                                            return sum + hours;
+                                            }, 0);
+
+                                            const trainingHours = safeNum(opTrainingField) + safeNum(trainingHoursFromList);
+
+                                            // --- итоговые отработанные часы (с учётом зачтённых часов тренинга) ---
+                                            const regular = safeNum(regularBase) + trainingHours;
+
+                                            // --- отображаем ---
                                             return (
                                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                                {/* Левая часть */}
+                                                {/* Левая часть с карточками */}
                                                 <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
-
-                                                {/* Regular Hours */}
+                                                {/* Отработанные часы (включая зачтённые часы тренинга) */}
                                                 <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                                     <i className="fas fa-briefcase text-gray-400"></i> Отработанные часы
@@ -7493,7 +7554,7 @@
                                                     </p>
                                                 </div>
 
-                                                {/* Norm Hours */}
+                                                {/* Норма часов */}
                                                 <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                                     <i className="fas fa-bullseye text-gray-400"></i> Норма часов
@@ -7503,7 +7564,17 @@
                                                     </p>
                                                 </div>
 
-                                                {/* Fines */}
+                                                {/* Часы тренинга (только те, что count_in_hours === true) */}
+                                                <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
+                                                    <i className="fas fa-chalkboard-teacher text-gray-400"></i> Часы тренинга
+                                                    </p>
+                                                    <p className="text-xl font-bold text-blue-700">
+                                                    {safeNum(trainingHours).toFixed(2)} <span className="text-sm font-medium text-gray-500">час</span>
+                                                    </p>
+                                                </div>
+
+                                                {/* Штрафы */}
                                                 <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                                     <i className="fas fa-exclamation-triangle text-gray-400"></i> Штрафы
@@ -7513,7 +7584,7 @@
                                                     </p>
                                                 </div>
 
-                                                {/* Calls per hour */}
+                                                {/* Звонки в час */}
                                                 <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                                     <i className="fas fa-phone-alt text-gray-400"></i> Звонки в час
@@ -7523,7 +7594,7 @@
                                                     </p>
                                                 </div>
 
-                                                {/* Полукруговая диаграмма */}
+                                                {/* Полукруговая диаграмма выполнения нормы */}
                                                 <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition flex justify-center">
                                                     <SemiCircleProgress
                                                     percentage={(safeNum(regular) / (safeNum(norm) || 1)) * 100}
@@ -7534,10 +7605,10 @@
                                                 </div>
                                                 </div>
 
-                                                {/* Правая часть – календарь */}
+                                                {/* Правая часть – календарь (передаём весь оператор-объект) */}
                                                 <div className="col-span-1">
                                                 <WorkHoursCalendar
-                                                    hoursData={op} // передаем весь объект оператора
+                                                    hoursData={op}
                                                     selectedMonth={selectedMonth}
                                                     user={user}
                                                     trainings={operatorTrainings}
