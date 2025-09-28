@@ -4525,6 +4525,11 @@
                                     return String(v);
                                 };
 
+                                const eff = Number(normalize("efficiency") ?? 0);
+                                const work = Number(normalize("work_time") ?? 0);
+                                const effPercent =
+                                    work > 0 && Number.isFinite(eff) ? ((eff / work) * 100).toFixed(1) + "%" : "—";
+
                                 const metrics = [
                                     {
                                     key: "break_time",
@@ -4544,8 +4549,8 @@
                                     key: "efficiency",
                                     label: "Efficiency",
                                     icon: "fas fa-tachometer-alt",
-                                    value: fmtNumber(normalize("efficiency")),
-                                    hint: "Эффективность (часы)",
+                                    value: effPercent,
+                                    hint: "Эффективность (отн. рабочего времени)",
                                     },
                                     {
                                     key: "talk_time",
