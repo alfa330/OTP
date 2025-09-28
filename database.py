@@ -554,27 +554,107 @@ class Database:
                     created_at = CURRENT_TIMESTAMP
             """, (operator_id, day, work_time, break_time, talk_time, calls, efficiency))
 
-    def get_daily_hours_for_operator_month(self, operator_id, month):
-        """Возвращает список daily_hours для оператора за месяц YYYY-MM."""
+    def get_daily_hours_for_operator_month(self, operator_id: int, month: str):
+        """
+        Возвращает daily_hours для одного оператора за месяц YYYY-MM,
+        а также norm_hours, aggregates (из work_hours) и rate/name из users.
+
+        Результат:
+        {
+            "month": month,
+            "days_in_month": <int>,
+            "operator": { ... }
+        }
+        """
         import calendar as _py_calendar
-        year, mon = map(int, month.split('-'))
-        start = date(year, mon, 1)
-        end = date(year, mon, _py_calendar.monthrange(year, mon)[1])
+        from datetime import date as _date
+
+        # validate month format YYYY-MM and compute date range
+        try:
+            year, mon = map(int, month.split('-'))
+            days_in_month = _py_calendar.monthrange(year, mon)[1]
+            start = _date(year, mon, 1)
+            end = _date(year, mon, days_in_month)
+        except Exception as e:
+            raise ValueError("Invalid month format, expected YYYY-MM") from e
+
         with self._get_cursor() as cursor:
-            cursor.execute("""
+            # 1) Получаем daily_hours (одним запросом)
+            cursor.execute(
+                """
                 SELECT day, work_time, break_time, talk_time, calls, efficiency
                 FROM daily_hours
                 WHERE operator_id = %s AND day >= %s AND day <= %s
                 ORDER BY day
-            """, (operator_id, start, end))
-            return [{
-                "day": row[0].isoformat(),
-                "work_time": float(row[1]),
-                "break_time": float(row[2]),
-                "talk_time": float(row[3]),
-                "calls": int(row[4]),
-                "efficiency": float(row[5])   # часы
-            } for row in cursor.fetchall()]
+                """,
+                (operator_id, start, end),
+            )
+            daily_rows = cursor.fetchall()
+
+            # build daily map: { "1": {...}, "2": {...}, ... }
+            daily_map = {
+                str(row[0].day): {
+                    "work_time": float(row[1]) if row[1] is not None else 0.0,
+                    "break_time": float(row[2]) if row[2] is not None else 0.0,
+                    "talk_time": float(row[3]) if row[3] is not None else 0.0,
+                    "calls": int(row[4]) if row[4] is not None else 0,
+                    "efficiency": float(row[5]) if row[5] is not None else 0.0,
+                }
+                for row in daily_rows
+            }
+
+            # 2) Получаем имя/ставку + данные work_hours одним LEFT JOIN запросом
+            cursor.execute(
+                """
+                SELECT u.name, u.rate,
+                    COALESCE(w.norm_hours, 0) AS norm_hours,
+                    COALESCE(w.regular_hours, 0) AS regular_hours,
+                    COALESCE(w.total_break_time, 0) AS total_break_time,
+                    COALESCE(w.total_talk_time, 0) AS total_talk_time,
+                    COALESCE(w.total_calls, 0) AS total_calls,
+                    COALESCE(w.total_efficiency_hours, 0) AS total_efficiency_hours,
+                    COALESCE(w.calls_per_hour, 0) AS calls_per_hour,
+                    COALESCE(w.fines, COALESCE(w.total_fines, 0)) AS fines
+                FROM users u
+                LEFT JOIN work_hours w
+                ON w.operator_id = u.id AND w.month = %s
+                WHERE u.id = %s
+                LIMIT 1
+                """,
+                (month, operator_id),
+            )
+            row = cursor.fetchone()
+
+        # default values if user / work_hours not found
+        if row:
+            name, rate, norm_hours, regular_hours, total_break_time, total_talk_time, \
+                total_calls, total_efficiency_hours, calls_per_hour, fines = row
+            rate = float(rate) if rate is not None else 0.0
+        else:
+            name = None
+            rate = 0.0
+            norm_hours = regular_hours = total_break_time = total_talk_time = 0.0
+            total_calls = 0
+            total_efficiency_hours = calls_per_hour = fines = 0.0
+
+        operator_obj = {
+            "operator_id": operator_id,
+            "name": name,
+            "rate": rate,
+            "norm_hours": float(norm_hours),
+            "fines": float(fines),
+            "daily": daily_map,
+            "aggregates": {
+                "regular_hours": float(regular_hours),
+                "total_break_time": float(total_break_time),
+                "total_talk_time": float(total_talk_time),
+                "total_calls": int(total_calls),
+                "total_efficiency_hours": float(total_efficiency_hours),
+                "calls_per_hour": float(calls_per_hour),
+            },
+        }
+
+        return {"month": month, "days_in_month": days_in_month, "operator": operator_obj}
 
     def get_daily_hours_by_supervisor_month(self, supervisor_id, month):
         """

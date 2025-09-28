@@ -467,135 +467,35 @@ def sv_daily_hours():
         # -----------------------
         if role == 'sv':
             try:
+                # метод БД уже возвращает norm_hours, aggregates и rate для каждого оператора
                 result = db.get_daily_hours_by_supervisor_month(requester_id, month)
             except ValueError as e:
                 return jsonify({"error": str(e)}), 400
-
-            # Дополняем каждый operator.norm_hours и operator.fines из get_hours_summary
-            ops = result.get("operators", [])
-            for op in ops:
-                op_id = op.get("operator_id")
-                if not op_id:
-                    # пропускаем если нет id
-                    op["norm_hours"] = op.get("norm_hours", 0.0)
-                    op["fines"] = op.get("fines", 0.0)
-                    continue
-
-                try:
-                    summary = db.get_hours_summary(operator_id=op_id, month=month)
-                    # summary может быть dict или list
-                    if isinstance(summary, list) and len(summary) > 0:
-                        summary = summary[0]
-                    if not summary:
-                        raise ValueError("empty summary")
-
-                    op["norm_hours"] = float(summary.get("norm_hours", op.get("norm_hours", 0.0)))
-                    # some schemas use 'fines' or 'total_fines' — пробуем оба
-                    op["fines"] = float(summary.get("fines",
-                                         summary.get("total_fines",
-                                                     op.get("fines", 0.0))))
-                except Exception:
-                    # на случай ошибки — не ломаем ответ, ставим значения по умолчанию
-                    op["norm_hours"] = float(op.get("norm_hours", 0.0))
-                    op["fines"] = float(op.get("fines", 0.0))
 
             return jsonify({
                 "status": "success",
                 "month": result.get("month", month),
                 "days_in_month": result.get("days_in_month"),
-                "operators": ops
+                "operators": result.get("operators", [])
             }), 200
 
         # -----------------------
         # Behavior for operators
         # -----------------------
         elif role == 'operator':
-            # get daily entries for this operator for the month
             try:
-                daily_list = db.get_daily_hours_for_operator_month(requester_id, month)
+                # теперь этот метод вернёт dict с operator (включая norm_hours, fines/aggregates и daily)
+                result = db.get_daily_hours_for_operator_month(requester_id, month)
             except Exception as e:
                 logging.exception("Error fetching daily hours for operator")
                 return jsonify({"error": "Failed to fetch daily hours"}), 500
 
-            # convert list -> map as in supervisor response: { "1": {...}, "2": {...} ... }
-            daily_map = {}
-            for entry in daily_list:
-                # entry["day"] is expected 'YYYY-MM-DD'
-                try:
-                    day_num = str(int(datetime.fromisoformat(entry["day"]).day))
-                except Exception:
-                    day_num = str(int(entry["day"].split('-')[-1]))
-                daily_map[day_num] = {
-                    "work_time": float(entry.get("work_time", 0.0)),
-                    "break_time": float(entry.get("break_time", 0.0)),
-                    "talk_time": float(entry.get("talk_time", 0.0)),
-                    "calls": int(entry.get("calls", 0)),
-                    "efficiency": float(entry.get("efficiency", 0.0))
-                }
-
-            # aggregates: суммируем daily и обновляем work_hours (и получаем агрегаты)
-            try:
-                aggregates = db.aggregate_month_from_daily(requester_id, month)
-            except Exception as e:
-                logging.exception("Error aggregating month from daily")
-                aggregates = {
-                    "regular_hours": 0.0,
-                    "total_break_time": 0.0,
-                    "total_talk_time": 0.0,
-                    "total_calls": 0,
-                    "total_efficiency_hours": 0.0,
-                    "calls_per_hour": 0.0
-                }
-
-            # try to fetch norm_hours and fines from work_hours / users summary if available
-            norm_hours = 0.0
-            fines = 0.0
-            try:
-                summary = db.get_hours_summary(operator_id=requester_id, month=month)
-                if isinstance(summary, list) and len(summary) > 0:
-                    summary = summary[0]
-                if summary:
-                    norm_hours = float(summary.get("norm_hours", 0.0))
-                    fines = float(summary.get("fines",
-                                      summary.get("total_fines",
-                                                  0.0)))
-            except Exception:
-                # ignore if not available
-                norm_hours = 0.0
-                fines = 0.0
-
-            rate = float(requester[12]) if len(requester) > 12 and requester[12] is not None else 0.0
-
-            operator_obj = {
-                "operator_id": requester_id,
-                "name": requester[2],
-                "rate": rate,
-                "norm_hours": norm_hours,
-                "fines": fines,
-                "daily": daily_map,
-                "aggregates": {
-                    "regular_hours": float(aggregates.get("regular_hours", 0.0)),
-                    "total_break_time": float(aggregates.get("total_break_time", 0.0)),
-                    "total_talk_time": float(aggregates.get("total_talk_time", 0.0)),
-                    "total_calls": int(aggregates.get("total_calls", 0)),
-                    "total_efficiency_hours": float(aggregates.get("total_efficiency_hours", 0.0)),
-                    "calls_per_hour": float(aggregates.get("calls_per_hour", 0.0))
-                }
-            }
-
-            # calculate days_in_month
-            try:
-                import calendar as _calendar
-                year, mon = map(int, month.split('-'))
-                days_in_month = _calendar.monthrange(year, mon)[1]
-            except Exception:
-                days_in_month = None
-
+            operator_obj = result.get("operator")
             return jsonify({
                 "status": "success",
-                "month": month,
-                "days_in_month": days_in_month,
-                "operators": [operator_obj]
+                "month": result.get("month", month),
+                "days_in_month": result.get("days_in_month"),
+                "operators": [operator_obj] if operator_obj else []
             }), 200
 
         # -----------------------
