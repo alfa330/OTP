@@ -4471,22 +4471,121 @@
                                 Запрос по дню: {selectedDay.day} {monthLabel}
                             </h3>
 
-                            {/* --- Инфо по дню --- */}
-                            <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
-                                <p className="text-sm text-gray-700">
-                                <span className="font-semibold">Дата:</span> {selectedDay.dateStr}
-                                </p>
-                                <p className="text-sm text-gray-700">
-                                <span className="font-semibold">Выполненные часы:</span> {selectedDay.hours}
-                                </p>
+                            {/* --- Верхняя инфо-панель (дата, часы, ключевые метрики с иконками) --- */}
+                            <div className="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                                <div className="flex items-center justify-between mb-3">
+                                <div>
+                                    <p className="text-sm text-gray-700">
+                                    <span className="font-semibold">Дата:</span> {selectedDay.dateStr}
+                                    </p>
+                                    <p className="text-sm text-gray-700">
+                                    <span className="font-semibold">Выполненные часы:</span> {selectedDay.hours ?? "—"}
+                                    </p>
+                                </div>
 
-                                <div className="mt-2 space-y-1 text-sm text-gray-700">
+                                {/* Крупный бейдж с общими часами (если нужно) */}
+                                <div className="text-right">
+                                    <div className="text-xs text-gray-500">Итого за день</div>
+                                    <div className="text-lg font-semibold text-gray-800">{selectedDay.hours ?? "—"} ч</div>
+                                </div>
+                                </div>
+
+                                {/* -- Метрики в виде сетки с иконками -- */}
+                                {(() => {
+                                // утилиты форматирования значений
+                                const d = selectedDay.dayData || {};
+                                const normalize = (key) => {
+                                    // ищем в нескольких местах: dayData, root поля selectedDay
+                                    return d[key] ?? selectedDay[key] ?? null;
+                                };
+
+                                const fmtNumber = (v, digits = 2) => {
+                                    if (v === null || v === undefined || v === "") return "—";
+                                    const n = Number(v);
+                                    return Number.isFinite(n) ? n.toFixed(digits).replace(/\.00$/, "") : String(v);
+                                };
+
+                                const fmtTimeLike = (v) => {
+                                    if (v === null || v === undefined || v === "") return "—";
+                                    // если строка вида "HH:MM" — отдаем как есть
+                                    if (typeof v === "string" && /^\d{1,2}:\d{2}$/.test(v)) return v;
+                                    // если число — считаем минуты -> HH:MM
+                                    const n = Number(v);
+                                    if (Number.isFinite(n)) {
+                                    // предполагаем минуты, если > 12, иначе часы
+                                    if (n > 12) {
+                                        const hh = Math.floor(n / 60);
+                                        const mm = Math.round(n % 60);
+                                        return `${hh}:${String(mm).padStart(2, "0")}`;
+                                    } else {
+                                        // малые числа — часы
+                                        return `${n} ч`;
+                                    }
+                                    }
+                                    return String(v);
+                                };
+
+                                const metrics = [
+                                    {
+                                    key: "break_time",
+                                    label: "Break",
+                                    icon: "fas fa-coffee",
+                                    value: fmtTimeLike(normalize("break_time")),
+                                    hint: "Перерывы",
+                                    },
+                                    {
+                                    key: "total_calls",
+                                    label: "Calls",
+                                    icon: "fas fa-phone",
+                                    value: fmtNumber(normalize("total_calls"), 0),
+                                    hint: "Всего звонков",
+                                    },
+                                    {
+                                    key: "efficiency",
+                                    label: "Efficiency",
+                                    icon: "fas fa-tachometer-alt",
+                                    value: fmtNumber(normalize("efficiency") ?? normalize("total_efficiency_hours") ?? normalize("efficiency_hours")),
+                                    hint: "Эффективность (часы)",
+                                    },
+                                    {
+                                    key: "talk_time",
+                                    label: "Talk",
+                                    icon: "fas fa-comments",
+                                    value: fmtTimeLike(normalize("talk_time") ?? normalize("talk_time_minutes") ?? normalize("talk_minutes")),
+                                    hint: "Говорильное время",
+                                    },
+                                ];
+
+                                return (
+                                    <div className="grid grid-cols-2 gap-3 mt-3">
+                                    {metrics.map((m) => (
+                                        <div key={m.key} className="flex items-center gap-3 p-2 bg-white border rounded-lg shadow-sm">
+                                        <div className="flex-shrink-0 w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center text-blue-600">
+                                            <i className={`${m.icon} text-lg`} aria-hidden="true" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center justify-between">
+                                            <div className="text-sm font-medium text-gray-800">{m.label}</div>
+                                            <div className="text-sm font-semibold text-gray-900">{m.value}</div>
+                                            </div>
+                                            <div className="text-xs text-gray-500">{m.hint}</div>
+                                        </div>
+                                        </div>
+                                    ))}
+                                    </div>
+                                );
+                                })()}
+                            </div>
+
+                            {/* --- Доп. детали по дню (старый блок, немного отрефакторен) --- */}
+                            <div className="mb-4 p-3 bg-white rounded-lg border border-gray-200">
+                                <div className="text-sm text-gray-700 mb-2">
                                 {selectedDay.dayData && Object.keys(selectedDay.dayData).length > 0 ? (
                                     Object.entries(selectedDay.dayData).map(([k, v]) => {
                                     if (k === "work_time" || k === "hours" || k === "time") return null;
                                     return (
-                                        <p key={k}>
-                                        <span className="font-semibold">{k.replace(/_/g, " ")}:</span> {String(v)}
+                                        <p key={k} className="mb-1">
+                                        <span className="font-semibold">{k.replace(/_/g, " ")}:</span> {String(v ?? "—")}
                                         </p>
                                     );
                                     })
@@ -4496,9 +4595,8 @@
                                 </div>
                             </div>
 
-                            {/* --- Тренинги --- */}
+                            {/* --- Тренинги (оставил как был, с теми же утилитами) --- */}
                             {(() => {
-                                // вспомогательные утилиты внутри JSX для компактности и читаемости
                                 const parseHMToMinutes = (hm) => {
                                 if (!hm || typeof hm !== "string") return null;
                                 const parts = hm.split(":");
@@ -4509,7 +4607,6 @@
                                 return hh * 60 + mm;
                                 };
 
-                                // вычисляет длительность в часах; возвращает { hours: number, source: 'time'|'field'|'fallback' }
                                 const computeTrainingDuration = (t) => {
                                 let hours = 0;
                                 let source = "fallback";
@@ -4519,7 +4616,7 @@
 
                                 if (startMin !== null && endMin !== null) {
                                     let diff = endMin - startMin;
-                                    if (diff < 0) diff += 24 * 60; // переход через полночь
+                                    if (diff < 0) diff += 24 * 60;
                                     hours = diff / 60;
                                     source = "time";
                                 } else {
@@ -4528,22 +4625,16 @@
                                     hours = maybe;
                                     source = "field";
                                     } else {
-                                    // если не удалось определить — считаем 1 час как fallback (можно поменять)
                                     hours = 1;
                                     source = "fallback";
                                     }
                                 }
 
-                                // Не округляем до 1h — оставляем реальную длительность (например 0.5)
                                 return { hours: Number(hours), source };
                                 };
 
-                                // все тренинги на выбранную дату
-                                const trainingsOnDay = Array.isArray(trainings)
-                                ? trainings.filter((t) => t.date === selectedDay.dateStr)
-                                : [];
+                                const trainingsOnDay = Array.isArray(trainings) ? trainings.filter((t) => t.date === selectedDay.dateStr) : [];
 
-                                // суммарные часы которые будут засчитаны (только count_in_hours === true)
                                 const countedTrainingSummary = trainingsOnDay.reduce((acc, t) => {
                                 if (!t || !t.count_in_hours) return acc;
                                 const { hours } = computeTrainingDuration(t);
@@ -4575,13 +4666,10 @@
                                                 <span className="font-semibold">Причина:</span> {t.reason || "—"}
                                                 </p>
                                                 {t.comment && <p className="text-sm text-gray-600 italic">"{t.comment}"</p>}
-                                                <p className="text-xs text-gray-500 mt-1">
-                                                Создал: {t.created_by_name} ({t.created_at})
-                                                </p>
+                                                <p className="text-xs text-gray-500 mt-1">Создал: {t.created_by_name} ({t.created_at})</p>
                                             </div>
 
                                             <div className="ml-3 flex-shrink-0 text-right">
-                                                {/* бейдж — засчитывается или нет */}
                                                 <div className="mb-2">
                                                 {t.count_in_hours ? (
                                                     <span className="inline-block px-2 py-1 text-xs font-semibold rounded-md bg-green-100 text-green-800">
@@ -4594,7 +4682,6 @@
                                                 )}
                                                 </div>
 
-                                                {/* длительность */}
                                                 <div className="text-sm font-medium text-gray-800">
                                                 {hours.toFixed(2)} ч
                                                 {source !== "time" && (
