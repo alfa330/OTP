@@ -5518,47 +5518,95 @@
             };
 
             const fetchHoursData = async () => {
-                setIsLoading(true);
+            setIsLoading(true);
 
-                try {
-                    const response = await axios.get(
-                        `${API_BASE_URL}/api/sv/daily_hours?month=${selectedMonth}`,
-                        {
-                            headers: {
-                                'X-API-Key': user.apiKey,
-                                'X-User-Id': String(user.id), // обязательно для /api/sv/daily_hours
-                            },
-                        }
-                    );
-
-                    const data = response.data;
-
-                    if (data.status === 'success' && isMounted.current) {
-                        // data.operators — массив операторов (для sv) или массив с одним оператором (для operator)
-                        let operatorObj = null;
-
-                        if (Array.isArray(data.operators) && data.operators.length > 0) {
-                            // пытаемся найти объект для текущего пользователя по id, иначе берём первый
-                            operatorObj = data.operators.find(op => Number(op.operator_id) === Number(user.id)) || data.operators[0];
-                        }
-
-                        if (operatorObj) {
-                            // в operatorObj.daily ожидается мапа вида { "1": {...}, "2": {...}, ... }
-                            setHoursData(operatorObj.daily || {});
-                        } else {
-                            // нет данных по операторам — чистим состояние и предупреждаем
-                            setHoursData({});
-                            showToast('No daily hours available for this user/month', 'warning');
-                        }
-                    } else {
-                        showToast(data.error || 'Failed to fetch daily hours', 'error');
-                    }
-                } catch (err) {
-                    console.error('Fetch daily hours error:', err);
-                    showToast(err.response?.data?.error || 'Failed to fetch daily hours', 'error');
-                } finally {
-                    if (isMounted.current) setIsLoading(false);
+            try {
+                const response = await axios.get(
+                `${API_BASE_URL}/api/sv/daily_hours?month=${selectedMonth}`,
+                {
+                    headers: {
+                    'X-API-Key': user.apiKey,
+                    'X-User-Id': String(user.id), // обязательно для /api/sv/daily_hours
+                    },
                 }
+                );
+
+                const data = response.data;
+
+                if (!isMounted.current) return;
+
+                if (data && data.status === 'success') {
+                // Если сервер уже вернул корректную обёртку с operators — используем её целиком
+                if (Array.isArray(data.operators)) {
+                    // Если это список для SV — найдём нашего оператора и гарантируем, что operators содержит хотя бы его
+                    const operatorObj = data.operators.find(op => Number(op.operator_id) === Number(user.id)) || data.operators[0];
+
+                    if (operatorObj) {
+                    // Сохраняем весь ответ (он уже в нужном формате)
+                    setHoursData({
+                        status: data.status,
+                        month: data.month ?? selectedMonth,
+                        days_in_month: data.days_in_month ?? (data.operators[0]?.days_in_month ?? undefined),
+                        operators: [operatorObj],
+                    });
+                    } else {
+                    // operators — пуст или не содержит нужного оператора
+                    setHoursData({ status: data.status, month: data.month ?? selectedMonth, days_in_month: data.days_in_month, operators: [] });
+                    showToast('No daily hours available for this user/month', 'warning');
+                    }
+                } else if (data.operator && typeof data.operator === 'object') {
+                    // Иногда бэкенд может вернуть { operator: {...}, month:..., days_in_month:... }
+                    setHoursData({
+                    status: data.status,
+                    month: data.month ?? selectedMonth,
+                    days_in_month: data.days_in_month,
+                    operators: [data.operator],
+                    });
+                } else if (data.operator === null || (Array.isArray(data.operators) && data.operators.length === 0)) {
+                    // Явный случай «нет данных»
+                    setHoursData({ status: data.status, month: data.month ?? selectedMonth, days_in_month: data.days_in_month, operators: [] });
+                    showToast('No daily hours available for this user/month', 'warning');
+                } else {
+                    // Защитный fallback — если прилетел только объект daily map (старый/ошибочный формат),
+                    // оборачиваем его в ожидаемый формат: оператор без meta (operator_id не известен)
+                    // Но лучше, если бек вернёт нормальный объект — оставляем предупреждение.
+                    if (typeof data === 'object' && Object.keys(data).some(k => /^\d+$/.test(k))) {
+                    setHoursData({
+                        status: 'success',
+                        month: selectedMonth,
+                        days_in_month: Object.keys(data).length,
+                        operators: [{
+                        operator_id: user.id,
+                        name: null,
+                        rate: 0,
+                        norm_hours: 0,
+                        fines: 0,
+                        daily: data,
+                        aggregates: {},
+                        }],
+                    });
+                    showToast('Warning: received legacy daily map — wrapped into operator object', 'warning');
+                    } else {
+                    // Нечто совсем неожиданное — сохраним как есть и покажем ошибку
+                    setHoursData(data);
+                    showToast('Unexpected response format from server', 'error');
+                    console.warn('Unexpected /api/sv/daily_hours response:', data);
+                    }
+                }
+                } else {
+                showToast(data?.error || 'Failed to fetch daily hours', 'error');
+                // очистим старые данные, чтобы UI не показывал некорректную информацию
+                setHoursData({ status: data?.status ?? 'error', month: selectedMonth, days_in_month: undefined, operators: [] });
+                }
+            } catch (err) {
+                console.error('Fetch daily hours error:', err);
+                showToast(err.response?.data?.error || 'Failed to fetch daily hours', 'error');
+                if (isMounted.current) {
+                setHoursData({ status: 'error', month: selectedMonth, days_in_month: undefined, operators: [] });
+                }
+            } finally {
+                if (isMounted.current) setIsLoading(false);
+            }
             };
 
             const fetchSelectedSvData = async (svId) => {
