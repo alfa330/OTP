@@ -10,12 +10,11 @@
        background-size: 300px; /* размер логотипа, можно менять */
        background-attachment: fixed;
      }
-    /* === AudioPlayer styles (вставить в <head> или в существующий <style>) === */
+     /* === AudioPlayer styles (вставить в <head>) === */
     :root{
     --primary:#2196f3;
     --primary-hover:#1976d2;
     --accent:#4caf50;
-    --danger:#f44336;
     --bg:#f4f4f9;
     --card:#fff;
     }
@@ -45,22 +44,6 @@
     /* Timeline */
     .timeline{ position:relative; height:14px; background:#e5e7eb; border-radius:999px; overflow:hidden; cursor:pointer; flex:1 1 auto;}
     .progress{ position:absolute; inset:0 auto 0 0; height:100%; width:0; background:linear-gradient(90deg, var(--accent), #8bc34a); transition:width .08s linear;}
-    .marker{ position:absolute; top:0; height:100%; width:4px; background:var(--danger); cursor:pointer; }
-    .marker::after{ content:""; position:absolute; top:-6px; left:-3px; width:10px; height:10px; background:var(--danger); border-radius:50%; }
-    .marker:hover .tooltip{ display:block }
-    .tooltip{ display:none; position:absolute; bottom:100%; left:50%; transform:translate(-50%,-8px); background:#111827; color:#fff; padding:6px 10px; border-radius:8px; white-space:nowrap; font-size:12px; box-shadow:0 6px 18px rgba(0,0,0,0.18); }
-
-    .controls{ display:flex; gap:10px; margin-top:12px; }
-    .controls input[type="text"]{ flex:1; padding:10px 12px; border:1px solid #d1d5db; border-radius:10px; outline:none; }
-    .controls button{ padding:10px 14px; background:var(--primary); color:#fff; border:none; border-radius:10px; cursor:pointer; }
-    .controls button:hover{ background:var(--primary-hover) }
-
-    .markers-list{ margin-top:14px }
-    .markers-list ul{ list-style:none; margin:8px 0 0; padding:0 }
-    .markers-list li{ background:#f9fafb; padding:10px; margin:6px 0; border-radius:10px; display:flex; justify-content:space-between; align-items:center; gap:10px; }
-    .markers-list li button{ background:var(--danger); border:none; color:#fff; padding:8px 10px; border-radius:10px; cursor:pointer; }
-    .markers-list li button:hover{ background:#d32f2f }
-
     /* Скрытый тег <audio> — управляем вручную */
     audio.player-hidden{ display:none; }
     @media (max-width:700px){ .time-display{ display:none } }
@@ -3124,8 +3107,6 @@
             }
 
         function AudioPlayer({ audioSrc, uniqueKey }) {
-            const [markers, setMarkers] = React.useState([]);
-            const [errorDesc, setErrorDesc] = React.useState('');
             const [duration, setDuration] = React.useState(0);
             const [currentTime, setCurrentTime] = React.useState(0);
             const [isPlaying, setIsPlaying] = React.useState(false);
@@ -3134,13 +3115,11 @@
             const audioRef = React.useRef(null);
             const timelineRef = React.useRef(null);
 
-            // Обновляем src при изменении audioSrc
             React.useEffect(()=>{
                 if(audioRef.current){
                 audioRef.current.src = audioSrc || '';
                 audioRef.current.playbackRate = playbackRate;
                 }
-                setMarkers([]);
                 setCurrentTime(0);
                 setIsPlaying(false);
             }, [audioSrc]);
@@ -3199,20 +3178,11 @@
                 if(audioRef.current) audioRef.current.playbackRate = rate;
             };
 
-            const addMarker = ()=>{
-                if(audioRef.current && errorDesc.trim()){
-                const time = audioRef.current.currentTime || 0;
-                setMarkers(prev => [...prev, { time, error: errorDesc.trim() }]);
-                setErrorDesc('');
-                }
-            };
-            const removeMarker = (idx)=> setMarkers(prev => prev.filter((_,i)=>i!==idx));
             const progressWidth = duration > 0 ? (currentTime / duration) * 100 : 0;
 
-            // Не рендерим плеер если нет источника
             if(!audioSrc) return (
                 <div className="p-3 bg-gray-50 rounded-md">
-                <div className="text-sm text-red-500"><i className="fas fa-times-circle mr-2"></i>Аудио отсутствует</div>
+                <div className="text-sm text-red-500">Аудио отсутствует</div>
                 </div>
             );
 
@@ -3250,14 +3220,6 @@
 
                     <div className="timeline" ref={timelineRef} onClick={handleSeek}>
                     <div className="progress" style={{ width: `${progressWidth}%` }}></div>
-                    {markers.map((m, i)=>{
-                        const left = duration > 0 ? (m.time / duration) * 100 : 0;
-                        return (
-                        <div key={i} className="marker" style={{ left: `${left}%` }} title="Перейти к метке" onClick={(e)=>{ e.stopPropagation(); jumpToTime(m.time); }}>
-                            <div className="tooltip">{m.error}</div>
-                        </div>
-                        );
-                    })}
                     </div>
 
                     <div className="controls-right">
@@ -3276,27 +3238,6 @@
                         </select>
                     </div>
                     </div>
-                </div>
-
-                <div className="controls" style={{marginTop:12}}>
-                    <input type="text" placeholder="Описание метки" value={errorDesc} onChange={(e)=>setErrorDesc(e.target.value)} />
-                    <button onClick={addMarker}>Добавить метку</button>
-                </div>
-
-                <div className="markers-list">
-                    <h4 className="text-sm font-medium mt-3 mb-2">Метки</h4>
-                    <ul>
-                    {markers.map((m, i)=>(
-                        <li key={i}>
-                        <div className="text-sm">{formatTime(m.time)} — {m.error}</div>
-                        <div style={{display:'flex', gap:8}}>
-                            <button onClick={()=>jumpToTime(m.time)}>Перейти</button>
-                            <button onClick={()=>removeMarker(i)}>Удалить</button>
-                        </div>
-                        </li>
-                    ))}
-                    {markers.length === 0 && <li className="text-sm text-gray-500">Метки отсутствуют</li>}
-                    </ul>
                 </div>
 
                 <audio ref={audioRef} className="player-hidden" src={audioSrc}></audio>
@@ -7828,13 +7769,13 @@
 
                                                                     <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Аудио</h4>
-                                                                        {audioUrl ? (
-                                                                        <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} />
-                                                                        ) : (
-                                                                        <div className="text-sm text-red-500 flex items-center gap-2">
-                                                                            <i className="fas fa-times-circle"></i> Файлов не имеется
-                                                                        </div>
-                                                                        )}
+                                                                    {audioUrl ? (
+                                                                    <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} />
+                                                                    ) : (
+                                                                    <div className="text-sm text-red-500 flex items-center gap-2">
+                                                                        <i className="fas fa-times-circle"></i> Файлов не имеется
+                                                                    </div>
+                                                                    )}
                                                                     </div>
 
                                                                     <div className="text-xs text-gray-500">
