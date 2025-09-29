@@ -7770,11 +7770,11 @@
                                                                     <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Аудио</h4>
                                                                     {audioUrl ? (
-                                                                        <audio controls src={audioUrl} className="w-full" />
+                                                                    <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} />
                                                                     ) : (
-                                                                        <div className="text-sm text-red-500 flex items-center gap-2">
+                                                                    <div className="text-sm text-red-500 flex items-center gap-2">
                                                                         <i className="fas fa-times-circle"></i> Файлов не имеется
-                                                                        </div>
+                                                                    </div>
                                                                     )}
                                                                     </div>
 
