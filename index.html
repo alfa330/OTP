@@ -10,7 +10,7 @@
        background-size: 300px; /* размер логотипа, можно менять */
        background-attachment: fixed;
      }
-     /* === AudioPlayer styles (вставить в <head>) === */
+    /* AudioPlayer styles + spinner */
     :root{
     --primary:#2196f3;
     --primary-hover:#1976d2;
@@ -44,7 +44,28 @@
     /* Timeline */
     .timeline{ position:relative; height:14px; background:#e5e7eb; border-radius:999px; overflow:hidden; cursor:pointer; flex:1 1 auto;}
     .progress{ position:absolute; inset:0 auto 0 0; height:100%; width:0; background:linear-gradient(90deg, var(--accent), #8bc34a); transition:width .08s linear;}
-    /* Скрытый тег <audio> — управляем вручную */
+
+    /* Spinner */
+    .player-loading{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    padding:12px;
+    background:#ffffff;
+    border-radius:10px;
+    border:1px solid #eef2f7;
+    }
+    .spinner{
+    width:28px;
+    height:28px;
+    border-radius:50%;
+    border:4px solid rgba(0,0,0,0.08);
+    border-top-color:var(--primary);
+    animation: spin 1s linear infinite;
+    }
+    @keyframes spin{ to { transform: rotate(360deg); } }
+
+    .player-container{ padding:12px; background:#fff; border-radius:10px; border:1px solid #eef2f7; }
     audio.player-hidden{ display:none; }
     @media (max-width:700px){ .time-display{ display:none } }
     </style>
@@ -3111,83 +3132,136 @@
             const [currentTime, setCurrentTime] = React.useState(0);
             const [isPlaying, setIsPlaying] = React.useState(false);
             const [playbackRate, setPlaybackRate] = React.useState(1);
+            const [isLoaded, setIsLoaded] = React.useState(false);     // true после loadedmetadata
+            const [isLoading, setIsLoading] = React.useState(false);   // true, пока идёт загрузка
+            const [loadError, setLoadError] = React.useState(null);
 
             const audioRef = React.useRef(null);
             const timelineRef = React.useRef(null);
 
-            React.useEffect(()=>{
-                if(audioRef.current){
-                audioRef.current.src = audioSrc || '';
-                audioRef.current.playbackRate = playbackRate;
-                }
+            // Когда audioSrc меняется — подготовить загрузку
+            React.useEffect(() => {
+                setLoadError(null);
+                setDuration(0);
                 setCurrentTime(0);
+                setIsLoaded(false);
                 setIsPlaying(false);
+
+                if (!audioSrc) {
+                // нет аудиофайла — ничего не показываем
+                setIsLoading(false);
+                return;
+                }
+
+                // есть источник — начать загрузку метаданных
+                setIsLoading(true);
+                if (audioRef.current) {
+                audioRef.current.src = audioSrc;
+                try {
+                    audioRef.current.load(); // инициируем загрузку
+                } catch (e) {
+                    // старые браузеры могут ругаться, но мы обработаем error event
+                }
+                }
             }, [audioSrc]);
 
-            React.useEffect(()=>{
+            // Слушаем события аудио
+            React.useEffect(() => {
                 const a = audioRef.current;
-                if(!a) return;
-                const onLoaded = ()=> setDuration(a.duration || 0);
-                const onTime = ()=> setCurrentTime(a.currentTime || 0);
-                const onEnded = ()=> setIsPlaying(false);
-                const onPlay = ()=> setIsPlaying(true);
-                const onPause = ()=> setIsPlaying(false);
+                if (!a) return;
+
+                const onLoaded = () => {
+                setDuration(a.duration || 0);
+                setIsLoaded(true);
+                setIsLoading(false);
+                };
+                const onTime = () => setCurrentTime(a.currentTime || 0);
+                const onEnded = () => setIsPlaying(false);
+                const onPlay = () => setIsPlaying(true);
+                const onPause = () => setIsPlaying(false);
+                const onError = () => {
+                setLoadError('Ошибка загрузки аудио');
+                setIsLoading(false);
+                setIsLoaded(false);
+                };
 
                 a.addEventListener('loadedmetadata', onLoaded);
                 a.addEventListener('timeupdate', onTime);
                 a.addEventListener('ended', onEnded);
                 a.addEventListener('play', onPlay);
                 a.addEventListener('pause', onPause);
+                a.addEventListener('error', onError);
 
-                return ()=> {
+                return () => {
                 a.removeEventListener('loadedmetadata', onLoaded);
                 a.removeEventListener('timeupdate', onTime);
                 a.removeEventListener('ended', onEnded);
                 a.removeEventListener('play', onPlay);
                 a.removeEventListener('pause', onPause);
+                a.removeEventListener('error', onError);
                 };
             }, [audioSrc, playbackRate]);
 
-            const formatTime = (s)=>{
+            const formatTime = (s) => {
                 if (!s || !isFinite(s)) return '0:00';
                 const mins = Math.floor(s / 60);
                 const secs = Math.floor(s % 60);
                 return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
             };
 
-            const jumpToTime = (time)=>{
-                if(!audioRef.current) return;
+            const jumpToTime = (time) => {
+                if (!audioRef.current) return;
                 audioRef.current.currentTime = time;
                 setCurrentTime(time);
             };
-            const play = ()=> audioRef.current?.play();
-            const pause = ()=> audioRef.current?.pause();
-            const togglePlayPause = ()=> isPlaying ? pause() : play();
-            const rewind10 = ()=> jumpToTime(Math.max(0, (audioRef.current?.currentTime||0) - 10));
-            const forward10 = ()=> jumpToTime(Math.min(duration, (audioRef.current?.currentTime||0) + 10));
-            const handleSeek = (e)=>{
-                if(!audioRef.current || !timelineRef.current) return;
+            const play = () => audioRef.current?.play();
+            const pause = () => audioRef.current?.pause();
+            const togglePlayPause = () => (isPlaying ? pause() : play());
+            const rewind10 = () => jumpToTime(Math.max(0, (audioRef.current?.currentTime || 0) - 10));
+            const forward10 = () => jumpToTime(Math.min(duration, (audioRef.current?.currentTime || 0) + 10));
+            const handleSeek = (e) => {
+                if (!audioRef.current || !timelineRef.current || !isLoaded) return;
                 const rect = timelineRef.current.getBoundingClientRect();
-                const x = e.clientX - rect.left;
+                const x = (e.clientX ?? e.touches?.[0]?.clientX) - rect.left;
                 const ratio = Math.min(Math.max(x / rect.width, 0), 1);
                 jumpToTime(ratio * duration);
             };
-            const handlePlaybackRateChange = (e)=>{
+            const handlePlaybackRateChange = (e) => {
                 const rate = parseFloat(e.target.value);
                 setPlaybackRate(rate);
-                if(audioRef.current) audioRef.current.playbackRate = rate;
+                if (audioRef.current) audioRef.current.playbackRate = rate;
             };
 
             const progressWidth = duration > 0 ? (currentTime / duration) * 100 : 0;
 
-            if(!audioSrc) return (
-                <div className="p-3 bg-gray-50 rounded-md">
-                <div className="text-sm text-red-500">Аудио отсутствует</div>
-                </div>
-            );
+            // Если аудио не передано — ничего не рендерим (убирает "Файлов нет" при начальной загрузке)
+            if (!audioSrc) return null;
 
+            // Если есть ошибка загрузки — показать сообщение
+            if (loadError) {
+                return (
+                <div className="player-container">
+                    <div style={{ color: '#b91c1c', fontSize: 14 }}>Ошибка: {loadError}</div>
+                </div>
+                );
+            }
+
+            // Пока загружается — показываем spinner
+            if (isLoading && !isLoaded) {
+                return (
+                <div className="player-loading">
+                    <div className="spinner" aria-hidden="true"></div>
+                    <div>
+                    <div style={{ fontWeight: 600 }}>Загрузка аудио…</div>
+                    <div style={{ fontSize: 13, color: '#6b7280' }}>{/* можно показать имя файла */}</div>
+                    </div>
+                </div>
+                );
+            }
+
+            // После того, как метаданные загружены — показываем плеер
             return (
-                <div key={uniqueKey || audioSrc} className="p-3 bg-white rounded-lg border border-gray-200 shadow-sm">
+                <div key={uniqueKey || audioSrc} className="player-container">
                 <div className="player-bar">
                     <div className="controls-left">
                     <button className="icon-btn" onClick={togglePlayPause} title={isPlaying ? 'Пауза' : 'Воспроизвести'}>
@@ -3219,7 +3293,7 @@
                     </div>
 
                     <div className="timeline" ref={timelineRef} onClick={handleSeek}>
-                    <div className="progress" style={{ width: `${progressWidth}%` }}></div>
+                    <div className="progress" style={{ width: `${progressWidth}%` }} />
                     </div>
 
                     <div className="controls-right">
@@ -3240,7 +3314,7 @@
                     </div>
                 </div>
 
-                <audio ref={audioRef} className="player-hidden" src={audioSrc}></audio>
+                <audio ref={audioRef} className="player-hidden" src={audioSrc} preload="metadata" />
                 </div>
             );
             }
@@ -7769,13 +7843,7 @@
 
                                                                     <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Аудио</h4>
-                                                                    {audioUrl ? (
                                                                     <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} />
-                                                                    ) : (
-                                                                    <div className="text-sm text-red-500 flex items-center gap-2">
-                                                                        <i className="fas fa-times-circle"></i> Файлов не имеется
-                                                                    </div>
-                                                                    )}
                                                                     </div>
 
                                                                     <div className="text-xs text-gray-500">
