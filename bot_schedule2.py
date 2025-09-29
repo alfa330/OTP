@@ -4119,11 +4119,7 @@ if __name__ == '__main__':
         CronTrigger(day_of_week='mon', hour=9, minute=0),
         misfire_grace_time=3600
     )
-    # scheduler.add_job(
-    #     db.process_and_upload_timesheet,
-    #     CronTrigger(minute='*/3'),
-    #     misfire_grace_time=3600
-    # )
+
     scheduler.start()
     
     logging.info("🔄 Планировщик запущен")
