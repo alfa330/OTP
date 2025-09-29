@@ -1289,6 +1289,7 @@ def get_sv_data():
                 response_data["operators"].append({
                     "id": operator_id,
                     "name": operator_name,
+                    "hire_date": hire_date,
                     "direction_id": direction_id,
                     "call_count": call_count,
                     "avg_score": round(avg_score, 2) if call_count > 0 else None,
