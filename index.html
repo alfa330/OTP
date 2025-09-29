@@ -4009,7 +4009,7 @@
                                             <div className="flex justify-between items-center">
                                                 <div>
                                                     <label className="block text-sm font-medium text-gray-700 mb-1">Оператор</label>
-                                                    <input type="text" value={selectedCalendarTraining.operator || selectedCalendarTraining.operatorName || ''} disabled className="w-32 p-2 border rounded bg-gray-100 text-blue-700 font-semibold" />
+                                                    <input type="text" value={selectedCalendarTraining.operator || selectedCalendarTraining.operatorName || ''} disabled className="w-38 p-2 border rounded bg-gray-100 text-blue-700 font-semibold" />
                                                 </div>
                                                 <div>
                                                     <label className="block text-sm font-medium text-gray-700 mb-1">Дата</label>
@@ -5368,7 +5368,6 @@
             const fetchUserHistory = async (userId) => {
                 try {
                     setLoadingHistoryId(userId);
-                    setIsLoading(true);
                     const response = await axios.get(`${API_BASE_URL}/api/user/history?user_id=${userId}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
@@ -5384,7 +5383,6 @@
                 } catch (error) {
                     addToast('Error fetching history', 'error');
                 } finally {
-                    setIsLoading(false);
                     setLoadingHistoryId(null);
                 }
             };
@@ -6826,27 +6824,35 @@
                                         </div>
 
                                         {/* Tabs */}
-                                        <div className="flex space-x-4 mb-6">
-                                        <button
-                                            onClick={() => setActiveTab("active")}
-                                            className={`px-4 py-2 rounded-lg font-medium ${
-                                            activeTab === "active"
-                                                ? "bg-green-600 text-white"
-                                                : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                                            }`}
-                                        >
-                                            Активные
-                                        </button>
-                                        <button
-                                            onClick={() => setActiveTab("fired")}
-                                            className={`px-4 py-2 rounded-lg font-medium ${
-                                            activeTab === "fired"
-                                                ? "bg-red-600 text-white"
-                                                : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                                            }`}
-                                        >
-                                            Уволенные
-                                        </button>
+                                        <div className="flex items-center space-x-3 mb-6">
+                                        {(() => {
+                                            const all = svData?.operators ?? [];
+                                            const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
+                                            const firedCount = all.filter(op => op.status === 'fired').length;
+                                            return (
+                                            <>
+                                                <button
+                                                onClick={() => setActiveTab('active')}
+                                                className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeTab === 'active' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                                                role="tab"
+                                                aria-selected={activeTab === 'active'}
+                                                aria-controls="operators-active"
+                                                >
+                                                Активные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{activeCount}</span>
+                                                </button>
+
+                                                <button
+                                                onClick={() => setActiveTab('fired')}
+                                                className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeTab === 'fired' ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                                                role="tab"
+                                                aria-selected={activeTab === 'fired'}
+                                                aria-controls="operators-fired"
+                                                >
+                                                Уволенные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{firedCount}</span>
+                                                </button>
+                                            </>
+                                            );
+                                        })()}
                                         </div>
 
                                         {isLoading ? (
