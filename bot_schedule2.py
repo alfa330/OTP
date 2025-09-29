@@ -368,46 +368,6 @@ def change_password():
         logging.error(f"Error changing password: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/sv/preview_calls_table', methods=['POST'])
-@require_api_key
-def preview_calls_table():
-    try:
-        # Проверяем наличие файла
-        if 'file' not in request.files:
-            return jsonify({"error": "Файл не был загружен"}), 400
-
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({"error": "Файл не выбран"}), 400
-
-        if not file.filename.lower().endswith(('.csv', '.xls', '.xlsx')):
-            return jsonify({"error": "Неверный формат файла. Допустимы .csv, .xls, .xlsx"}), 400
-
-        # Получаем user_id из заголовка
-        user_id_header = request.headers.get('X-User-Id')
-        if not user_id_header or not user_id_header.isdigit():
-            return jsonify({"error": "Некорректный X-User-Id"}), 400
-        user_id = int(user_id_header)
-
-        user = db.get_user(id=user_id)
-        if not user or user[3] != 'sv':  # user[3] == role
-            return jsonify({"error": "Unauthorized: только супервайзеры могут загружать таблицы"}), 403
-
-        # Только парсим файл, не сохраняем
-        sheet_name, operators, error = db.parse_calls_file(file)
-        if error:
-            return jsonify({"error": error}), 400
-
-        return jsonify({
-            "status": "success",
-            "sheet_name": sheet_name,
-            "operators": operators
-        }), 200
-
-    except Exception as e:
-        logging.error(f"Ошибка при предпросмотре таблицы звонков: {e}", exc_info=True)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
 @app.route('/api/sv/update_norm_hours', methods=['POST'])
 @require_api_key
 def update_norm_hours():
@@ -689,33 +649,6 @@ def upload_group_day():
 
     except Exception as e:
         logging.exception("Error in upload_group_day")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/api/sv/preview_table', methods=['POST'])
-@require_api_key
-def preview_table():
-    try:
-        data = request.get_json()
-        if not data or 'table_url' not in data:
-            return jsonify({"error": "Missing table_url"}), 400
-
-        table_url = data['table_url']
-        user_id = int(request.headers.get('X-User-Id'))
-        user = db.get_user(id=user_id)
-        if not user or user[3] != 'sv':
-            return jsonify({"error": "Unauthorized: Only supervisors can preview tables"}), 403
-
-        sheet_name, operators, error = extract_fio_and_links(table_url)
-        if error:
-            return jsonify({"error": error}), 400
-
-        return jsonify({
-            "status": "success",
-            "sheet_name": sheet_name,
-            "operators": operators
-        }), 200
-    except Exception as e:
-        logging.error(f"Error previewing table: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/sv/save_table', methods=['POST'])
@@ -1414,61 +1347,6 @@ def notify_supervisor():
         logging.error(f"Error in notify_supervisor: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/admin/sv_operators', methods=['GET'])
-@require_api_key
-def get_sv_operators():
-    try:
-        sv_id = request.args.get('sv_id')
-        if not sv_id:
-            return jsonify({"error": "Missing sv_id parameter"}), 400
-        
-        sv_id = int(sv_id)
-        user = db.get_user(id=sv_id)
-        if not user or user[3] != 'sv':
-            return jsonify({"error": "SV not found"}), 404
-        
-        table_url = user[6]  # table_url stored in 7th column
-        operators = []
-        error = None
-        
-        if table_url:
-            sheet_name, operators, error = extract_fio_and_links(table_url)
-            if error:
-                return jsonify({"error": error}), 400
-        
-        current_week = get_current_week_of_month()
-        expected_calls = get_expected_calls(current_week)
-        
-        operators_with_issues = []
-        for op in operators:
-            call_count = op.get('call_count', 0)
-            if call_count in [None, "#DIV/0!"]:
-                call_count = 0
-            else:
-                try:
-                    call_count = int(call_count)
-                except (ValueError, TypeError):
-                    call_count = 0
-            
-            if call_count < expected_calls:
-                operators_with_issues.append({
-                    'name': op.get('name', ''),
-                    'call_count': call_count,
-                    'expected_calls': expected_calls,
-                    'avg_score': op.get('avg_score', None)
-                })
-        
-        return jsonify({
-            "status": "success",
-            "operators": operators,
-            "operators_with_issues": operators_with_issues,
-            "current_week": current_week,
-            "expected_calls": expected_calls
-        })
-    except Exception as e:
-        logging.error(f"Error fetching SV operators: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
 @app.route('/api/admin/monthly_report', methods=['GET'])
 @require_api_key
 def handle_monthly_report():
@@ -1634,43 +1512,6 @@ def get_users_report():
         )
     except Exception as e:
         logging.error(f"Error generating users report: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/api/sv/update_table', methods=['POST'])
-def update_sv_table():
-    try:
-        data = request.get_json()
-        required_fields = ['id', 'table_url']
-        if not data or not all(field in data for field in required_fields):
-            return jsonify({"error": "Missing required fields"}), 400
-
-        user_id = int(data['id'])
-        table_url = data['table_url']
-        
-        user = db.get_user(id=user_id)
-        if not user or user[3] not in ['sv', 'operator']:
-            return jsonify({"error": "User not found"}), 404
-        
-        sheet_name, operators, error = extract_fio_and_links(table_url)
-        if error:
-            return jsonify({"error": error}), 400
-        
-        db.update_user_table(user_id = user_id, hours_table_url = table_url)
-        
-        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": user[1],
-            "text": f"Таблица успешно обновлена <b>успешно✅</b>",
-            "parse_mode": "HTML"
-        }
-        response = requests.post(telegram_url, json=payload, timeout=10)
-        if response.status_code != 200:
-            error_detail = response.json().get('description', 'Unknown error')
-            logging.error(f"Telegram API error: {error_detail}")
-        
-        return jsonify({"status": "success", "message": "Table updated", "operators": operators})
-    except Exception as e:
-        logging.error(f"Error updating table: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/call_versions/<int:call_id>', methods=['GET'])
@@ -2455,7 +2296,6 @@ def get_editor_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Добавить СВ➕'))
     kb.insert(KeyboardButton('Убрать СВ❌'))
-    kb.add(KeyboardButton('Изменить таблицу СВ🔄'))
     kb.add(KeyboardButton('Назад 🔙'))
     return kb
 
@@ -2931,187 +2771,6 @@ async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
             text="Супервайзер не найден!",
             parse_mode='HTML'
         )
-    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-    await state.finish()
-
-
-@dp.message_handler(regexp='Изменить таблицу СВ🔄')
-async def change_sv_table(message: types.Message):
-    user = db.get_user(telegram_id=message.from_user.id)
-    if user and user[3] == 'admin':
-        supervisors = db.get_supervisors()
-        if not supervisors:
-            await bot.send_message(
-                chat_id=message.from_user.id,
-                text="<b>Нет доступных супервайзеров</b>",
-                parse_mode='HTML',
-                reply_markup=get_editor_keyboard()
-            )
-            return
-
-        ikb = InlineKeyboardMarkup(row_width=1)
-        for sv_id, sv_name, _, _, _, _ in supervisors:
-            ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"change_hours_table_{sv_id}"))
-        
-        await bot.send_message(
-            chat_id=message.from_user.id,
-            text="<b>Выберите супервайзера для изменения таблицы часов</b>",
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-
-        await bot.send_message(
-            chat_id=message.from_user.id,
-            text="<b>Лист СВ:</b>",
-            parse_mode='HTML',
-            reply_markup=ikb
-        )
-
-        await sv.change_table.set()
-    await message.delete()
-
-@dp.callback_query_handler(lambda c: c.data.startswith('change_hours_table_'), state=sv.change_table)
-async def select_sv_for_hours_table_change(callback: types.CallbackQuery, state: FSMContext):
-    sv_id = int(callback.data.split('_')[-1])
-    async with state.proxy() as data:
-        data['sv_id'] = sv_id
-    user = db.get_user(id=sv_id)
-    if user:
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text=f'<b>Отправьте новую таблицу часов для {user[2]}🖊</b>',
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-        await state.set_state("waiting_for_hours_table_admin")
-    else:
-        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
-        await state.finish()
-
-@dp.message_handler(state="waiting_for_hours_table_admin")
-async def save_hours_table_admin(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        sv_id = data.get('sv_id')
-    user = db.get_user(id=sv_id)
-    if user and user[3] == 'sv':
-        try:
-            sheet_name, operators, error = extract_fio_and_links(message.text)
-            if error:
-                await bot.send_message(
-                    chat_id=message.from_user.id,
-                    text=f"{error}\n\n<b>Пожалуйста, отправьте корректную ссылку на таблицу.</b>",
-                    parse_mode="HTML",
-                    reply_markup=get_cancel_keyboard()
-                )
-                return
-
-            async with state.proxy() as data:
-                data['hours_table_url'] = message.text
-                data['operators'] = operators
-                data['sheet_name'] = sheet_name
-                data['sv_id'] = user[0]
-
-            message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
-            for op in operators:
-                    message_text += f"👤 {op['name']}\n"
-            message_text += "\n<b>Это все операторы для этого СВ?</b>"
-
-            await bot.send_message(
-                chat_id=message.from_user.id,
-                text=message_text,
-                parse_mode="HTML",
-                reply_markup=get_verify_keyboard(),
-                disable_web_page_preview=True
-            )
-            await state.set_state("verify_hours_table_admin")
-            await message.delete()
-        except Exception as e:
-            await bot.send_message(
-                chat_id=message.from_user.id,
-                text=f"<b>Ошибка при обработке таблицы: {str(e)}</b>",
-                parse_mode='HTML'
-            )
-            await state.finish()
-
-@dp.callback_query_handler(state="verify_hours_table_admin")
-async def verify_hours_table_admin(callback: types.CallbackQuery, state: FSMContext):
-    async with state.proxy() as data:
-        hours_table_url = data.get('hours_table_url')
-        sv_id = data.get('sv_id')
-        operators = data.get('operators')
-        sheet_name = data.get('sheet_name')
-
-    user = db.get_user(id=sv_id)
-    if not user:
-        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
-        await state.finish()
-        return
-
-    if callback.data == "verify_yes":
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text="Выберите направление для операторов:",
-            reply_markup=get_direction_keyboard()
-        )
-        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-        await state.set_state("select_hours_direction_admin")
-    elif callback.data == "verify_no":
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text=f'<b>Отправьте корректную таблицу часов для {user[2]}🖊</b>',
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-        await state.set_state("waiting_for_hours_table_admin")
-
-@dp.callback_query_handler(state="select_hours_direction_admin")
-async def select_hours_direction_admin(callback: types.CallbackQuery, state: FSMContext):
-    async with state.proxy() as data:
-        hours_table_url = data.get('hours_table_url')
-        sv_id = data.get('sv_id')
-        operators = data.get('operators')
-
-    direction_id = None
-    if callback.data.startswith("dir_"):
-        try:
-            direction_id = int(callback.data.replace("dir_", ""))
-        except ValueError:
-            await bot.answer_callback_query(callback.id, text="Ошибка: Неверный формат направления")
-            return
-
-    direction = next((d for d in db.get_directions() if d['id'] == direction_id), None)
-    if not direction:
-        await bot.answer_callback_query(callback.id, text="Ошибка: Направление не найдено")
-        await state.finish()
-        return
-
-    user = db.get_user(id=sv_id)
-    if not user:
-        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
-        await state.finish()
-        return
-
-    # Обновляем таблицу часов супервайзера
-    db.update_user_table(user[0], hours_table_url=hours_table_url)
-
-    # Создаём/обновляем операторов с direction_id
-    for op in operators:
-        db.create_user(
-            telegram_id=None,
-            name=op['name'],
-            role='operator',
-            direction_id=direction_id,
-            supervisor_id=user[0]
-        )
-
-    await bot.send_message(
-        chat_id=callback.from_user.id,
-        text=f"""<b>Таблица часов для {user[2]} сохранена, операторы добавлены/обновлены с направлением "{direction['name']}"✅</b>""",
-        parse_mode='HTML',
-        reply_markup=get_editor_keyboard()
-    )
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await state.finish()
 
