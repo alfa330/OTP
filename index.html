@@ -3141,9 +3141,6 @@
             const [userHistory, setUserHistory] = useState([]);
             const [selectedUserForHistory, setSelectedUserForHistory] = useState(null);
             const [loadingHistoryId, setLoadingHistoryId] = useState(null);
-            const [callsTableFile, setCallsTableFile] = useState(null);
-            const [previewCallsData, setPreviewCallsData] = useState(null);
-            const [showCallsPreview, setShowCallsPreview] = useState(false);
             const [errorMessage, setErrorMessage] = useState('');
             const [converterData, setConverterData] = useState({amount: "", kpi: ""});
             const [operatorTrainings, setOperatorTrainings] = useState([]);
@@ -4134,37 +4131,6 @@
                     localStorage.setItem('calculatorType', calculatorType);
                 }
             }, [calculatorType]);
-
-            const handlePreviewCallsTable = async (fileParam) => {
-              const file = fileParam || callsTableFile; // если не передали — взять из стейта
-              if (!file) {
-                showToast("Сначала выберите файл", "error");
-                return;
-              }
-            
-              try {
-                const formData = new FormData();
-                formData.append("file", file);
-            
-                const response = await axios.post(
-                  `${API_BASE_URL}/api/sv/preview_calls_table`,
-                  formData,
-                  {
-                    headers: {
-                      "X-User-Id": user.id,
-                      "X-API-Key": user.apiKey,
-                      "Content-Type": "multipart/form-data",
-                    },
-                  }
-                );
-            
-                setPreviewCallsData(response.data);
-                setShowCallsPreview(true);
-              } catch (error) {
-                console.error("Preview error:", error);
-                showToast("Failed to preview calls table", "error");
-              }
-            };
             
             const monthNames = [
             "января","февраля","марта","апреля","мая","июня",
@@ -5059,71 +5025,6 @@
                     setDisputeLoading(false);
                 }
             };        
-
-            const handlePreviewTable = async () => {
-                if (!tableUrl) {
-                    showToast('Введите URL таблицы', 'error');
-                    return;
-                }
-                setIsLoading(true);
-                showToast('');
-                try {
-                    const response = await axios.post(`${API_BASE_URL}/api/sv/preview_table`, { table_url: tableUrl }, {
-                        headers: { 
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        setPreviewData(data);
-                        setShowPreview(true);
-                    } else {
-                        showToast(data.error || 'Ошибка предпросмотра таблицы', 'error');
-                    }
-                } catch (err) {
-                    showToast(err.response?.data?.error || 'Ошибка сервера', 'error');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
-            
-            const handleSaveTable = async () => {
-                if (!selectedDirection || !previewData) {
-                    showToast('Выберите направление и подтвердите данные', 'error');
-                    return;
-                }
-                setIsLoading(true);
-                showToast('');
-                try {
-                    const response = await axios.post(`${API_BASE_URL}/api/sv/save_table`, { 
-                        table_url: tableUrl,
-                        direction_id: selectedDirection,
-                        operators: previewData.operators // Список operators из preview
-                    }, {
-                        headers: { 
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success') {
-                        showToast('Таблица успешно обновлена и операторы сохранены', 'success');
-                        setShowPreview(false);
-                        setPreviewData(null);
-                        setTableUrl('');
-                        setSelectedDirection('');
-                        // Обновите данные SV после сохранения
-                        fetchSvData();
-                    } else {
-                        showToast(data.error || 'Ошибка сохранения таблицы', 'error');
-                    }
-                } catch (err) {
-                    showToast(err.response?.data?.error || 'Ошибка сервера', 'error');
-                } finally {
-                    setIsLoading(false);
-                }
-            };
 
             const calculateSalary = () => {
                 const hoursNorm = parseFloat(salaryData.hoursNorm) || 0;
@@ -6194,11 +6095,6 @@
                                 {user.role === 'sv' && (
                                     <>
                                         <li>
-                                            <button onClick={() => setView('update_table')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'update_table' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-table"></i> Обновить таблицу
-                                            </button>
-                                        </li>
-                                        <li>
                                             <button onClick={() => setView('operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'operators' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-users-cog"></i> Оценки операторов
                                             </button>
@@ -6906,164 +6802,7 @@
                             </>
                         )}
                         {user.role === 'sv' && (
-                            <>
-                                {view === 'update_table' && (
-                                <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                    <h2 className="text-2xl font-semibold mb-6 text-gray-800">Обновить таблицу</h2>
-
-                                    {/* INPUT / PREVIEW SWITCH */}
-                                    {!showPreview ? (
-                                    <>
-                                        <div className="space-y-3">
-                                        <label className="block text-sm font-medium text-gray-700">Ссылка на таблицу</label>
-                                        <div className="flex gap-3 items-center">
-                                            <input
-                                            type="text"
-                                            placeholder="Вставьте ссылку таблицы часов"
-                                            value={tableUrl}
-                                            onChange={(e) => setTableUrl(e.target.value)}
-                                            className="flex-1 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                            disabled={isLoading}
-                                            aria-label="Ссылка на таблицу часов"
-                                            />
-
-                                            {/* Посмотреть шаблон — теперь слева от кнопки предпросмотра */}
-                                            {(() => {
-                                            const TEMPLATE_PREVIEW_LINK = 'https://example.com/your-template.xlsx'; // <- замените на свою ссылку
-                                            return (
-                                                <button
-                                                onClick={() => window.open(TEMPLATE_PREVIEW_LINK, '_blank')}
-                                                className="inline-flex items-center px-4 py-3 text-sm rounded-lg border hover:bg-gray-50 text-gray-700"
-                                                aria-label="Посмотреть шаблон"
-                                                type="button"
-                                                >
-                                                Посмотреть шаблон
-                                                </button>
-                                            );
-                                            })()}
-
-                                            <button
-                                            onClick={handlePreviewTable}
-                                            disabled={isLoading || !tableUrl}
-                                            className={`bg-blue-600 text-white px-4 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 text-sm ${isLoading || !tableUrl ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                            aria-disabled={isLoading || !tableUrl}
-                                            >
-                                            {isLoading ? 'Предварительный просмотр...' : 'Предварительный просмотр таблицы'}
-                                            </button>
-                                        </div>
-                                        </div>
-                                    </>
-                                    ) : (
-                                    <>
-                                        {/* PREVIEW MODE */}
-                                        <div className="mb-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                                        <div>
-                                            <h3 className="text-xl font-semibold text-gray-800">Предварительный просмотр данных</h3>
-                                            <p className="text-sm text-gray-500 mt-1">
-                                            Лист: <span className="font-medium text-gray-700">{previewData?.sheet_name ?? '—'}</span>
-                                            {previewData?.expected_calls != null && (
-                                                <span className="ml-3 text-sm text-gray-500">Ожидаемые: <span className="font-medium text-gray-700">{previewData.expected_calls}</span></span>
-                                            )}
-                                            </p>
-                                        </div>
-
-                                        <div className="flex items-center gap-3">
-                                            <label className="text-sm font-medium text-gray-700 mr-2">Выберите направление</label>
-                                            <select
-                                            value={selectedDirection}
-                                            onChange={(e) => setSelectedDirection(e.target.value)}
-                                            className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                            disabled={isLoading}
-                                            aria-label="Выбор направления"
-                                            >
-                                            <option value="">Выберите направление</option>
-                                            {directions.map(dir => (
-                                                <option key={dir.id} value={dir.id}>{dir.name}</option>
-                                            ))}
-                                            </select>
-                                        </div>
-                                        </div>
-
-                                        {/* Operators preview: normalize input and show table (only names) */}
-                                        <div className="rounded-lg border overflow-hidden shadow-sm">
-                                        <div className="max-h-[360px] overflow-auto">
-                                            <table className="min-w-full table-auto">
-                                            <thead className="bg-gray-50 sticky top-0">
-                                                <tr>
-                                                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">#</th>
-                                                <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Оператор</th>
-                                                </tr>
-                                            </thead>
-
-                                            <tbody className="bg-white divide-y">
-                                                {(() => {
-                                                const raw = previewData?.operators || [];
-                                                if (!raw || raw.length === 0) {
-                                                    return (
-                                                    <tr>
-                                                        <td colSpan={2} className="px-4 py-6 text-center text-sm text-gray-500">Нет операторов в предварительном просмотре.</td>
-                                                    </tr>
-                                                    );
-                                                }
-
-                                                // Normalize row format to { name }
-                                                const rows = raw.map((r) => {
-                                                    if (r == null) return { name: "-" };
-                                                    if (typeof r === 'object' && !Array.isArray(r)) {
-                                                    return { name: r.name ?? r[0] ?? "-" };
-                                                    }
-                                                    if (Array.isArray(r)) {
-                                                    return { name: r[0] ?? "-" };
-                                                    }
-                                                    return { name: String(r) };
-                                                });
-
-                                                return rows.map((row, idx) => (
-                                                    <tr key={idx} className="hover:bg-gray-50">
-                                                    <td className="px-4 py-3 text-sm text-gray-600">{idx + 1}</td>
-                                                    <td className="px-4 py-3 text-sm text-gray-800 break-words">{row.name}</td>
-                                                    </tr>
-                                                ));
-                                                })()}
-                                            </tbody>
-                                            </table>
-                                        </div>
-                                        </div>
-
-                                        {/* Error block (если есть) */}
-                                        {previewData?.error && (
-                                        <div className="mt-4 p-3 rounded bg-red-50 border border-red-200 text-red-700">
-                                            Ошибка при чтении файла: {previewData.error}
-                                        </div>
-                                        )}
-
-                                        {/* Actions */}
-                                        <div className="mt-6 flex flex-col md:flex-row items-center justify-end gap-3">
-                                        <button
-                                            onClick={handleSaveTable}
-                                            disabled={isLoading || !selectedDirection}
-                                            className={`px-6 py-3 rounded-lg text-white ${isLoading || !selectedDirection ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}
-                                            aria-disabled={isLoading || !selectedDirection}
-                                        >
-                                            {isLoading ? 'Сохранение...' : 'Подтвердить и сохранить'}
-                                        </button>
-
-                                        <button
-                                            onClick={() => {
-                                            setShowPreview(false);
-                                            setPreviewData(null);
-                                            setSelectedDirection('');
-                                            }}
-                                            className="px-6 py-3 rounded-lg bg-gray-600 text-white hover:bg-gray-700"
-                                            disabled={isLoading}
-                                        >
-                                            Отмена
-                                        </button>
-                                        </div>
-                                    </>
-                                    )}
-                                </div>
-                                )}                            
+                            <>                            
                                 {view === 'manage_operators' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <div className="flex justify-between items-center mb-6">
@@ -7230,30 +6969,6 @@
                                         <i className="fas fa-arrow-down" />
                                         <span>{isLoading ? 'Скачивание...' : 'Сгенерировать отчет'}</span>
                                         </button>
-
-                                        {/* Upload calls table (hidden input triggered) */}
-                                        <button
-                                        onClick={() => document.getElementById('callsFileInput')?.click()}
-                                        className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-green-600 text-white hover:bg-green-700 transition"
-                                        title="Загрузить таблицу КВЗ"
-                                        >
-                                        <i className="fas fa-arrow-up" />
-                                        Загрузить таблицу КВЗ
-                                        </button>
-
-                                        <input
-                                        type="file"
-                                        id="callsFileInput"
-                                        accept=".xlsx,.xls,.csv"
-                                        className="hidden"
-                                        onChange={(e) => {
-                                            if (!e.target.files || e.target.files.length === 0) return;
-                                            const file = e.target.files[0];
-                                            setCallsTableFile(file);
-                                            handlePreviewCallsTable(file);
-                                            e.target.value = '';
-                                        }}
-                                        />
                                     </div>
                                     </div>
 
@@ -7368,119 +7083,6 @@
                                     ) : (
                                     <p className="text-center text-gray-600 py-8">Операторы не найдены.</p>
                                     )}
-                                </div>
-                                )}
-                                {showCallsPreview && previewCallsData && (
-                                <div
-                                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
-                                    onClick={() => setShowCallsPreview(false)} // клик по фону закрывает
-                                >
-                                    <div
-                                    role="dialog"
-                                    aria-modal="true"
-                                    aria-labelledby="calls-preview-title"
-                                    className="bg-white rounded-2xl shadow-2xl w-full max-w-[900px] max-h-[80vh] overflow-hidden flex flex-col"
-                                    onClick={(e) => e.stopPropagation()} // предотвратить закрытие при клике внутри
-                                    tabIndex={0}
-                                    onKeyDown={(e) => { if (e.key === "Escape") setShowCallsPreview(false); }}
-                                    >
-                                    {/* Header */}
-                                    <div className="flex items-start justify-between px-6 py-4 border-b">
-                                        <div className="pr-4">
-                                        <h3 id="calls-preview-title" className="text-lg font-semibold text-gray-800">
-                                            Preview: {previewCallsData.sheet_name ?? "Calls table"}
-                                        </h3>
-                                        <p className="text-sm text-gray-500 mt-1">
-                                            Операторы: <span className="font-medium text-gray-700">{(previewCallsData.operators || []).length}</span>
-                                            {previewCallsData.expected_calls != null && (
-                                            <> · Ожидаемые: <span className="font-medium text-gray-700">{previewCallsData.expected_calls}</span></>
-                                            )}
-                                        </p>
-                                        </div>
-
-                                        <div className="flex items-center gap-3">
-                                        <button
-                                            onClick={() => setShowCallsPreview(false)}
-                                            className="px-3 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 text-sm"
-                                            aria-label="Закрыть превью"
-                                        >
-                                            Закрыть
-                                        </button>
-                                        </div>
-                                    </div>
-
-                                    {/* Content: нормализация данных внутри IIFE */}
-                                    <div className="p-4 overflow-auto">
-                                        {previewCallsData.error && (
-                                        <div className="mb-3 p-3 bg-red-50 border border-red-200 text-red-700 rounded">
-                                            Ошибка при обработке файла: {previewCallsData.error}
-                                        </div>
-                                        )}
-
-                                        {(() => {
-                                        const raw = previewCallsData.operators || [];
-                                        const rows = raw.map((op) => {
-                                            if (op == null) return { name: "-", cph: "-" };
-                                            if (typeof op === "object" && !Array.isArray(op)) {
-                                            return { name: op.name ?? op[0] ?? "-", cph: op.cph ?? op.calls_per_hour ?? op[1] ?? "-" };
-                                            }
-                                            if (Array.isArray(op)) {
-                                            return { name: op[0] ?? "-", cph: op[1] ?? "-" };
-                                            }
-                                            return { name: String(op), cph: "-" };
-                                        });
-
-                                        return (
-                                            <div className="rounded-lg overflow-hidden border">
-                                            <table className="min-w-full table-fixed">
-                                                <thead className="bg-gray-50 sticky top-0 z-10">
-                                                <tr>
-                                                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">Оператор</th>
-                                                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 uppercase">КВЗ</th>
-                                                </tr>
-                                                </thead>
-
-                                                <tbody className="bg-white divide-y">
-                                                {rows.length === 0 ? (
-                                                    <tr>
-                                                    <td colSpan={2} className="px-4 py-6 text-center text-sm text-gray-500">Нет данных для отображения.</td>
-                                                    </tr>
-                                                ) : (
-                                                    rows.map((r, i) => (
-                                                    <tr key={i} className="hover:bg-gray-50">
-                                                        <td className="px-4 py-3 text-sm text-gray-800 break-words">{r.name}</td>
-                                                        <td className="px-4 py-3 text-sm text-gray-800">{r.cph}</td>
-                                                    </tr>
-                                                    ))
-                                                )}
-                                                </tbody>
-                                            </table>
-                                            </div>
-                                        );
-                                        })()}
-                                    </div>
-
-                                    {/* Footer */}
-                                    <div className="px-6 py-4 border-t bg-gray-50 flex items-center justify-between gap-4">
-                                        <div className="text-sm text-gray-600">
-                                        {previewCallsData.processed_at ? `Обновлено: ${new Date(previewCallsData.processed_at).toLocaleString()}` : ""}
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                        <button
-                                            onClick={() => { /* принять превью — добавьте обработчик здесь, если нужно */ setShowCallsPreview(false); }}
-                                            className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm"
-                                        >
-                                            Принять
-                                        </button>
-                                        <button
-                                            onClick={() => setShowCallsPreview(false)}
-                                            className="px-3 py-2 bg-white border rounded-lg hover:bg-gray-50 text-sm"
-                                        >
-                                            Отмена
-                                        </button>
-                                        </div>
-                                    </div>
-                                    </div>
                                 </div>
                                 )}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
