@@ -7205,37 +7205,37 @@
                                         return (
                                         <div className="overflow-x-auto rounded-lg border border-gray-200">
                                             <table className="min-w-full divide-y divide-gray-200">
-                                            <thead className="bg-gray-50">
+                                                <thead className="bg-gray-50">
                                                 <tr>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Оценок</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Средний балл</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Оценок</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Средний балл</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
                                                 </tr>
-                                            </thead>
+                                                </thead>
 
-                                            <tbody className="bg-white divide-y divide-gray-200">
+                                                <tbody className="bg-white divide-y divide-gray-200">
                                                 {filteredOperators.map((op, idx) => {
-                                                const callCount = parseInt(op.call_count) || 0;
-                                                return (
+                                                    const callCount = parseInt(op.call_count) || 0;
+                                                    return (
                                                     <tr key={op.id ?? idx} className="hover:bg-gray-50 transition-colors duration-200">
-                                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{op.name}</td>
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{op.name}</td>
 
-                                                    <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
+                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
                                                         {callCount}
-                                                    </td>
+                                                        </td>
 
-                                                    <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                         <span className={getScoreColor(op.avg_score)}>
-                                                        {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
+                                                            {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
                                                         </span>
-                                                    </td>
+                                                        </td>
 
-                                                    <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                         <div className="flex items-center gap-2">
-                                                        <button
+                                                            <button
                                                             onClick={() => {
-                                                            const tokenData = {
+                                                                const tokenData = {
                                                                 apiKey: user.apiKey,
                                                                 userId: user.id,
                                                                 role: user.role,
@@ -7243,25 +7243,55 @@
                                                                 operatorId: op.id,
                                                                 operatorName: op.name,
                                                                 timestamp: Date.now()
-                                                            };
-                                                            const token = safeBtoa(JSON.stringify(tokenData));
-                                                            window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
+                                                                };
+                                                                const token = safeBtoa(JSON.stringify(tokenData));
+                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
                                                             }}
                                                             className="inline-flex items-center gap-2 bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition"
                                                             title={`Оценить оператора ${op.name}`}
-                                                        >
+                                                            >
                                                             <i className="fas fa-play-circle" /> Оценить
-                                                        </button>
-
-                                                        {/* Дополнительные действия: редактировать, история и т.д. (опционально) */}
+                                                            </button>
                                                         </div>
-                                                    </td>
+                                                        </td>
                                                     </tr>
-                                                );
+                                                    );
                                                 })}
-                                            </tbody>
+                                                </tbody>
+
+                                                {/* FOOTER: total calls + overall average score (weighted by call count) */}
+                                                <tfoot className="bg-gray-50">
+                                                {(() => {
+                                                    const totalCalls = filteredOperators.reduce((sum, o) => sum + (parseInt(o.call_count) || 0), 0);
+                                                    // weighted average: sum(score * calls) / totalCalls
+                                                    const weightedSum = filteredOperators.reduce((sum, o) => {
+                                                    const score = parseFloat(o.avg_score);
+                                                    const calls = parseInt(o.call_count) || 0;
+                                                    return sum + (isNaN(score) ? 0 : score * calls);
+                                                    }, 0);
+                                                    const overallAvg = totalCalls > 0 ? (weightedSum / totalCalls) : (
+                                                    // fallback: unweighted average across operators that have score
+                                                    (() => {
+                                                        const scored = filteredOperators.map(o => parseFloat(o.avg_score)).filter(v => !isNaN(v));
+                                                        if (scored.length === 0) return null;
+                                                        return scored.reduce((a,b) => a+b,0) / scored.length;
+                                                    })()
+                                                    );
+
+                                                    const overallAvgStr = overallAvg == null ? '-' : Number(overallAvg).toFixed(2);
+
+                                                    return (
+                                                    <tr>
+                                                        <td className="px-6 py-3 text-sm font-medium text-gray-700">Итого</td>
+                                                        <td className="px-6 py-3 text-sm font-medium text-gray-900">{totalCalls}</td>
+                                                        <td className="px-6 py-3 text-sm font-medium text-gray-900">{overallAvgStr}</td>
+                                                        <td className="px-6 py-3" />
+                                                    </tr>
+                                                    );
+                                                })()}
+                                                </tfoot>
                                             </table>
-                                        </div>
+                                            </div>
                                         );
                                     })()
                                     ) : (
