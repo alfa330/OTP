@@ -10,11 +10,12 @@
        background-size: 300px; /* размер логотипа, можно менять */
        background-attachment: fixed;
      }
-    /* AudioPlayer styles + spinner */
+    /* === AudioPlayer styles (вставить в <head> или в существующий <style>) === */
     :root{
     --primary:#2196f3;
     --primary-hover:#1976d2;
     --accent:#4caf50;
+    --danger:#f44336;
     --bg:#f4f4f9;
     --card:#fff;
     }
@@ -44,28 +45,23 @@
     /* Timeline */
     .timeline{ position:relative; height:14px; background:#e5e7eb; border-radius:999px; overflow:hidden; cursor:pointer; flex:1 1 auto;}
     .progress{ position:absolute; inset:0 auto 0 0; height:100%; width:0; background:linear-gradient(90deg, var(--accent), #8bc34a); transition:width .08s linear;}
+    .marker{ position:absolute; top:0; height:100%; width:4px; background:var(--danger); cursor:pointer; }
+    .marker::after{ content:""; position:absolute; top:-6px; left:-3px; width:10px; height:10px; background:var(--danger); border-radius:50%; }
+    .marker:hover .tooltip{ display:block }
+    .tooltip{ display:none; position:absolute; bottom:100%; left:50%; transform:translate(-50%,-8px); background:#111827; color:#fff; padding:6px 10px; border-radius:8px; white-space:nowrap; font-size:12px; box-shadow:0 6px 18px rgba(0,0,0,0.18); }
 
-    /* Spinner */
-    .player-loading{
-    display:flex;
-    align-items:center;
-    gap:12px;
-    padding:12px;
-    background:#ffffff;
-    border-radius:10px;
-    border:1px solid #eef2f7;
-    }
-    .spinner{
-    width:28px;
-    height:28px;
-    border-radius:50%;
-    border:4px solid rgba(0,0,0,0.08);
-    border-top-color:var(--primary);
-    animation: spin 1s linear infinite;
-    }
-    @keyframes spin{ to { transform: rotate(360deg); } }
+    .controls{ display:flex; gap:10px; margin-top:12px; }
+    .controls input[type="text"]{ flex:1; padding:10px 12px; border:1px solid #d1d5db; border-radius:10px; outline:none; }
+    .controls button{ padding:10px 14px; background:var(--primary); color:#fff; border:none; border-radius:10px; cursor:pointer; }
+    .controls button:hover{ background:var(--primary-hover) }
 
-    .player-container{ padding:12px; background:#fff; border-radius:10px; border:1px solid #eef2f7; }
+    .markers-list{ margin-top:14px }
+    .markers-list ul{ list-style:none; margin:8px 0 0; padding:0 }
+    .markers-list li{ background:#f9fafb; padding:10px; margin:6px 0; border-radius:10px; display:flex; justify-content:space-between; align-items:center; gap:10px; }
+    .markers-list li button{ background:var(--danger); border:none; color:#fff; padding:8px 10px; border-radius:10px; cursor:pointer; }
+    .markers-list li button:hover{ background:#d32f2f }
+
+    /* Скрытый тег <audio> — управляем вручную */
     audio.player-hidden{ display:none; }
     @media (max-width:700px){ .time-display{ display:none } }
     </style>
@@ -3128,140 +3124,100 @@
             }
 
         function AudioPlayer({ audioSrc, uniqueKey }) {
+            const [markers, setMarkers] = React.useState([]);
+            const [errorDesc, setErrorDesc] = React.useState('');
             const [duration, setDuration] = React.useState(0);
             const [currentTime, setCurrentTime] = React.useState(0);
             const [isPlaying, setIsPlaying] = React.useState(false);
             const [playbackRate, setPlaybackRate] = React.useState(1);
-            const [isLoaded, setIsLoaded] = React.useState(false);     // true после loadedmetadata
-            const [isLoading, setIsLoading] = React.useState(false);   // true, пока идёт загрузка
-            const [loadError, setLoadError] = React.useState(null);
 
             const audioRef = React.useRef(null);
             const timelineRef = React.useRef(null);
 
-            // Когда audioSrc меняется — подготовить загрузку
-            React.useEffect(() => {
-                setLoadError(null);
-                setDuration(0);
+            // Обновляем src при изменении audioSrc
+            React.useEffect(()=>{
+                if(audioRef.current){
+                audioRef.current.src = audioSrc || '';
+                audioRef.current.playbackRate = playbackRate;
+                }
+                setMarkers([]);
                 setCurrentTime(0);
-                setIsLoaded(false);
                 setIsPlaying(false);
-
-                if (!audioSrc) {
-                // нет аудиофайла — ничего не показываем
-                setIsLoading(false);
-                return;
-                }
-
-                // есть источник — начать загрузку метаданных
-                setIsLoading(true);
-                if (audioRef.current) {
-                audioRef.current.src = audioSrc;
-                try {
-                    audioRef.current.load(); // инициируем загрузку
-                } catch (e) {
-                    // старые браузеры могут ругаться, но мы обработаем error event
-                }
-                }
             }, [audioSrc]);
 
-            // Слушаем события аудио
-            React.useEffect(() => {
+            React.useEffect(()=>{
                 const a = audioRef.current;
-                if (!a) return;
-
-                const onLoaded = () => {
-                setDuration(a.duration || 0);
-                setIsLoaded(true);
-                setIsLoading(false);
-                };
-                const onTime = () => setCurrentTime(a.currentTime || 0);
-                const onEnded = () => setIsPlaying(false);
-                const onPlay = () => setIsPlaying(true);
-                const onPause = () => setIsPlaying(false);
-                const onError = () => {
-                setLoadError('Ошибка загрузки аудио');
-                setIsLoading(false);
-                setIsLoaded(false);
-                };
+                if(!a) return;
+                const onLoaded = ()=> setDuration(a.duration || 0);
+                const onTime = ()=> setCurrentTime(a.currentTime || 0);
+                const onEnded = ()=> setIsPlaying(false);
+                const onPlay = ()=> setIsPlaying(true);
+                const onPause = ()=> setIsPlaying(false);
 
                 a.addEventListener('loadedmetadata', onLoaded);
                 a.addEventListener('timeupdate', onTime);
                 a.addEventListener('ended', onEnded);
                 a.addEventListener('play', onPlay);
                 a.addEventListener('pause', onPause);
-                a.addEventListener('error', onError);
 
-                return () => {
+                return ()=> {
                 a.removeEventListener('loadedmetadata', onLoaded);
                 a.removeEventListener('timeupdate', onTime);
                 a.removeEventListener('ended', onEnded);
                 a.removeEventListener('play', onPlay);
                 a.removeEventListener('pause', onPause);
-                a.removeEventListener('error', onError);
                 };
             }, [audioSrc, playbackRate]);
 
-            const formatTime = (s) => {
+            const formatTime = (s)=>{
                 if (!s || !isFinite(s)) return '0:00';
                 const mins = Math.floor(s / 60);
                 const secs = Math.floor(s % 60);
                 return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
             };
 
-            const jumpToTime = (time) => {
-                if (!audioRef.current) return;
+            const jumpToTime = (time)=>{
+                if(!audioRef.current) return;
                 audioRef.current.currentTime = time;
                 setCurrentTime(time);
             };
-            const play = () => audioRef.current?.play();
-            const pause = () => audioRef.current?.pause();
-            const togglePlayPause = () => (isPlaying ? pause() : play());
-            const rewind10 = () => jumpToTime(Math.max(0, (audioRef.current?.currentTime || 0) - 10));
-            const forward10 = () => jumpToTime(Math.min(duration, (audioRef.current?.currentTime || 0) + 10));
-            const handleSeek = (e) => {
-                if (!audioRef.current || !timelineRef.current || !isLoaded) return;
+            const play = ()=> audioRef.current?.play();
+            const pause = ()=> audioRef.current?.pause();
+            const togglePlayPause = ()=> isPlaying ? pause() : play();
+            const rewind10 = ()=> jumpToTime(Math.max(0, (audioRef.current?.currentTime||0) - 10));
+            const forward10 = ()=> jumpToTime(Math.min(duration, (audioRef.current?.currentTime||0) + 10));
+            const handleSeek = (e)=>{
+                if(!audioRef.current || !timelineRef.current) return;
                 const rect = timelineRef.current.getBoundingClientRect();
-                const x = (e.clientX ?? e.touches?.[0]?.clientX) - rect.left;
+                const x = e.clientX - rect.left;
                 const ratio = Math.min(Math.max(x / rect.width, 0), 1);
                 jumpToTime(ratio * duration);
             };
-            const handlePlaybackRateChange = (e) => {
+            const handlePlaybackRateChange = (e)=>{
                 const rate = parseFloat(e.target.value);
                 setPlaybackRate(rate);
-                if (audioRef.current) audioRef.current.playbackRate = rate;
+                if(audioRef.current) audioRef.current.playbackRate = rate;
             };
 
+            const addMarker = ()=>{
+                if(audioRef.current && errorDesc.trim()){
+                const time = audioRef.current.currentTime || 0;
+                setMarkers(prev => [...prev, { time, error: errorDesc.trim() }]);
+                setErrorDesc('');
+                }
+            };
+            const removeMarker = (idx)=> setMarkers(prev => prev.filter((_,i)=>i!==idx));
             const progressWidth = duration > 0 ? (currentTime / duration) * 100 : 0;
 
-            // Если аудио не передано — ничего не рендерим (убирает "Файлов нет" при начальной загрузке)
-            if (!audioSrc) return null;
-
-            // Если есть ошибка загрузки — показать сообщение
-            if (loadError) {
-                return (
-                <div className="player-container">
-                    <div style={{ color: '#b91c1c', fontSize: 14 }}>Ошибка: {loadError}</div>
+            // Не рендерим плеер если нет источника
+            if(!audioSrc) return (
+                <div className="p-3 bg-gray-50 rounded-md">
+                <div className="text-sm text-red-500"><i className="fas fa-times-circle mr-2"></i>Аудио отсутствует</div>
                 </div>
-                );
-            }
+            );
 
-            // Пока загружается — показываем spinner
-            if (isLoading && !isLoaded) {
-                return (
-                <div className="player-loading">
-                    <div className="spinner" aria-hidden="true"></div>
-                    <div>
-                    <div style={{ fontWeight: 600 }}>Загрузка аудио…</div>
-                    <div style={{ fontSize: 13, color: '#6b7280' }}>{/* можно показать имя файла */}</div>
-                    </div>
-                </div>
-                );
-            }
-
-            // После того, как метаданные загружены — показываем плеер
             return (
-                <div key={uniqueKey || audioSrc} className="player-container">
+                <div key={uniqueKey || audioSrc} className="p-3 bg-white rounded-lg border border-gray-200 shadow-sm">
                 <div className="player-bar">
                     <div className="controls-left">
                     <button className="icon-btn" onClick={togglePlayPause} title={isPlaying ? 'Пауза' : 'Воспроизвести'}>
@@ -3293,7 +3249,15 @@
                     </div>
 
                     <div className="timeline" ref={timelineRef} onClick={handleSeek}>
-                    <div className="progress" style={{ width: `${progressWidth}%` }} />
+                    <div className="progress" style={{ width: `${progressWidth}%` }}></div>
+                    {markers.map((m, i)=>{
+                        const left = duration > 0 ? (m.time / duration) * 100 : 0;
+                        return (
+                        <div key={i} className="marker" style={{ left: `${left}%` }} title="Перейти к метке" onClick={(e)=>{ e.stopPropagation(); jumpToTime(m.time); }}>
+                            <div className="tooltip">{m.error}</div>
+                        </div>
+                        );
+                    })}
                     </div>
 
                     <div className="controls-right">
@@ -3314,7 +3278,28 @@
                     </div>
                 </div>
 
-                <audio ref={audioRef} className="player-hidden" src={audioSrc} preload="metadata" />
+                <div className="controls" style={{marginTop:12}}>
+                    <input type="text" placeholder="Описание метки" value={errorDesc} onChange={(e)=>setErrorDesc(e.target.value)} />
+                    <button onClick={addMarker}>Добавить метку</button>
+                </div>
+
+                <div className="markers-list">
+                    <h4 className="text-sm font-medium mt-3 mb-2">Метки</h4>
+                    <ul>
+                    {markers.map((m, i)=>(
+                        <li key={i}>
+                        <div className="text-sm">{formatTime(m.time)} — {m.error}</div>
+                        <div style={{display:'flex', gap:8}}>
+                            <button onClick={()=>jumpToTime(m.time)}>Перейти</button>
+                            <button onClick={()=>removeMarker(i)}>Удалить</button>
+                        </div>
+                        </li>
+                    ))}
+                    {markers.length === 0 && <li className="text-sm text-gray-500">Метки отсутствуют</li>}
+                    </ul>
+                </div>
+
+                <audio ref={audioRef} className="player-hidden" src={audioSrc}></audio>
                 </div>
             );
             }
@@ -7843,7 +7828,13 @@
 
                                                                     <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Аудио</h4>
-                                                                    <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} />
+                                                                        {audioUrl ? (
+                                                                        <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} />
+                                                                        ) : (
+                                                                        <div className="text-sm text-red-500 flex items-center gap-2">
+                                                                            <i className="fas fa-times-circle"></i> Файлов не имеется
+                                                                        </div>
+                                                                        )}
                                                                     </div>
 
                                                                     <div className="text-xs text-gray-500">
