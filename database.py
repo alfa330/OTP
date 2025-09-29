@@ -2312,5 +2312,10 @@ class Database:
             cursor.execute(query, params)
             return cursor.fetchone() is not None
 
+    def delete_training(self, training_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM trainings WHERE id = %s RETURNING id", (training_id,))
+            return cursor.fetchone() is not None
+
 # Initialize database
 db = Database()
