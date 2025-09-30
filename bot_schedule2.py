@@ -1295,7 +1295,7 @@ def get_sv_data():
                     "avg_score": round(avg_score, 2) if call_count > 0 else None,
                     "scores_table_url": scores_table_url,
                     "status": status,
-                    "rate": rate
+                    "rate": float(rate) if rate else 1.0
                 })
         
         return jsonify(response_data), 200
