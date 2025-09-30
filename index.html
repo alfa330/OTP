@@ -7072,7 +7072,7 @@
                                             <div className="mb-4 p-4">
                                             <input
                                                 type="text"
-                                                placeholder="Поиск по имени, направлению или супервайзеру..."
+                                                placeholder="Поиск по имени, направлению..."
                                                 value={searchQuery}
                                                 onChange={(e) => setSearchQuery(e.target.value)}
                                                 className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
@@ -7081,10 +7081,6 @@
 
                                             {Object.entries(grouped).map(([svName, ops]) => (
                                             <div key={svName} className="mb-8">
-                                                <h3 className="text-xl font-semibold text-gray-800 bg-gray-100 px-6 py-3 rounded-t-lg">
-                                                {svName}
-                                                </h3>
-
                                                 <table className="min-w-full table-fixed border rounded-lg w-full">
                                                 <colgroup>
                                                     <col style={{ width: "30%" }} />
