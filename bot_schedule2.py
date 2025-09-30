@@ -661,6 +661,7 @@ def upload_group_day():
 
                 # Insert/update daily_hours
                 try:
+                    logging.info(fine_amount,fine_reason,fine_comment)
                     # use the Database helper (assumes method exists)
                     db.insert_or_update_daily_hours(resolved_operator_id, date_str,
                                                     work_time=work_time,
