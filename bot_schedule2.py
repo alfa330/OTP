@@ -585,7 +585,19 @@ def upload_group_day():
                     efficiency = float(row.get('efficiency') or 0.0)  # в часах
                 except Exception:
                     efficiency = 0.0
+                try:
+                    fine_amount = float(row.get('fine_amount') or 0.0)
+                except Exception:
+                    fine_amount = 0.0
+                
+                fine_reason = (row.get('fine_reason') or None)
+                # защита: принимаем только разрешённые причины (опционально)
+                ALLOWED_FINE_REASONS = ['Корп такси', 'Опоздание', 'Прокси карта', 'Другое']
+                if fine_reason and fine_reason not in ALLOWED_FINE_REASONS:
+                    # если невалидная причина — помечаем как "Другое" или сохраняем как есть, в примере — нормализуем в 'Другое'
+                    fine_reason = 'Другое'
 
+                fine_comment = (row.get('fine_comment') or None)
                 month = row.get('month') or default_month
 
                 # resolve operator_id if not provided
@@ -655,7 +667,10 @@ def upload_group_day():
                                                     break_time=break_time,
                                                     talk_time=talk_time,
                                                     calls=calls,
-                                                    efficiency=efficiency)
+                                                    efficiency=efficiency,
+                                                    fine_amount=fine_amount,
+                                                    fine_reason=fine_reason,
+                                                    fine_comment=fine_comment)
                     processed.append({"row": idx, "operator_id": resolved_operator_id, "name": name})
                     processed_operator_ids.add(resolved_operator_id)
                 except Exception as e:
