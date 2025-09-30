@@ -368,6 +368,46 @@ def change_password():
         logging.error(f"Error changing password: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/sv/preview_calls_table', methods=['POST'])
+@require_api_key
+def preview_calls_table():
+    try:
+        # Проверяем наличие файла
+        if 'file' not in request.files:
+            return jsonify({"error": "Файл не был загружен"}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "Файл не выбран"}), 400
+
+        if not file.filename.lower().endswith(('.csv', '.xls', '.xlsx')):
+            return jsonify({"error": "Неверный формат файла. Допустимы .csv, .xls, .xlsx"}), 400
+
+        # Получаем user_id из заголовка
+        user_id_header = request.headers.get('X-User-Id')
+        if not user_id_header or not user_id_header.isdigit():
+            return jsonify({"error": "Некорректный X-User-Id"}), 400
+        user_id = int(user_id_header)
+
+        user = db.get_user(id=user_id)
+        if not user or user[3] != 'sv':  # user[3] == role
+            return jsonify({"error": "Unauthorized: только супервайзеры могут загружать таблицы"}), 403
+
+        # Только парсим файл, не сохраняем
+        sheet_name, operators, error = db.parse_calls_file(file)
+        if error:
+            return jsonify({"error": error}), 400
+
+        return jsonify({
+            "status": "success",
+            "sheet_name": sheet_name,
+            "operators": operators
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Ошибка при предпросмотре таблицы звонков: {e}", exc_info=True)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/sv/update_norm_hours', methods=['POST'])
 @require_api_key
 def update_norm_hours():
