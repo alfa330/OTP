@@ -1067,7 +1067,7 @@ class Database:
                     'id': row[0],
                     'name': row[1],
                     'direction_id': row[2],
-                    'hire_date': row[3],
+                    'hire_date': row[3].strftime('%d-%m-%Y') if row[3] else None,
                     'hours_table_url': row[4],
                     'scores_table_url': row[5],
                     'supervisor_name': row[6],
