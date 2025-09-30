@@ -3044,38 +3044,117 @@
 
                 {/* Detail modal for a single cell (trainings shown only in work_time tab) */}
                 {selectedCell && cellModel && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-                    <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-lg" onClick={e => e.stopPropagation()}>
-                        <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-lg font-semibold">Детали: {cellModel.name} — {cellModel.dateStr}</h3>
-                        <button onClick={closeCellModal} className="px-2 py-1 rounded-md border">Закрыть</button>
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                    onClick={closeCellModal}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="cell-modal-title"
+                >
+                    <div
+                    className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl border border-gray-100 overflow-y-auto max-h-[90vh]"
+                    onClick={e => e.stopPropagation()}
+                    >
+                    {/* Header */}
+                    <div className="flex items-start justify-between gap-4 p-6 border-b">
+                        <div>
+                        <h3 id="cell-modal-title" className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+                            <i className="fas fa-info-circle text-sm text-gray-500" aria-hidden="true" />
+                            Детали: <span className="ml-1 text-primary-700">{cellModel.name}</span>
+                            <span className="ml-2 text-sm text-gray-500">— {cellModel.dateStr}</span>
+                        </h3>
+                        <div className="text-xs text-gray-500 mt-1">Оператор: {selectedCell.operator?.name}</div>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-3 mb-4">
-                        <label className="text-xs text-gray-600">Work time (ч)
-                            <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.work_time} onChange={e => updateCellField('work_time', e.target.value)} />
-                        </label>
-                        <label className="text-xs text-gray-600">Break time (ч)
-                            <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.break_time} onChange={e => updateCellField('break_time', e.target.value)} />
+                        <div className="flex items-center gap-2">
+                        <button
+                            onClick={closeCellModal}
+                            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm text-gray-600 hover:bg-gray-50"
+                            aria-label="Закрыть"
+                        >
+                            <i className="fas fa-times" aria-hidden="true" /> Закрыть
+                        </button>
+                        </div>
+                    </div>
+
+                    {/* Body */}
+                    <div className="p-6">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <label className="flex flex-col text-xs text-gray-700">
+                            <span className="flex items-center gap-2 mb-1">
+                            <i className="fas fa-clock" aria-hidden="true" /> Work time (ч)
+                            </span>
+                            <input
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
+                            type="number"
+                            step="0.01"
+                            value={cellModel.work_time}
+                            onChange={e => updateCellField('work_time', e.target.value)}
+                            />
                         </label>
 
-                        <label className="text-xs text-gray-600">Talk time (ч)
-                            <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.talk_time} onChange={e => updateCellField('talk_time', e.target.value)} />
+                        <label className="flex flex-col text-xs text-gray-700">
+                            <span className="flex items-center gap-2 mb-1">
+                            <i className="fas fa-coffee" aria-hidden="true" /> Break time (ч)
+                            </span>
+                            <input
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
+                            type="number"
+                            step="0.01"
+                            value={cellModel.break_time}
+                            onChange={e => updateCellField('break_time', e.target.value)}
+                            />
                         </label>
 
-                        <label className="text-xs text-gray-600">Calls
-                            <input className="w-full p-2 mt-1 border rounded-md" type="number" value={cellModel.calls} onChange={e => updateCellField('calls', e.target.value)} />
+                        <label className="flex flex-col text-xs text-gray-700">
+                            <span className="flex items-center gap-2 mb-1">
+                            <i className="fas fa-comments" aria-hidden="true" /> Talk time (ч)
+                            </span>
+                            <input
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
+                            type="number"
+                            step="0.01"
+                            value={cellModel.talk_time}
+                            onChange={e => updateCellField('talk_time', e.target.value)}
+                            />
                         </label>
 
-                        <label className="col-span-2 text-xs text-gray-600">Efficiency (ч)
-                            <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.efficiency} onChange={e => updateCellField('efficiency', e.target.value)} />
+                        <label className="flex flex-col text-xs text-gray-700">
+                            <span className="flex items-center gap-2 mb-1">
+                            <i className="fas fa-phone" aria-hidden="true" /> Calls
+                            </span>
+                            <input
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
+                            type="number"
+                            value={cellModel.calls}
+                            onChange={e => updateCellField('calls', e.target.value)}
+                            />
+                        </label>
+
+                        <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
+                            <span className="flex items-center gap-2 mb-1">
+                            <i className="fas fa-percent" aria-hidden="true" /> Efficiency (ч)
+                            </span>
+                            <input
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
+                            type="number"
+                            step="0.01"
+                            value={cellModel.efficiency}
+                            onChange={e => updateCellField('efficiency', e.target.value)}
+                            />
                         </label>
                         </div>
 
-                        {/* Trainings list — show ONLY if currently viewing work_time tab */}
+                        {/* Trainings — visible for work_time/trainings tab */}
                         {(selectedTab === 'work_time' || selectedTab === 'trainings') && (
-                        <div className="mb-4">
-                            <h4 className="text-sm font-semibold mb-2">Тренинги</h4>
+                        <div className="mt-6">
+                            <div className="flex items-center justify-between mb-3">
+                            <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                                <i className="fas fa-chalkboard-teacher" aria-hidden="true" /> Тренинги
+                            </h4>
+                            <div className="text-xs text-gray-500">{getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).length} найдено</div>
+                            </div>
+
                             {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).length === 0 ? (
                             <div className="text-sm text-gray-500">Тренингов нет.</div>
                             ) : (
@@ -3083,13 +3162,34 @@
                                 {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).map(t => {
                                 const dur = computeTrainingDurationHours(t);
                                 return (
-                                    <div key={t.id} className={`p-2 border rounded-md ${t.count_in_hours ? 'bg-green-50' : 'bg-yellow-50'}`}>
+                                    <div
+                                    key={t.id}
+                                    className={`p-3 rounded-lg border flex flex-col gap-2 ${
+                                        t.count_in_hours ? 'bg-green-50 border-green-200' : 'bg-yellow-50 border-yellow-200'
+                                    }`}
+                                    >
                                     <div className="flex items-center justify-between">
-                                        <div className="text-sm font-medium">{t.start_time || '—'} — {t.end_time || '—'} · {dur.toFixed(2)} ч</div>
+                                        <div className="text-sm font-medium flex items-center gap-3">
+                                        <i className="fas fa-clock" aria-hidden="true" />
+                                        <span>{t.start_time || '—'} — {t.end_time || '—'}</span>
+                                        <span className="text-xs text-gray-600">· {dur.toFixed(2)} ч</span>
+                                        </div>
                                         <div className="text-xs text-gray-500">by {t.created_by_name}</div>
                                     </div>
+
                                     <div className="text-sm text-gray-700">{t.reason || '—'}</div>
-                                    {t.comment && <div className="text-xs text-gray-600 mt-1">{t.comment}</div>}
+                                    {t.comment && <div className="text-xs text-gray-600">{t.comment}</div>}
+
+                                    <div className="flex items-center gap-2 text-xs">
+                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border">
+                                        <i className="fas fa-info-circle" /> {t.count_in_hours ? 'Засчитывается в часы' : 'Не засчитывается'}
+                                        </span>
+                                        {t.verified && (
+                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border">
+                                            <i className="fas fa-check" /> Проверено
+                                        </span>
+                                        )}
+                                    </div>
                                     </div>
                                 );
                                 })}
@@ -3098,32 +3198,80 @@
                         </div>
                         )}
 
-                        <label className="text-xs text-gray-600">Штраф (сумма)
-                        <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.fine_amount} onChange={e => updateCellField('fine_amount', e.target.value)} />
+                        <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <label className="flex flex-col text-xs text-gray-700">
+                            <span className="flex items-center gap-2 mb-1">
+                            <i className="fas fa-wallet" aria-hidden="true" /> Штраф (сумма)
+                            </span>
+                            <input
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
+                            type="number"
+                            step="0.01"
+                            value={cellModel.fine_amount}
+                            onChange={e => updateCellField('fine_amount', e.target.value)}
+                            />
                         </label>
 
-                        <label className="text-xs text-gray-600">Причина
-                        <select className="w-full p-2 mt-1 border rounded-md" value={cellModel.fine_reason} onChange={e => updateCellField('fine_reason', e.target.value)}>
+                        <label className="flex flex-col text-xs text-gray-700">
+                            <span className="flex items-center gap-2 mb-1">
+                            <i className="fas fa-flag" aria-hidden="true" /> Причина
+                            </span>
+                            <select
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
+                            value={cellModel.fine_reason}
+                            onChange={e => updateCellField('fine_reason', e.target.value)}
+                            >
                             <option value="">—</option>
                             <option>Корп такси</option>
                             <option>Опоздание</option>
                             <option>Прокси карта</option>
                             <option>Другое</option>
-                        </select>
+                            </select>
                         </label>
 
-                        <label className="text-xs text-gray-600 col-span-2">Комментарий
-                        <textarea className="w-full p-2 mt-1 border rounded-md" value={cellModel.fine_comment} onChange={e => updateCellField('fine_comment', e.target.value)} />
+                        <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
+                            <span className="flex items-center gap-2 mb-1">
+                            <i className="fas fa-comment-dots" aria-hidden="true" /> Комментарий
+                            </span>
+                            <textarea
+                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
+                            value={cellModel.fine_comment}
+                            onChange={e => updateCellField('fine_comment', e.target.value)}
+                            rows={3}
+                            />
                         </label>
-
-                        <div className="mt-4 flex items-center justify-end gap-3">
-                        <button onClick={closeCellModal} className="px-3 py-2 rounded-md border">Отмена</button>
-                        <button onClick={saveCell} disabled={isSavingCell} className="px-4 py-2 bg-green-600 text-white rounded-md">
-                            {isSavingCell ? 'Сохранение...' : 'Сохранить'}
-                        </button>
                         </div>
                     </div>
+
+                    {/* Footer actions */}
+                    <div className="flex items-center justify-end gap-3 p-4 border-t">
+                        <button
+                        onClick={closeCellModal}
+                        className="px-4 py-2 rounded-md border text-sm text-gray-600 hover:bg-gray-50"
+                        >
+                        Отмена
+                        </button>
+
+                        <button
+                        onClick={saveCell}
+                        disabled={isSavingCell}
+                        className={`inline-flex items-center gap-2 px-5 py-2 rounded-md text-sm text-white ${
+                            isSavingCell ? 'bg-green-400 cursor-wait' : 'bg-green-600 hover:bg-green-700'
+                        }`}
+                        >
+                        {isSavingCell ? (
+                            <>
+                            <i className="fas fa-spinner fa-spin" aria-hidden="true" /> Сохранение...
+                            </>
+                        ) : (
+                            <>
+                            <i className="fas fa-save" aria-hidden="true" /> Сохранить
+                            </>
+                        )}
+                        </button>
                     </div>
+                    </div>
+                </div>
                 )}
 
                 </div>
