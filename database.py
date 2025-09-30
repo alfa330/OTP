@@ -390,6 +390,9 @@ class Database:
         Возвращает daily_hours для одного оператора за месяц YYYY-MM,
         а также norm_hours, aggregates (из work_hours) и rate/name из users.
 
+        Включает поля штрафов из daily_hours: fine_amount, fine_reason, fine_comment
+        и агрегированное поле fines из work_hours.
+
         Результат:
         {
             "month": month,
@@ -410,10 +413,11 @@ class Database:
             raise ValueError("Invalid month format, expected YYYY-MM") from e
 
         with self._get_cursor() as cursor:
-            # 1) Получаем daily_hours (одним запросом)
+            # 1) Получаем daily_hours (одним запросом), теперь с информацией о штрафах
             cursor.execute(
                 """
-                SELECT day, work_time, break_time, talk_time, calls, efficiency, fine_amount, fine_reason, fine_comment
+                SELECT day, work_time, break_time, talk_time, calls, efficiency,
+                    fine_amount, fine_reason, fine_comment
                 FROM daily_hours
                 WHERE operator_id = %s AND day >= %s AND day <= %s
                 ORDER BY day
@@ -423,8 +427,12 @@ class Database:
             daily_rows = cursor.fetchall()
 
             # build daily map: { "1": {...}, "2": {...}, ... }
-            daily_map = {
-                str(int(row[0].day)): {
+            daily_map = {}
+            for row in daily_rows:
+                # row: (day, work_time, break_time, talk_time, calls, efficiency, fine_amount, fine_reason, fine_comment)
+                day_obj = row[0]
+                day_key = str(int(day_obj.day))
+                daily_map[day_key] = {
                     "work_time": float(row[1]) if row[1] is not None else 0.0,
                     "break_time": float(row[2]) if row[2] is not None else 0.0,
                     "talk_time": float(row[3]) if row[3] is not None else 0.0,
@@ -434,10 +442,8 @@ class Database:
                     "fine_reason": row[7],
                     "fine_comment": row[8],
                 }
-                for row in daily_rows
-            }
 
-            # 2) Получаем имя/ставку + данные work_hours одним LEFT JOIN запросом
+            # 2) Получаем имя/ставку + данные work_hours одним LEFT JOIN запросом (включая fines)
             cursor.execute(
                 """
                 SELECT u.name, u.rate,
