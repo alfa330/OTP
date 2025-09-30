@@ -493,7 +493,7 @@ class Database:
     def get_daily_hours_by_supervisor_month(self, supervisor_id, month):
         """
         Возвращает все daily_hours и агрегаты work_hours для всех операторов указанного супервайзера за месяц YYYY-MM.
-        Включает также ставку (rate) из users и norm_hours из work_hours.
+        Включает также ставку (rate) из users, norm_hours и fines из work_hours.
         """
         import calendar as _py_calendar
         from datetime import date as _date
@@ -508,7 +508,7 @@ class Database:
             raise ValueError("Invalid month format, expected YYYY-MM") from e
 
         with self._get_cursor() as cursor:
-            # Получаем операторов + ставку + norm_hours + агрегаты work_hours
+            # Получаем операторов + ставка + norm_hours + агрегаты work_hours (включая fines)
             cursor.execute("""
                 SELECT u.id, u.name, u.rate,
                     COALESCE(w.norm_hours, 0) as norm_hours,
@@ -517,7 +517,8 @@ class Database:
                     COALESCE(w.total_talk_time, 0) as total_talk_time,
                     COALESCE(w.total_calls, 0) as total_calls,
                     COALESCE(w.total_efficiency_hours, 0) as total_efficiency_hours,
-                    COALESCE(w.calls_per_hour, 0) as calls_per_hour
+                    COALESCE(w.calls_per_hour, 0) as calls_per_hour,
+                    COALESCE(w.fines, 0) as fines
                 FROM users u
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
@@ -531,9 +532,10 @@ class Database:
 
             op_ids = [row[0] for row in operator_rows]
 
-            # Получаем daily_hours для этих операторов за месяц
+            # Получаем daily_hours для этих операторов за месяц (с информацией о штрафах)
             cursor.execute("""
-                SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency
+                SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency,
+                    d.fine_amount, d.fine_reason, d.fine_comment
                 FROM daily_hours d
                 WHERE d.operator_id = ANY(%s)
                 AND d.day >= %s AND d.day <= %s
@@ -543,14 +545,18 @@ class Database:
 
             # Готовим словарь daily: operator_id -> {day_number: {...}}
             daily_map = {}
-            for op_id, day, work_time, break_time, talk_time, calls, eff in daily_rows:
+            for (op_id, day, work_time, break_time, talk_time, calls, eff,
+                fine_amount, fine_reason, fine_comment) in daily_rows:
                 day_num = str(int(day.day))
                 d = {
                     "work_time": float(work_time) if work_time is not None else 0.0,
                     "break_time": float(break_time) if break_time is not None else 0.0,
                     "talk_time": float(talk_time) if talk_time is not None else 0.0,
                     "calls": int(calls) if calls is not None else 0,
-                    "efficiency": float(eff) if eff is not None else 0.0
+                    "efficiency": float(eff) if eff is not None else 0.0,
+                    "fine_amount": float(fine_amount) if fine_amount is not None else 0.0,
+                    "fine_reason": fine_reason,
+                    "fine_comment": fine_comment
                 }
                 daily_map.setdefault(op_id, {})[day_num] = d
 
@@ -559,7 +565,7 @@ class Database:
             for row in operator_rows:
                 (op_id, op_name, rate, norm_hours,
                 regular_hours, total_break_time, total_talk_time,
-                total_calls, total_efficiency_hours, calls_per_hour) = row
+                total_calls, total_efficiency_hours, calls_per_hour, fines) = row
 
                 operators.append({
                     "operator_id": op_id,
@@ -573,7 +579,8 @@ class Database:
                         "total_talk_time": float(total_talk_time),
                         "total_calls": int(total_calls),
                         "total_efficiency_hours": float(total_efficiency_hours),
-                        "calls_per_hour": float(calls_per_hour)
+                        "calls_per_hour": float(calls_per_hour),
+                        "fines": float(fines)
                     }
                 })
 
