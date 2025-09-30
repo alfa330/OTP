@@ -205,10 +205,20 @@ class Database:
                     break_time FLOAT NOT NULL DEFAULT 0,
                     talk_time FLOAT NOT NULL DEFAULT 0,
                     calls INTEGER NOT NULL DEFAULT 0,
-                    efficiency FLOAT NOT NULL DEFAULT 0,  -- **часы**, не доля
+                    efficiency FLOAT NOT NULL DEFAULT 0,  -- часы
+                    fine_amount FLOAT NOT NULL DEFAULT 0,
+                    fine_reason VARCHAR(64),
+                    fine_comment TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(operator_id, day)
                 );
+            """)
+
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                    ADD COLUMN IF NOT EXISTS fine_amount FLOAT NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS fine_reason VARCHAR(64),
+                    ADD COLUMN IF NOT EXISTS fine_comment TEXT;           
             """)
 
             # Processed sheets table
@@ -344,17 +354,22 @@ class Database:
                 } for row in cursor.fetchall()
             ]
 
-    def insert_or_update_daily_hours(self, operator_id, day, work_time=0.0, break_time=0.0, talk_time=0.0, calls=0, efficiency=0.0):
+    def insert_or_update_daily_hours(self, operator_id, day, work_time=0.0, break_time=0.0,
+                                    talk_time=0.0, calls=0, efficiency=0.0,
+                                    fine_amount=0.0, fine_reason=None, fine_comment=None):
         """
         Вставляет/обновляет запись daily_hours (operator_id + day).
-        efficiency ожидается в часах.
+        efficiency и fine_amount ожидаются в часах/суммах соответственно.
         """
         if isinstance(day, str):
             day = datetime.strptime(day, "%Y-%m-%d").date()
         with self._get_cursor() as cursor:
             cursor.execute("""
-                INSERT INTO daily_hours (operator_id, day, work_time, break_time, talk_time, calls, efficiency)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO daily_hours (
+                    operator_id, day, work_time, break_time, talk_time, calls, efficiency,
+                    fine_amount, fine_reason, fine_comment
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (operator_id, day)
                 DO UPDATE SET
                     work_time = EXCLUDED.work_time,
@@ -362,8 +377,13 @@ class Database:
                     talk_time = EXCLUDED.talk_time,
                     calls = EXCLUDED.calls,
                     efficiency = EXCLUDED.efficiency,
+                    fine_amount = EXCLUDED.fine_amount,
+                    fine_reason = EXCLUDED.fine_reason,
+                    fine_comment = EXCLUDED.fine_comment,
                     created_at = CURRENT_TIMESTAMP
-            """, (operator_id, day, work_time, break_time, talk_time, calls, efficiency))
+            """, (operator_id, day, work_time, break_time, talk_time, calls, efficiency,
+                float(fine_amount) if fine_amount is not None else 0.0,
+                fine_reason, fine_comment))
 
     def get_daily_hours_for_operator_month(self, operator_id: int, month: str):
         """
@@ -393,7 +413,7 @@ class Database:
             # 1) Получаем daily_hours (одним запросом)
             cursor.execute(
                 """
-                SELECT day, work_time, break_time, talk_time, calls, efficiency
+                SELECT day, work_time, break_time, talk_time, calls, efficiency, fine_amount, fine_reason, fine_comment
                 FROM daily_hours
                 WHERE operator_id = %s AND day >= %s AND day <= %s
                 ORDER BY day
@@ -404,12 +424,15 @@ class Database:
 
             # build daily map: { "1": {...}, "2": {...}, ... }
             daily_map = {
-                str(row[0].day): {
+                str(int(row[0].day)): {
                     "work_time": float(row[1]) if row[1] is not None else 0.0,
                     "break_time": float(row[2]) if row[2] is not None else 0.0,
                     "talk_time": float(row[3]) if row[3] is not None else 0.0,
                     "calls": int(row[4]) if row[4] is not None else 0,
                     "efficiency": float(row[5]) if row[5] is not None else 0.0,
+                    "fine_amount": float(row[6]) if row[6] is not None else 0.0,
+                    "fine_reason": row[7],
+                    "fine_comment": row[8],
                 }
                 for row in daily_rows
             }
@@ -577,12 +600,13 @@ class Database:
                     COALESCE(SUM(break_time),0),
                     COALESCE(SUM(talk_time),0),
                     COALESCE(SUM(calls),0),
-                    COALESCE(SUM(efficiency),0)  -- суммируем часы эффективности
+                    COALESCE(SUM(efficiency),0),
+                    COALESCE(SUM(fine_amount),0)
                 FROM daily_hours
                 WHERE operator_id = %s AND day >= %s AND day <= %s
             """, (operator_id, start, end))
             row = cursor.fetchone()
-            total_work_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours = row
+            total_work_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours, total_fines = row
 
             # Защита от деления на ноль
             if total_work_time and float(total_work_time) > 0:
@@ -593,12 +617,15 @@ class Database:
             # Вставляем/обновляем work_hours:
             cursor.execute("""
                 INSERT INTO work_hours (
-                    operator_id, month, regular_hours, total_break_time, total_talk_time, total_calls, total_efficiency_hours, calls_per_hour
+                    operator_id, month, regular_hours, training_hours, fines, total_break_time,
+                    total_talk_time, total_calls, total_efficiency_hours, calls_per_hour
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (operator_id, month)
                 DO UPDATE SET
                     regular_hours = EXCLUDED.regular_hours,
+                    training_hours = EXCLUDED.training_hours,
+                    fines = EXCLUDED.fines,
                     total_break_time = EXCLUDED.total_break_time,
                     total_talk_time = EXCLUDED.total_talk_time,
                     total_calls = EXCLUDED.total_calls,
@@ -609,6 +636,8 @@ class Database:
                 operator_id,
                 month,
                 float(total_work_time),
+                0.0,  # training_hours — если считаешь отдельно, можно заполнять позже
+                float(total_fines),
                 float(total_break_time),
                 float(total_talk_time),
                 int(total_calls),
@@ -622,7 +651,8 @@ class Database:
             "total_talk_time": float(total_talk_time),
             "total_calls": int(total_calls),
             "total_efficiency_hours": float(total_efficiency_hours),
-            "calls_per_hour": float(calls_per_hour)
+            "calls_per_hour": float(calls_per_hour),
+            "fines": float(total_fines)
         }
 
     def save_directions(self, directions):

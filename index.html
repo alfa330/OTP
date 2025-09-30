@@ -2542,6 +2542,9 @@
                 talk_time: Number(dayData.talk_time || 0),
                 calls: Number(dayData.calls || 0),
                 efficiency: Number(dayData.efficiency || 0),
+                fine_amount: Number(dayData.fine_amount || 0),
+                fine_reason: dayData.fine_reason || '',
+                fine_comment: dayData.fine_comment || '',
                 month
                 });
             }
@@ -2552,14 +2555,14 @@
             }
 
             function updateCellField(field, value) {
-                setCellModel(prev => {
+            setCellModel(prev => {
                 if (!prev) return prev;
                 const next = { ...prev };
-                if (['work_time', 'break_time', 'talk_time', 'efficiency'].includes(field)) next[field] = value === '' ? '' : Number(value);
+                if (['work_time', 'break_time', 'talk_time', 'efficiency', 'fine_amount'].includes(field)) next[field] = value === '' ? '' : Number(value);
                 else if (field === 'calls') next[field] = value === '' ? '' : parseInt(value, 10) || 0;
                 else next[field] = value;
                 return next;
-                });
+            });
             }
 
             async function saveCell() {
@@ -2577,8 +2580,11 @@
                     talk_time: Number(cellModel.talk_time) || 0,
                     calls: parseInt(cellModel.calls, 10) || 0,
                     efficiency: Number(cellModel.efficiency) || 0,
+                    fine_amount: Number(cellModel.fine_amount) || 0,
+                    fine_reason: cellModel.fine_reason || null,
+                    fine_comment: cellModel.fine_comment || null,
                     month: cellModel.month
-                    }]
+                }]
                 };
                 const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, payload, {
                     headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'application/json' },
@@ -3091,6 +3097,24 @@
                             )}
                         </div>
                         )}
+
+                        <label className="text-xs text-gray-600">Штраф (сумма)
+                        <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.fine_amount} onChange={e => updateCellField('fine_amount', e.target.value)} />
+                        </label>
+
+                        <label className="text-xs text-gray-600">Причина
+                        <select className="w-full p-2 mt-1 border rounded-md" value={cellModel.fine_reason} onChange={e => updateCellField('fine_reason', e.target.value)}>
+                            <option value="">—</option>
+                            <option>Корп такси</option>
+                            <option>Опоздание</option>
+                            <option>Прокси карта</option>
+                            <option>Другое</option>
+                        </select>
+                        </label>
+
+                        <label className="text-xs text-gray-600 col-span-2">Комментарий
+                        <textarea className="w-full p-2 mt-1 border rounded-md" value={cellModel.fine_comment} onChange={e => updateCellField('fine_comment', e.target.value)} />
+                        </label>
 
                         <div className="mt-4 flex items-center justify-end gap-3">
                         <button onClick={closeCellModal} className="px-3 py-2 rounded-md border">Отмена</button>
