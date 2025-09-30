@@ -7263,20 +7263,15 @@
                                                 <tfoot className="bg-gray-50">
                                                 {(() => {
                                                     const totalCalls = filteredOperators.reduce((sum, o) => sum + (parseInt(o.call_count) || 0), 0);
-                                                    // weighted average: sum(score * calls) / totalCalls
-                                                    const weightedSum = filteredOperators.reduce((sum, o) => {
-                                                    const score = parseFloat(o.avg_score);
-                                                    const calls = parseInt(o.call_count) || 0;
-                                                    return sum + (isNaN(score) ? 0 : score * calls);
-                                                    }, 0);
-                                                    const overallAvg = totalCalls > 0 ? (weightedSum / totalCalls) : (
-                                                    // fallback: unweighted average across operators that have score
-                                                    (() => {
-                                                        const scored = filteredOperators.map(o => parseFloat(o.avg_score)).filter(v => !isNaN(v));
-                                                        if (scored.length === 0) return null;
-                                                        return scored.reduce((a,b) => a+b,0) / scored.length;
-                                                    })()
-                                                    );
+
+                                                    // собираем все avg_score, которые есть
+                                                    const scores = filteredOperators
+                                                    .map(o => parseFloat(o.avg_score))
+                                                    .filter(v => !isNaN(v));
+
+                                                    const overallAvg = scores.length > 0
+                                                    ? scores.reduce((a, b) => a + b, 0) / scores.length
+                                                    : null;
 
                                                     const overallAvgStr = overallAvg == null ? '-' : Number(overallAvg).toFixed(2);
 
