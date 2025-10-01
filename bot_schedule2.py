@@ -2190,19 +2190,9 @@ def get_monthly_report_hours():
             trainings_list = []
 
         trainings_map = build_trainings_map(trainings_list)
-
-        # Если у вас есть отдельно экспортированная функция генерации, используйте её:
-        if 'generate_excel_report_from_view' in globals() or hasattr(db, 'generate_excel_report_from_view'):
-            # prefer db.generate_excel_report_from_view if exists
-            if hasattr(db, 'generate_excel_report_from_view'):
-                filename, content = db.generate_excel_report_from_view(operators, trainings_map, month)
-            else:
-                # если функция импортирована в модуль как generate_excel_report_from_view
-                from database import generate_excel_report_from_view
-                filename, content = generate_excel_report_from_view(operators, trainings_map, month)
-        else:
-            return jsonify({"error": "No report generator available on db and no local generator imported"}), 500
-
+        
+        filename, content = db.generate_excel_report_from_view(operators, trainings_map, month)
+            
         if not filename or not content:
             logging.error("Генерация отчёта вернула пустой результат")
             return jsonify({"error": "Failed to generate report"}), 500
