@@ -2175,40 +2175,33 @@ def get_monthly_report_hours():
 
         logging.info("Начало генерации отчета: supervisor_id=%s month=%s", supervisor_id, month)
 
-        # Если в db реализован удобный метод generate_monthly_report, используем его
-        if hasattr(db, 'generate_monthly_report'):
-            filename, content = db.generate_monthly_report(supervisor_id, month)
-        else:
-            # Иначе собираем данные вручную и используем функцию-генератор (если есть)
-            # Ожидаемые методы: get_daily_hours_by_supervisor_month / get_daily_hours_for_all_month и get_trainings_for_month / get_trainings_by_sv_month
-            try:
-                operators = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
-            except Exception as e:
-                logging.exception("Ошибка получения operators из db")
-                return jsonify({"error": f"Ошибка получения операторов: {str(e)}"}), 500
+        # Иначе собираем данные вручную и используем функцию-генератор (если есть)
+        # Ожидаемые методы: get_daily_hours_by_supervisor_month / get_daily_hours_for_all_month и get_trainings_for_month / get_trainings_by_sv_month
+        try:
+            operators = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
+        except Exception as e:
+            logging.exception("Ошибка получения operators из db")
+            return jsonify({"error": f"Ошибка получения операторов: {str(e)}"}), 500
 
-            try:
-                if hasattr(db, 'get_trainings_by_sv_month'):
-                    trainings_list = db.get_trainings_by_sv_month(month, supervisor_id)
-                else:
-                    trainings_list = db.get_trainings_for_month(month)
-            except Exception as e:
-                logging.exception("Ошибка получения trainings из db")
-                trainings_list = []
+        try:
+            trainings_list = db.get_trainings(month, supervisor_id)
+        except Exception as e:
+            logging.exception("Ошибка получения trainings из db")
+            trainings_list = []
 
-            trainings_map = build_trainings_map(trainings_list)
+        trainings_map = build_trainings_map(trainings_list)
 
-            # Если у вас есть отдельно экспортированная функция генерации, используйте её:
-            if 'generate_excel_report_from_view' in globals() or hasattr(db, 'generate_excel_report_from_view'):
-                # prefer db.generate_excel_report_from_view if exists
-                if hasattr(db, 'generate_excel_report_from_view'):
-                    filename, content = db.generate_excel_report_from_view(operators, trainings_map, month)
-                else:
-                    # если функция импортирована в модуль как generate_excel_report_from_view
-                    from database import generate_excel_report_from_view
-                    filename, content = generate_excel_report_from_view(operators, trainings_map, month)
+        # Если у вас есть отдельно экспортированная функция генерации, используйте её:
+        if 'generate_excel_report_from_view' in globals() or hasattr(db, 'generate_excel_report_from_view'):
+            # prefer db.generate_excel_report_from_view if exists
+            if hasattr(db, 'generate_excel_report_from_view'):
+                filename, content = db.generate_excel_report_from_view(operators, trainings_map, month)
             else:
-                return jsonify({"error": "No report generator available on db and no local generator imported"}), 500
+                # если функция импортирована в модуль как generate_excel_report_from_view
+                from database import generate_excel_report_from_view
+                filename, content = generate_excel_report_from_view(operators, trainings_map, month)
+        else:
+            return jsonify({"error": "No report generator available on db and no local generator imported"}), 500
 
         if not filename or not content:
             logging.error("Генерация отчёта вернула пустой результат")
