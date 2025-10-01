@@ -2366,7 +2366,7 @@
                 params.append('month', month);
                 if (supervisorId) params.append('supervisor_id', supervisorId);
 
-                const url = `/api/report/monthly?${params.toString()}`;
+                const url = `${API_BASE_URL}/api/report/monthly_hours?${params.toString()}`;
                 setIsDownloadingReport(true);
 
                 try {

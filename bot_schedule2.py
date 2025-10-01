@@ -2068,7 +2068,7 @@ def get_active_operators():
         logging.error(f"Error fetching active operators: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
     
-@app.route('/api/report/monthly', methods=['GET'])
+@app.route('/api/report/monthly_hours', methods=['GET'])
 @require_api_key
 def get_monthly_report():
     try:
