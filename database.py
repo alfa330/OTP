@@ -2064,7 +2064,7 @@ class Database:
 
         operators = operators["operators"]
 
-        FILL_POS = PatternFill(fill_type='solid', start_color='999999')  # чуть темнее серый
+        FILL_POS = PatternFill(fill_type='solid', start_color='b3b3b3')  # чуть темнее серый
         THIN = Side(style='thin')
         BORDER_ALL = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
