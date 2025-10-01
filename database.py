@@ -2044,52 +2044,6 @@ class Database:
             cursor.execute("DELETE FROM trainings WHERE id = %s RETURNING id", (training_id,))
             return cursor.fetchone() is not None
 
-    def parse_time_to_minutes(t: str):
-        """Парсер HH:mm -> минуты или None"""
-        if not t: 
-            return None
-        try:
-            parts = t.strip().split(':')
-            hh = int(parts[0])
-            mm = int(parts[1]) if len(parts) > 1 else 0
-            return hh * 60 + mm
-        except Exception:
-            return None
-
-    def compute_training_duration_hours(t: Dict[str, Any]) -> float:
-        """
-        Совместимая с вашим фронтом функция:
-        - смотрит duration_minutes / duration_hours
-        - иначе считает по start_time/end_time (HH:mm)
-        - корректно работает при переходе через полночь
-        """
-        try:
-            if t.get('duration_minutes') is not None:
-                return round(float(t['duration_minutes']) / 60.0, 2)
-            if t.get('duration_hours') is not None:
-                return round(float(t['duration_hours']), 2)
-            s = parse_time_to_minutes(t.get('start_time'))
-            e = parse_time_to_minutes(t.get('end_time'))
-            if s is None or e is None:
-                return 0.0
-            diff = e - s
-            if diff < 0:
-                diff += 24 * 60
-            return round(diff / 60.0, 2)
-        except Exception:
-            return 0.0
-
-    def _make_header(ws, headers: List[str]):
-        thin = Side(style='thin')
-        border = Border(left=thin, right=thin, top=thin, bottom=thin)
-        bold = Font(bold=True)
-        for i, h in enumerate(headers, start=1):
-            cell = ws.cell(1, i)
-            cell.value = h
-            cell.font = bold
-            cell.alignment = Alignment(horizontal='center', vertical='center')
-            cell.border = border
-
     def generate_excel_report_from_view(self,
         operators: List[Dict[str, Any]],
         trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
@@ -2112,6 +2066,52 @@ class Database:
         trainings_map: { operator_id: { dayNum: [trainingObj, ...] } }
         Возвращает (filename, bytes_content)
         """
+        def _make_header(ws, headers: List[str]):
+            thin = Side(style='thin')
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            bold = Font(bold=True)
+            for i, h in enumerate(headers, start=1):
+                cell = ws.cell(1, i)
+                cell.value = h
+                cell.font = bold
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+                cell.border = border
+
+        def parse_time_to_minutes(t: str):
+            """Парсер HH:mm -> минуты или None"""
+            if not t: 
+                return None
+            try:
+                parts = t.strip().split(':')
+                hh = int(parts[0])
+                mm = int(parts[1]) if len(parts) > 1 else 0
+                return hh * 60 + mm
+            except Exception:
+                return None
+
+        def compute_training_duration_hours(t: Dict[str, Any]) -> float:
+            """
+            Совместимая с вашим фронтом функция:
+            - смотрит duration_minutes / duration_hours
+            - иначе считает по start_time/end_time (HH:mm)
+            - корректно работает при переходе через полночь
+            """
+            try:
+                if t.get('duration_minutes') is not None:
+                    return round(float(t['duration_minutes']) / 60.0, 2)
+                if t.get('duration_hours') is not None:
+                    return round(float(t['duration_hours']), 2)
+                s = parse_time_to_minutes(t.get('start_time'))
+                e = parse_time_to_minutes(t.get('end_time'))
+                if s is None or e is None:
+                    return 0.0
+                diff = e - s
+                if diff < 0:
+                    diff += 24 * 60
+                return round(diff / 60.0, 2)
+            except Exception:
+                return 0.0
+
         logging.info(month)
         year, mon = map(int, month.split('-'))
         days_in_month = calendar.monthrange(year, mon)[1]
