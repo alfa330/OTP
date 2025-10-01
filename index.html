@@ -6666,16 +6666,6 @@
                                                     </button>
                                                     <button
                                                     onClick={() => {
-                                                        setCurrentSvForTableChange(sv);
-                                                        setShowChangeTableForm(true);
-                                                        setOpenMenuId(null);
-                                                    }}
-                                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                                    >
-                                                    <i className="fas fa-table mr-2"></i>Поменять таблицу
-                                                    </button>
-                                                    <button
-                                                    onClick={() => {
                                                         setSelectedUserForHistory(sv);
                                                         fetchUserHistory(sv.id);
                                                         setOpenMenuId(null);
@@ -6755,7 +6745,7 @@
                                 )}
                                 {view === 'view_scores' && (
                                     <div className="bg-white p-6 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        {/* Header: title + controls на одной линии */}
+                                        {/* Header: title + month + report */}
                                         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
                                         <h2 className="text-2xl font-semibold text-gray-800">Оценки операторов</h2>
 
@@ -6766,7 +6756,6 @@
                                             onChange={(e) => setSelectedReportMonth(e.target.value)}
                                             className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                             disabled={isAdminDataLoading}
-                                            aria-label="Выберите месяц для отчета"
                                             >
                                             {getMonthOptions()}
                                             </select>
@@ -6784,6 +6773,19 @@
                                         </div>
                                         </div>
 
+                                        {/* Select supervisor */}
+                                        <select
+                                        value={selectedSvId}
+                                        onChange={(e) => setSelectedSvId(e.target.value)}
+                                        className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                        disabled={isLoading || isAdminDataLoading}
+                                        >
+                                        <option value="">Выберите супервайзера</option>
+                                        {svList.map(sv => (
+                                            <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
+                                        ))}
+                                        </select>
+
                                         {/* Tabs: Активные / Уволенные */}
                                         <div className="flex items-center space-x-3 mb-4">
                                         {(() => {
@@ -6795,17 +6797,12 @@
                                                 <button
                                                 onClick={() => setActiveOperatorsTab('active')}
                                                 className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeOperatorsTab === 'active' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
-                                                role="tab"
-                                                aria-selected={activeOperatorsTab === 'active'}
                                                 >
                                                 Активные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{activeCount}</span>
                                                 </button>
-
                                                 <button
                                                 onClick={() => setActiveOperatorsTab('fired')}
                                                 className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeOperatorsTab === 'fired' ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
-                                                role="tab"
-                                                aria-selected={activeOperatorsTab === 'fired'}
                                                 >
                                                 Уволенные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{firedCount}</span>
                                                 </button>
@@ -6814,7 +6811,7 @@
                                         })()}
                                         </div>
 
-                                        {/* Table */}
+                                        {/* Таблица операторов + footer */}
                                         {isAdminDataLoading ? (
                                         <p className="text-center text-gray-600 py-8">Загрузка...</p>
                                         ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
@@ -6824,12 +6821,10 @@
                                             ? allOps.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
                                             : allOps.filter(op => op.status === 'fired');
 
-                                            // fallback если пусто
                                             if (filteredOperators.length === 0) {
                                             return <p className="text-center text-gray-600 py-8">Операторы не найдены.</p>;
                                             }
 
-                                            // Footer calc: total calls и средняя оценка по тем у кого есть >=1 оценка
                                             const totalCalls = filteredOperators.reduce((sum, o) => sum + (parseInt(o.call_count) || 0), 0);
                                             const scoresArr = filteredOperators
                                             .map(o => (o.avg_score == null ? NaN : Number(o.avg_score)))
@@ -6841,15 +6836,14 @@
                                                 <table className="min-w-full divide-y divide-gray-200">
                                                 <thead className="bg-gray-50">
                                                     <tr>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Прослушано</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ожидаемые</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Средний балл</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ссылка</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Имя</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Прослушано</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ожидаемые</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Средний балл</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ссылка</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Действия</th>
                                                     </tr>
                                                 </thead>
-
                                                 <tbody className="bg-white divide-y divide-gray-200">
                                                     {filteredOperators.map((op, index) => {
                                                     const currentWeek = getCurrentWeekOfMonth();
@@ -6858,32 +6852,24 @@
                                                     const hasIssue = callCount < expectedCalls;
                                                     return (
                                                         <tr key={op.id ?? index} className="hover:bg-gray-50 transition-colors duration-200">
-                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{op.name}</td>
-
-                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, expectedCalls)}`}>
-                                                            {callCount}
-                                                        </td>
-
-                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">{expectedCalls}</td>
-
-                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                        <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
+                                                        <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, expectedCalls)}`}>{callCount}</td>
+                                                        <td className="px-6 py-4 whitespace-nowrap">{expectedCalls}</td>
+                                                        <td className="px-6 py-4 whitespace-nowrap">
                                                             <span className={getScoreColor(op.avg_score)}>
                                                             {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
                                                             </span>
                                                         </td>
-
-                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                        <td className="px-6 py-4 whitespace-nowrap">
                                                             {op.link ? (
                                                             <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">Просмотр</a>
                                                             ) : '-'}
                                                         </td>
-
                                                         <td className="px-6 py-4 whitespace-nowrap space-x-2">
                                                             {hasIssue && (
                                                             <button
                                                                 onClick={() => notifySupervisor(selectedSvId, op.name)}
-                                                                title="Уведомить супервайзера о низком количестве оценок"
-                                                                className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm transition-all duration-200"
+                                                                className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm"
                                                                 disabled={isLoading}
                                                             >
                                                                 Уведомить
@@ -6904,8 +6890,7 @@
                                                                 const token = safeBtoa(JSON.stringify(tokenData));
                                                                 window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
                                                             }}
-                                                            className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
-                                                            title="Listen to operator calls"
+                                                            className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm"
                                                             >
                                                             Оценки
                                                             </button>
@@ -6914,14 +6899,13 @@
                                                     );
                                                     })}
                                                 </tbody>
-
-                                                {/* Footer: totals */}
                                                 <tfoot className="bg-gray-50">
                                                     <tr>
-                                                    <td className="px-6 py-3 text-sm font-medium text-gray-700">Итого</td>
-                                                    <td className="px-6 py-3 text-sm font-medium text-gray-900">{totalCalls}</td>
-                                                    <td className="px-6 py-3 text-sm font-medium text-gray-900">{/* оставляем ячейку для ожидаемых — можно вставить общий expected if needed */}</td>
-                                                    <td className="px-6 py-3 text-sm font-medium text-gray-900">{avgByScored == null ? '-' : Number(avgByScored).toFixed(2)}</td>
+                                                    <td className="px-6 py-3 font-medium">Итого</td>
+                                                    <td className="px-6 py-3 font-medium">{totalCalls}</td>
+                                                    <td className="px-6 py-3" />
+                                                    <td className="px-6 py-3 font-medium">{avgByScored == null ? '-' : avgByScored.toFixed(2)}</td>
+                                                    <td className="px-6 py-3" />
                                                     <td className="px-6 py-3" />
                                                     </tr>
                                                 </tfoot>
