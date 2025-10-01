@@ -5844,25 +5844,35 @@
                 }
             };
 
-            const fetchSvData = async () => {
+            const svDataUrl = (id, month) => {
+                const base = `${API_BASE_URL}/api/sv/data?id=${encodeURIComponent(id)}`;
+                return month ? `${base}&month=${encodeURIComponent(month)}` : base;
+                };
+
+                // --- Обновлённый fetchSvData ---
+                // Замените вашу текущую функцию fetchSvData на эту версию.
+                // Использует selectedReportMonth если он задан, иначе selectedMonth.
+            const fetchSvData = async (month = (selectedReportMonth || selectedMonth)) => {
                 setIsLoading(true);
-                
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/sv/data?id=${user.id}`);
+                    if (!user || !user.id) return;
+                    const url = svDataUrl(user.id, month);
+                    const response = await axios.get(url, {
+                    headers: { 'X-API-Key': user.apiKey }
+                    });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSvData(data);
+                    setSvData(data);
                     } else {
-                        showToast(data.error || 'Failed to fetch supervisor data', 'error');
+                    showToast(data.error || 'Failed to fetch supervisor data', 'error');
                     }
                 } catch (err) {
                     console.error('Fetch SV data error:', err);
-                    showToast('Failed to fetch supervisor data', 'error');
-                    console.error('Failed to fetch supervisor data', 'error');
+                    showToast(err.response?.data?.error || 'Failed to fetch supervisor data', 'error');
                 } finally {
                     if (isMounted.current) setIsLoading(false);
                 }
-            };
+                };
 
             const fetchOperatorData = async () => {
                 setIsLoading(true);
@@ -6024,30 +6034,30 @@
             }
             };
 
-            const fetchSelectedSvData = async (svId) => {
+            const fetchSelectedSvData = async (svId, month = (selectedReportMonth || selectedMonth)) => {
                 if (!svId) {
                     if (isMounted.current) setSelectedSvData(null);
                     return;
                 }
                 setIsAdminDataLoading(true);
-                
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/sv/data?id=${svId}`, {
-                        headers: { 'X-API-Key': user.apiKey }
+                    const url = svDataUrl(svId, month);
+                    const response = await axios.get(url, {
+                    headers: { 'X-API-Key': user.apiKey }
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setSelectedSvData(data);
+                    setSelectedSvData(data);
                     } else {
-                        showToast(data.error || 'Failed to fetch supervisor data', 'error');
+                    showToast(data.error || 'Failed to fetch supervisor data', 'error');
                     }
                 } catch (err) {
                     console.error('Fetch selected SV data error:', err);
-                    showToast('Failed to fetch supervisor data', 'error');
+                    showToast(err.response?.data?.error || 'Failed to fetch supervisor data', 'error');
                 } finally {
                     if (isMounted.current) setIsAdminDataLoading(false);
                 }
-            };
+                };
 
             const addSv = async () => {
                     if (!newSvName.trim()) {
@@ -6243,29 +6253,31 @@
             };
 
             useEffect(() => {
-                if (user) {
-                    if (user.role === 'admin') {
-                        fetchSvList();
-                        fetchDirections();
-                        fetchUsers();
-                    } else if (user.role === 'sv') {
-                        fetchSvData();
-                        fetchUsers();
-                        fetchDirections();
-                    } else if (user.role === 'operator') {
-                        fetchProfileData();
-                        fetchHoursData();
-                        fetchOperatorData();
-                        fetchTrainings();
-                    }
+                if (!user) return;
+                if (user.role === 'admin') {
+                    fetchSvList();
+                    fetchDirections();
+                    fetchUsers();
+                } else if (user.role === 'sv') {
+                    // передаём выбранный месяц прямо, чтобы использовать selectedReportMonth если он задан
+                    fetchSvData(selectedReportMonth || selectedMonth);
+                    fetchUsers();
+                    fetchDirections();
+                } else if (user.role === 'operator') {
+                    fetchProfileData();
+                    fetchHoursData();
+                    fetchOperatorData();
+                    fetchTrainings();
                 }
-            }, [user, selectedMonth]);
+            }, [user, selectedMonth, selectedReportMonth]);
 
-            useEffect(() => {
+           useEffect(() => {
                 if (selectedSvId) {
-                    fetchSelectedSvData(selectedSvId);
+                    fetchSelectedSvData(selectedSvId, selectedReportMonth || selectedMonth);
+                } else {
+                    setSelectedSvData(null);
                 }
-            }, [selectedSvId]);
+            }, [selectedSvId, selectedReportMonth, selectedMonth]);
 
             if (!user) {
                 return (
@@ -6542,30 +6554,6 @@
                                 <div className="flex justify-between items-center mb-6">
                                 <h2 className="text-2xl font-semibold text-gray-800">Супервайзеры</h2>
                                 <div className="flex items-center gap-4">
-                                    {/* Выбор месяца */}
-                                    <select
-                                    value={selectedReportMonth}
-                                    onChange={(e) => setSelectedReportMonth(e.target.value)}
-                                    className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    disabled={isAdminDataLoading}
-                                    >
-                                    {getMonthOptions()}
-                                    </select>
-                                    <button
-                                        onClick={generateMonthlyReport}
-                                        title="Скачать отчет по прослушанным звонкам за выбранный месяц"
-                                        className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 min-w-[220px] text-center ${
-                                            isLoading ? "cursor-not-allowed opacity-50" : ""
-                                        }`}
-                                        disabled={isLoading}
-                                    >
-                                        {isLoading ? "Загрузка..." : (
-                                            <>
-                                                <i className="fas fa-arrow-down mr-2"></i>
-                                                Загрузить отчет
-                                            </>
-                                        )}
-                                    </button>
 
                                     <button
                                     onClick={() => setShowAddSvModal(true)}
@@ -6768,6 +6756,32 @@
                                 {view === 'view_scores' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-2xl font-semibold mb-6 text-gray-800">Оценка операторов</h2>
+
+                                        {/* Выбор месяца */}
+                                        <select
+                                        value={selectedReportMonth}
+                                        onChange={(e) => setSelectedReportMonth(e.target.value)}
+                                        className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        disabled={isAdminDataLoading}
+                                        >
+                                        {getMonthOptions()}
+                                        </select>
+                                        <button
+                                            onClick={generateMonthlyReport}
+                                            title="Скачать отчет по прослушанным звонкам за выбранный месяц"
+                                            className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 min-w-[220px] text-center ${
+                                                isLoading ? "cursor-not-allowed opacity-50" : ""
+                                            }`}
+                                            disabled={isLoading}
+                                        >
+                                            {isLoading ? "Загрузка..." : (
+                                                <>
+                                                    <i className="fas fa-arrow-down mr-2"></i>
+                                                    Загрузить отчет
+                                                </>
+                                            )}
+                                        </button>
+
                                         <select
                                             value={selectedSvId}
                                             onChange={(e) => setSelectedSvId(e.target.value)}
