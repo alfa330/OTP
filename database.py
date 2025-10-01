@@ -2066,7 +2066,8 @@ class Database:
         trainings_map: { operator_id: { dayNum: [trainingObj, ...] } }
         Возвращает (filename, bytes_content)
         """
-        operators=operators["operators"]
+        operators = operators["operators"]
+
         def _make_header(ws, headers: List[str]):
             thin = Side(style='thin')
             border = Border(left=thin, right=thin, top=thin, bottom=thin)
@@ -2080,7 +2081,7 @@ class Database:
 
         def parse_time_to_minutes(t: str):
             """Парсер HH:mm -> минуты или None"""
-            if not t: 
+            if not t:
                 return None
             try:
                 parts = t.strip().split(':')
@@ -2123,13 +2124,17 @@ class Database:
         default = wb.active
         wb.remove(default)
 
-        # common header: Name, Rate, Norm, day1..dayN, Total
-        def build_sheet(key: str, label: str, metric_key: str, is_hour=True, format_fn=None):
+        # ----- Specialized sheet builders -----
+        def build_generic_sheet(key: str, label: str, metric_key: str, is_hour=True, format_fn=None, extra_cols=None):
+            """Generic sheets for break_time, calls (partially), efficiency (partially).
+            extra_cols - list of (col_name, compute_fn(row_totals_dict) -> value) appended after Total
+            """
             ws = wb.create_sheet(title=label[:31])
             headers = ["Оператор", "Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого"]
+            if extra_cols:
+                headers += [c[0] for c in extra_cols]
             _make_header(ws, headers)
             row = 2
-            logging.info(operators)
             for op in operators:
                 daily = op.get('daily', {})
                 name = op.get('name') or f"op_{op.get('operator_id')}"
@@ -2137,11 +2142,12 @@ class Database:
                 ws.cell(row, 2).value = float(op.get('rate') or 0)
                 ws.cell(row, 3).value = float(op.get('norm_hours') or 0)
                 total = 0.0
+                # also collect totals for extra calculations
+                totals = { 'work_time': 0.0, 'calls': 0, 'efficiency': 0.0 }
                 for c_idx, day in enumerate(days, start=4):
                     dkey = str(day)
                     cell_val = None
                     if metric_key == 'trainings':
-                        # trainings sheet handled separately
                         cell_val = None
                     else:
                         d = daily.get(dkey)
@@ -2149,38 +2155,141 @@ class Database:
                             v = d.get(metric_key, 0)
                             if metric_key == 'calls':
                                 cell_val = int(v or 0)
+                                totals['calls'] += int(cell_val)
                                 total += int(cell_val)
                             else:
                                 cell_num = float(v or 0)
                                 cell_val = round(cell_num, 2) if format_fn is None else format_fn(cell_num)
                                 total += float(cell_num)
+                                if metric_key == 'work_time':
+                                    totals['work_time'] += float(cell_num)
+                                if metric_key == 'efficiency':
+                                    totals['efficiency'] += float(cell_num)
                         else:
                             cell_val = 0 if metric_key == 'calls' else 0.0
                     ws.cell(row, c_idx).value = cell_val
-                    # center-align
                     ws.cell(row, c_idx).alignment = Alignment(horizontal='center', vertical='center')
 
                 # total
-                ws.cell(row, 4 + len(days)).value = round(total, 2) if is_hour else int(total)
+                if is_hour:
+                    ws.cell(row, 4 + len(days)).value = round(total, 2)
+                else:
+                    ws.cell(row, 4 + len(days)).value = int(total)
+
+                # extra cols computations
+                if extra_cols:
+                    for i, (_, fn) in enumerate(extra_cols, start=1):
+                        val = fn(op, totals)
+                        ws.cell(row, 4 + len(days) + i).value = val
+                        ws.cell(row, 4 + len(days) + i).alignment = Alignment(horizontal='center', vertical='center')
+
                 row += 1
 
             # simple column widths
             ws.column_dimensions['A'].width = 24
-            for i in range(2, 5 + len(days)):
+            for i in range(2, 5 + len(days) + (len(extra_cols) if extra_cols else 0)):
                 col = ws.cell(1, i).column_letter
                 ws.column_dimensions[col].width = 12
 
-        # 1) Отработанные часы
-        build_sheet('work_time', 'Отработанные часы', 'work_time', is_hour=True)
+        # ----- Work time sheet with trainings counted -----
+        def build_work_time_sheet():
+            ws = wb.create_sheet(title='Отработанные часы'[:31])
+            headers = ["Оператор", "Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого часов", "С выч. тренинга", "Вып нормы (%)", "Выработка"]
+            _make_header(ws, headers)
+            row = 2
+            for op in operators:
+                daily = op.get('daily', {})
+                name = op.get('name') or f"op_{op.get('operator_id')}"
+                ws.cell(row, 1).value = name
+                ws.cell(row, 2).value = float(op.get('rate') or 0)
+                norm = float(op.get('norm_hours') or 0)
+                ws.cell(row, 3).value = norm
+
+                total_work = 0.0
+                total_counted_trainings = 0.0
+
+                # per-day work and trainings
+                for c_idx, day in enumerate(days, start=4):
+                    dkey = str(day)
+                    work_val = 0.0
+                    d = daily.get(dkey)
+                    if d:
+                        work_val = float(d.get('work_time') or 0.0)
+                    # compute trainings for this operator/day
+                    trainings_for_day = trainings_map.get(op.get('operator_id'), {}).get(day, []) if trainings_map else []
+                    counted_for_day = 0.0
+                    for t in trainings_for_day:
+                        dur = compute_training_duration_hours(t)
+                        if t.get('count_in_hours'):
+                            counted_for_day += dur
+                    total_work += work_val
+                    total_counted_trainings += counted_for_day
+                    # display work_time in cell (as before)
+                    ws.cell(row, c_idx).value = round(work_val, 2)
+                    ws.cell(row, c_idx).alignment = Alignment(horizontal='center', vertical='center')
+
+                # Итого часов = work + counted trainings
+                itogo_chasov = round(total_work + total_counted_trainings, 2)
+                ws.cell(row, 4 + len(days)).value = itogo_chasov
+                # С выч. тренинга = просто сумма часов раб.
+                ws.cell(row, 5 + len(days)).value = round(total_work, 2)
+                # Вып нормы (%) = (work + counted_trainings) / norm * 100
+                if norm and norm != 0:
+                    percent = round((total_work + total_counted_trainings) / norm * 100, 2)
+                else:
+                    percent = None
+                ws.cell(row, 6 + len(days)).value = percent
+                # Выработка = Норма - (work + counted_trainings)
+                ws.cell(row, 7 + len(days)).value = round(norm - (total_work + total_counted_trainings), 2)
+
+                row += 1
+
+            # widths
+            ws.column_dimensions['A'].width = 24
+            for i in range(2, 8 + len(days)):
+                col = ws.cell(1, i).column_letter
+                ws.column_dimensions[col].width = 14
+
+        # ----- Calls sheet: add КВЗ = sum_calls / sum_work_hours -----
+        def build_calls_sheet():
+            def kvz_fn(op, totals):
+                work_hours = 0.0
+                # compute total work hours for operator
+                daily = op.get('daily', {})
+                for dnum in daily.values():
+                    work_hours += float(dnum.get('work_time') or 0.0)
+                calls = totals.get('calls', 0)
+                if work_hours and work_hours != 0:
+                    return round(calls / work_hours, 2)
+                return None
+
+            build_generic_sheet('calls', 'Звонки', 'calls', is_hour=False, extra_cols=[('КВЗ', kvz_fn)])
+
+        # ----- Efficiency sheet: add Отн. = (sum_work_hours / sum_efficiency) * 100 (guard zeros) -----
+        def build_efficiency_sheet():
+            def otn_fn(op, totals):
+                sum_work = 0.0
+                sum_eff = totals.get('efficiency', 0.0)
+                daily = op.get('daily', {})
+                for dnum in daily.values():
+                    sum_work += float(dnum.get('work_time') or 0.0)
+                if sum_eff and sum_eff != 0:
+                    return round((sum_work / sum_eff) * 100, 2)
+                return None
+
+            build_generic_sheet('efficiency', 'Эффективность', 'efficiency', is_hour=True, extra_cols=[('Отн.', otn_fn)])
+
+        # 1) Отработанные часы (спец. логика)
+        build_work_time_sheet()
 
         # 2) Перерыв
-        build_sheet('break_time', 'Перерыв', 'break_time', is_hour=True)
+        build_generic_sheet('break_time', 'Перерыв', 'break_time', is_hour=True)
 
         # 3) Звонки
-        build_sheet('calls', 'Звонки', 'calls', is_hour=False)
+        build_calls_sheet()
 
-        # 4) Эффективность (ч)
-        build_sheet('efficiency', 'Эффективность', 'efficiency', is_hour=True)
+        # 4) Эффективность (ч) с колонкой Отн.
+        build_efficiency_sheet()
 
         # 5) Тренинги — отдельная логика: по дням показываем "засчитано(ч) / не_засчитано(ч)" и итоги
         ws_t = wb.create_sheet(title='Тренинги'[:31])
