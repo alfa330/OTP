@@ -2056,13 +2056,17 @@ class Database:
         Правила форматирования (по заданию пользователя):
         - Округлять все числа до 1 знака после запятой, КРОМЕ полей "Ставка" (rate) и "Норма часов" (norm_hours) — они оставляются как есть.
         - Внутри таблицы по дням значение 0 отображается как целое 0 (не 0.0).
-        - Ячейки по дням, где значение > 0, закрашивать светло-серым.
+        - Ячейки по дням, где значение > 0, закрашивать светло-серым (теперь чуть темнее).
         - Calls (количество звонков) остаются целыми числами.
+        - Везде, где значение должно быть процентом, добавлять знак "%".
+        - Добавить границы ко всем ячейкам таблиц.
         """
 
         operators = operators["operators"]
 
-        FILL_POS = PatternFill(fill_type='solid', start_color='EEEEEE')
+        FILL_POS = PatternFill(fill_type='solid', start_color='666666')  # чуть темнее серый
+        THIN = Side(style='thin')
+        BORDER_ALL = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
         def _make_header(ws, headers: List[str]):
             thin = Side(style='thin')
@@ -2127,13 +2131,15 @@ class Database:
             - для calls оставляем int
             - для остальных округляем до 1 знака (кроме rate и norm handled separately)
             """
+            if value is None:
+                return None
             if metric_key == 'calls':
                 try:
                     return int(value or 0)
                 except Exception:
                     return 0
             try:
-                num = float(value or 0)
+                num = float(value)
             except Exception:
                 return None
             return round(num, 1)
@@ -2147,6 +2153,16 @@ class Database:
         default = wb.active
         wb.remove(default)
 
+        def set_cell(ws, r, c, value, align_center=True, fill=None):
+            cell = ws.cell(r, c)
+            cell.value = value
+            if align_center:
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = BORDER_ALL
+            if fill:
+                cell.fill = fill
+            return cell
+
         def build_generic_sheet(key: str, label: str, metric_key: str, is_hour=True, format_fn=None, extra_cols=None):
             ws = wb.create_sheet(title=label[:31])
             headers = ["Оператор", "Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого"]
@@ -2157,31 +2173,25 @@ class Database:
             for op in operators:
                 daily = op.get('daily', {})
                 name = op.get('name') or f"op_{op.get('operator_id')}"
-                ws.cell(row, 1).value = name
-                ws.cell(row, 2).value = float(op.get('rate') or 0)
-                # norm оставляем без округления
-                ws.cell(row, 3).value = float(op.get('norm_hours') or 0)
+                set_cell(ws, row, 1, name, align_center=False)
+                # Ставка и Норма оставляем без изменения/округления
+                set_cell(ws, row, 2, float(op.get('rate') or 0), align_center=False)
+                set_cell(ws, row, 3, float(op.get('norm_hours') or 0), align_center=False)
                 total = 0.0
                 totals = { 'work_time': 0.0, 'calls': 0, 'efficiency': 0.0 }
                 for c_idx, day in enumerate(days, start=4):
                     dkey = str(day)
                     if metric_key == 'trainings':
-                        cell_val = ""
-                        ws.cell(row, c_idx).value = cell_val
+                        set_cell(ws, row, c_idx, "")
                     else:
                         d = daily.get(dkey)
                         raw_v = None
                         if d:
                             raw_v = d.get(metric_key, 0)
-                        # format for day cells
                         cell_val = fmt_day_value(metric_key, raw_v)
-                        ws.cell(row, c_idx).value = cell_val
-                        # shade if > 0
-                        try:
-                            if isinstance(cell_val, (int, float)) and cell_val > 0:
-                                ws.cell(row, c_idx).fill = FILL_POS
-                        except Exception:
-                            pass
+                        # apply fill if >0
+                        fill = FILL_POS if (isinstance(cell_val, (int, float)) and cell_val > 0) else None
+                        set_cell(ws, row, c_idx, cell_val, fill=fill)
                         if metric_key == 'calls':
                             totals['calls'] += int(cell_val or 0)
                             total += int(cell_val or 0)
@@ -2192,20 +2202,19 @@ class Database:
                                 totals['work_time'] += num_for_tot
                             if metric_key == 'efficiency':
                                 totals['efficiency'] += num_for_tot
-                    ws.cell(row, c_idx).alignment = Alignment(horizontal='center', vertical='center')
-
                 # total cell
-                if is_hour:
-                    ws.cell(row, 4 + len(days)).value = fmt_total_value(metric_key, total)
-                else:
-                    ws.cell(row, 4 + len(days)).value = fmt_total_value(metric_key, total)
+                total_col = 4 + len(days)
+                set_cell(ws, row, total_col, fmt_total_value(metric_key, total))
 
                 # extra cols
                 if extra_cols:
                     for i, (_, fn) in enumerate(extra_cols, start=1):
                         val = fn(op, totals)
-                        ws.cell(row, 4 + len(days) + i).value = round(val, 1) if isinstance(val, float) else val
-                        ws.cell(row, 4 + len(days) + i).alignment = Alignment(horizontal='center', vertical='center')
+                        # if fn returns percent-string already, keep
+                        if isinstance(val, str):
+                            set_cell(ws, row, total_col + i, val)
+                        else:
+                            set_cell(ws, row, total_col + i, fmt_total_value(metric_key, val))
 
                 row += 1
 
@@ -2222,10 +2231,10 @@ class Database:
             for op in operators:
                 daily = op.get('daily', {})
                 name = op.get('name') or f"op_{op.get('operator_id')}"
-                ws.cell(row, 1).value = name
-                ws.cell(row, 2).value = float(op.get('rate') or 0)
+                set_cell(ws, row, 1, name, align_center=False)
+                set_cell(ws, row, 2, float(op.get('rate') or 0), align_center=False)
                 norm = float(op.get('norm_hours') or 0)
-                ws.cell(row, 3).value = norm
+                set_cell(ws, row, 3, norm, align_center=False)
 
                 total_work = 0.0
                 total_counted_trainings = 0.0
@@ -2244,23 +2253,20 @@ class Database:
                             counted_for_day += dur
                     total_work += work_val
                     total_counted_trainings += counted_for_day
-                    # write day cell: show 0 as 0, otherwise round to 1 dec. shade if >0
                     cell_val = fmt_day_value('work_time', work_val)
-                    ws.cell(row, c_idx).value = cell_val
-                    if isinstance(cell_val, (int, float)) and cell_val > 0:
-                        ws.cell(row, c_idx).fill = FILL_POS
-                    ws.cell(row, c_idx).alignment = Alignment(horizontal='center', vertical='center')
+                    fill = FILL_POS if (isinstance(cell_val, (int, float)) and cell_val > 0) else None
+                    set_cell(ws, row, c_idx, cell_val, fill=fill)
 
                 itogo_chasov = total_work + total_counted_trainings
-                ws.cell(row, 4 + len(days)).value = fmt_total_value('work_time', itogo_chasov)
-                ws.cell(row, 5 + len(days)).value = fmt_total_value('work_time', total_work)
+                set_cell(ws, row, 4 + len(days), fmt_total_value('work_time', itogo_chasov))
+                set_cell(ws, row, 5 + len(days), fmt_total_value('work_time', total_work))
                 if norm and norm != 0:
-                    percent = (itogo_chasov / norm) * 100
-                    percent = round(percent, 1)
+                    percent = round((itogo_chasov / norm) * 100, 1)
+                    percent_display = f"{percent}%"
                 else:
-                    percent = None
-                ws.cell(row, 6 + len(days)).value = percent
-                ws.cell(row, 7 + len(days)).value = fmt_total_value('work_time', round(norm - itogo_chasov, 1) if norm is not None else None)
+                    percent_display = None
+                set_cell(ws, row, 6 + len(days), percent_display)
+                set_cell(ws, row, 7 + len(days), fmt_total_value('work_time', round(norm - itogo_chasov, 1) if norm is not None else None))
 
                 row += 1
 
@@ -2290,7 +2296,8 @@ class Database:
                 for dnum in daily.values():
                     sum_work += float(dnum.get('work_time') or 0.0)
                 if sum_work and sum_work != 0:
-                    return round((sum_eff / sum_work) * 100, 1)
+                    val = round((sum_eff / sum_work) * 100, 1)
+                    return f"{val}%"
                 return None
 
             build_generic_sheet('efficiency', 'Эффективность', 'efficiency', is_hour=True, extra_cols=[('Отн.', otn_fn)])
@@ -2306,7 +2313,7 @@ class Database:
         row = 2
         for op in operators:
             name = op.get('name') or f"op_{op.get('operator_id')}"
-            ws_t.cell(row, 1).value = name
+            set_cell(ws_t, row, 1, name, align_center=False)
             total_all = 0.0
             total_counted = 0.0
             total_not = 0.0
@@ -2324,21 +2331,16 @@ class Database:
                     else:
                         not_counted += dur
                         total_not += dur
-                # формат: показать 0 как 0, иначе округлить до 1 знака и закрасить если >0
                 if counted == 0 and not_counted == 0:
-                    ws_t.cell(row, c_idx).value = ""
+                    set_cell(ws_t, row, c_idx, "")
                 else:
                     c_val = round(counted, 1)
                     n_val = round(not_counted, 1)
-                    ws_t.cell(row, c_idx).value = f"{c_val} / {n_val}"
-                    # если любое из значений >0, закрасим
-                    if c_val > 0 or n_val > 0:
-                        ws_t.cell(row, c_idx).fill = FILL_POS
-                ws_t.cell(row, c_idx).alignment = Alignment(horizontal='center', vertical='center')
+                    set_cell(ws_t, row, c_idx, f"{c_val} / {n_val}", fill=FILL_POS)
 
-            ws_t.cell(row, 2 + len(days)).value = round(total_all, 1)
-            ws_t.cell(row, 3 + len(days)).value = round(total_counted, 1)
-            ws_t.cell(row, 4 + len(days)).value = round(total_not, 1)
+            set_cell(ws_t, row, 2 + len(days), round(total_all, 1))
+            set_cell(ws_t, row, 3 + len(days), round(total_counted, 1))
+            set_cell(ws_t, row, 4 + len(days), round(total_not, 1))
             row += 1
 
         ws_t.column_dimensions['A'].width = 24
