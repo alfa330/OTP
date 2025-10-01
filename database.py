@@ -2052,8 +2052,17 @@ class Database:
     ) -> Tuple[str, bytes]:
         """
         Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность, Тренинги.
+
+        Правила форматирования (по заданию пользователя):
+        - Округлять все числа до 1 знака после запятой, КРОМЕ полей "Ставка" (rate) и "Норма часов" (norm_hours) — они оставляются как есть.
+        - Внутри таблицы по дням значение 0 отображается как целое 0 (не 0.0).
+        - Ячейки по дням, где значение > 0, закрашивать светло-серым.
+        - Calls (количество звонков) остаются целыми числами.
         """
+
         operators = operators["operators"]
+
+        FILL_POS = PatternFill(fill_type='solid', start_color='EEEEEE')
 
         def _make_header(ws, headers: List[str]):
             thin = Side(style='thin')
@@ -2094,6 +2103,41 @@ class Database:
             except Exception:
                 return 0.0
 
+        def fmt_day_value(metric_key: str, value: Any):
+            """Формат для значений в столбцах по дням.
+            - calls -> int
+            - for hours/perc/eff -> round to 1 decimal; show 0 as integer 0
+            """
+            if metric_key == 'calls':
+                try:
+                    return int(value or 0)
+                except Exception:
+                    return 0
+            try:
+                num = float(value or 0)
+            except Exception:
+                return 0
+            # represent exactly zero as int 0
+            if abs(num) < 1e-9:
+                return 0
+            return round(num, 1)
+
+        def fmt_total_value(metric_key: str, value: Any):
+            """Формат для итоговых/доп. колонок (итого, проценты и т.п.).
+            - для calls оставляем int
+            - для остальных округляем до 1 знака (кроме rate и norm handled separately)
+            """
+            if metric_key == 'calls':
+                try:
+                    return int(value or 0)
+                except Exception:
+                    return 0
+            try:
+                num = float(value or 0)
+            except Exception:
+                return None
+            return round(num, 1)
+
         logging.info(month)
         year, mon = map(int, month.split('-'))
         days_in_month = calendar.monthrange(year, mon)[1]
@@ -2115,44 +2159,52 @@ class Database:
                 name = op.get('name') or f"op_{op.get('operator_id')}"
                 ws.cell(row, 1).value = name
                 ws.cell(row, 2).value = float(op.get('rate') or 0)
+                # norm оставляем без округления
                 ws.cell(row, 3).value = float(op.get('norm_hours') or 0)
                 total = 0.0
                 totals = { 'work_time': 0.0, 'calls': 0, 'efficiency': 0.0 }
                 for c_idx, day in enumerate(days, start=4):
                     dkey = str(day)
-                    cell_val = None
                     if metric_key == 'trainings':
-                        cell_val = None
+                        cell_val = ""
+                        ws.cell(row, c_idx).value = cell_val
                     else:
                         d = daily.get(dkey)
+                        raw_v = None
                         if d:
-                            v = d.get(metric_key, 0)
-                            if metric_key == 'calls':
-                                cell_val = int(v or 0)
-                                totals['calls'] += int(cell_val)
-                                total += int(cell_val)
-                            else:
-                                cell_num = float(v or 0)
-                                cell_val = round(cell_num, 2) if format_fn is None else format_fn(cell_num)
-                                total += float(cell_num)
-                                if metric_key == 'work_time':
-                                    totals['work_time'] += float(cell_num)
-                                if metric_key == 'efficiency':
-                                    totals['efficiency'] += float(cell_num)
+                            raw_v = d.get(metric_key, 0)
+                        # format for day cells
+                        cell_val = fmt_day_value(metric_key, raw_v)
+                        ws.cell(row, c_idx).value = cell_val
+                        # shade if > 0
+                        try:
+                            if isinstance(cell_val, (int, float)) and cell_val > 0:
+                                ws.cell(row, c_idx).fill = FILL_POS
+                        except Exception:
+                            pass
+                        if metric_key == 'calls':
+                            totals['calls'] += int(cell_val or 0)
+                            total += int(cell_val or 0)
                         else:
-                            cell_val = 0 if metric_key == 'calls' else 0.0
-                    ws.cell(row, c_idx).value = cell_val
+                            num_for_tot = float(raw_v or 0)
+                            total += num_for_tot
+                            if metric_key == 'work_time':
+                                totals['work_time'] += num_for_tot
+                            if metric_key == 'efficiency':
+                                totals['efficiency'] += num_for_tot
                     ws.cell(row, c_idx).alignment = Alignment(horizontal='center', vertical='center')
 
+                # total cell
                 if is_hour:
-                    ws.cell(row, 4 + len(days)).value = round(total, 2)
+                    ws.cell(row, 4 + len(days)).value = fmt_total_value(metric_key, total)
                 else:
-                    ws.cell(row, 4 + len(days)).value = int(total)
+                    ws.cell(row, 4 + len(days)).value = fmt_total_value(metric_key, total)
 
+                # extra cols
                 if extra_cols:
                     for i, (_, fn) in enumerate(extra_cols, start=1):
                         val = fn(op, totals)
-                        ws.cell(row, 4 + len(days) + i).value = val
+                        ws.cell(row, 4 + len(days) + i).value = round(val, 1) if isinstance(val, float) else val
                         ws.cell(row, 4 + len(days) + i).alignment = Alignment(horizontal='center', vertical='center')
 
                 row += 1
@@ -2192,18 +2244,23 @@ class Database:
                             counted_for_day += dur
                     total_work += work_val
                     total_counted_trainings += counted_for_day
-                    ws.cell(row, c_idx).value = round(work_val, 2)
+                    # write day cell: show 0 as 0, otherwise round to 1 dec. shade if >0
+                    cell_val = fmt_day_value('work_time', work_val)
+                    ws.cell(row, c_idx).value = cell_val
+                    if isinstance(cell_val, (int, float)) and cell_val > 0:
+                        ws.cell(row, c_idx).fill = FILL_POS
                     ws.cell(row, c_idx).alignment = Alignment(horizontal='center', vertical='center')
 
-                itogo_chasov = round(total_work + total_counted_trainings, 2)
-                ws.cell(row, 4 + len(days)).value = itogo_chasov
-                ws.cell(row, 5 + len(days)).value = round(total_work, 2)
+                itogo_chasov = total_work + total_counted_trainings
+                ws.cell(row, 4 + len(days)).value = fmt_total_value('work_time', itogo_chasov)
+                ws.cell(row, 5 + len(days)).value = fmt_total_value('work_time', total_work)
                 if norm and norm != 0:
-                    percent = round((total_work + total_counted_trainings) / norm * 100, 2)
+                    percent = (itogo_chasov / norm) * 100
+                    percent = round(percent, 1)
                 else:
                     percent = None
                 ws.cell(row, 6 + len(days)).value = percent
-                ws.cell(row, 7 + len(days)).value = round(norm - (total_work + total_counted_trainings), 2)
+                ws.cell(row, 7 + len(days)).value = fmt_total_value('work_time', round(norm - itogo_chasov, 1) if norm is not None else None)
 
                 row += 1
 
@@ -2220,7 +2277,7 @@ class Database:
                     work_hours += float(dnum.get('work_time') or 0.0)
                 calls = totals.get('calls', 0)
                 if work_hours and work_hours != 0:
-                    return round(calls / work_hours, 2)
+                    return round(calls / work_hours, 1)
                 return None
 
             build_generic_sheet('calls', 'Звонки', 'calls', is_hour=False, extra_cols=[('КВЗ', kvz_fn)])
@@ -2233,7 +2290,7 @@ class Database:
                 for dnum in daily.values():
                     sum_work += float(dnum.get('work_time') or 0.0)
                 if sum_work and sum_work != 0:
-                    return round((sum_eff / sum_work) * 100, 2)
+                    return round((sum_eff / sum_work) * 100, 1)
                 return None
 
             build_generic_sheet('efficiency', 'Эффективность', 'efficiency', is_hour=True, extra_cols=[('Отн.', otn_fn)])
@@ -2267,15 +2324,21 @@ class Database:
                     else:
                         not_counted += dur
                         total_not += dur
+                # формат: показать 0 как 0, иначе округлить до 1 знака и закрасить если >0
                 if counted == 0 and not_counted == 0:
                     ws_t.cell(row, c_idx).value = ""
                 else:
-                    ws_t.cell(row, c_idx).value = f"{round(counted,2)} / {round(not_counted,2)}"
+                    c_val = round(counted, 1)
+                    n_val = round(not_counted, 1)
+                    ws_t.cell(row, c_idx).value = f"{c_val} / {n_val}"
+                    # если любое из значений >0, закрасим
+                    if c_val > 0 or n_val > 0:
+                        ws_t.cell(row, c_idx).fill = FILL_POS
                 ws_t.cell(row, c_idx).alignment = Alignment(horizontal='center', vertical='center')
 
-            ws_t.cell(row, 2 + len(days)).value = round(total_all, 2)
-            ws_t.cell(row, 3 + len(days)).value = round(total_counted, 2)
-            ws_t.cell(row, 4 + len(days)).value = round(total_not, 2)
+            ws_t.cell(row, 2 + len(days)).value = round(total_all, 1)
+            ws_t.cell(row, 3 + len(days)).value = round(total_counted, 1)
+            ws_t.cell(row, 4 + len(days)).value = round(total_not, 1)
             row += 1
 
         ws_t.column_dimensions['A'].width = 24
