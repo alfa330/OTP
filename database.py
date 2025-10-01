@@ -2129,6 +2129,7 @@ class Database:
             _make_header(ws, headers)
             row = 2
             for op in operators:
+                logging.info(op)
                 daily = op.get('daily', {})
                 name = op.get('name') or f"op_{op.get('operator_id')}"
                 ws.cell(row, 1).value = name
