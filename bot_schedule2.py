@@ -1314,47 +1314,100 @@ def get_sv_data():
         user_id = request.args.get('id')
         if not user_id:
             return jsonify({"error": "Missing ID parameter"}), 400
-        user_id = int(user_id)
-        
+        try:
+            user_id = int(user_id)
+        except ValueError:
+            return jsonify({"error": "Invalid ID parameter"}), 400
+
+        # --- accept optional month param in format YYYY-MM ---
+        month = request.args.get('month')
+        from datetime import datetime
+        if month:
+            try:
+                # validate format
+                datetime.strptime(month, '%Y-%m')
+            except ValueError:
+                return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
+        else:
+            month = datetime.now().strftime('%Y-%m')
+
         user = db.get_user(id=user_id)
         if not user or user[3] not in ['sv', 'operator']:
             return jsonify({"error": "User not found or invalid role"}), 404
-        
-        # Initialize response data
+
         response_data = {
             "status": "success",
             "name": user[2],
             "table": user[9],  # scores_table_url
+            "requested_month": month,
             "operators": []
         }
 
-        # If user is a supervisor, fetch their operators and call statistics
         if user[3] == 'sv':
             operators = db.get_operators_by_supervisor(user_id)
-            current_month = datetime.now().strftime('%Y-%m')
-            
+
             for operator in operators:
-                operator_id, operator_name, direction_id, hire_date, hours_table_url, scores_table_url, supervisor_name, status, rate =[operator[kkk] for kkk in operator]
-                # Get direction name from direction_id
-                
-                # Get call evaluations for the operator
-                evaluations = db.get_call_evaluations(operator_id, month=current_month)
-                call_count = len(evaluations)
-                avg_score = sum(float(e['score']) for e in evaluations) / call_count if call_count > 0 else 0
-                
+                # safe unpacking (operator is expected to be a sequence)
+                operator_id = operator[0] if len(operator) > 0 else None
+                operator_name = operator[1] if len(operator) > 1 else None
+                direction_id = operator[2] if len(operator) > 2 else None
+                hire_date = operator[3] if len(operator) > 3 else None
+                hours_table_url = operator[4] if len(operator) > 4 else None
+                scores_table_url = operator[5] if len(operator) > 5 else None
+                supervisor_name = operator[6] if len(operator) > 6 else None
+                status = operator[7] if len(operator) > 7 else None
+                rate = operator[8] if len(operator) > 8 else None
+
+                # optional: resolve direction name if you have such a helper
+                direction_name = None
+                try:
+                    if direction_id:
+                        dir_row = getattr(db, "get_direction", lambda _id: None)(direction_id)
+                        if dir_row:
+                            if isinstance(dir_row, (list, tuple)):
+                                direction_name = dir_row[1] if len(dir_row) > 1 else None
+                            elif isinstance(dir_row, dict):
+                                direction_name = dir_row.get("name")
+                except Exception:
+                    direction_name = None
+
+                # fetch evaluations for requested month
+                evaluations = db.get_call_evaluations(operator_id, month=month)
+                eval_count = len(evaluations) if evaluations else 0
+
+                # compute average score only from numeric scores (be tolerant to shapes)
+                scores = []
+                if evaluations:
+                    for ev in evaluations:
+                        try:
+                            if isinstance(ev, dict):
+                                val = ev.get("score")
+                            else:
+                                # try index access if ev is sequence-like
+                                val = ev[ "score" ] if isinstance(ev, dict) else (ev[0] if len(ev) > 0 else None)
+                            if val is None:
+                                continue
+                            scores.append(float(val))
+                        except Exception:
+                            continue
+
+                avg_score = round(sum(scores) / len(scores), 2) if len(scores) > 0 else None
+
                 response_data["operators"].append({
                     "id": operator_id,
                     "name": operator_name,
-                    "hire_date": hire_date ,
+                    "hire_date": hire_date,
                     "direction_id": direction_id,
-                    "call_count": call_count,
-                    "avg_score": round(avg_score, 2) if call_count > 0 else None,
+                    "direction_name": direction_name,
+                    "call_count": eval_count,
+                    "avg_score": avg_score,
                     "scores_table_url": scores_table_url,
                     "status": status,
-                    "rate": float(rate) if rate else 1.0
+                    "rate": float(rate) if rate is not None else 1.0
                 })
-        
+
         return jsonify(response_data), 200
+
     except Exception as e:
         logging.error(f"Error fetching SV data: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
