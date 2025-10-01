@@ -2128,8 +2128,8 @@ class Database:
             headers = ["Оператор", "Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого"]
             _make_header(ws, headers)
             row = 2
+            logging.info(operators)
             for op in operators:
-                logging.info(op)
                 daily = op.get('daily', {})
                 name = op.get('name') or f"op_{op.get('operator_id')}"
                 ws.cell(row, 1).value = name
