@@ -1911,8 +1911,8 @@ def background_upload_and_notify(audio_data, bucket_name, blob_path, evaluation_
 
 def send_telegram_notification(evaluator_name, operator_name, month, phone_number, score, comment, is_correction, previous_version_id, audio_path, appeal_date):
     try:
-        API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-        admin = os.getenv('TELEGRAM_ADMIN_CHAT_ID')
+        API_TOKEN = os.getenv('BOT_TOKEN')
+        admin = os.getenv('ADMIN_ID')
         if not admin:
             return
 
