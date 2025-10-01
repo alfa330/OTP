@@ -2184,7 +2184,7 @@ def get_monthly_report_hours():
             return jsonify({"error": f"Ошибка получения операторов: {str(e)}"}), 500
 
         try:
-            trainings_list = db.get_trainings(month, supervisor_id)
+            trainings_list = db.get_trainings(supervisor_id, month)
         except Exception as e:
             logging.exception("Ошибка получения trainings из db")
             trainings_list = []
