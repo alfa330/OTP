@@ -6754,124 +6754,183 @@
                                 </div>
                                 )}
                                 {view === 'view_scores' && (
-                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <h2 className="text-2xl font-semibold mb-6 text-gray-800">Оценка операторов</h2>
+                                    <div className="bg-white p-6 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        {/* Header: title + controls на одной линии */}
+                                        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+                                        <h2 className="text-2xl font-semibold text-gray-800">Оценки операторов</h2>
 
-                                        {/* Выбор месяца */}
-                                        <select
-                                        value={selectedReportMonth}
-                                        onChange={(e) => setSelectedReportMonth(e.target.value)}
-                                        className="w-full max-w-xs p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        disabled={isAdminDataLoading}
-                                        >
-                                        {getMonthOptions()}
-                                        </select>
-                                        <button
+                                        <div className="flex items-center gap-3">
+                                            {/* Month select */}
+                                            <select
+                                            value={selectedReportMonth}
+                                            onChange={(e) => setSelectedReportMonth(e.target.value)}
+                                            className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            disabled={isAdminDataLoading}
+                                            aria-label="Выберите месяц для отчета"
+                                            >
+                                            {getMonthOptions()}
+                                            </select>
+
+                                            {/* Генерация отчёта */}
+                                            <button
                                             onClick={generateMonthlyReport}
-                                            title="Скачать отчет по прослушанным звонкам за выбранный месяц"
-                                            className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 min-w-[220px] text-center ${
-                                                isLoading ? "cursor-not-allowed opacity-50" : ""
-                                            }`}
                                             disabled={isLoading}
-                                        >
-                                            {isLoading ? "Загрузка..." : (
-                                                <>
-                                                    <i className="fas fa-arrow-down mr-2"></i>
-                                                    Загрузить отчет
-                                                </>
-                                            )}
-                                        </button>
+                                            className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isLoading ? 'bg-blue-600 opacity-60 cursor-not-allowed text-white' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+                                            title="Скачать отчет по прослушанным звонкам за выбранный месяц"
+                                            >
+                                            <i className="fas fa-arrow-down" />
+                                            <span>{isLoading ? 'Загрузка...' : 'Скачать отчёт'}</span>
+                                            </button>
+                                        </div>
+                                        </div>
 
-                                        <select
-                                            value={selectedSvId}
-                                            onChange={(e) => setSelectedSvId(e.target.value)}
-                                            className="w-full p-3 mb-6 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                            disabled={isLoading || isAdminDataLoading}
-                                        >
-                                            <option value="">Выберите супервайзера</option>
-                                            {svList.map(sv => (
-                                                <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
-                                            ))}
-                                        </select>
+                                        {/* Tabs: Активные / Уволенные */}
+                                        <div className="flex items-center space-x-3 mb-4">
+                                        {(() => {
+                                            const all = selectedSvData?.operators ?? [];
+                                            const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
+                                            const firedCount = all.filter(op => op.status === 'fired').length;
+                                            return (
+                                            <>
+                                                <button
+                                                onClick={() => setActiveOperatorsTab('active')}
+                                                className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeOperatorsTab === 'active' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                                                role="tab"
+                                                aria-selected={activeOperatorsTab === 'active'}
+                                                >
+                                                Активные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{activeCount}</span>
+                                                </button>
+
+                                                <button
+                                                onClick={() => setActiveOperatorsTab('fired')}
+                                                className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeOperatorsTab === 'fired' ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                                                role="tab"
+                                                aria-selected={activeOperatorsTab === 'fired'}
+                                                >
+                                                Уволенные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{firedCount}</span>
+                                                </button>
+                                            </>
+                                            );
+                                        })()}
+                                        </div>
+
+                                        {/* Table */}
                                         {isAdminDataLoading ? (
-                                            <p className="text-center text-gray-600">Загрузка...</p>
+                                        <p className="text-center text-gray-600 py-8">Загрузка...</p>
                                         ) : selectedSvData && selectedSvData.operators && selectedSvData.operators.length > 0 ? (
+                                        (() => {
+                                            const allOps = selectedSvData.operators;
+                                            const filteredOperators = activeOperatorsTab === 'active'
+                                            ? allOps.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
+                                            : allOps.filter(op => op.status === 'fired');
+
+                                            // fallback если пусто
+                                            if (filteredOperators.length === 0) {
+                                            return <p className="text-center text-gray-600 py-8">Операторы не найдены.</p>;
+                                            }
+
+                                            // Footer calc: total calls и средняя оценка по тем у кого есть >=1 оценка
+                                            const totalCalls = filteredOperators.reduce((sum, o) => sum + (parseInt(o.call_count) || 0), 0);
+                                            const scoresArr = filteredOperators
+                                            .map(o => (o.avg_score == null ? NaN : Number(o.avg_score)))
+                                            .filter(v => !isNaN(v));
+                                            const avgByScored = scoresArr.length > 0 ? (scoresArr.reduce((a, b) => a + b, 0) / scoresArr.length) : null;
+
+                                            return (
                                             <div className="overflow-x-auto rounded-lg border border-gray-200">
                                                 <table className="min-w-full divide-y divide-gray-200">
-                                                    <thead className="bg-gray-50">
-                                                        <tr>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Оценки</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ожидаемые</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Средний балл</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ссылка</th>
-                                                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
+                                                <thead className="bg-gray-50">
+                                                    <tr>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Прослушано</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ожидаемые</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Средний балл</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ссылка</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
+                                                    </tr>
+                                                </thead>
+
+                                                <tbody className="bg-white divide-y divide-gray-200">
+                                                    {filteredOperators.map((op, index) => {
+                                                    const currentWeek = getCurrentWeekOfMonth();
+                                                    const expectedCalls = getExpectedCalls(currentWeek);
+                                                    const callCount = parseInt(op.call_count) || 0;
+                                                    const hasIssue = callCount < expectedCalls;
+                                                    return (
+                                                        <tr key={op.id ?? index} className="hover:bg-gray-50 transition-colors duration-200">
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{op.name}</td>
+
+                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, expectedCalls)}`}>
+                                                            {callCount}
+                                                        </td>
+
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">{expectedCalls}</td>
+
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                            <span className={getScoreColor(op.avg_score)}>
+                                                            {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
+                                                            </span>
+                                                        </td>
+
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                            {op.link ? (
+                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">Просмотр</a>
+                                                            ) : '-'}
+                                                        </td>
+
+                                                        <td className="px-6 py-4 whitespace-nowrap space-x-2">
+                                                            {hasIssue && (
+                                                            <button
+                                                                onClick={() => notifySupervisor(selectedSvId, op.name)}
+                                                                title="Уведомить супервайзера о низком количестве оценок"
+                                                                className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm transition-all duration-200"
+                                                                disabled={isLoading}
+                                                            >
+                                                                Уведомить
+                                                            </button>
+                                                            )}
+                                                            <button
+                                                            onClick={() => {
+                                                                const tokenData = {
+                                                                apiKey: user.apiKey,
+                                                                userId: user.id,
+                                                                role: user.role,
+                                                                name: user.name,
+                                                                operatorId: op.id,
+                                                                operatorName: op.name,
+                                                                supervisorId: selectedSvId,
+                                                                timestamp: Date.now()
+                                                                };
+                                                                const token = safeBtoa(JSON.stringify(tokenData));
+                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
+                                                            }}
+                                                            className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
+                                                            title="Listen to operator calls"
+                                                            >
+                                                            Оценки
+                                                            </button>
+                                                        </td>
                                                         </tr>
-                                                    </thead>
-                                                    <tbody className="bg-white divide-y divide-gray-200">
-                                                        {selectedSvData.operators.map((op, index) => {
-                                                            const currentWeek = getCurrentWeekOfMonth();
-                                                            const expectedCalls = getExpectedCalls(currentWeek);
-                                                            const callCount = parseInt(op.call_count) || 0;
-                                                            const hasIssue = callCount < expectedCalls;
-                                                            return (
-                                                                <tr key={index} className="hover:bg-gray-50 transition-colors duration-200">
-                                                                    <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
-                                                                    <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, expectedCalls)}`}>
-                                                                        {callCount}
-                                                                    </td>
-                                                                    <td className="px-6 py-4 whitespace-nowrap">{expectedCalls}</td>
-                                                                    <td className="px-6 py-4 whitespace-nowrap">
-                                                                        <span className={getScoreColor(op.avg_score)}>
-                                                                            {op.avg_score ? op.avg_score.toFixed(2) : '-'}
-                                                                        </span>
-                                                                    </td>
-                                                                    <td className="px-6 py-4 whitespace-nowrap">
-                                                                        {op.link ? (
-                                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">Просмотр</a>
-                                                                        ) : '-'}
-                                                                    </td>
-                                                                    <td className="px-6 py-4 whitespace-nowrap space-x-2">
-                                                                        {hasIssue && (
-                                                                            <button
-                                                                                onClick={() => notifySupervisor(selectedSvId, op.name)}
-                                                                                title="Уведомить супервайзера о низком количестве оценок"
-                                                                                className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm transition-all duration-200"
-                                                                                disabled={isLoading}
-                                                                            >
-                                                                                Уведомить
-                                                                            </button>
-                                                                        )}
-                                                                        <button
-                                                                            onClick={() => {
-                                                                                // Generate token with operator data
-                                                                                const tokenData = {
-                                                                                    apiKey: user.apiKey,
-                                                                                    userId: user.id,
-                                                                                    role: user.role,
-                                                                                    name: user.name,
-                                                                                    operatorId: op.id,
-                                                                                    operatorName: op.name,
-                                                                                    supervisorId: selectedSvId,
-                                                                                    timestamp: Date.now()
-                                                                                };
-                                                                                const token = safeBtoa(JSON.stringify(tokenData));
-                                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
-                                                                            }}
-                                                                            className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200"
-                                                                            title="Listen to operator calls"
-                                                                        >
-                                                                            Оценки
-                                                                        </button>
-                                                                    </td>
-                                                                </tr>
-                                                            );
-                                                        })}
-                                                    </tbody>
+                                                    );
+                                                    })}
+                                                </tbody>
+
+                                                {/* Footer: totals */}
+                                                <tfoot className="bg-gray-50">
+                                                    <tr>
+                                                    <td className="px-6 py-3 text-sm font-medium text-gray-700">Итого</td>
+                                                    <td className="px-6 py-3 text-sm font-medium text-gray-900">{totalCalls}</td>
+                                                    <td className="px-6 py-3 text-sm font-medium text-gray-900">{/* оставляем ячейку для ожидаемых — можно вставить общий expected if needed */}</td>
+                                                    <td className="px-6 py-3 text-sm font-medium text-gray-900">{avgByScored == null ? '-' : Number(avgByScored).toFixed(2)}</td>
+                                                    <td className="px-6 py-3" />
+                                                    </tr>
+                                                </tfoot>
                                                 </table>
                                             </div>
+                                            );
+                                        })()
                                         ) : selectedSvId ? (
-                                            <p className="text-center text-gray-600">Операторы не найдены для этого супервайзера.</p>
+                                        <p className="text-center text-gray-600">Операторы не найдены для этого супервайзера.</p>
                                         ) : null}
                                     </div>
                                 )}
