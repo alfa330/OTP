@@ -2068,7 +2068,7 @@ def get_active_operators():
         logging.error(f"Error fetching active operators: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
     
-@app.route('/api/report/monthly_hours', methods=['GET'])
+@app.route('/api/report/monthly', methods=['GET'])
 @require_api_key
 def get_monthly_report():
     try:
@@ -2135,9 +2135,9 @@ def build_trainings_map(trainings_list):
         tmap.setdefault(op, {}).setdefault(day, []).append(t)
     return tmap
 
-@app.route('/api/report/monthly', methods=['GET'])
+@app.route('/api/report/monthly_hours', methods=['GET'])
 @require_api_key
-def get_monthly_report():
+def get_monthly_report_hours():
     try:
         supervisor_id = request.args.get('supervisor_id')
         month = request.args.get('month')
