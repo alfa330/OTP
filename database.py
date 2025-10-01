@@ -2112,6 +2112,7 @@ class Database:
         trainings_map: { operator_id: { dayNum: [trainingObj, ...] } }
         Возвращает (filename, bytes_content)
         """
+        logging.info(month)
         year, mon = map(int, month.split('-'))
         days_in_month = calendar.monthrange(year, mon)[1]
         days = list(range(1, days_in_month + 1))
