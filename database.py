@@ -2066,6 +2066,7 @@ class Database:
         trainings_map: { operator_id: { dayNum: [trainingObj, ...] } }
         Возвращает (filename, bytes_content)
         """
+        operators=operators["operators"]
         def _make_header(ws, headers: List[str]):
             thin = Side(style='thin')
             border = Border(left=thin, right=thin, top=thin, bottom=thin)
