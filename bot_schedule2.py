@@ -2106,6 +2106,126 @@ def get_monthly_report():
         logging.error(f"Error generating monthly report: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+MONTH_RE = re.compile(r'^\d{4}-\d{2}$')
+
+def build_trainings_map(trainings_list):
+    """
+    Преобразует список тренингов в структуру { operator_id: { dayNum: [training...] } }.
+    Ожидается, что у тренинга есть поле 'operator_id' и 'date' в формате 'YYYY-MM-DD'.
+    """
+    tmap = {}
+    if not trainings_list:
+        return tmap
+    for t in trainings_list:
+        op = t.get('operator_id')
+        if op is None:
+            continue
+        dt = t.get('date') or t.get('date_str') or t.get('day')
+        day = None
+        if isinstance(dt, str) and len(dt) >= 10:
+            try:
+                day = int(dt[8:10])
+            except Exception:
+                day = None
+        elif isinstance(dt, int):
+            day = dt
+        if day is None:
+            # пропускаем записи без понятного дня
+            continue
+        tmap.setdefault(op, {}).setdefault(day, []).append(t)
+    return tmap
+
+@app.route('/api/report/monthly', methods=['GET'])
+@require_api_key
+def get_monthly_report():
+    try:
+        supervisor_id = request.args.get('supervisor_id')
+        month = request.args.get('month')
+        if not month or not MONTH_RE.match(month):
+            return jsonify({"error": "month required in format YYYY-MM"}), 400
+
+        # requester
+        try:
+            requester_id = int(request.headers.get('X-User-Id'))
+        except Exception:
+            return jsonify({"error": "X-User-Id header required"}), 400
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+
+        # роль в requester ожидается в requester[3] как в вашем примере
+        role = requester[3] if len(requester) > 3 else None
+
+        # разрешаем sv без supervisor_id - тогда смотрим на себя
+        if not supervisor_id:
+            if role == 'sv':
+                supervisor_id = requester_id
+            else:
+                return jsonify({"error": "supervisor_id required"}), 400
+        else:
+            try:
+                supervisor_id = int(supervisor_id)
+            except ValueError:
+                return jsonify({"error": "supervisor_id must be integer"}), 400
+
+        # проверка прав: admin или тот же sv
+        if role != 'admin' and (role != 'sv' or supervisor_id != requester_id):
+            return jsonify({"error": "Unauthorized to access this report"}), 403
+
+        logging.info("Начало генерации отчета: supervisor_id=%s month=%s", supervisor_id, month)
+
+        # Если в db реализован удобный метод generate_monthly_report, используем его
+        if hasattr(db, 'generate_monthly_report'):
+            filename, content = db.generate_monthly_report(supervisor_id, month)
+        else:
+            # Иначе собираем данные вручную и используем функцию-генератор (если есть)
+            # Ожидаемые методы: get_daily_hours_by_supervisor_month / get_daily_hours_for_all_month и get_trainings_for_month / get_trainings_by_sv_month
+            try:
+                operators = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
+            except Exception as e:
+                logging.exception("Ошибка получения operators из db")
+                return jsonify({"error": f"Ошибка получения операторов: {str(e)}"}), 500
+
+            try:
+                if hasattr(db, 'get_trainings_by_sv_month'):
+                    trainings_list = db.get_trainings_by_sv_month(month, supervisor_id)
+                else:
+                    trainings_list = db.get_trainings_for_month(month)
+            except Exception as e:
+                logging.exception("Ошибка получения trainings из db")
+                trainings_list = []
+
+            trainings_map = build_trainings_map(trainings_list)
+
+            # Если у вас есть отдельно экспортированная функция генерации, используйте её:
+            if 'generate_excel_report_from_view' in globals() or hasattr(db, 'generate_excel_report_from_view'):
+                # prefer db.generate_excel_report_from_view if exists
+                if hasattr(db, 'generate_excel_report_from_view'):
+                    filename, content = db.generate_excel_report_from_view(operators, trainings_map, month)
+                else:
+                    # если функция импортирована в модуль как generate_excel_report_from_view
+                    from database import generate_excel_report_from_view
+                    filename, content = generate_excel_report_from_view(operators, trainings_map, month)
+            else:
+                return jsonify({"error": "No report generator available on db and no local generator imported"}), 500
+
+        if not filename or not content:
+            logging.error("Генерация отчёта вернула пустой результат")
+            return jsonify({"error": "Failed to generate report"}), 500
+
+        return send_file(
+            BytesIO(content),
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+
+    except Exception as e:
+        logging.exception("Error generating monthly report")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
 @app.route('/api/trainings', methods=['GET'])
 @require_api_key
 def get_trainings():

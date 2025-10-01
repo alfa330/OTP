@@ -2344,8 +2344,84 @@
             const [isPreviewing, setIsPreviewing] = useState(false);
             const [isSavingPreview, setIsSavingPreview] = useState(false);
             const [uploadProgress, setUploadProgress] = useState(0);
+            const [isDownloadingReport, setIsDownloadingReport] = useState(false);
 
             const [selectedTab, setSelectedTab] = useState('work_time');
+
+            async function downloadMonthlyReport() {
+                if (!user) {
+                    fallbackToast('Пользователь не авторизован', 'error');
+                    return;
+                }
+                if (!month) {
+                    fallbackToast('Выберите месяц', 'error');
+                    return;
+                }
+
+                // Определяем supervisor_id: если выбран (selectedSvId) используем его, иначе если пользователь sv — используем его id
+                let supervisorId = selectedSvId || '';
+                if (!supervisorId && user.role === 'sv') supervisorId = String(user.id);
+
+                const params = new URLSearchParams();
+                params.append('month', month);
+                if (supervisorId) params.append('supervisor_id', supervisorId);
+
+                const url = `/api/report/monthly?${params.toString()}`;
+                setIsDownloadingReport(true);
+
+                try {
+                    const resp = await fetch(url, {
+                    method: 'GET',
+                    headers: {
+                        'X-API-Key': user.apiKey || '',
+                        'X-User-Id': String(user.id)
+                    }
+                    });
+
+                    if (!resp.ok) {
+                    // попытка прочитать JSON ошибки
+                    let errText = `Ошибка ${resp.status}`;
+                    try {
+                        const j = await resp.json();
+                        errText = j.error || JSON.stringify(j);
+                    } catch (e) {
+                        errText = await resp.text();
+                    }
+                    fallbackToast(`Не удалось получить файл: ${errText}`, 'error');
+                    return;
+                    }
+
+                    // Получаем blob
+                    const blob = await resp.blob();
+
+                    // Попытка взять имя файла из заголовка Content-Disposition
+                    const cd = resp.headers.get('Content-Disposition') || resp.headers.get('content-disposition') || '';
+                    let filename = `report_${month}.xlsx`;
+                    if (cd) {
+                    const m = cd.match(/filename\*?=(?:UTF-8'')?["']?([^;"']+)["']?/i);
+                    if (m && m[1]) {
+                        filename = decodeURIComponent(m[1]);
+                    }
+                    }
+
+                    // Создаём ссылку и кликаем
+                    const link = document.createElement('a');
+                    const urlBlob = window.URL.createObjectURL(blob);
+                    link.href = urlBlob;
+                    link.download = filename;
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                    window.URL.revokeObjectURL(urlBlob);
+
+                    fallbackToast('Отчет загружен', 'success');
+                } catch (err) {
+                    console.error('downloadMonthlyReport error', err);
+                    fallbackToast(err.message || 'Ошибка при скачивании отчёта', 'error');
+                } finally {
+                    setIsDownloadingReport(false);
+                }
+                }
 
             // helpers: month parts
             const monthParts = useMemo(() => {
@@ -2805,12 +2881,35 @@
                     </div>
 
                     <div className="flex items-center gap-3">
-                    {user?.role === 'admin' && (
-                        <select value={selectedSvId || ''} onChange={e => setSelectedSvId(e.target.value)} className="px-3 py-2 border rounded-md">
-                        <option value="">Все супервайзеры</option>
-                        </select>
-                    )}
-                    <button onClick={fetchDailyHoursAndTrainings} className="px-3 py-2 bg-blue-600 text-white rounded-md shadow-sm hover:bg-blue-700">Обновить</button>
+                        {user?.role === 'admin' && (
+                            <select value={selectedSvId || ''} onChange={e => setSelectedSvId(e.target.value)} className="px-3 py-2 border rounded-md">
+                            <option value="">Все супервайзеры</option>
+                            </select>
+                        )}
+
+                        <button
+                            onClick={fetchDailyHoursAndTrainings}
+                            className="px-3 py-2 bg-blue-600 text-white rounded-md shadow-sm hover:bg-blue-700"
+                        >
+                            Обновить
+                        </button>
+
+                        <button
+                            onClick={downloadMonthlyReport}
+                            disabled={isDownloadingReport}
+                            className={`px-3 py-2 rounded-md text-white ${isDownloadingReport ? 'bg-green-400 cursor-wait' : 'bg-green-600 hover:bg-green-700'}`}
+                            title="Скачать месячный отчёт в XLSX"
+                        >
+                            {isDownloadingReport ? (
+                            <>
+                                <i className="fas fa-spinner fa-spin mr-2" /> Формируется...
+                            </>
+                            ) : (
+                            <>
+                                <i className="fas fa-file-excel mr-2" /> Сформировать отчёт
+                            </>
+                            )}
+                        </button>
                     </div>
                 </div>
 
