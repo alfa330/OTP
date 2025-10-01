@@ -2320,7 +2320,7 @@
         return Number((diff / 60).toFixed(2));
         }
 
-        const HoursAccountingView = ({ user, onUploaded, showToast }) => {
+        const HoursAccountingView = ({ user, svList, onUploaded, showToast }) => {
             const [month, setMonth] = useState(() => {
                 const d = new Date();
                 return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -2882,8 +2882,17 @@
 
                     <div className="flex items-center gap-3">
                         {user?.role === 'admin' && (
-                            <select value={selectedSvId || ''} onChange={e => setSelectedSvId(e.target.value)} className="px-3 py-2 border rounded-md">
-                            <option value="">Все супервайзеры</option>
+                            <select
+                                value={selectedSvId || ''}
+                                onChange={e => setSelectedSvId(e.target.value)}
+                                className="px-3 py-2 border rounded-md"
+                            >
+                                <option value="">Выберите супервайзера</option>
+                                {svList?.map(sv => (
+                                    <option key={sv.id} value={sv.id}>
+                                        {sv.name}
+                                    </option>
+                                ))}
                             </select>
                         )}
 
@@ -7301,7 +7310,7 @@
                                 </div>
                                 )}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
-                                {( view === "sv_hours" && (<HoursAccountingView user={user} showToast={showToast} />))}
+                                {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                             </>
                         )}
                         {user.role === 'sv' && (
