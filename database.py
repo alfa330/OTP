@@ -2090,7 +2090,7 @@ class Database:
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.border = border
 
-    def generate_excel_report_from_view(
+    def generate_excel_report_from_view(self,
         operators: List[Dict[str, Any]],
         trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
         month: str,  # 'YYYY-MM'
