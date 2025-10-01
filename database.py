@@ -2044,191 +2044,191 @@ class Database:
             cursor.execute("DELETE FROM trainings WHERE id = %s RETURNING id", (training_id,))
             return cursor.fetchone() is not None
 
-def parse_time_to_minutes(t: str):
-    """Парсер HH:mm -> минуты или None"""
-    if not t: 
-        return None
-    try:
-        parts = t.strip().split(':')
-        hh = int(parts[0])
-        mm = int(parts[1]) if len(parts) > 1 else 0
-        return hh * 60 + mm
-    except Exception:
-        return None
+    def parse_time_to_minutes(t: str):
+        """Парсер HH:mm -> минуты или None"""
+        if not t: 
+            return None
+        try:
+            parts = t.strip().split(':')
+            hh = int(parts[0])
+            mm = int(parts[1]) if len(parts) > 1 else 0
+            return hh * 60 + mm
+        except Exception:
+            return None
 
-def compute_training_duration_hours(t: Dict[str, Any]) -> float:
-    """
-    Совместимая с вашим фронтом функция:
-    - смотрит duration_minutes / duration_hours
-    - иначе считает по start_time/end_time (HH:mm)
-    - корректно работает при переходе через полночь
-    """
-    try:
-        if t.get('duration_minutes') is not None:
-            return round(float(t['duration_minutes']) / 60.0, 2)
-        if t.get('duration_hours') is not None:
-            return round(float(t['duration_hours']), 2)
-        s = parse_time_to_minutes(t.get('start_time'))
-        e = parse_time_to_minutes(t.get('end_time'))
-        if s is None or e is None:
+    def compute_training_duration_hours(t: Dict[str, Any]) -> float:
+        """
+        Совместимая с вашим фронтом функция:
+        - смотрит duration_minutes / duration_hours
+        - иначе считает по start_time/end_time (HH:mm)
+        - корректно работает при переходе через полночь
+        """
+        try:
+            if t.get('duration_minutes') is not None:
+                return round(float(t['duration_minutes']) / 60.0, 2)
+            if t.get('duration_hours') is not None:
+                return round(float(t['duration_hours']), 2)
+            s = parse_time_to_minutes(t.get('start_time'))
+            e = parse_time_to_minutes(t.get('end_time'))
+            if s is None or e is None:
+                return 0.0
+            diff = e - s
+            if diff < 0:
+                diff += 24 * 60
+            return round(diff / 60.0, 2)
+        except Exception:
             return 0.0
-        diff = e - s
-        if diff < 0:
-            diff += 24 * 60
-        return round(diff / 60.0, 2)
-    except Exception:
-        return 0.0
 
-def _make_header(ws, headers: List[str]):
-    thin = Side(style='thin')
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    bold = Font(bold=True)
-    for i, h in enumerate(headers, start=1):
-        cell = ws.cell(1, i)
-        cell.value = h
-        cell.font = bold
-        cell.alignment = Alignment(horizontal='center', vertical='center')
-        cell.border = border
+    def _make_header(ws, headers: List[str]):
+        thin = Side(style='thin')
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        bold = Font(bold=True)
+        for i, h in enumerate(headers, start=1):
+            cell = ws.cell(1, i)
+            cell.value = h
+            cell.font = bold
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = border
 
-def generate_excel_report_from_view(
-    operators: List[Dict[str, Any]],
-    trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
-    month: str,  # 'YYYY-MM'
-    filename: str = None
-) -> Tuple[str, bytes]:
-    """
-    Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность, Тренинги.
-    Ожидаемые структуры:
-      operators: [
-        {
-          "operator_id": int,
-          "name": str,
-          "rate": ...,
-          "norm_hours": float,
-          "daily": { "1": { "work_time": 4.5, "break_time": 0.5, "talk_time": 1.2, "calls": 12, "efficiency": 1.0, ... }, ... },
-          "aggregates": { ... }
-        }, ...
-      ]
-      trainings_map: { operator_id: { dayNum: [trainingObj, ...] } }
-    Возвращает (filename, bytes_content)
-    """
-    year, mon = map(int, month.split('-'))
-    days_in_month = calendar.monthrange(year, mon)[1]
-    days = list(range(1, days_in_month + 1))
+    def generate_excel_report_from_view(
+        operators: List[Dict[str, Any]],
+        trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
+        month: str,  # 'YYYY-MM'
+        filename: str = None
+    ) -> Tuple[str, bytes]:
+        """
+        Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность, Тренинги.
+        Ожидаемые структуры:
+        operators: [
+            {
+            "operator_id": int,
+            "name": str,
+            "rate": ...,
+            "norm_hours": float,
+            "daily": { "1": { "work_time": 4.5, "break_time": 0.5, "talk_time": 1.2, "calls": 12, "efficiency": 1.0, ... }, ... },
+            "aggregates": { ... }
+            }, ...
+        ]
+        trainings_map: { operator_id: { dayNum: [trainingObj, ...] } }
+        Возвращает (filename, bytes_content)
+        """
+        year, mon = map(int, month.split('-'))
+        days_in_month = calendar.monthrange(year, mon)[1]
+        days = list(range(1, days_in_month + 1))
 
-    wb = Workbook()
-    # remove default sheet and recreate where needed
-    default = wb.active
-    wb.remove(default)
+        wb = Workbook()
+        # remove default sheet and recreate where needed
+        default = wb.active
+        wb.remove(default)
 
-    # common header: Name, Rate, Norm, day1..dayN, Total
-    def build_sheet(key: str, label: str, metric_key: str, is_hour=True, format_fn=None):
-        ws = wb.create_sheet(title=label[:31])
-        headers = ["Оператор", "Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого"]
-        _make_header(ws, headers)
+        # common header: Name, Rate, Norm, day1..dayN, Total
+        def build_sheet(key: str, label: str, metric_key: str, is_hour=True, format_fn=None):
+            ws = wb.create_sheet(title=label[:31])
+            headers = ["Оператор", "Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого"]
+            _make_header(ws, headers)
+            row = 2
+            for op in operators:
+                daily = op.get('daily', {})
+                name = op.get('name') or f"op_{op.get('operator_id')}"
+                ws.cell(row, 1).value = name
+                ws.cell(row, 2).value = float(op.get('rate') or 0)
+                ws.cell(row, 3).value = float(op.get('norm_hours') or 0)
+                total = 0.0
+                for c_idx, day in enumerate(days, start=4):
+                    dkey = str(day)
+                    cell_val = None
+                    if metric_key == 'trainings':
+                        # trainings sheet handled separately
+                        cell_val = None
+                    else:
+                        d = daily.get(dkey)
+                        if d:
+                            v = d.get(metric_key, 0)
+                            if metric_key == 'calls':
+                                cell_val = int(v or 0)
+                                total += int(cell_val)
+                            else:
+                                cell_num = float(v or 0)
+                                cell_val = round(cell_num, 2) if format_fn is None else format_fn(cell_num)
+                                total += float(cell_num)
+                        else:
+                            cell_val = 0 if metric_key == 'calls' else 0.0
+                    ws.cell(row, c_idx).value = cell_val
+                    # center-align
+                    ws.cell(row, c_idx).alignment = Alignment(horizontal='center', vertical='center')
+
+                # total
+                ws.cell(row, 4 + len(days)).value = round(total, 2) if is_hour else int(total)
+                row += 1
+
+            # simple column widths
+            ws.column_dimensions['A'].width = 24
+            for i in range(2, 5 + len(days)):
+                col = ws.cell(1, i).column_letter
+                ws.column_dimensions[col].width = 12
+
+        # 1) Отработанные часы
+        build_sheet('work_time', 'Отработанные часы', 'work_time', is_hour=True)
+
+        # 2) Перерыв
+        build_sheet('break_time', 'Перерыв', 'break_time', is_hour=True)
+
+        # 3) Звонки
+        build_sheet('calls', 'Звонки', 'calls', is_hour=False)
+
+        # 4) Эффективность (ч)
+        build_sheet('efficiency', 'Эффективность', 'efficiency', is_hour=True)
+
+        # 5) Тренинги — отдельная логика: по дням показываем "засчитано(ч) / не_засчитано(ч)" и итоги
+        ws_t = wb.create_sheet(title='Тренинги'[:31])
+        headers = ["Оператор"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Всего (ч)", "Засчитано (ч)", "Не засчитано (ч)"]
+        _make_header(ws_t, headers)
         row = 2
         for op in operators:
-            daily = op.get('daily', {})
             name = op.get('name') or f"op_{op.get('operator_id')}"
-            ws.cell(row, 1).value = name
-            ws.cell(row, 2).value = float(op.get('rate') or 0)
-            ws.cell(row, 3).value = float(op.get('norm_hours') or 0)
-            total = 0.0
-            for c_idx, day in enumerate(days, start=4):
-                dkey = str(day)
-                cell_val = None
-                if metric_key == 'trainings':
-                    # trainings sheet handled separately
-                    cell_val = None
-                else:
-                    d = daily.get(dkey)
-                    if d:
-                        v = d.get(metric_key, 0)
-                        if metric_key == 'calls':
-                            cell_val = int(v or 0)
-                            total += int(cell_val)
-                        else:
-                            cell_num = float(v or 0)
-                            cell_val = round(cell_num, 2) if format_fn is None else format_fn(cell_num)
-                            total += float(cell_num)
+            ws_t.cell(row, 1).value = name
+            total_all = 0.0
+            total_counted = 0.0
+            total_not = 0.0
+            op_trainings = trainings_map.get(op.get('operator_id')) or {}
+            for c_idx, day in enumerate(days, start=2):
+                arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
+                counted = 0.0
+                not_counted = 0.0
+                for t in arr:
+                    dur = compute_training_duration_hours(t)
+                    total_all += dur
+                    if t.get('count_in_hours'):
+                        counted += dur
+                        total_counted += dur
                     else:
-                        cell_val = 0 if metric_key == 'calls' else 0.0
-                ws.cell(row, c_idx).value = cell_val
-                # center-align
-                ws.cell(row, c_idx).alignment = Alignment(horizontal='center', vertical='center')
+                        not_counted += dur
+                        total_not += dur
+                # cell format: "C: 1.50 | N: 0.50" — компактно
+                if counted == 0 and not_counted == 0:
+                    ws_t.cell(row, c_idx).value = ""
+                else:
+                    ws_t.cell(row, c_idx).value = f"{round(counted,2)} / {round(not_counted,2)}"
+                ws_t.cell(row, c_idx).alignment = Alignment(horizontal='center', vertical='center')
 
-            # total
-            ws.cell(row, 4 + len(days)).value = round(total, 2) if is_hour else int(total)
+            ws_t.cell(row, 2 + len(days)).value = round(total_all, 2)
+            ws_t.cell(row, 3 + len(days)).value = round(total_counted, 2)
+            ws_t.cell(row, 4 + len(days)).value = round(total_not, 2)
             row += 1
 
-        # simple column widths
-        ws.column_dimensions['A'].width = 24
+        ws_t.column_dimensions['A'].width = 24
         for i in range(2, 5 + len(days)):
-            col = ws.cell(1, i).column_letter
-            ws.column_dimensions[col].width = 12
+            col = ws_t.cell(1, i).column_letter
+            ws_t.column_dimensions[col].width = 14
 
-    # 1) Отработанные часы
-    build_sheet('work_time', 'Отработанные часы', 'work_time', is_hour=True)
-
-    # 2) Перерыв
-    build_sheet('break_time', 'Перерыв', 'break_time', is_hour=True)
-
-    # 3) Звонки
-    build_sheet('calls', 'Звонки', 'calls', is_hour=False)
-
-    # 4) Эффективность (ч)
-    build_sheet('efficiency', 'Эффективность', 'efficiency', is_hour=True)
-
-    # 5) Тренинги — отдельная логика: по дням показываем "засчитано(ч) / не_засчитано(ч)" и итоги
-    ws_t = wb.create_sheet(title='Тренинги'[:31])
-    headers = ["Оператор"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Всего (ч)", "Засчитано (ч)", "Не засчитано (ч)"]
-    _make_header(ws_t, headers)
-    row = 2
-    for op in operators:
-        name = op.get('name') or f"op_{op.get('operator_id')}"
-        ws_t.cell(row, 1).value = name
-        total_all = 0.0
-        total_counted = 0.0
-        total_not = 0.0
-        op_trainings = trainings_map.get(op.get('operator_id')) or {}
-        for c_idx, day in enumerate(days, start=2):
-            arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
-            counted = 0.0
-            not_counted = 0.0
-            for t in arr:
-                dur = compute_training_duration_hours(t)
-                total_all += dur
-                if t.get('count_in_hours'):
-                    counted += dur
-                    total_counted += dur
-                else:
-                    not_counted += dur
-                    total_not += dur
-            # cell format: "C: 1.50 | N: 0.50" — компактно
-            if counted == 0 and not_counted == 0:
-                ws_t.cell(row, c_idx).value = ""
-            else:
-                ws_t.cell(row, c_idx).value = f"{round(counted,2)} / {round(not_counted,2)}"
-            ws_t.cell(row, c_idx).alignment = Alignment(horizontal='center', vertical='center')
-
-        ws_t.cell(row, 2 + len(days)).value = round(total_all, 2)
-        ws_t.cell(row, 3 + len(days)).value = round(total_counted, 2)
-        ws_t.cell(row, 4 + len(days)).value = round(total_not, 2)
-        row += 1
-
-    ws_t.column_dimensions['A'].width = 24
-    for i in range(2, 5 + len(days)):
-        col = ws_t.cell(1, i).column_letter
-        ws_t.column_dimensions[col].width = 14
-
-    # Save to bytes
-    out = BytesIO()
-    wb.save(out)
-    out.seek(0)
-    content = out.getvalue()
-    if filename is None:
-        filename = f"report_{month}.xlsx"
-    return filename, content
+        # Save to bytes
+        out = BytesIO()
+        wb.save(out)
+        out.seek(0)
+        content = out.getvalue()
+        if filename is None:
+            filename = f"report_{month}.xlsx"
+        return filename, content
 
 # Initialize database
 db = Database()
