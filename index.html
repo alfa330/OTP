@@ -2370,7 +2370,7 @@
                 }
 
                 const url = `${API_BASE_URL}/api/report/monthly_hours?${params.toString()}`;
-                
+
                 setIsDownloadingReport(true);
 
                 try {
@@ -2465,7 +2465,7 @@
 
             // ---- fetch daily hours + trainings ----
             async function fetchDailyHoursAndTrainings() {
-                if (!user) return;
+                if (!user || !selectedSvId) return;
                 setIsLoading(true);
                 try {
                     // build params: month always, but if admin + selectedSvId -> use id
@@ -3012,6 +3012,8 @@
                     <div>
                         {isLoading ? (
                         <div className="p-4 text-gray-600">Загрузка данных...</div>
+                        ) : user?.role === 'admin' && !selectedSvId ? (
+                        <div className="p-4 text-gray-600">Супервайзер не выбран.</div>
                         ) : operators.length === 0 ? (
                         <div className="p-4 text-gray-600">Операторы не найдены.</div>
                         ) : operators.map(op => {
