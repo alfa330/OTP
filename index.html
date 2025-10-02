@@ -6901,10 +6901,10 @@
                                             <button
                                             onClick={generateMonthlyReport}
                                             disabled={isLoading}
-                                            className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isLoading ? 'bg-blue-600 opacity-60 cursor-not-allowed text-white' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+                                            className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isLoading ? 'bg-green-600 opacity-60 cursor-not-allowed text-white' : 'bg-green-600 text-white hover:bg-green-700'}`}
                                             title="Скачать отчет по прослушанным звонкам за выбранный месяц"
                                             >
-                                            <i className="fas fa-arrow-down" />
+                                            <i className="fas fa-file-excel mr-2" />
                                             <span>{isLoading ? 'Загрузка...' : 'Скачать отчёт'}</span>
                                             </button>
                                         </div>
@@ -7071,13 +7071,13 @@
                                     {/* Generate Report Button */}
                                     <button
                                         onClick={handleGenerateReport}
-                                        className={`bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-all duration-200 ${
+                                        className={`bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200 ${
                                             isLoading ? "opacity-50 cursor-not-allowed" : ""
                                         }`}
                                         disabled={isLoading}
                                     >
-                                        <i className="fas fa-arrow-down mr-2"></i>
-                                        {isLoading ? "Генерация..." : "Сгенерировать отчет"}
+                                        <i className="fas fa-file-excel mr-2"></i>
+                                        {isLoading ? "Загрузка..." : "Сформировать отчет"}
                                     </button>
                                     </div>
 
