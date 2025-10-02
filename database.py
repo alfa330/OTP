@@ -1237,113 +1237,113 @@ class Database:
                 return pbkdf2_sha256.verify(password, result[0])
             return False
 
-def get_call_evaluations(self, operator_id, month=None):
-    query = """
-        WITH latest_versions AS (
-            -- Находим последние версии для каждого уникального вызова (по номеру и месяцу)
-            SELECT 
-                phone_number,
-                month,
-                MAX(created_at) as latest_date
-            FROM calls
-            WHERE operator_id = %s
-            GROUP BY phone_number, month
-        ),
-        latest_calls AS (
-            -- Получаем полные данные последних версий
+    def get_call_evaluations(self, operator_id, month=None):
+        query = """
+            WITH latest_versions AS (
+                -- Находим последние версии для каждого уникального вызова (по номеру и месяцу)
+                SELECT 
+                    phone_number,
+                    month,
+                    MAX(created_at) as latest_date
+                FROM calls
+                WHERE operator_id = %s
+                GROUP BY phone_number, month
+            ),
+            latest_calls AS (
+                -- Получаем полные данные последних версий
+                SELECT 
+                    c.id,
+                    c.phone_number,
+                    c.month,
+                    c.created_at
+                FROM calls c
+                JOIN latest_versions lv ON 
+                    c.phone_number = lv.phone_number AND 
+                    c.month = lv.month AND 
+                    c.created_at = lv.latest_date
+                WHERE c.operator_id = %s
+            )
             SELECT 
                 c.id,
-                c.phone_number,
-                c.month,
-                c.created_at
+                c.month, 
+                c.phone_number, 
+                c.appeal_date,
+                c.score, 
+                c.comment,
+                c.audio_path,
+                c.is_draft,
+                c.is_correction,
+                TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI') AS evaluation_date,
+                c.scores,
+                c.criterion_comments,
+                d.id as direction_id,
+                d.name as direction_name,
+                d.criteria as direction_criteria,
+                d.has_file_upload as direction_has_file_upload,
+                u.name as evaluator_name,
+                c.created_at,
+                -- sv_request fields
+                c.sv_request,
+                c.sv_request_comment,
+                c.sv_request_by,
+                su.name as sv_request_by_name,
+                TO_CHAR(c.sv_request_at, 'YYYY-MM-DD HH24:MI') as sv_request_at,
+                c.sv_request_approved,
+                c.sv_request_approved_by,
+                apu.name as sv_request_approved_by_name,
+                TO_CHAR(c.sv_request_approved_at, 'YYYY-MM-DD HH24:MI') as sv_request_approved_at
             FROM calls c
-            JOIN latest_versions lv ON 
-                c.phone_number = lv.phone_number AND 
-                c.month = lv.month AND 
-                c.created_at = lv.latest_date
+            JOIN latest_calls lc ON c.id = lc.id
+            LEFT JOIN directions d ON c.direction_id = d.id  
+            LEFT JOIN users u ON c.evaluator_id = u.id
+            LEFT JOIN users su ON c.sv_request_by = su.id
+            LEFT JOIN users apu ON c.sv_request_approved_by = apu.id
             WHERE c.operator_id = %s
-        )
-        SELECT 
-            c.id,
-            c.month, 
-            c.phone_number, 
-            c.appeal_date,
-            c.score, 
-            c.comment,
-            c.audio_path,
-            c.is_draft,
-            c.is_correction,
-            TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI') AS evaluation_date,
-            c.scores,
-            c.criterion_comments,
-            d.id as direction_id,
-            d.name as direction_name,
-            d.criteria as direction_criteria,
-            d.has_file_upload as direction_has_file_upload,
-            u.name as evaluator_name,
-            c.created_at,
-            -- sv_request fields
-            c.sv_request,
-            c.sv_request_comment,
-            c.sv_request_by,
-            su.name as sv_request_by_name,
-            TO_CHAR(c.sv_request_at, 'YYYY-MM-DD HH24:MI') as sv_request_at,
-            c.sv_request_approved,
-            c.sv_request_approved_by,
-            apu.name as sv_request_approved_by_name,
-            TO_CHAR(c.sv_request_approved_at, 'YYYY-MM-DD HH24:MI') as sv_request_approved_at
-        FROM calls c
-        JOIN latest_calls lc ON c.id = lc.id
-        LEFT JOIN directions d ON c.direction_id = d.id  
-        LEFT JOIN users u ON c.evaluator_id = u.id
-        LEFT JOIN users su ON c.sv_request_by = su.id
-        LEFT JOIN users apu ON c.sv_request_approved_by = apu.id
-        WHERE c.operator_id = %s
-    """
-    params = [operator_id, operator_id, operator_id]
-    if month:
-        query += " AND c.month = %s"
-        params.append(month)
-    query += " ORDER BY c.created_at DESC"
+        """
+        params = [operator_id, operator_id, operator_id]
+        if month:
+            query += " AND c.month = %s"
+            params.append(month)
+        query += " ORDER BY c.created_at DESC"
 
-    with self._get_cursor() as cursor:
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
+        with self._get_cursor() as cursor:
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
 
-        return [
-            {
-                "id": row[0],
-                "month": row[1],
-                "phone_number": row[2],
-                "appeal_date": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None,
-                "score": float(row[4]) if row[4] is not None else None,
-                "comment": row[5],
-                "audio_path": row[6],
-                "is_draft": row[7],
-                "is_correction": row[8],
-                "evaluation_date": row[9],
-                "scores": row[10] if row[10] else [],
-                "criterion_comments": row[11] if row[11] else [],
-                "direction": {
-                    "id": row[12],
-                    "name": row[13],
-                    "criteria": row[14] if row[14] else [],
-                    "hasFileUpload": row[15] if row[15] is not None else True
-                } if row[12] else None,
-                "evaluator": row[16] if row[16] else None,
-                "created_at": row[17],
-                # sv_request block
-                "sv_request": bool(row[18]),
-                "sv_request_comment": row[19],
-                "sv_request_by": row[20],
-                "sv_request_by_name": row[21],
-                "sv_request_at": row[22],
-                "sv_request_approved": bool(row[23]),
-                "sv_request_approved_by": row[24],
-                "sv_request_approved_by_name": row[25],
-                "sv_request_approved_at": row[26]
-            } for row in rows
-        ]
+            return [
+                {
+                    "id": row[0],
+                    "month": row[1],
+                    "phone_number": row[2],
+                    "appeal_date": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None,
+                    "score": float(row[4]) if row[4] is not None else None,
+                    "comment": row[5],
+                    "audio_path": row[6],
+                    "is_draft": row[7],
+                    "is_correction": row[8],
+                    "evaluation_date": row[9],
+                    "scores": row[10] if row[10] else [],
+                    "criterion_comments": row[11] if row[11] else [],
+                    "direction": {
+                        "id": row[12],
+                        "name": row[13],
+                        "criteria": row[14] if row[14] else [],
+                        "hasFileUpload": row[15] if row[15] is not None else True
+                    } if row[12] else None,
+                    "evaluator": row[16] if row[16] else None,
+                    "created_at": row[17],
+                    # sv_request block
+                    "sv_request": bool(row[18]),
+                    "sv_request_comment": row[19],
+                    "sv_request_by": row[20],
+                    "sv_request_by_name": row[21],
+                    "sv_request_at": row[22],
+                    "sv_request_approved": bool(row[23]),
+                    "sv_request_approved_by": row[24],
+                    "sv_request_approved_by_name": row[25],
+                    "sv_request_approved_at": row[26]
+                } for row in rows
+            ]
         
     def update_user(self, user_id, field, value, changed_by=None):
         allowed_fields = ['direction_id', 'supervisor_id', 'status', 'rate', 'hire_date']  # Add new fields
