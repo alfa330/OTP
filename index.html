@@ -7015,14 +7015,15 @@
                                                             <button
                                                             onClick={() => {
                                                                 const tokenData = {
-                                                                apiKey: user.apiKey,
-                                                                userId: user.id,
-                                                                role: user.role,
-                                                                name: user.name,
-                                                                operatorId: op.id,
-                                                                operatorName: op.name,
-                                                                supervisorId: selectedSvId,
-                                                                timestamp: Date.now()
+                                                                    apiKey: user.apiKey,
+                                                                    userId: user.id,
+                                                                    role: user.role,
+                                                                    name: user.name,
+                                                                    operatorId: op.id,
+                                                                    operatorName: op.name,
+                                                                    supervisorId: selectedSvId,
+                                                                    month: selectedReportMonth || selectedMonth, // <-- добавляем месяц (формат YYYY-MM)
+                                                                    timestamp: Date.now()
                                                                 };
                                                                 const token = safeBtoa(JSON.stringify(tokenData));
                                                                 window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
