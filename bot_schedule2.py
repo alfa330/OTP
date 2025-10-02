@@ -1679,6 +1679,98 @@ def get_users_report():
         logging.error(f"Error generating users report: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/call_evaluation/sv_request', methods=['POST'])
+@require_api_key
+def sv_request_call():
+    """
+    Супервайзер отправляет запрос на переоценку по конкретному звонку (call_id).
+    Тело JSON: { "call_id": int, "comment": "..." }
+    Заголовки: X-User-Id, X-API-Key (require_api_key обеспечит авторизацию)
+    """
+    try:
+        data = request.get_json()
+        if not data or 'call_id' not in data:
+            return jsonify({"error": "Missing call_id"}), 400
+
+        call_id = int(data['call_id'])
+        comment = data.get('comment', '').strip()
+        requester_id = int(request.headers.get('X-User-Id'))
+
+        # Проверка: существует ли звонок и принадлежит ли оператор супервайзеру
+        call = db.get_call_by_id(call_id)
+        if not call:
+            return jsonify({"error": "Call not found"}), 404
+
+        # получить запись звонка с operator_id
+        with db._get_cursor() as cursor:
+            cursor.execute("SELECT operator_id, evaluator_id, month FROM calls WHERE id = %s", (call_id,))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({"error": "Call not found"}), 404
+            operator_id, evaluator_id, call_month = row
+
+        operator = db.get_user(id=operator_id)
+        if not operator:
+            return jsonify({"error": "Operator not found"}), 404
+
+        # Проверяем что requester — супервайзер этого оператора (или админ)
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 403
+
+        if requester[3] != 'admin' and operator[6] != requester_id:
+            return jsonify({"error": "Only the operator's supervisor or admin can request reevaluation"}), 403
+
+        # Сохраняем заявку в calls
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE calls
+                SET sv_request = TRUE,
+                    sv_request_comment = %s,
+                    sv_request_by = %s,
+                    sv_request_at = %s,
+                    sv_request_approved = FALSE,
+                    sv_request_approved_by = NULL,
+                    sv_request_approved_at = NULL
+                WHERE id = %s
+            """, (comment, requester_id, datetime.utcnow(), call_id))
+
+        # Уведомляем админа через Telegram с inline-кнопкой
+        API_TOKEN = os.getenv('BOT_TOKEN')
+        admin_chat_id = os.getenv('ADMIN_ID')
+        if API_TOKEN and admin_chat_id:
+            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+            text = (
+                f"⚠️ <b>Запрос на переоценку (от СВ)</b>\n\n"
+                f"📞 Call ID: <b>{call_id}</b>\n"
+                f"👤 Оператор ID: <b>{operator_id}</b> / {operator[2]}\n"
+                f"📄 Месяц: <b>{call_month}</b>\n"
+                f"📝 Комментарий: {comment or '-'}\n\n"
+                f"Нажмите кнопку, чтобы одобрить переоценку и открыть звонок для переоценки."
+            )
+            reply_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "Одобрить переоценку ✅", "callback_data": f"approve_reval:{call_id}"}
+                    ]
+                ]
+            }
+            try:
+                requests.post(telegram_url, json={
+                    "chat_id": admin_chat_id,
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "reply_markup": json.dumps(reply_markup)
+                }, timeout=10)
+            except Exception as e:
+                logging.error(f"Failed to send telegram sv_request notification: {e}")
+
+        return jsonify({"status": "success", "message": "sv_request created"}), 200
+
+    except Exception as e:
+        logging.error(f"Error in sv_request_call: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 @app.route('/api/call_versions/<int:call_id>', methods=['GET'])
 @require_api_key
 def get_call_versions(call_id):
@@ -3372,6 +3464,132 @@ async def notify_supervisor_handler(callback: types.CallbackQuery):
             text="Ошибка отправки уведомления",
             show_alert=True
         )
+
+async def _is_admin_user(tg_id):
+    """Проверка админа: сначала сравнение с переменной admin, затем fallback — проверка в БД."""
+    try:
+        if admin is not None and str(tg_id) == str(admin):
+            return True
+
+        # fallback: проверить в users по telegram_id и role='admin'
+        loop = asyncio.get_event_loop()
+        def _check():
+            with db._get_cursor() as cur:
+                cur.execute("SELECT role FROM users WHERE telegram_id = %s LIMIT 1", (tg_id,))
+                row = cur.fetchone()
+                return bool(row and row[0] == 'admin')
+        return await loop.run_in_executor(None, _check)
+    except Exception as e:
+        logger.exception("Error checking admin: %s", e)
+        return False
+
+async def _approve_call_and_get_notify_row(call_id, approver_tg_id):
+    """
+    Пометить звонок одобренным и вернуть данные для уведомлений:
+    (sv_request_by, sv_tg, evaluator_id, eval_tg)
+    """
+    loop = asyncio.get_event_loop()
+
+    def _update():
+        with db._get_cursor() as cur:
+            # получить internal user id админа (если есть)
+            cur.execute("SELECT id FROM users WHERE telegram_id = %s LIMIT 1", (approver_tg_id,))
+            row = cur.fetchone()
+            approver_user_id = row[0] if row else None
+
+            cur.execute("""
+                UPDATE calls
+                SET sv_request_approved = TRUE,
+                    sv_request_approved_by = %s,
+                    sv_request_approved_at = %s
+                WHERE id = %s
+            """, (approver_user_id, datetime.utcnow(), call_id))
+
+            cur.execute("""
+                SELECT c.sv_request_by, u_super.telegram_id AS sv_tg, c.evaluator_id, u_eval.telegram_id AS eval_tg
+                FROM calls c
+                LEFT JOIN users u_super ON u_super.id = c.sv_request_by
+                LEFT JOIN users u_eval ON u_eval.id = c.evaluator_id
+                WHERE c.id = %s
+            """, (call_id,))
+            return cur.fetchone()
+
+    result = await loop.run_in_executor(None, _update)
+    return result  # None или кортеж (sv_request_by, sv_tg, evaluator_id, eval_tg)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('approve_reval:'))
+async def handle_approve_reval(callback_query: types.CallbackQuery):
+    """
+    Обработка approve_reval:{call_id}.
+    Требования:
+      - admin (telegram id) доступен в переменной `admin`.
+      - db доступен и синхронен (используем run_in_executor).
+    """
+    cq = callback_query
+    user = cq.from_user
+    data = cq.data
+
+    # извлечь call_id
+    try:
+        _, call_id_str = data.split(':', 1)
+        call_id = int(call_id_str)
+    except Exception:
+        await cq.answer("Неверный идентификатор звонка", show_alert=True)
+        return
+
+    # проверить, что нажал админ
+    try:
+        is_admin = await _is_admin_user(user.id)
+    except Exception as e:
+        logger.exception("Ошибка проверки администратора: %s", e)
+        is_admin = False
+
+    if not is_admin:
+        await cq.answer("Только администратор может одобрять переоценку", show_alert=True)
+        return
+
+    # пометим звонок как одобренный и получим данные для уведомлений
+    try:
+        notify_row = await _approve_call_and_get_notify_row(call_id, user.id)
+    except Exception as e:
+        logger.exception("Ошибка при пометке звонка: %s", e)
+        await cq.answer("Ошибка сервера при одобрении", show_alert=True)
+        return
+
+    # ответ на callback (чтобы кнопка показала результат)
+    try:
+        await cq.answer("Переоценка одобрена администратором", show_alert=False)
+    except Exception as e:
+        logger.debug("Не удалось послать answerCallbackQuery: %s", e)
+
+    # убрать inline-кнопку (если возможно)
+    try:
+        if cq.message:
+            await cq.bot.edit_message_reply_markup(chat_id=cq.message.chat.id, message_id=cq.message.message_id, reply_markup=None)
+    except Exception as e:
+        logger.debug("Не удалось удалить reply_markup: %s", e)
+
+    # уведомить супервайзера и оценивающего (если есть tg id)
+    if notify_row:
+        try:
+            sv_request_by, sv_tg, evaluator_id, eval_tg = notify_row
+            if sv_tg:
+                try:
+                    await cq.bot.send_message(int(sv_tg),
+                        f"✅ Ваша заявка на переоценку для Call ID {call_id} одобрена администратором. Можете инициировать переоценку.")
+                except Exception as e:
+                    logger.debug("Не удалось уведомить супервайзера: %s", e)
+            if eval_tg:
+                try:
+                    await cq.bot.send_message(int(eval_tg),
+                        f"ℹ️ Админ одобрил запрос на переоценку для Call ID {call_id}. Для переоценки создайте новую оценку с is_correction=true и previous_version_id={call_id}.")
+                except Exception as e:
+                    logger.debug("Не удалось уведомить оценивающего: %s", e)
+        except Exception as e:
+            logger.exception("Ошибка при отправке уведомлений после approve: %s", e)
+
+    # (опционально) логирование
+    logger.info("Call %s approved by tg_user %s", call_id, user.id)
 
 
 # === Супервайзерам =============================================================================================
