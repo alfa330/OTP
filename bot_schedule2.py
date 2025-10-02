@@ -501,8 +501,27 @@ def sv_daily_hours():
         # -----------------------
         # Other roles not allowed
         # -----------------------
+        elif role == 'admin':
+            
+            user_id = request.args.get('id')
+            if not user_id:
+                return jsonify({"error": "SV id not found."}), 403
+
+            try:
+                result = db.get_daily_hours_by_supervisor_month(user_id, month)
+            except Exception as e:
+                return jsonify({"error":str(e)}), 400
+            
+            operator_obj = result.get("operator")
+            return jsonify({
+                "status": "success",
+                "month": result.get("month", month),
+                "days_in_month": result.get("days_in_month"),
+                "operators": [operator_obj] if operator_obj else []
+            }), 200
+
         else:
-            return jsonify({"error": "Only supervisors or operators can request this endpoint"}), 403
+            return jsonify({"error": "Only supervisors, operators and admins can request this endpoint"}), 403
 
     except Exception as e:
         logging.exception("Error in sv_daily_hours")

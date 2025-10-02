@@ -133,6 +133,10 @@ class Database:
                 );
             """)
             cursor.execute("""
+                UPDATE calls
+                SET month = '2025-09'
+                WHERE operator_id = 77
+                AND month = '2025-10';
                 CREATE TABLE IF NOT EXISTS calls (
                     id SERIAL PRIMARY KEY,
                     evaluator_id INTEGER NOT NULL REFERENCES users(id),

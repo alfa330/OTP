@@ -2358,15 +2358,19 @@
                     return;
                 }
 
-                // Определяем supervisor_id: если выбран (selectedSvId) используем его, иначе если пользователь sv — используем его id
-                let supervisorId = selectedSvId || '';
-                if (!supervisorId && user.role === 'sv') supervisorId = String(user.id);
-
                 const params = new URLSearchParams();
                 params.append('month', month);
-                if (supervisorId) params.append('supervisor_id', supervisorId);
+
+                if (user.role === 'admin' && selectedSvId) {
+                    params.append('id', selectedSvId);
+                } else if (selectedSvId) {
+                    params.append('supervisor_id', selectedSvId);
+                } else if (user.role === 'sv') {
+                    params.append('supervisor_id', String(user.id));
+                }
 
                 const url = `${API_BASE_URL}/api/report/monthly_hours?${params.toString()}`;
+                
                 setIsDownloadingReport(true);
 
                 try {
@@ -2464,12 +2468,35 @@
                 if (!user) return;
                 setIsLoading(true);
                 try {
-                const url = `${API_BASE_URL}/api/sv/daily_hours?month=${encodeURIComponent(month)}`;
-                const trainingsUrl = `${API_BASE_URL}/api/trainings?month=${encodeURIComponent(month)}${selectedSvId ? `&sv_id=${selectedSvId}` : ''}`;
-                const [hoursResp, trainingsResp] = await Promise.all([
+                    // build params: month always, but if admin + selectedSvId -> use id
+                    const hoursParams = new URLSearchParams();
+                    hoursParams.append('month', month);
+                    if (user.role === 'admin' && selectedSvId) {
+                    hoursParams.append('id', selectedSvId);
+                    } else if (selectedSvId) {
+                    // for supervisors or when admin didn't choose - use sv_id
+                    hoursParams.append('sv_id', selectedSvId);
+                    } else if (user.role === 'sv') {
+                    hoursParams.append('sv_id', String(user.id));
+                    }
+
+                    const trainingsParams = new URLSearchParams();
+                    trainingsParams.append('month', month);
+                    if (user.role === 'admin' && selectedSvId) {
+                    trainingsParams.append('id', selectedSvId);
+                    } else if (selectedSvId) {
+                    trainingsParams.append('sv_id', selectedSvId);
+                    } else if (user.role === 'sv') {
+                    trainingsParams.append('sv_id', String(user.id));
+                    }
+
+                    const url = `${API_BASE_URL}/api/sv/daily_hours?${hoursParams.toString()}`;
+                    const trainingsUrl = `${API_BASE_URL}/api/trainings?${trainingsParams.toString()}`;
+
+                    const [hoursResp, trainingsResp] = await Promise.all([
                     axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
                     axios.get(trainingsUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
-                ]);
+                    ]);
 
                 if (hoursResp.data && hoursResp.data.status === 'success' && Array.isArray(hoursResp.data.operators)) {
                     setOperators(hoursResp.data.operators);
