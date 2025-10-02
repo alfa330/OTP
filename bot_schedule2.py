@@ -1944,8 +1944,42 @@ def receive_call_evaluation():
         if is_correction:
             requester_id = int(request.headers.get('X-User-Id'))
             requester = db.get_user(id=requester_id)
-            if not requester or requester[3] != 'admin':
-                return jsonify({"error": "Only admins can perform re-evaluations"}), 403
+            if not requester:
+                return jsonify({"error": "Requester not found"}), 403
+
+            # admins всегда могут делать переоценки
+            if requester[3] == 'admin':
+                allowed = True
+            else:
+                # non-admin может переоценивать ТОЛЬКО если:
+                # - передан previous_version_id
+                # - previous call exists AND sv_request == TRUE AND sv_request_approved == TRUE
+                # - и sv_request_by == requester_id (т.е. именно этот СВ отправил запрос)
+                allowed = False
+                if previous_version_id:
+                    try:
+                        prev_id = int(previous_version_id)
+                    except Exception:
+                        prev_id = None
+                    if prev_id:
+                        try:
+                            with db._get_cursor() as cursor:
+                                cursor.execute("SELECT sv_request, sv_request_approved, sv_request_by FROM calls WHERE id = %s", (prev_id,))
+                                prev = cursor.fetchone()
+                        except Exception as e:
+                            logging.error(f"Error checking previous call for re-eval permissions: {e}")
+                            prev = None
+
+                        if prev:
+                            sv_request_flag = bool(prev[0])
+                            sv_request_approved_flag = bool(prev[1])
+                            sv_request_by_id = prev[2]
+                            if sv_request_flag and sv_request_approved_flag and sv_request_by_id == requester_id:
+                                allowed = True
+
+            if not allowed:
+                return jsonify({"error": "Only admins or the supervisor who requested and was approved can perform re-evaluations"}), 403
+
 
         audio_path = None
         audio_data = None
