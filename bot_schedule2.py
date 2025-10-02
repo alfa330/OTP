@@ -503,7 +503,7 @@ def sv_daily_hours():
         # -----------------------
         elif role == 'admin':
             
-            user_id = request.args.get('id')
+            user_id = request.args.get('sv_id')
             if not user_id:
                 return jsonify({"error": "SV id not found."}), 403
 
