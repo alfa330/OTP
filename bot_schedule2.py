@@ -441,6 +441,7 @@ def sv_daily_hours():
     Если запрос делает обычный оператор — возвращаем только его daily_hours.
     Параметры:
       - month (query param) — YYYY-MM (опционально, по умолчанию текущий месяц)
+      - id (query param) — (только для admin) id нужного supervisor
     Заголовки:
       - X-User-Id (обязательно) — id супервайзера/оператора (проверяется роль)
     """
@@ -450,28 +451,40 @@ def sv_daily_hours():
         if not month:
             month = datetime.now().strftime('%Y-%m')
 
-        # requester
+        # requester id header
         requester_header = request.headers.get('X-User-Id')
         if not requester_header or not requester_header.isdigit():
             return jsonify({"error": "Invalid or missing X-User-Id header"}), 400
         requester_id = int(requester_header)
 
+        # get requester from db
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 403
 
-        role = requester[3]  # u.role
+        # try to read role in a robust way (support tuple or dict)
+        role = None
+        if isinstance(requester, dict):
+            role = requester.get('role')
+        elif isinstance(requester, (list, tuple)) and len(requester) > 3:
+            role = requester[3]
+        else:
+            # fallback: try attribute access
+            role = getattr(requester, 'role', None)
+
+        if not role:
+            # если роль не определена — ошибка
+            return jsonify({"error": "User role not determined"}), 500
 
         # -----------------------
         # Behavior for supervisors
         # -----------------------
         if role == 'sv':
             try:
-                # метод БД уже возвращает norm_hours, aggregates и rate для каждого оператора
                 result = db.get_daily_hours_by_supervisor_month(requester_id, month)
             except ValueError as e:
                 return jsonify({"error": str(e)}), 400
-
+            # result expected to contain "operators" list
             return jsonify({
                 "status": "success",
                 "month": result.get("month", month),
@@ -484,40 +497,47 @@ def sv_daily_hours():
         # -----------------------
         elif role == 'operator':
             try:
-                # теперь этот метод вернёт dict с operator (включая norm_hours, fines/aggregates и daily)
                 result = db.get_daily_hours_for_operator_month(requester_id, month)
             except Exception as e:
                 logging.exception("Error fetching daily hours for operator")
                 return jsonify({"error": "Failed to fetch daily hours"}), 500
 
-            operator_obj = result.get("operator")
+            operator_obj = result.get("operator") if isinstance(result, dict) else None
             return jsonify({
                 "status": "success",
-                "month": result.get("month", month),
-                "days_in_month": result.get("days_in_month"),
+                "month": result.get("month", month) if isinstance(result, dict) else month,
+                "days_in_month": result.get("days_in_month") if isinstance(result, dict) else None,
                 "operators": [operator_obj] if operator_obj else []
             }), 200
 
         # -----------------------
-        # Other roles not allowed
+        # Behavior for admins
         # -----------------------
         elif role == 'admin':
-            
-            user_id = request.args.get('sv_id')
-            if not user_id:
-                return jsonify({"error": "SV id not found."}), 403
+            # admin must pass id (supervisor id) as query param "id"
+            user_id = request.args.get('id')
+            if not user_id or not str(user_id).isdigit():
+                return jsonify({"error": "Missing or invalid 'id' parameter (supervisor id)"}), 400
 
+            supervisor_id = int(user_id)
             try:
-                result = db.get_daily_hours_by_supervisor_month(user_id, month)
+                result = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
             except Exception as e:
-                return jsonify({"error":str(e)}), 400
-            
-            operator_obj = result.get("operator")
+                logging.exception("Error fetching daily hours for supervisor (admin request)")
+                return jsonify({"error": str(e)}), 400
+
+            # Normalize: expect result to contain "operators" list
+            operators = result.get("operators") if isinstance(result, dict) else None
+            if operators is None:
+                # if older API returned single operator under "operator", handle it
+                single = result.get("operator") if isinstance(result, dict) else None
+                operators = [single] if single else []
+
             return jsonify({
                 "status": "success",
-                "month": result.get("month", month),
+                "month": result.get("month", month) if isinstance(result, dict) else month,
                 "days_in_month": result.get("days_in_month"),
-                "operators": [operator_obj] if operator_obj else []
+                "operators": operators
             }), 200
 
         else:
