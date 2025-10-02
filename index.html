@@ -7693,6 +7693,7 @@
                                                                 name: user.name,
                                                                 operatorId: op.id,
                                                                 operatorName: op.name,
+                                                                month: selectedReportMonth || selectedMonth, // <-- добавляем месяц (формат YYYY-MM)
                                                                 timestamp: Date.now()
                                                                 };
                                                                 const token = safeBtoa(JSON.stringify(tokenData));
