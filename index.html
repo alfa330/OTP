@@ -2362,7 +2362,7 @@
                 params.append('month', month);
 
                 if (user.role === 'admin' && selectedSvId) {
-                    params.append('id', selectedSvId);
+                    params.append('supervisor_id', selectedSvId);
                 } else if (selectedSvId) {
                     params.append('supervisor_id', selectedSvId);
                 } else if (user.role === 'sv') {
