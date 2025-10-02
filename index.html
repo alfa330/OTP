@@ -6631,13 +6631,13 @@
                                                 <i className="fas fa-chart-bar"></i> Мои оценки
                                             </button>
                                         </li>
-                                        <li>
-                                            <button onClick={() => setView('salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-calculator"></i> Калькулятор зарплаты
-                                            </button>
-                                        </li>
                                     </>
                                 )}
+                                <li>
+                                    <button onClick={() => setView('salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
+                                        <i className="fas fa-calculator"></i> Калькулятор зарплаты
+                                    </button>
+                                </li>
                                <li className="relative" ref={sidebarAccountRef}>
                                 <button
                                     onClick={handleToggleDropdown}
@@ -8293,6 +8293,8 @@
                                             )}
                                         </div>
                                         )}
+                            </>
+                        )}
                                         {view === 'salary' && (
                                             <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                                 <h2 className="text-3xl font-bold mb-8 text-gray-900 flex items-center gap-2">
@@ -8627,8 +8629,6 @@
                                                         )}
                                                       </div>
                                                     )}
-                            </>
-                        )}
                         {showDisputeModal && (
                             <DisputeModal
                                 selectedEvaluation={selectedEvaluation}
