@@ -2835,18 +2835,18 @@
                     <div className="mb-3 flex space-x-2 items-center">
                     <button
                         onClick={() => setActiveTab("active")}
-                        className={`px-4 py-2 rounded-lg font-medium ${activeTab === "active" ? "bg-green-600 text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"}`}
+                        className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeTab === 'active' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
                         title="Показать активных операторов"
                     >
-                        Активные <span className="ml-2 text-sm text-gray-700 bg-white/20 px-2 py-0.5 rounded">{opsCount.active}</span>
+                        Активные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{opsCount.active}</span>
                     </button>
 
                     <button
                         onClick={() => setActiveTab("fired")}
-                        className={`px-4 py-2 rounded-lg font-medium ${activeTab === "fired" ? "bg-red-600 text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"}`}
+                        className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeTab === 'fired' ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
                         title="Показать уволенных операторов"
                     >
-                        Уволенные <span className="ml-2 text-sm text-gray-700 bg-white/20 px-2 py-0.5 rounded">{opsCount.fired}</span>
+                        Уволенные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{opsCount.fired}</span>
                     </button>
                     </div>
 
