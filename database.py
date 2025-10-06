@@ -577,7 +577,7 @@ class Database:
             # Сбор финального списка операторов
             operators = []
             for row in operator_rows:
-                (op_id, op_name, rate, norm_hours, status,
+                (op_id, op_name, rate, status, norm_hours, 
                 regular_hours, total_break_time, total_talk_time,
                 total_calls, total_efficiency_hours, calls_per_hour, fines) = row
 
