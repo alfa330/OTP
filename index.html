@@ -3657,6 +3657,64 @@
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
             const [sortField, setSortField] = useState('name'); // primary sort field
             const [sortDirection, setSortDirection] = useState('asc'); // 'asc' | 'desc'
+            const [opsSortField, setOpsSortField] = useState('name'); // primary sort field
+            const [opsSortDirection, setOpsSortDirection] = useState('asc'); // 'asc' | 'desc'
+
+            const handleOpsSort = (field) => {
+            if (opsSortField === field) {
+                setOpsSortDirection(prev => (prev === 'asc' ? 'desc' : 'asc'));
+            } else {
+                setOpsSortField(field);
+                setOpsSortDirection('asc');
+            }
+            };
+
+            const getOpsSortIcon = (field) => {
+            if (opsSortField !== field) return <span className="ml-2 text-gray-400 text-xs">⇅</span>;
+            return opsSortDirection === 'asc' ? <span className="ml-2 text-xs">▲</span> : <span className="ml-2 text-xs">▼</span>;
+            };
+
+            const parseNumberSafe = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : 0;
+            };
+
+            // combined sort: primary field (opsSortField) + secondary by name
+            const compareOpsByField = (a, b, field) => {
+            const dir = opsSortDirection === 'asc' ? 1 : -1;
+            const nameA = (a?.name || '').toString();
+            const nameB = (b?.name || '').toString();
+
+            if (field === 'call_count') {
+                const ca = parseNumberSafe(a.call_count);
+                const cb = parseNumberSafe(b.call_count);
+                if (ca === cb) return nameA.localeCompare(nameB, 'ru', { sensitivity: 'base' });
+                return (ca - cb) * dir;
+            }
+
+            if (field === 'avg_score') {
+                const sa = parseNumberSafe(a.avg_score);
+                const sb = parseNumberSafe(b.avg_score);
+                if (sa === sb) return nameA.localeCompare(nameB, 'ru', { sensitivity: 'base' });
+                return (sa - sb) * dir;
+            }
+
+            if (field === 'status') {
+                const order = { working: 1, unpaid_leave: 2, fired: 3 };
+                const oa = order[a.status || 'working'] || 99;
+                const ob = order[b.status || 'working'] || 99;
+                if (oa === ob) return nameA.localeCompare(nameB, 'ru', { sensitivity: 'base' });
+                return (oa - ob) * dir;
+            }
+
+            // default: string compare on field then by name
+            const fa = (a[field] || '').toString();
+            const fb = (b[field] || '').toString();
+            const res = fa.localeCompare(fb, 'ru', { sensitivity: 'base' });
+            if (res === 0) return nameA.localeCompare(nameB, 'ru', { sensitivity: 'base' });
+            return res * dir;
+            };
+
 
             const handleSort = (field) => {
             if (sortField === field) {
@@ -7790,92 +7848,139 @@
                                         return <p className="text-center text-gray-600 py-8">Операторы не найдены.</p>;
                                         }
 
+                                        // Группируем по направлению (показываем заголовки групп, но колонку направления убираем)
+                                        const grouped = filteredOperators.reduce((acc, op) => {
+                                        const dirName = directions.find(d => d.id === op.direction_id)?.name || "Без направления";
+                                        if (!acc[dirName]) acc[dirName] = [];
+                                        acc[dirName].push(op);
+                                        return acc;
+                                        }, {});
+
+                                        // Сортируем группы: если сортируем по direction, сортируем сами группы по имени направления,
+                                        // иначе сортируем внутри каждой группы по opsSortField (комбинированно: primary + name)
+                                        let sortedDirectionNames = Object.keys(grouped);
+                                        if (opsSortField === 'direction') {
+                                        sortedDirectionNames = sortedDirectionNames.sort((a, b) => {
+                                            const res = a.localeCompare(b, 'ru', { sensitivity: 'base' });
+                                            return opsSortDirection === 'asc' ? res : -res;
+                                        });
+                                        // внутри группы — сортировка по имени (в направлении учитываем opsSortDirection)
+                                        sortedDirectionNames.forEach(dir => {
+                                            grouped[dir].sort((x, y) => (x.name || '').localeCompare(y.name || '', 'ru', { sensitivity: 'base' }) * (opsSortDirection === 'asc' ? 1 : -1));
+                                        });
+                                        } else {
+                                        // сортируем внутри групп по выбранному полю (compareOpsByField делает secondary sort по name)
+                                        sortedDirectionNames.forEach(dir => {
+                                            grouped[dir].sort((x, y) => compareOpsByField(x, y, opsSortField));
+                                        });
+                                        // стабильный порядок групп по имени направления
+                                        sortedDirectionNames = sortedDirectionNames.sort((a, b) => a.localeCompare(b, 'ru', { sensitivity: 'base' }));
+                                        }
+
                                         return (
                                         <div className="overflow-x-auto rounded-lg border border-gray-200">
                                             <table className="min-w-full divide-y divide-gray-200">
-                                                <thead className="bg-gray-50">
+                                            <thead className="bg-gray-50">
                                                 <tr>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Оценок</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Средний балл</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
+                                                <th
+                                                    onClick={() => handleOpsSort('name')}
+                                                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer select-none"
+                                                >
+                                                    Имя {getOpsSortIcon('name')}
+                                                </th>
+                                                <th
+                                                    onClick={() => handleOpsSort('call_count')}
+                                                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer select-none"
+                                                >
+                                                    Оценок {getOpsSortIcon('call_count')}
+                                                </th>
+                                                <th
+                                                    onClick={() => handleOpsSort('avg_score')}
+                                                    className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer select-none"
+                                                >
+                                                    Средний балл {getOpsSortIcon('avg_score')}
+                                                </th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
                                                 </tr>
-                                                </thead>
+                                            </thead>
 
-                                                <tbody className="bg-white divide-y divide-gray-200">
-                                                {filteredOperators.map((op, idx) => {
+                                            <tbody className="bg-white divide-y divide-gray-200">
+                                                {sortedDirectionNames.map((dirName) => (
+                                                <React.Fragment key={dirName}>
+                                                    {/* Заголовок группы направления */}
+                                                    <tr className="bg-gray-100">
+                                                    <td colSpan={4} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                        {dirName} <span className="ml-2 text-xs text-gray-500">({grouped[dirName].length})</span>
+                                                    </td>
+                                                    </tr>
+
+                                                    {grouped[dirName].map((op, idx) => {
                                                     const callCount = parseInt(op.call_count) || 0;
                                                     return (
-                                                    <tr key={op.id ?? idx} className="hover:bg-gray-50 transition-colors duration-200">
+                                                        <tr key={op.id ?? `${dirName}-${idx}`} className="hover:bg-gray-50 transition-colors duration-200">
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{op.name}</td>
 
                                                         <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
-                                                        {callCount}
+                                                            {callCount}
                                                         </td>
 
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm">
-                                                        <span className={getScoreColor(op.avg_score)}>
+                                                            <span className={getScoreColor(op.avg_score)}>
                                                             {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
-                                                        </span>
+                                                            </span>
                                                         </td>
 
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm">
-                                                        <div className="flex items-center gap-2">
+                                                            <div className="flex items-center gap-2">
                                                             <button
-                                                            onClick={() => {
+                                                                onClick={() => {
                                                                 const tokenData = {
-                                                                apiKey: user.apiKey,
-                                                                userId: user.id,
-                                                                role: user.role,
-                                                                name: user.name,
-                                                                operatorId: op.id,
-                                                                operatorName: op.name,
-                                                                month: selectedReportMonth || selectedMonth, // <-- добавляем месяц (формат YYYY-MM)
-                                                                timestamp: Date.now()
+                                                                    apiKey: user.apiKey,
+                                                                    userId: user.id,
+                                                                    role: user.role,
+                                                                    name: user.name,
+                                                                    operatorId: op.id,
+                                                                    operatorName: op.name,
+                                                                    month: selectedReportMonth || selectedMonth,
+                                                                    timestamp: Date.now()
                                                                 };
                                                                 const token = safeBtoa(JSON.stringify(tokenData));
                                                                 window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
-                                                            }}
-                                                            className="inline-flex items-center gap-2 bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition"
-                                                            title={`Оценить оператора ${op.name}`}
+                                                                }}
+                                                                className="inline-flex items-center gap-2 bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition"
+                                                                title={`Оценить оператора ${op.name}`}
                                                             >
-                                                            <i className="fas fa-play-circle" /> Оценить
+                                                                <i className="fas fa-play-circle" /> Оценить
                                                             </button>
-                                                        </div>
+                                                            </div>
                                                         </td>
-                                                    </tr>
+                                                        </tr>
                                                     );
-                                                })}
-                                                </tbody>
+                                                    })}
+                                                </React.Fragment>
+                                                ))}
+                                            </tbody>
 
-                                                {/* FOOTER: total calls + overall average score (weighted by call count) */}
-                                                <tfoot className="bg-gray-50">
+                                            {/* FOOTER: total calls + overall average score (weighted by call count) */}
+                                            <tfoot className="bg-gray-50">
                                                 {(() => {
-                                                    const totalCalls = filteredOperators.reduce((sum, o) => sum + (parseInt(o.call_count) || 0), 0);
+                                                const totalCalls = Object.values(grouped).flat().reduce((sum, o) => sum + (parseInt(o.call_count) || 0), 0);
+                                                const scores = Object.values(grouped).flat().map(o => parseFloat(o.avg_score)).filter(v => !isNaN(v));
+                                                const overallAvg = scores.length > 0 ? (scores.reduce((a, b) => a + b, 0) / scores.length) : null;
+                                                const overallAvgStr = overallAvg == null ? '-' : Number(overallAvg).toFixed(2);
 
-                                                    // собираем все avg_score, которые есть
-                                                    const scores = filteredOperators
-                                                    .map(o => parseFloat(o.avg_score))
-                                                    .filter(v => !isNaN(v));
-
-                                                    const overallAvg = scores.length > 0
-                                                    ? scores.reduce((a, b) => a + b, 0) / scores.length
-                                                    : null;
-
-                                                    const overallAvgStr = overallAvg == null ? '-' : Number(overallAvg).toFixed(2);
-
-                                                    return (
+                                                return (
                                                     <tr>
-                                                        <td className="px-6 py-3 text-sm font-medium text-gray-700">Итого</td>
-                                                        <td className="px-6 py-3 text-sm font-medium text-gray-900">{totalCalls}</td>
-                                                        <td className="px-6 py-3 text-sm font-medium text-gray-900">{overallAvgStr}</td>
-                                                        <td className="px-6 py-3" />
+                                                    <td className="px-6 py-3 text-sm font-medium text-gray-700">Итого</td>
+                                                    <td className="px-6 py-3 text-sm font-medium text-gray-900">{totalCalls}</td>
+                                                    <td className="px-6 py-3 text-sm font-medium text-gray-900">{overallAvgStr}</td>
+                                                    <td className="px-6 py-3" />
                                                     </tr>
-                                                    );
+                                                );
                                                 })()}
-                                                </tfoot>
+                                            </tfoot>
                                             </table>
-                                            </div>
+                                        </div>
                                         );
                                     })()
                                     ) : (
