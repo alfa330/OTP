@@ -3655,12 +3655,62 @@
             const [activeTab, setActiveTab] = useState("active");
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
+            //SORTING
             const [sortField, setSortField] = useState('name'); // primary sort field
             const [sortDirection, setSortDirection] = useState('asc'); // 'asc' | 'desc'
             const [opsSortField, setOpsSortField] = useState('name'); // primary sort field
             const [opsSortDirection, setOpsSortDirection] = useState('asc'); // 'asc' | 'desc'
             const [usersSortField, setUsersSortField] = useState('name'); // 'name' | 'direction' | 'status' | 'hire_date' | 'rate' | 'supervisor'
             const [usersSortDirection, setUsersSortDirection] = useState('asc'); // 'asc' | 'desc'
+            const [viewScoresSortField, setViewScoresSortField] = useState('name'); // 'name' | 'listened' | 'avg_score' | 'direction'
+            const [viewScoresSortDirection, setViewScoresSortDirection] = useState('asc'); // 'asc' | 'desc'
+
+            const handleViewScoresSort = (field) => {
+            if (viewScoresSortField === field) {
+                setViewScoresSortDirection(prev => (prev === 'asc' ? 'desc' : 'asc'));
+            } else {
+                setViewScoresSortField(field);
+                setViewScoresSortDirection('asc');
+            }
+            };
+
+            const getViewScoresSortIcon = (field) => {
+            if (viewScoresSortField !== field) return <span className="ml-2 text-gray-400 text-xs">⇅</span>;
+            return viewScoresSortDirection === 'asc' ? <span className="ml-2 text-xs">▲</span> : <span className="ml-2 text-xs">▼</span>;
+            };
+
+            const parseNumberSafeViewScores = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : 0;
+            };
+
+            // combined sort: primary (viewScoresSortField) + secondary by name
+            const compareViewScoresByField = (a, b, field) => {
+            const dir = viewScoresSortDirection === 'asc' ? 1 : -1;
+            const nameA = (a?.name || '').toString();
+            const nameB = (b?.name || '').toString();
+
+            if (field === 'listened') {
+                const ca = parseNumberSafeViewScores(a.call_count);
+                const cb = parseNumberSafeViewScores(b.call_count);
+                if (ca === cb) return nameA.localeCompare(nameB, 'ru', { sensitivity: 'base' });
+                return (ca - cb) * dir;
+            }
+
+            if (field === 'avg_score') {
+                const sa = parseNumberSafeViewScores(a.avg_score);
+                const sb = parseNumberSafeViewScores(b.avg_score);
+                if (sa === sb) return nameA.localeCompare(nameB, 'ru', { sensitivity: 'base' });
+                return (sa - sb) * dir;
+            }
+
+            // default: string compare on field then by name
+            const fa = (a[field] || '').toString();
+            const fb = (b[field] || '').toString();
+            const res = fa.localeCompare(fb, 'ru', { sensitivity: 'base' });
+            if (res === 0) return nameA.localeCompare(nameB, 'ru', { sensitivity: 'base' });
+            return res * dir;
+            };
 
             const handleUsersSort = (field) => {
             if (usersSortField === field) {
@@ -7176,6 +7226,36 @@
                                             return <p className="text-center text-gray-600 py-8">Операторы не найдены.</p>;
                                             }
 
+                                            // Группируем по направлению (показываем заголовки групп, но колонку направления не выводим)
+                                            const grouped = filteredOperators.reduce((acc, op) => {
+                                            const dirName = directions.find(d => d.id === op.direction_id)?.name || "Без направления";
+                                            if (!acc[dirName]) acc[dirName] = [];
+                                            acc[dirName].push(op);
+                                            return acc;
+                                            }, {});
+
+                                            // Сортировка групп: если выбран field = 'direction' — сортируем группы по имени направления,
+                                            // иначе внутри каждой группы сортируем по выбранному полю (combined: primary + name)
+                                            let sortedDirectionNames = Object.keys(grouped);
+                                            if (viewScoresSortField === 'direction') {
+                                            sortedDirectionNames = sortedDirectionNames.sort((a, b) => {
+                                                const res = a.localeCompare(b, 'ru', { sensitivity: 'base' });
+                                                return viewScoresSortDirection === 'asc' ? res : -res;
+                                            });
+                                            // внутри группы — сортировка по имени оператора
+                                            sortedDirectionNames.forEach(dir => {
+                                                grouped[dir].sort((x, y) => (x.name || '').localeCompare(y.name || '', 'ru', { sensitivity: 'base' }) * (viewScoresSortDirection === 'asc' ? 1 : -1));
+                                            });
+                                            } else {
+                                            // сортируем внутри групп по выбранному полю
+                                            sortedDirectionNames.forEach(dir => {
+                                                grouped[dir].sort((x, y) => compareViewScoresByField(x, y, viewScoresSortField));
+                                            });
+                                            // стабильный порядок групп по имени направления
+                                            sortedDirectionNames = sortedDirectionNames.sort((a, b) => a.localeCompare(b, 'ru', { sensitivity: 'base' }));
+                                            }
+
+                                            // предвычислим общие значения для футера
                                             const totalCalls = filteredOperators.reduce((sum, o) => sum + (parseInt(o.call_count) || 0), 0);
                                             const scoresArr = filteredOperators
                                             .map(o => (o.avg_score == null ? NaN : Number(o.avg_score)))
@@ -7187,48 +7267,74 @@
                                                 <table className="min-w-full divide-y divide-gray-200">
                                                 <thead className="bg-gray-50">
                                                     <tr>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Имя</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Прослушано</th>
+                                                    <th
+                                                        onClick={() => handleViewScoresSort('name')}
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                    >
+                                                        Имя {getViewScoresSortIcon('name')}
+                                                    </th>
+                                                    <th
+                                                        onClick={() => handleViewScoresSort('listened')}
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                    >
+                                                        Прослушано {getViewScoresSortIcon('listened')}
+                                                    </th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ожидаемые</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Средний балл</th>
+                                                    <th
+                                                        onClick={() => handleViewScoresSort('avg_score')}
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                    >
+                                                        Средний балл {getViewScoresSortIcon('avg_score')}
+                                                    </th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ссылка</th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Действия</th>
                                                     </tr>
                                                 </thead>
+
                                                 <tbody className="bg-white divide-y divide-gray-200">
-                                                    {filteredOperators.map((op, index) => {
-                                                    const currentWeek = getCurrentWeekOfMonth();
-                                                    const expectedCalls = getExpectedCalls(currentWeek);
-                                                    const callCount = parseInt(op.call_count) || 0;
-                                                    const hasIssue = callCount < expectedCalls;
-                                                    return (
-                                                        <tr key={op.id ?? index} className="hover:bg-gray-50 transition-colors duration-200">
-                                                        <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
-                                                        <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, expectedCalls)}`}>{callCount}</td>
-                                                        <td className="px-6 py-4 whitespace-nowrap">{expectedCalls}</td>
-                                                        <td className="px-6 py-4 whitespace-nowrap">
-                                                            <span className={getScoreColor(op.avg_score)}>
-                                                            {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
-                                                            </span>
+                                                    {sortedDirectionNames.map((dirName) => (
+                                                    <React.Fragment key={dirName}>
+                                                        {/* Заголовок группы направления */}
+                                                        <tr className="bg-gray-100">
+                                                        <td colSpan={6} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                            {dirName} <span className="ml-2 text-xs text-gray-500">({grouped[dirName].length})</span>
                                                         </td>
-                                                        <td className="px-6 py-4 whitespace-nowrap">
-                                                            {op.link ? (
-                                                            <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">Просмотр</a>
-                                                            ) : '-'}
-                                                        </td>
-                                                        <td className="px-6 py-4 whitespace-nowrap space-x-2">
-                                                            {hasIssue && (
-                                                            <button
-                                                                onClick={() => notifySupervisor(selectedSvId, op.name)}
-                                                                className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm"
-                                                                disabled={isLoading}
-                                                            >
-                                                                Уведомить
-                                                            </button>
-                                                            )}
-                                                            <button
-                                                            onClick={() => {
-                                                                const tokenData = {
+                                                        </tr>
+
+                                                        {grouped[dirName].map((op, index) => {
+                                                        const currentWeek = getCurrentWeekOfMonth();
+                                                        const expectedCalls = getExpectedCalls(currentWeek);
+                                                        const callCount = parseInt(op.call_count) || 0;
+                                                        const hasIssue = callCount < expectedCalls;
+
+                                                        return (
+                                                            <tr key={op.id ?? `${dirName}-${index}`} className="hover:bg-gray-50 transition-colors duration-200">
+                                                            <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
+                                                            <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, expectedCalls)}`}>{callCount}</td>
+                                                            <td className="px-6 py-4 whitespace-nowrap">{expectedCalls}</td>
+                                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                                <span className={getScoreColor(op.avg_score)}>
+                                                                {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                                {op.link ? (
+                                                                <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">Просмотр</a>
+                                                                ) : '-'}
+                                                            </td>
+                                                            <td className="px-6 py-4 whitespace-nowrap space-x-2">
+                                                                {hasIssue && (
+                                                                <button
+                                                                    onClick={() => notifySupervisor(selectedSvId, op.name)}
+                                                                    className="bg-yellow-500 text-white px-3 py-1 rounded-lg hover:bg-yellow-600 text-sm"
+                                                                    disabled={isLoading}
+                                                                >
+                                                                    Уведомить
+                                                                </button>
+                                                                )}
+                                                                <button
+                                                                onClick={() => {
+                                                                    const tokenData = {
                                                                     apiKey: user.apiKey,
                                                                     userId: user.id,
                                                                     role: user.role,
@@ -7236,21 +7342,24 @@
                                                                     operatorId: op.id,
                                                                     operatorName: op.name,
                                                                     supervisorId: selectedSvId,
-                                                                    month: selectedReportMonth || selectedMonth, // <-- добавляем месяц (формат YYYY-MM)
+                                                                    month: selectedReportMonth || selectedMonth,
                                                                     timestamp: Date.now()
-                                                                };
-                                                                const token = safeBtoa(JSON.stringify(tokenData));
-                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
-                                                            }}
-                                                            className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm"
-                                                            >
-                                                            Оценки
-                                                            </button>
-                                                        </td>
-                                                        </tr>
-                                                    );
-                                                    })}
+                                                                    };
+                                                                    const token = safeBtoa(JSON.stringify(tokenData));
+                                                                    window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
+                                                                }}
+                                                                className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm"
+                                                                >
+                                                                Оценки
+                                                                </button>
+                                                            </td>
+                                                            </tr>
+                                                        );
+                                                        })}
+                                                    </React.Fragment>
+                                                    ))}
                                                 </tbody>
+
                                                 <tfoot className="bg-gray-50">
                                                     <tr>
                                                     <td className="px-6 py-3 font-medium">Итого</td>
@@ -7269,7 +7378,7 @@
                                         <p className="text-center text-gray-600">Операторы не найдены для этого супервайзера.</p>
                                         ) : null}
                                     </div>
-                                )}
+                                    )}
                                 {showMonitoringScaleModal && (
                                     <MonitoringScaleModal
                                         isOpen={showMonitoringScaleModal}
