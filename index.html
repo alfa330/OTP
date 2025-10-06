@@ -3655,8 +3655,8 @@
             const [activeTab, setActiveTab] = useState("active");
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
-            const [sortField, setSortField] = useState('name');
-            const [sortDirection, setSortDirection] = useState('asc');
+            const [sortField, setSortField] = useState('name'); // primary sort field
+            const [sortDirection, setSortDirection] = useState('asc'); // 'asc' | 'desc'
 
             const handleSort = (field) => {
             if (sortField === field) {
@@ -3679,25 +3679,47 @@
             return dt.getTime() || 0;
             };
 
+            // compare with secondary key = name (combined sort)
             const compareByField = (a, b, field) => {
             const dir = sortDirection === 'asc' ? 1 : -1;
-            const va = a?.[field];
-            const vb = b?.[field];
+
+            const safe = (v) => (v === null || typeof v === 'undefined') ? '' : v;
 
             if (field === 'rate') {
-                const na = Number(va || 0);
-                const nb = Number(vb || 0);
+                const na = Number(a?.rate || 0);
+                const nb = Number(b?.rate || 0);
+                if (na === nb) return safe(a?.name).toString().localeCompare(safe(b?.name).toString(), 'ru', { sensitivity: 'base' }) * 1;
                 return (na - nb) * dir;
             }
 
             if (field === 'hire_date') {
-                return (parseDateForSort(va) - parseDateForSort(vb)) * dir;
+                const da = parseDateForSort(a?.hire_date);
+                const db = parseDateForSort(b?.hire_date);
+                if (da === db) return safe(a?.name).toString().localeCompare(safe(b?.name).toString(), 'ru', { sensitivity: 'base' }) * 1;
+                return (da - db) * dir;
             }
 
-            // string comparison (name, status, supervisor_name, etc.)
-            const sa = (va || '').toString();
-            const sb = (vb || '').toString();
-            return sa.localeCompare(sb, 'ru', { sensitivity: 'base' }) * dir;
+            if (field === 'status') {
+                // optional: define logical order for statuses (working -> unpaid_leave -> fired -> others)
+                const order = { working: 1, unpaid_leave: 2, fired: 3 };
+                const sa = a?.status || 'working';
+                const sb = b?.status || 'working';
+                const oa = order[sa] || 99;
+                const ob = order[sb] || 99;
+                if (oa === ob) {
+                return safe(a?.name).toString().localeCompare(safe(b?.name).toString(), 'ru', { sensitivity: 'base' }) * 1;
+                }
+                return (oa - ob) * dir;
+            }
+
+            // direction handled separately (groups); default: string compare then by name
+            const sa = safe(a?.[field]).toString();
+            const sb = safe(b?.[field]).toString();
+            const res = sa.localeCompare(sb, 'ru', { sensitivity: 'base' });
+            if (res === 0) {
+                return safe(a?.name).toString().localeCompare(safe(b?.name).toString(), 'ru', { sensitivity: 'base' }) * 1;
+            }
+            return res * dir;
             };
 
             const handleToggleDropdown = (forceClose = null) => {
@@ -7487,7 +7509,7 @@
                                             );
                                             });
 
-                                            // Группируем по направлению
+                                            // Группируем по направлению (оставляем группировку, но убираем колонку направления)
                                             const grouped = matched.reduce((acc, op) => {
                                             const dirName = directions.find(d => d.id === op.direction_id)?.name || "Без направления";
                                             if (!acc[dirName]) acc[dirName] = [];
@@ -7495,22 +7517,28 @@
                                             return acc;
                                             }, {});
 
-                                            // Сортировка направлений (если сортируем по direction) или просто получить список направлений
+                                            // Сортируем группы: если сортируем по 'direction' — сортируем имена групп по направлению + вторично по ФИО
                                             let sortedDirectionNames = Object.keys(grouped);
                                             if (sortField === 'direction') {
                                             sortedDirectionNames = sortedDirectionNames.sort((a, b) => {
                                                 const res = a.localeCompare(b, 'ru', { sensitivity: 'base' });
                                                 return sortDirection === 'asc' ? res : -res;
                                             });
+                                            // внутри групп — комбинированная сортировка (direction primary, name secondary)
+                                            sortedDirectionNames.forEach((dir) => {
+                                                grouped[dir].sort((x, y) => {
+                                                // primary same for all in group, so compare by name (respect sortDirection for combined behavior)
+                                                return (x.name || '').localeCompare(y.name || '', 'ru', { sensitivity: 'base' }) * (sortDirection === 'asc' ? 1 : -1);
+                                                });
+                                            });
                                             } else {
+                                            // для всех остальных полей — внутри каждой группы сортируем по (primary field, затем name)
+                                            sortedDirectionNames.forEach((dir) => {
+                                                grouped[dir].sort((x, y) => compareByField(x, y, sortField));
+                                            });
+                                            // сортируем список групп по имени направления для стабильного порядка
                                             sortedDirectionNames = sortedDirectionNames.sort((a, b) => a.localeCompare(b, 'ru', { sensitivity: 'base' }));
                                             }
-
-                                            // Внутри каждой группы сортируем операторов по выбранному полю (если поле direction — это уже обработано выше)
-                                            sortedDirectionNames.forEach((dir) => {
-                                            if (sortField === 'direction') return; // группы уже отсортированы
-                                            grouped[dir].sort((x, y) => compareByField(x, y, sortField));
-                                            });
 
                                             return (
                                             <div className="overflow-x-auto rounded-lg border border-gray-200">
@@ -7526,12 +7554,11 @@
 
                                                 <table className="min-w-full table-fixed border rounded-lg w-full">
                                                 <colgroup>
-                                                    <col style={{ width: "28%" }} /> {/* Имя */}
-                                                    <col style={{ width: "18%" }} /> {/* Направление */}
-                                                    <col style={{ width: "12%" }} /> {/* Статус */}
-                                                    <col style={{ width: "14%" }} /> {/* Hire date */}
-                                                    <col style={{ width: "10%" }} /> {/* Ставка */}
-                                                    <col style={{ width: "18%" }} /> {/* Действия */}
+                                                    <col style={{ width: "36%" }} /> {/* Имя */}
+                                                    <col style={{ width: "18%" }} /> {/* Статус */}
+                                                    <col style={{ width: "18%" }} /> {/* Hire date */}
+                                                    <col style={{ width: "12%" }} /> {/* Ставка */}
+                                                    <col style={{ width: "16%" }} /> {/* Действия */}
                                                 </colgroup>
 
                                                 <thead className="bg-gray-50">
@@ -7541,12 +7568,6 @@
                                                         className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none"
                                                     >
                                                         Имя {getSortIcon('name')}
-                                                    </th>
-                                                    <th
-                                                        onClick={() => handleSort('direction')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none"
-                                                    >
-                                                        Направление {getSortIcon('direction')}
                                                     </th>
                                                     <th
                                                         onClick={() => handleSort('status')}
@@ -7573,9 +7594,9 @@
                                                 <tbody className="bg-white divide-y divide-gray-200">
                                                     {sortedDirectionNames.map((dirName) => (
                                                     <React.Fragment key={dirName}>
-                                                        {/* Заголовок группы направления */}
+                                                        {/* Заголовок группы направления (оставляем, но колонку направления убрали) */}
                                                         <tr className="bg-gray-100">
-                                                        <td colSpan={6} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                        <td colSpan={5} className="px-6 py-3 text-sm font-semibold text-gray-700">
                                                             {dirName} <span className="ml-2 text-xs text-gray-500">({grouped[dirName].length})</span>
                                                         </td>
                                                         </tr>
@@ -7584,10 +7605,6 @@
                                                         {grouped[dirName].map((op) => (
                                                         <tr key={op.id} className="hover:bg-gray-50 transition-colors duration-200">
                                                             <td className="px-6 py-4 text-left truncate">{op.name}</td>
-
-                                                            <td className="px-6 py-4 text-left">
-                                                            {op.direction_id ? directions.find((d) => d.id === op.direction_id)?.name || "-" : "Без направления"}
-                                                            </td>
 
                                                             <td className="px-6 py-4 text-left">
                                                             {op.status === "working" || !op.status ? (
@@ -7660,9 +7677,6 @@
                                                 <tfoot className="bg-gray-50">
                                                     <tr>
                                                     <td className="px-6 py-3 font-medium text-gray-700">{matched.length} операторов</td>
-                                                    <td className="px-6 py-3 text-gray-700">
-                                                        {Array.from(new Set(matched.map((o) => directions.find(d => d.id === o.direction_id)?.name || "Без направления"))).join(", ")}
-                                                    </td>
                                                     <td className="px-6 py-3">
                                                         <div className="flex gap-2 flex-wrap">
                                                         {Object.entries(matched.reduce((acc, u) => {
