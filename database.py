@@ -24,8 +24,8 @@ from openpyxl.cell.rich_text import CellRichText, TextBlock
 from openpyxl.cell.text import InlineFont
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from collections import defaultdict
-import calendar
 import pandas as pd
+from typing import List, Dict, Any, Tuple
 
 logging.basicConfig(level=logging.INFO)
 
@@ -49,189 +49,6 @@ def get_pool():
         }
         POOL = ThreadedConnectionPool(MIN_CONN, MAX_CONN, **conn_params)
     return POOL
-
-def process_timesheet(file_url, supervisor_id):
-    """
-    Process the last sheet of a Google Sheets timesheet to extract operator details.
-    Args:
-        file_url (str): Google Sheets URL (e.g., https://docs.google.com/spreadsheets/d/.../edit?gid=...).
-    Returns:
-        list: List of dicts with ФИО, Кол-во часов, Кол-во часов тренинга, Штрафы, Год-Месяц, daily_hours.
-    """
-    # Set current year-month
-    current_month = datetime.now().strftime('%Y-%m')
-    # Convert Google Sheets URL to Excel export URL
-    sheet_id_match = re.search(r'spreadsheets/d/([a-zA-Z0-9_-]+)', file_url)
-    if not sheet_id_match:
-        return {"error": "Invalid Google Sheets URL format."}
-    sheet_id = sheet_id_match.group(1)
-    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
-    # Download the file
-    local_file = 'temp_timesheet.xlsx'
-    try:
-        response = requests.get(export_url)
-        if response.status_code != 200:
-            return {"error": f"Failed to download file: HTTP {response.status_code}"}
-        with open(local_file, 'wb') as f:
-            f.write(response.content)
-    except Exception as e:
-        return {"error": f"Failed to download file: {str(e)}"}
-    try:
-        # Load the Excel file and get the last sheet
-        workbook = openpyxl.load_workbook(local_file, data_only=True)
-        sheet_names = workbook.sheetnames
-        last_sheet = workbook[sheet_names[-1]]
-        current_sheet_name = last_sheet.title
-        
-        prev_month = datetime.now().replace(day=1) - timedelta(days=1)
-        prev_month_str = prev_month.strftime('%Y-%m')
-        
-        db = Database() # Assuming db is global or accessible
-        with db._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT sheet_name FROM processed_sheets
-                WHERE supervisor_id = %s AND processed_month = %s AND sheet_name = %s
-            """, (supervisor_id, prev_month_str, current_sheet_name))
-            if cursor.fetchone():
-                return {"error": f"Sheet '{current_sheet_name}' was already processed last month"}
-        # Set limits (55 rows, 50 columns)
-        MAX_ROWS = 55
-        MAX_COLS = 50
-        # Extract data
-        data = []
-        fio_col, hours_col, training_col, norm_col = None, None, None, None
-        # First pass - find headers in the main table (only check first row)
-        for row_idx, row in enumerate(last_sheet.iter_rows(max_row=1, max_col=MAX_COLS, values_only=True), 1):
-            headers = [str(cell).strip().replace('"', '').replace('\n', '').replace(' ', ' ') if cell else '' for cell in row]
-            for idx, header in enumerate(headers):
-                if idx >= MAX_COLS:
-                    break
-                header_lower = header.lower()
-                if 'фио' in header_lower:
-                    if fio_col is None:
-                        fio_col = idx
-                elif 'итого' in header_lower or 'итоговые' in header_lower:
-                    if hours_col is None: # Only set if not already found
-                        hours_col = idx
-                elif 'часы тренинга' in header_lower or 'тренинг' in header_lower:
-                    if training_col is None: # Only set if not already found
-                        training_col = idx
-                elif 'норма' in header_lower or 'норма часов' in header_lower:
-                    if norm_col is None: # Only set if not already found
-                        norm_col = idx
-            
-            if fio_col is None or hours_col is None:
-                os.remove(local_file)
-                return {"error": f"Required columns (ФИО, Итого) not found in sheet '{last_sheet.title}'."}
-        
-        # Identify day columns between norm_col and hours_col
-        if norm_col is not None and hours_col is not None and norm_col < hours_col - 1:
-            day_map = {day: idx for idx, day in enumerate(range(norm_col + 1, hours_col), start=1)}
-        
-        # Find the end of main data (first empty cell in ФИО column after header)
-        main_data_end_row = None
-        for row_idx, row in enumerate(last_sheet.iter_rows(min_row=2, max_row=MAX_ROWS, max_col=MAX_COLS, values_only=True), 2):
-            if not row[fio_col]: # Empty ФИО cell
-                main_data_end_row = row_idx
-                break
-        # Second pass - find fines section (look for "ФИО" again after main data)
-        fines_start_row = None
-        fines_fio_col = None
-        fines_amount_col = None
-        
-        for row_idx, row in enumerate(last_sheet.iter_rows(min_row=main_data_end_row+1 if main_data_end_row else 2,
-                                                          max_row=MAX_ROWS,
-                                                          max_col=MAX_COLS,
-                                                          values_only=True),
-                                  main_data_end_row+1 if main_data_end_row else 2):
-            if not fines_start_row:
-                for idx, cell in enumerate(row):
-                    if idx >= MAX_COLS:
-                        break
-                    if cell and 'фио' in str(cell).lower():
-                        fines_fio_col = idx
-                    elif cell and ('штраф' in str(cell).lower() or 'сумма' in str(cell).lower()):
-                        fines_amount_col = idx
-                
-                if fines_fio_col is not None:
-                    fines_start_row = row_idx
-                    break
-        # Create a mapping of operator names to fines
-        fines_map = {}
-        if fines_start_row and fines_fio_col is not None and fines_amount_col is not None:
-            for row in last_sheet.iter_rows(min_row=fines_start_row+1,
-                                           max_row=MAX_ROWS,
-                                           max_col=MAX_COLS,
-                                           values_only=True):
-                if fines_fio_col >= len(row) or fines_amount_col >= len(row):
-                    continue
-                    
-                name = str(row[fines_fio_col]).strip() if row[fines_fio_col] else None
-                fine = row[fines_amount_col] if fines_amount_col < len(row) else None
-                
-                if name and name != 'None' and fine is not None:
-                    try:
-                        fines_map[name] = float(fine)
-                    except (ValueError, TypeError):
-                        fines_map[name] = 0.0
-        # Process main data rows (2 to main_data_end_row-1)
-        for row_idx, row in enumerate(last_sheet.iter_rows(min_row=2,
-                                                          max_row=main_data_end_row-1 if main_data_end_row else MAX_ROWS,
-                                                          max_col=MAX_COLS,
-                                                          values_only=True), 2):
-            if fio_col >= len(row) or hours_col >= len(row):
-                continue
-                
-            if row[fio_col] and row[hours_col] is not None:
-                operator_name = str(row[fio_col]).strip()
-                training_hours = 0.0
-                norm_hours = 0.0
-                if training_col is not None and training_col < len(row) and row[training_col] is not None:
-                    try:
-                        training_hours = float(row[training_col])
-                    except (ValueError, TypeError):
-                        training_hours = 0.0
-                if norm_col is not None and norm_col < len(row) and row[norm_col] is not None:
-                    try:
-                        norm_hours = float(row[norm_col])
-                    except (ValueError, TypeError):
-                        norm_hours = 0.0
-                # Extract daily hours
-                daily_hours = [0.0] * 31
-                for col, day in day_map.items():
-                    if col < len(row):
-                        try:
-                            daily_hours[day - 1] = float(round(row[col],2) or 0.0)
-                        except (ValueError, TypeError):
-                            daily_hours[day - 1] = 0.0
-                entry = {
-                    'ФИО': operator_name,
-                    'Кол-во часов': round(float(row[hours_col]) if row[hours_col] else 0.0, 2),
-                    'Кол-во часов тренинга': round(training_hours, 2),
-                    'Штрафы': round(fines_map.get(operator_name, 0.0), 2),
-                    'Год-Месяц': current_month,
-                    'Норма часов': norm_hours,
-                    'daily_hours': daily_hours
-                }
-                data.append(entry)
-       
-        with db._get_cursor() as cursor:
-            cursor.execute("""
-                INSERT INTO processed_sheets (supervisor_id, sheet_name, processed_month)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (supervisor_id, processed_month)
-                DO UPDATE SET
-                    sheet_name = EXCLUDED.sheet_name,
-                    processed_at = CURRENT_TIMESTAMP
-            """, (supervisor_id, current_sheet_name, current_month))
-        # Clean up
-        os.remove(local_file)
-        return data
-    except Exception as e:
-        if os.path.exists(local_file):
-            os.remove(local_file)
-        return {"error": f"Error processing file: {str(e)}"}
-
 
 class Database:
     def __init__(self):
@@ -335,6 +152,14 @@ class Database:
                     direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL,
                     UNIQUE(evaluator_id, operator_id, month, phone_number, score, comment, is_draft)
                 );
+                ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS sv_request BOOLEAN NOT NULL DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS sv_request_comment TEXT,
+                    ADD COLUMN IF NOT EXISTS sv_request_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    ADD COLUMN IF NOT EXISTS sv_request_at TIMESTAMP,
+                    ADD COLUMN IF NOT EXISTS sv_request_approved BOOLEAN NOT NULL DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS sv_request_approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    ADD COLUMN IF NOT EXISTS sv_request_approved_at TIMESTAMP;
             """)
             #Trainings table
             cursor.execute("""
@@ -388,21 +213,25 @@ class Database:
                     break_time FLOAT NOT NULL DEFAULT 0,
                     talk_time FLOAT NOT NULL DEFAULT 0,
                     calls INTEGER NOT NULL DEFAULT 0,
-                    efficiency FLOAT NOT NULL DEFAULT 0,  -- **часы**, не доля
+                    efficiency FLOAT NOT NULL DEFAULT 0,  -- часы
+                    fine_amount FLOAT NOT NULL DEFAULT 0,
+                    fine_reason VARCHAR(64),
+                    fine_comment TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(operator_id, day)
                 );
             """)
 
+            cursor.execute("""
+                ALTER TABLE daily_hours
+                    ADD COLUMN IF NOT EXISTS fine_amount FLOAT NOT NULL DEFAULT 0,
+                    ADD COLUMN IF NOT EXISTS fine_reason VARCHAR(64),
+                    ADD COLUMN IF NOT EXISTS fine_comment TEXT;           
+            """)
+
             # Processed sheets table
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS processed_sheets (
-                    supervisor_id INTEGER NOT NULL REFERENCES users(id),
-                    sheet_name TEXT NOT NULL,
-                    processed_month VARCHAR(7) NOT NULL,
-                    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (supervisor_id, processed_month)
-                );
+                DROP TABLE IF EXISTS processed_sheets CASCADE;
             """)
 
             cursor.execute("""
@@ -533,17 +362,22 @@ class Database:
                 } for row in cursor.fetchall()
             ]
 
-    def insert_or_update_daily_hours(self, operator_id, day, work_time=0.0, break_time=0.0, talk_time=0.0, calls=0, efficiency=0.0):
+    def insert_or_update_daily_hours(self, operator_id, day, work_time=0.0, break_time=0.0,
+                                    talk_time=0.0, calls=0, efficiency=0.0,
+                                    fine_amount=0.0, fine_reason=None, fine_comment=None):
         """
         Вставляет/обновляет запись daily_hours (operator_id + day).
-        efficiency ожидается в часах.
+        efficiency и fine_amount ожидаются в часах/суммах соответственно.
         """
         if isinstance(day, str):
             day = datetime.strptime(day, "%Y-%m-%d").date()
         with self._get_cursor() as cursor:
             cursor.execute("""
-                INSERT INTO daily_hours (operator_id, day, work_time, break_time, talk_time, calls, efficiency)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO daily_hours (
+                    operator_id, day, work_time, break_time, talk_time, calls, efficiency,
+                    fine_amount, fine_reason, fine_comment
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (operator_id, day)
                 DO UPDATE SET
                     work_time = EXCLUDED.work_time,
@@ -551,35 +385,129 @@ class Database:
                     talk_time = EXCLUDED.talk_time,
                     calls = EXCLUDED.calls,
                     efficiency = EXCLUDED.efficiency,
+                    fine_amount = EXCLUDED.fine_amount,
+                    fine_reason = EXCLUDED.fine_reason,
+                    fine_comment = EXCLUDED.fine_comment,
                     created_at = CURRENT_TIMESTAMP
-            """, (operator_id, day, work_time, break_time, talk_time, calls, efficiency))
+            """, (operator_id, day, work_time, break_time, talk_time, calls, efficiency,
+                float(fine_amount) if fine_amount is not None else 0.0,
+                fine_reason, fine_comment))
 
-    def get_daily_hours_for_operator_month(self, operator_id, month):
-        """Возвращает список daily_hours для оператора за месяц YYYY-MM."""
+    def get_daily_hours_for_operator_month(self, operator_id: int, month: str):
+        """
+        Возвращает daily_hours для одного оператора за месяц YYYY-MM,
+        а также norm_hours, aggregates (из work_hours) и rate/name из users.
+
+        Включает поля штрафов из daily_hours: fine_amount, fine_reason, fine_comment
+        и агрегированное поле fines из work_hours.
+
+        Результат:
+        {
+            "month": month,
+            "days_in_month": <int>,
+            "operator": { ... }
+        }
+        """
         import calendar as _py_calendar
-        year, mon = map(int, month.split('-'))
-        start = date(year, mon, 1)
-        end = date(year, mon, _py_calendar.monthrange(year, mon)[1])
+        from datetime import date as _date
+
+        # validate month format YYYY-MM and compute date range
+        try:
+            year, mon = map(int, month.split('-'))
+            days_in_month = _py_calendar.monthrange(year, mon)[1]
+            start = _date(year, mon, 1)
+            end = _date(year, mon, days_in_month)
+        except Exception as e:
+            raise ValueError("Invalid month format, expected YYYY-MM") from e
+
         with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT day, work_time, break_time, talk_time, calls, efficiency
+            # 1) Получаем daily_hours (одним запросом), теперь с информацией о штрафах
+            cursor.execute(
+                """
+                SELECT day, work_time, break_time, talk_time, calls, efficiency,
+                    fine_amount, fine_reason, fine_comment
                 FROM daily_hours
                 WHERE operator_id = %s AND day >= %s AND day <= %s
                 ORDER BY day
-            """, (operator_id, start, end))
-            return [{
-                "day": row[0].isoformat(),
-                "work_time": float(row[1]),
-                "break_time": float(row[2]),
-                "talk_time": float(row[3]),
-                "calls": int(row[4]),
-                "efficiency": float(row[5])   # часы
-            } for row in cursor.fetchall()]
+                """,
+                (operator_id, start, end),
+            )
+            daily_rows = cursor.fetchall()
+
+            # build daily map: { "1": {...}, "2": {...}, ... }
+            daily_map = {}
+            for row in daily_rows:
+                # row: (day, work_time, break_time, talk_time, calls, efficiency, fine_amount, fine_reason, fine_comment)
+                day_obj = row[0]
+                day_key = str(int(day_obj.day))
+                daily_map[day_key] = {
+                    "work_time": float(row[1]) if row[1] is not None else 0.0,
+                    "break_time": float(row[2]) if row[2] is not None else 0.0,
+                    "talk_time": float(row[3]) if row[3] is not None else 0.0,
+                    "calls": int(row[4]) if row[4] is not None else 0,
+                    "efficiency": float(row[5]) if row[5] is not None else 0.0,
+                    "fine_amount": float(row[6]) if row[6] is not None else 0.0,
+                    "fine_reason": row[7],
+                    "fine_comment": row[8],
+                }
+
+            # 2) Получаем имя/ставку + данные work_hours одним LEFT JOIN запросом (включая fines)
+            cursor.execute(
+                """
+                SELECT u.name, u.rate,
+                    COALESCE(w.norm_hours, 0) AS norm_hours,
+                    COALESCE(w.regular_hours, 0) AS regular_hours,
+                    COALESCE(w.total_break_time, 0) AS total_break_time,
+                    COALESCE(w.total_talk_time, 0) AS total_talk_time,
+                    COALESCE(w.total_calls, 0) AS total_calls,
+                    COALESCE(w.total_efficiency_hours, 0) AS total_efficiency_hours,
+                    COALESCE(w.calls_per_hour, 0) AS calls_per_hour,
+                    COALESCE(w.fines, 0) AS fines
+                FROM users u
+                LEFT JOIN work_hours w
+                ON w.operator_id = u.id AND w.month = %s
+                WHERE u.id = %s
+                LIMIT 1
+                """,
+                (month, operator_id),
+            )
+            row = cursor.fetchone()
+
+        # default values if user / work_hours not found
+        if row:
+            name, rate, norm_hours, regular_hours, total_break_time, total_talk_time, \
+                total_calls, total_efficiency_hours, calls_per_hour, fines = row
+            rate = float(rate) if rate is not None else 0.0
+        else:
+            name = None
+            rate = 0.0
+            norm_hours = regular_hours = total_break_time = total_talk_time = 0.0
+            total_calls = 0
+            total_efficiency_hours = calls_per_hour = fines = 0.0
+
+        operator_obj = {
+            "operator_id": operator_id,
+            "name": name,
+            "rate": rate,
+            "norm_hours": float(norm_hours),
+            "fines": float(fines),
+            "daily": daily_map,
+            "aggregates": {
+                "regular_hours": float(regular_hours),
+                "total_break_time": float(total_break_time),
+                "total_talk_time": float(total_talk_time),
+                "total_calls": int(total_calls),
+                "total_efficiency_hours": float(total_efficiency_hours),
+                "calls_per_hour": float(calls_per_hour),
+            },
+        }
+
+        return {"month": month, "days_in_month": days_in_month, "operator": operator_obj}
 
     def get_daily_hours_by_supervisor_month(self, supervisor_id, month):
         """
         Возвращает все daily_hours и агрегаты work_hours для всех операторов указанного супервайзера за месяц YYYY-MM.
-        Включает также ставку (rate) из users и norm_hours из work_hours.
+        Включает также ставку (rate) из users, norm_hours и fines из work_hours.
         """
         import calendar as _py_calendar
         from datetime import date as _date
@@ -594,7 +522,7 @@ class Database:
             raise ValueError("Invalid month format, expected YYYY-MM") from e
 
         with self._get_cursor() as cursor:
-            # Получаем операторов + ставку + norm_hours + агрегаты work_hours
+            # Получаем операторов + ставка + norm_hours + агрегаты work_hours (включая fines)
             cursor.execute("""
                 SELECT u.id, u.name, u.rate,
                     COALESCE(w.norm_hours, 0) as norm_hours,
@@ -603,7 +531,8 @@ class Database:
                     COALESCE(w.total_talk_time, 0) as total_talk_time,
                     COALESCE(w.total_calls, 0) as total_calls,
                     COALESCE(w.total_efficiency_hours, 0) as total_efficiency_hours,
-                    COALESCE(w.calls_per_hour, 0) as calls_per_hour
+                    COALESCE(w.calls_per_hour, 0) as calls_per_hour,
+                    COALESCE(w.fines, 0) as fines
                 FROM users u
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
@@ -617,9 +546,10 @@ class Database:
 
             op_ids = [row[0] for row in operator_rows]
 
-            # Получаем daily_hours для этих операторов за месяц
+            # Получаем daily_hours для этих операторов за месяц (с информацией о штрафах)
             cursor.execute("""
-                SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency
+                SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency,
+                    d.fine_amount, d.fine_reason, d.fine_comment
                 FROM daily_hours d
                 WHERE d.operator_id = ANY(%s)
                 AND d.day >= %s AND d.day <= %s
@@ -629,14 +559,18 @@ class Database:
 
             # Готовим словарь daily: operator_id -> {day_number: {...}}
             daily_map = {}
-            for op_id, day, work_time, break_time, talk_time, calls, eff in daily_rows:
+            for (op_id, day, work_time, break_time, talk_time, calls, eff,
+                fine_amount, fine_reason, fine_comment) in daily_rows:
                 day_num = str(int(day.day))
                 d = {
                     "work_time": float(work_time) if work_time is not None else 0.0,
                     "break_time": float(break_time) if break_time is not None else 0.0,
                     "talk_time": float(talk_time) if talk_time is not None else 0.0,
                     "calls": int(calls) if calls is not None else 0,
-                    "efficiency": float(eff) if eff is not None else 0.0
+                    "efficiency": float(eff) if eff is not None else 0.0,
+                    "fine_amount": float(fine_amount) if fine_amount is not None else 0.0,
+                    "fine_reason": fine_reason,
+                    "fine_comment": fine_comment
                 }
                 daily_map.setdefault(op_id, {})[day_num] = d
 
@@ -645,7 +579,7 @@ class Database:
             for row in operator_rows:
                 (op_id, op_name, rate, norm_hours,
                 regular_hours, total_break_time, total_talk_time,
-                total_calls, total_efficiency_hours, calls_per_hour) = row
+                total_calls, total_efficiency_hours, calls_per_hour, fines) = row
 
                 operators.append({
                     "operator_id": op_id,
@@ -659,7 +593,8 @@ class Database:
                         "total_talk_time": float(total_talk_time),
                         "total_calls": int(total_calls),
                         "total_efficiency_hours": float(total_efficiency_hours),
-                        "calls_per_hour": float(calls_per_hour)
+                        "calls_per_hour": float(calls_per_hour),
+                        "fines": float(fines)
                     }
                 })
 
@@ -686,12 +621,13 @@ class Database:
                     COALESCE(SUM(break_time),0),
                     COALESCE(SUM(talk_time),0),
                     COALESCE(SUM(calls),0),
-                    COALESCE(SUM(efficiency),0)  -- суммируем часы эффективности
+                    COALESCE(SUM(efficiency),0),
+                    COALESCE(SUM(fine_amount),0)
                 FROM daily_hours
                 WHERE operator_id = %s AND day >= %s AND day <= %s
             """, (operator_id, start, end))
             row = cursor.fetchone()
-            total_work_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours = row
+            total_work_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours, total_fines = row
 
             # Защита от деления на ноль
             if total_work_time and float(total_work_time) > 0:
@@ -702,12 +638,15 @@ class Database:
             # Вставляем/обновляем work_hours:
             cursor.execute("""
                 INSERT INTO work_hours (
-                    operator_id, month, regular_hours, total_break_time, total_talk_time, total_calls, total_efficiency_hours, calls_per_hour
+                    operator_id, month, regular_hours, training_hours, fines, total_break_time,
+                    total_talk_time, total_calls, total_efficiency_hours, calls_per_hour
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (operator_id, month)
                 DO UPDATE SET
                     regular_hours = EXCLUDED.regular_hours,
+                    training_hours = EXCLUDED.training_hours,
+                    fines = EXCLUDED.fines,
                     total_break_time = EXCLUDED.total_break_time,
                     total_talk_time = EXCLUDED.total_talk_time,
                     total_calls = EXCLUDED.total_calls,
@@ -718,6 +657,8 @@ class Database:
                 operator_id,
                 month,
                 float(total_work_time),
+                0.0,  # training_hours — если считаешь отдельно, можно заполнять позже
+                float(total_fines),
                 float(total_break_time),
                 float(total_talk_time),
                 int(total_calls),
@@ -731,7 +672,8 @@ class Database:
             "total_talk_time": float(total_talk_time),
             "total_calls": int(total_calls),
             "total_efficiency_hours": float(total_efficiency_hours),
-            "calls_per_hour": float(calls_per_hour)
+            "calls_per_hour": float(calls_per_hour),
+            "fines": float(total_fines)
         }
 
     def save_directions(self, directions):
@@ -1052,20 +994,6 @@ class Database:
             
             return call_id
 
-    def add_work_hours(self, operator_id, regular_hours, training_hours, fines=0.0, norm_hours=0.0, month=None):
-        month = month or datetime.now().strftime('%Y-%m')
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                INSERT INTO work_hours (operator_id, month, regular_hours, training_hours, fines, norm_hours)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (operator_id, month)
-                DO UPDATE SET 
-                    regular_hours = EXCLUDED.regular_hours,
-                    training_hours = EXCLUDED.training_hours,
-                    fines = EXCLUDED.fines,
-                    norm_hours = EXCLUDED.norm_hours
-            """, (operator_id, month, regular_hours, training_hours, fines, norm_hours))
-
     def parse_calls_file(self, file):
         try:
             filename = file.filename.lower()
@@ -1138,119 +1066,6 @@ class Database:
         except Exception as e:
             return None, None, str(e)
 
-    
-    def process_and_upload_timesheet(self):
-        """
-        Process timesheets from all supervisors' hours_table_url and upload data to work_hours table.
-        Returns:
-            dict: Aggregated status of all operations with processed and skipped records per supervisor.
-        """
-        # Get all supervisors with their hours_table_url
-        supervisors = self.get_supervisors()
-        if not supervisors:
-            return {
-                "status": "error",
-                "message": "No supervisors found in database",
-                "total_processed": 0,
-                "total_skipped": 0,
-                "details": []
-            }
-        total_processed = 0
-        total_skipped = 0
-        results = []
-        for supervisor in supervisors:  
-            supervisor_id, supervisor_name, hours_table_url, _, _, _ = supervisor
-            
-            if not hours_table_url:
-                logging.warning(f"Supervisor {supervisor_name} (ID: {supervisor_id}) has no hours_table_url")
-                results.append({
-                    "supervisor_id": supervisor_id,
-                    "supervisor_name": supervisor_name,
-                    "status": "skipped",
-                    "message": "No hours_table_url configured",
-                    "processed": 0,
-                    "skipped": 0,
-                    "skipped_operators": []
-                })
-                continue
-            # Process the timesheet for this supervisor
-            timesheet_data = process_timesheet(hours_table_url,supervisor_id)
-            
-            if isinstance(timesheet_data, dict) and "error" in timesheet_data:
-                error_msg = timesheet_data["error"]
-                logging.error(f"Error processing timesheet for {supervisor_name}: {error_msg}")
-                results.append({
-                    "supervisor_id": supervisor_id,
-                    "supervisor_name": supervisor_name,
-                    "status": "error",
-                    "message": error_msg,
-                    "processed": 0,
-                    "skipped": 0,
-                    "skipped_operators": []
-                })
-                continue
-            processed = 0
-            skipped = 0
-            skipped_operators = []
-            with self._get_cursor() as cursor:
-                for entry in timesheet_data:
-                    fio = entry['ФИО']
-                    regular_hours = entry['Кол-во часов']
-                    training_hours = entry['Кол-во часов тренинга']
-                    fines = entry['Штрафы']
-                    month = entry['Год-Месяц']
-                    norm_hours = entry.get('Норма часов', 0.0) # Use get() with default value
-                    daily_hours = entry.get('daily_hours', [0.0] * 31)
-                    # Find operator by name who is under this supervisor
-                    cursor.execute("""
-                        SELECT id FROM users
-                        WHERE name = %s
-                        AND role = 'operator'
-                        AND supervisor_id = %s
-                    """, (fio, supervisor_id))
-                    operator = cursor.fetchone()
-                    if operator:
-                        operator_id = operator[0]
-                        cursor.execute("""
-                            INSERT INTO work_hours (
-                                operator_id,
-                                month,
-                                regular_hours,
-                                training_hours,
-                                fines,
-                                norm_hours,
-                                daily_hours
-                            )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (operator_id, month)
-                            DO UPDATE SET
-                                regular_hours = EXCLUDED.regular_hours,
-                                training_hours = EXCLUDED.training_hours,
-                                fines = EXCLUDED.fines,
-                                norm_hours = EXCLUDED.norm_hours,
-                                daily_hours = EXCLUDED.daily_hours
-                        """, (operator_id, month, regular_hours, training_hours, fines, norm_hours, daily_hours))
-                        processed += 1
-                    else:
-                        logging.warning(f"Operator {fio} not found under supervisor {supervisor_name}")
-                        skipped += 1
-                        skipped_operators.append(fio)
-            total_processed += processed
-            total_skipped += skipped
-            results.append({
-                "supervisor_id": supervisor_id,
-                "supervisor_name": supervisor_name,
-                "status": "success",
-                "processed": processed,
-                "skipped": skipped,
-                "skipped_operators": skipped_operators
-            })
-        return {
-            "status": "completed",
-            "total_processed": total_processed,
-            "total_skipped": total_skipped,
-            "details": results
-        }
 
     def get_operator_stats(self, operator_id):
         """Получить статистику оператора (часы, оценки)"""
@@ -1303,7 +1118,7 @@ class Database:
                     'id': row[0],
                     'name': row[1],
                     'direction_id': row[2],
-                    'hire_date': row[3],
+                    'hire_date': row[3].strftime('%d-%m-%Y') if row[3] else None,
                     'hours_table_url': row[4],
                     'scores_table_url': row[5],
                     'supervisor_name': row[6],
@@ -1388,10 +1203,10 @@ class Database:
                     "direction": row[2],
                     "regular_hours": float(row[3]) if row[3] is not None else 0,
                     "training_hours": float(row[4]) if row[4] is not None else 0,
-                    "fines": float(row[5]) if row[5] is not None else 0,
-                    "norm_hours": float(row[6]) if row[6] is not None else 0,
-                    "daily_hours": row[7] if row[7] is not None else [0.0]*31,
-                    "calls_per_hour": row[8]
+                    "fines": float(row[4]) if row[4] is not None else 0,
+                    "norm_hours": float(row[5]) if row[5] is not None else 0,
+                    "daily_hours": row[6] if row[6] is not None else [0.0]*31,
+                    "calls_per_hour": row[7]
                 } for row in cursor.fetchall()
             ]
 
@@ -1425,8 +1240,7 @@ class Database:
     def get_call_evaluations(self, operator_id, month=None):
         query = """
             WITH latest_versions AS (
-                -- Находим последние версии для каждого уникального вызова
-                -- Группируем по phone_number и month, чтобы найти последние оценки для каждого номера
+                -- Находим последние версии для каждого уникального вызова (по номеру и месяцу)
                 SELECT 
                     phone_number,
                     month,
@@ -1459,7 +1273,7 @@ class Database:
                 c.audio_path,
                 c.is_draft,
                 c.is_correction,
-                TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI'),
+                TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI') AS evaluation_date,
                 c.scores,
                 c.criterion_comments,
                 d.id as direction_id,
@@ -1467,11 +1281,23 @@ class Database:
                 d.criteria as direction_criteria,
                 d.has_file_upload as direction_has_file_upload,
                 u.name as evaluator_name,
-                c.created_at
+                c.created_at,
+                -- sv_request fields
+                c.sv_request,
+                c.sv_request_comment,
+                c.sv_request_by,
+                su.name as sv_request_by_name,
+                TO_CHAR(c.sv_request_at, 'YYYY-MM-DD HH24:MI') as sv_request_at,
+                c.sv_request_approved,
+                c.sv_request_approved_by,
+                apu.name as sv_request_approved_by_name,
+                TO_CHAR(c.sv_request_approved_at, 'YYYY-MM-DD HH24:MI') as sv_request_approved_at
             FROM calls c
             JOIN latest_calls lc ON c.id = lc.id
             LEFT JOIN directions d ON c.direction_id = d.id  
             LEFT JOIN users u ON c.evaluator_id = u.id
+            LEFT JOIN users su ON c.sv_request_by = su.id
+            LEFT JOIN users apu ON c.sv_request_approved_by = apu.id
             WHERE c.operator_id = %s
         """
         params = [operator_id, operator_id, operator_id]
@@ -1479,16 +1305,18 @@ class Database:
             query += " AND c.month = %s"
             params.append(month)
         query += " ORDER BY c.created_at DESC"
-        
+
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
+            rows = cursor.fetchall()
+
             return [
                 {
                     "id": row[0],
                     "month": row[1],
                     "phone_number": row[2],
                     "appeal_date": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None,
-                    "score": float(row[4]),
+                    "score": float(row[4]) if row[4] is not None else None,
                     "comment": row[5],
                     "audio_path": row[6],
                     "is_draft": row[7],
@@ -1503,8 +1331,18 @@ class Database:
                         "hasFileUpload": row[15] if row[15] is not None else True
                     } if row[12] else None,
                     "evaluator": row[16] if row[16] else None,
-                    "created_at":row[17]
-                } for row in cursor.fetchall()
+                    "created_at": row[17],
+                    # sv_request block
+                    "sv_request": bool(row[18]),
+                    "sv_request_comment": row[19],
+                    "sv_request_by": row[20],
+                    "sv_request_by_name": row[21],
+                    "sv_request_at": row[22],
+                    "sv_request_approved": bool(row[23]),
+                    "sv_request_approved_by": row[24],
+                    "sv_request_approved_by_name": row[25],
+                    "sv_request_approved_at": row[26]
+                } for row in rows
             ]
         
     def update_user(self, user_id, field, value, changed_by=None):
@@ -2231,6 +2069,323 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
             return cursor.fetchone() is not None
+
+    def delete_training(self, training_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM trainings WHERE id = %s RETURNING id", (training_id,))
+            return cursor.fetchone() is not None
+
+    def generate_excel_report_from_view(self,
+        operators: List[Dict[str, Any]],
+        trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
+        month: str,  # 'YYYY-MM'
+        filename: str = None
+    ) -> Tuple[str, bytes]:
+        """
+        Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность, Тренинги.
+
+        Правила форматирования (по заданию пользователя):
+        - Округлять все числа до 1 знака после запятой, КРОМЕ полей "Ставка" (rate) и "Норма часов" (norm_hours) — они оставляются как есть.
+        - Внутри таблицы по дням значение 0 отображается как целое 0 (не 0.0).
+        - Ячейки по дням, где значение > 0, закрашивать светло-серым (теперь чуть темнее).
+        - Calls (количество звонков) остаются целыми числами.
+        - Везде, где значение должно быть процентом, добавлять знак "%".
+        - Добавить границы ко всем ячейкам таблиц.
+        """
+
+        operators = operators["operators"]
+
+        FILL_POS = PatternFill(fill_type='solid', start_color='b3b3b3')  # чуть темнее серый
+        THIN = Side(style='thin')
+        BORDER_ALL = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+        def _make_header(ws, headers: List[str]):
+            thin = Side(style='thin')
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            bold = Font(bold=True)
+            for i, h in enumerate(headers, start=1):
+                cell = ws.cell(1, i)
+                cell.value = h
+                cell.font = bold
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+                cell.border = border
+
+        def parse_time_to_minutes(t: str):
+            if not t:
+                return None
+            try:
+                parts = t.strip().split(':')
+                hh = int(parts[0])
+                mm = int(parts[1]) if len(parts) > 1 else 0
+                return hh * 60 + mm
+            except Exception:
+                return None
+
+        def compute_training_duration_hours(t: Dict[str, Any]) -> float:
+            try:
+                if t.get('duration_minutes') is not None:
+                    return round(float(t['duration_minutes']) / 60.0, 2)
+                if t.get('duration_hours') is not None:
+                    return round(float(t['duration_hours']), 2)
+                s = parse_time_to_minutes(t.get('start_time'))
+                e = parse_time_to_minutes(t.get('end_time'))
+                if s is None or e is None:
+                    return 0.0
+                diff = e - s
+                if diff < 0:
+                    diff += 24 * 60
+                return round(diff / 60.0, 2)
+            except Exception:
+                return 0.0
+
+        def fmt_day_value(metric_key: str, value: Any):
+            """Формат для значений в столбцах по дням.
+            - calls -> int
+            - for hours/perc/eff -> round to 1 decimal; show 0 as integer 0
+            """
+            if metric_key == 'calls':
+                try:
+                    return int(value or 0)
+                except Exception:
+                    return 0
+            try:
+                num = float(value or 0)
+            except Exception:
+                return 0
+            # represent exactly zero as int 0
+            if abs(num) < 1e-9:
+                return 0
+            return round(num, 1)
+
+        def fmt_total_value(metric_key: str, value: Any):
+            """Формат для итоговых/доп. колонок (итого, проценты и т.п.).
+            - для calls оставляем int
+            - для остальных округляем до 1 знака (кроме rate и norm handled separately)
+            """
+            if value is None:
+                return None
+            if metric_key == 'calls':
+                try:
+                    return int(value or 0)
+                except Exception:
+                    return 0
+            try:
+                num = float(value)
+            except Exception:
+                return None
+            return round(num, 1)
+
+        logging.info(month)
+        year, mon = map(int, month.split('-'))
+        days_in_month = calendar.monthrange(year, mon)[1]
+        days = list(range(1, days_in_month + 1))
+
+        wb = Workbook()
+        default = wb.active
+        wb.remove(default)
+
+        def set_cell(ws, r, c, value, align_center=True, fill=None):
+            cell = ws.cell(r, c)
+            cell.value = value
+            if align_center:
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = BORDER_ALL
+            if fill:
+                cell.fill = fill
+            return cell
+
+        def build_generic_sheet(key: str, label: str, metric_key: str, is_hour=True, format_fn=None, extra_cols=None):
+            ws = wb.create_sheet(title=label[:31])
+            headers = ["Оператор", "Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого"]
+            if extra_cols:
+                headers += [c[0] for c in extra_cols]
+            _make_header(ws, headers)
+            row = 2
+            for op in operators:
+                daily = op.get('daily', {})
+                name = op.get('name') or f"op_{op.get('operator_id')}"
+                set_cell(ws, row, 1, name, align_center=False)
+                # Ставка и Норма оставляем без изменения/округления
+                set_cell(ws, row, 2, float(op.get('rate') or 0), align_center=False)
+                set_cell(ws, row, 3, float(op.get('norm_hours') or 0), align_center=False)
+                total = 0.0
+                totals = { 'work_time': 0.0, 'calls': 0, 'efficiency': 0.0 }
+                for c_idx, day in enumerate(days, start=4):
+                    dkey = str(day)
+                    if metric_key == 'trainings':
+                        set_cell(ws, row, c_idx, "")
+                    else:
+                        d = daily.get(dkey)
+                        raw_v = None
+                        if d:
+                            raw_v = d.get(metric_key, 0)
+                        cell_val = fmt_day_value(metric_key, raw_v)
+                        # apply fill if >0
+                        fill = FILL_POS if (isinstance(cell_val, (int, float)) and cell_val > 0) else None
+                        set_cell(ws, row, c_idx, cell_val, fill=fill)
+                        if metric_key == 'calls':
+                            totals['calls'] += int(cell_val or 0)
+                            total += int(cell_val or 0)
+                        else:
+                            num_for_tot = float(raw_v or 0)
+                            total += num_for_tot
+                            if metric_key == 'work_time':
+                                totals['work_time'] += num_for_tot
+                            if metric_key == 'efficiency':
+                                totals['efficiency'] += num_for_tot
+                # total cell
+                total_col = 4 + len(days)
+                set_cell(ws, row, total_col, fmt_total_value(metric_key, total))
+
+                # extra cols
+                if extra_cols:
+                    for i, (_, fn) in enumerate(extra_cols, start=1):
+                        val = fn(op, totals)
+                        # if fn returns percent-string already, keep
+                        if isinstance(val, str):
+                            set_cell(ws, row, total_col + i, val)
+                        else:
+                            set_cell(ws, row, total_col + i, fmt_total_value(metric_key, val))
+
+                row += 1
+
+            ws.column_dimensions['A'].width = 24
+            for i in range(2, 5 + len(days) + (len(extra_cols) if extra_cols else 0)):
+                col = ws.cell(1, i).column_letter
+                ws.column_dimensions[col].width = 12
+
+        def build_work_time_sheet():
+            ws = wb.create_sheet(title='Отработанные часы'[:31])
+            headers = ["Оператор", "Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого часов", "С выч. тренинга", "Вып нормы (%)", "Выработка"]
+            _make_header(ws, headers)
+            row = 2
+            for op in operators:
+                daily = op.get('daily', {})
+                name = op.get('name') or f"op_{op.get('operator_id')}"
+                set_cell(ws, row, 1, name, align_center=False)
+                set_cell(ws, row, 2, float(op.get('rate') or 0), align_center=False)
+                norm = float(op.get('norm_hours') or 0)
+                set_cell(ws, row, 3, norm, align_center=False)
+
+                total_work = 0.0
+                total_counted_trainings = 0.0
+
+                for c_idx, day in enumerate(days, start=4):
+                    dkey = str(day)
+                    work_val = 0.0
+                    d = daily.get(dkey)
+                    if d:
+                        work_val = float(d.get('work_time') or 0.0)
+                    trainings_for_day = trainings_map.get(op.get('operator_id'), {}).get(day, []) if trainings_map else []
+                    counted_for_day = 0.0
+                    for t in trainings_for_day:
+                        dur = compute_training_duration_hours(t)
+                        if t.get('count_in_hours'):
+                            counted_for_day += dur
+                    total_work += work_val
+                    total_counted_trainings += counted_for_day
+                    cell_val = fmt_day_value('work_time', work_val)
+                    fill = FILL_POS if (isinstance(cell_val, (int, float)) and cell_val > 0) else None
+                    set_cell(ws, row, c_idx, cell_val, fill=fill)
+
+                itogo_chasov = total_work + total_counted_trainings
+                set_cell(ws, row, 4 + len(days), fmt_total_value('work_time', itogo_chasov))
+                set_cell(ws, row, 5 + len(days), fmt_total_value('work_time', total_work))
+                if norm and norm != 0:
+                    percent = round((itogo_chasov / norm) * 100, 1)
+                    percent_display = f"{percent}%"
+                else:
+                    percent_display = None
+                set_cell(ws, row, 6 + len(days), percent_display)
+                set_cell(ws, row, 7 + len(days), fmt_total_value('work_time', round(norm - itogo_chasov, 1) if norm is not None else None))
+
+                row += 1
+
+            ws.column_dimensions['A'].width = 24
+            for i in range(2, 8 + len(days)):
+                col = ws.cell(1, i).column_letter
+                ws.column_dimensions[col].width = 14
+
+        def build_calls_sheet():
+            def kvz_fn(op, totals):
+                work_hours = 0.0
+                daily = op.get('daily', {})
+                for dnum in daily.values():
+                    work_hours += float(dnum.get('work_time') or 0.0)
+                calls = totals.get('calls', 0)
+                if work_hours and work_hours != 0:
+                    return round(calls / work_hours, 1)
+                return None
+
+            build_generic_sheet('calls', 'Звонки', 'calls', is_hour=False, extra_cols=[('КВЗ', kvz_fn)])
+
+        def build_efficiency_sheet():
+            def otn_fn(op, totals):
+                sum_work = 0.0
+                sum_eff = totals.get('efficiency', 0.0)
+                daily = op.get('daily', {})
+                for dnum in daily.values():
+                    sum_work += float(dnum.get('work_time') or 0.0)
+                if sum_work and sum_work != 0:
+                    val = round((sum_eff / sum_work) * 100, 1)
+                    return f"{val}%"
+                return None
+
+            build_generic_sheet('efficiency', 'Эффективность', 'efficiency', is_hour=True, extra_cols=[('Отн.', otn_fn)])
+
+        build_work_time_sheet()
+        build_generic_sheet('break_time', 'Перерыв', 'break_time', is_hour=True)
+        build_calls_sheet()
+        build_efficiency_sheet()
+
+        ws_t = wb.create_sheet(title='Тренинги'[:31])
+        headers = ["Оператор"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Всего (ч)", "Засчитано (ч)", "Не засчитано (ч)"]
+        _make_header(ws_t, headers)
+        row = 2
+        for op in operators:
+            name = op.get('name') or f"op_{op.get('operator_id')}"
+            set_cell(ws_t, row, 1, name, align_center=False)
+            total_all = 0.0
+            total_counted = 0.0
+            total_not = 0.0
+            op_trainings = trainings_map.get(op.get('operator_id')) or {}
+            for c_idx, day in enumerate(days, start=2):
+                arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
+                counted = 0.0
+                not_counted = 0.0
+                for t in arr:
+                    dur = compute_training_duration_hours(t)
+                    total_all += dur
+                    if t.get('count_in_hours'):
+                        counted += dur
+                        total_counted += dur
+                    else:
+                        not_counted += dur
+                        total_not += dur
+                if counted == 0 and not_counted == 0:
+                    set_cell(ws_t, row, c_idx, "")
+                else:
+                    c_val = round(counted, 1)
+                    n_val = round(not_counted, 1)
+                    set_cell(ws_t, row, c_idx, f"{c_val} / {n_val}", fill=FILL_POS)
+
+            set_cell(ws_t, row, 2 + len(days), round(total_all, 1))
+            set_cell(ws_t, row, 3 + len(days), round(total_counted, 1))
+            set_cell(ws_t, row, 4 + len(days), round(total_not, 1))
+            row += 1
+
+        ws_t.column_dimensions['A'].width = 24
+        for i in range(2, 5 + len(days)):
+            col = ws_t.cell(1, i).column_letter
+            ws_t.column_dimensions[col].width = 14
+
+        out = BytesIO()
+        wb.save(out)
+        out.seek(0)
+        content = out.getvalue()
+        if filename is None:
+            filename = f"report_{month}.xlsx"
+        return filename, content
 
 # Initialize database
 db = Database()
