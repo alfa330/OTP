@@ -7363,235 +7363,261 @@
                         {user.role === 'sv' && (
                             <>                            
                                 {view === 'manage_operators' && (
-                                <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                    <div className="flex justify-between items-center mb-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800">Управлять операторами</h2>
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <div className="flex justify-between items-center mb-6">
+                                        <h2 className="text-2xl font-semibold text-gray-800">Управлять операторами</h2>
 
-                                    <button
-                                        onClick={() => {
-                                        setUserToEdit({
-                                            name: "",
-                                            rate: 1.0,
-                                            direction_id: "",
-                                            hire_date: "",
-                                            supervisor_id: user?.id || "",
-                                            status: "working",
-                                        });
-                                        setShowUserEditModal(true);
-                                        }}
-                                        className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-green-600 text-white hover:bg-green-700 transition"
-                                    >
-                                        <i className="fas fa-user-plus"></i> Добавить оператора
-                                    </button>
-                                    </div>
-
-                                    {/* Tabs */}
-                                    <div className="flex items-center space-x-3 mb-6">
-                                    {(() => {
-                                        const all = svData?.operators ?? [];
-                                        const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
-                                        const firedCount = all.filter(op => op.status === 'fired').length;
-                                        return (
-                                        <>
-                                            <button
-                                            onClick={() => setActiveTab('active')}
-                                            className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeTab === 'active' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
-                                            role="tab"
-                                            aria-selected={activeTab === 'active'}
-                                            aria-controls="operators-active"
-                                            >
-                                            Активные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{activeCount}</span>
-                                            </button>
-
-                                            <button
-                                            onClick={() => setActiveTab('fired')}
-                                            className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeTab === 'fired' ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
-                                            role="tab"
-                                            aria-selected={activeTab === 'fired'}
-                                            aria-controls="operators-fired"
-                                            >
-                                            Уволенные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{firedCount}</span>
-                                            </button>
-                                        </>
-                                        );
-                                    })()}
-                                    </div>
-
-                                    {isLoading ? (
-                                    <p className="text-center text-gray-600">Загрузка...</p>
-                                    ) : (
-                                    (() => {
-                                        const operators = svData?.operators ?? [];
-                                        const filteredByStatus =
-                                        activeTab === 'active'
-                                            ? operators.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
-                                            : operators.filter(op => op.status === 'fired');
-
-                                        if (!filteredByStatus || filteredByStatus.length === 0) {
-                                        return <p className="text-center text-gray-600">Операторы не найдены.</p>;
-                                        }
-
-                                        // Применяем локальный поиск (если нужно)
-                                        const matched = filteredByStatus.filter((op) => {
-                                        if (!searchQuery) return true;
-                                        const q = searchQuery.toLowerCase();
-                                        const dirName = directions.find(d => d.id === op.direction_id)?.name || "";
-                                        return (
-                                            (op.name || "").toLowerCase().includes(q) ||
-                                            dirName.toLowerCase().includes(q) ||
-                                            (op.supervisor_name || "").toLowerCase().includes(q)
-                                        );
-                                        });
-
-                                        return (
-                                        <div className="overflow-x-auto rounded-lg border border-gray-200">
-                                            <div className="mb-4 p-4">
-                                            <input
-                                                type="text"
-                                                placeholder="Поиск по имени, направлению или супервайзеру..."
-                                                value={searchQuery}
-                                                onChange={(e) => setSearchQuery(e.target.value)}
-                                                className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                                            />
-                                            </div>
-
-                                            <table className="min-w-full table-fixed border rounded-lg w-full">
-                                            <colgroup>
-                                                <col style={{ width: "28%" }} /> {/* Имя */}
-                                                <col style={{ width: "18%" }} /> {/* Направление */}
-                                                <col style={{ width: "12%" }} /> {/* Статус */}
-                                                <col style={{ width: "14%" }} /> {/* Hire date */}
-                                                <col style={{ width: "10%" }} /> {/* Ставка */}
-                                                <col style={{ width: "18%" }} /> {/* Действия */}
-                                            </colgroup>
-
-                                            <thead className="bg-gray-50">
-                                                <tr>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Имя</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Направление</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Статус</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Дата найма</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ставка</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Действия</th>
-                                                </tr>
-                                            </thead>
-
-                                            <tbody className="bg-white divide-y divide-gray-200">
-                                                {matched.map((op) => (
-                                                <tr key={op.id} className="hover:bg-gray-50 transition-colors duration-200">
-                                                    <td className="px-6 py-4 text-left truncate">{op.name}</td>
-
-                                                    <td className="px-6 py-4 text-left">
-                                                    {op.direction_id ? directions.find((d) => d.id === op.direction_id)?.name || "-" : "-"}
-                                                    </td>
-
-                                                    <td className="px-6 py-4 text-left">
-                                                    {op.status === "working" || !op.status ? (
-                                                        <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Работает</span>
-                                                    ) : op.status === "unpaid_leave" ? (
-                                                        <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">БС</span>
-                                                    ) : op.status === "fired" ? (
-                                                        <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Уволен</span>
-                                                    ) : (
-                                                        <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{op.status}</span>
-                                                    )}
-                                                    </td>
-
-                                                    <td className="px-6 py-4 text-left">
-                                                    {op.hire_date
-                                                        ? (() => {
-                                                            const [day, month, year] = op.hire_date.split("-");
-                                                            const date = new Date(`${year}-${month}-${day}`);
-                                                            return date.toLocaleDateString("ru-RU");
-                                                        })()
-                                                        : "-"}
-                                                    </td>
-
-                                                    <td className="px-6 py-4 text-left">
-                                                    <div className="inline-flex items-center justify-start">
-                                                        <RateCircle rate={op.rate || 1.0} />
-                                                    </div>
-                                                    </td>
-
-                                                    <td className="px-6 py-4 text-left">
-                                                    <div className="flex space-x-2">
-                                                        <button
-                                                        onClick={() => {
-                                                            setUserToEdit({ ...op, supervisor_id: user.id });
-                                                            setShowUserEditModal(true);
-                                                        }}
-                                                        className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
-                                                        >
-                                                        <i className="fas fa-edit"></i> Править
-                                                        </button>
-
-                                                        <button
-                                                        onClick={() => {
-                                                            setSelectedUserForHistory(op);
-                                                            fetchUserHistory(op.id);
-                                                        }}
-                                                        disabled={loadingHistoryId === op.id}
-                                                        className={`bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700 text-sm transition-all duration-200 flex items-center gap-1 ${
-                                                            loadingHistoryId === op.id ? "opacity-50 cursor-not-allowed" : ""
-                                                        }`}
-                                                        >
-                                                        {loadingHistoryId === op.id ? (
-                                                            <>
-                                                            <i className="fas fa-spinner fa-spin"></i> Загрузка...
-                                                            </>
-                                                        ) : (
-                                                            <>
-                                                            <i className="fas fa-history"></i> История
-                                                            </>
-                                                        )}
-                                                        </button>
-                                                    </div>
-                                                    </td>
-                                                </tr>
-                                                ))}
-                                            </tbody>
-
-                                            <tfoot className="bg-gray-50">
-                                                <tr>
-                                                <td className="px-6 py-3 font-medium text-gray-700">{matched.length} операторов</td>
-                                                <td className="px-6 py-3 text-gray-700">
-                                                    {Array.from(new Set(matched.map((o) => directions.find(d => d.id === o.direction_id)?.name || "-"))).join(", ")}
-                                                </td>
-                                                <td className="px-6 py-3">
-                                                    <div className="flex gap-2 flex-wrap">
-                                                    {Object.entries(matched.reduce((acc, u) => {
-                                                        const st = u.status || "working";
-                                                        acc[st] = (acc[st] || 0) + 1;
-                                                        return acc;
-                                                    }, {})).map(([status, count]) => (
-                                                        <span
-                                                        key={status}
-                                                        title={status}
-                                                        className={`px-2 py-1 rounded-full text-xs font-medium border ${
-                                                            status === "working" || !status ? "border-green-500 text-green-700" :
-                                                            status === "unpaid_leave" ? "border-yellow-500 text-yellow-700" :
-                                                            status === "fired" ? "border-red-500 text-red-700" : "border-gray-500 text-gray-700"
-                                                        }`}
-                                                        >
-                                                        {count}
-                                                        </span>
-                                                    ))}
-                                                    </div>
-                                                </td>
-                                                <td className="px-6 py-3"></td>
-                                                <td className="px-6 py-3">
-                                                    <RateCircle rate={matched.reduce((s, o) => s + (o.rate || 0), 0)} len={matched.length} />
-                                                </td>
-                                                <td className="px-6 py-3"></td>
-                                                </tr>
-                                            </tfoot>
-                                            </table>
+                                        <button
+                                            onClick={() => {
+                                            setUserToEdit({
+                                                name: "",
+                                                rate: 1.0,
+                                                direction_id: "",
+                                                hire_date: "",
+                                                supervisor_id: user?.id || "",
+                                                status: "working",
+                                            });
+                                            setShowUserEditModal(true);
+                                            }}
+                                            className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-green-600 text-white hover:bg-green-700 transition"
+                                        >
+                                            <i className="fas fa-user-plus"></i> Добавить оператора
+                                        </button>
                                         </div>
-                                        );
-                                    })()
+
+                                        {/* Tabs */}
+                                        <div className="flex items-center space-x-3 mb-6">
+                                        {(() => {
+                                            const all = svData?.operators ?? [];
+                                            const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
+                                            const firedCount = all.filter(op => op.status === 'fired').length;
+                                            return (
+                                            <>
+                                                <button
+                                                onClick={() => setActiveTab('active')}
+                                                className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeTab === 'active' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                                                role="tab"
+                                                aria-selected={activeTab === 'active'}
+                                                aria-controls="operators-active"
+                                                >
+                                                Активные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{activeCount}</span>
+                                                </button>
+
+                                                <button
+                                                onClick={() => setActiveTab('fired')}
+                                                className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeTab === 'fired' ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                                                role="tab"
+                                                aria-selected={activeTab === 'fired'}
+                                                aria-controls="operators-fired"
+                                                >
+                                                Уволенные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{firedCount}</span>
+                                                </button>
+                                            </>
+                                            );
+                                        })()}
+                                        </div>
+
+                                        {isLoading ? (
+                                        <p className="text-center text-gray-600">Загрузка...</p>
+                                        ) : (
+                                        (() => {
+                                            const operators = svData?.operators ?? [];
+                                            const filteredByStatus =
+                                            activeTab === 'active'
+                                                ? operators.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
+                                                : operators.filter(op => op.status === 'fired');
+
+                                            if (!filteredByStatus || filteredByStatus.length === 0) {
+                                            return <p className="text-center text-gray-600">Операторы не найдены.</p>;
+                                            }
+
+                                            // Применяем локальный поиск (если нужно)
+                                            const matched = filteredByStatus.filter((op) => {
+                                            if (!searchQuery) return true;
+                                            const q = searchQuery.toLowerCase();
+                                            const dirName = directions.find(d => d.id === op.direction_id)?.name || "Без направления";
+                                            return (
+                                                (op.name || "").toLowerCase().includes(q) ||
+                                                dirName.toLowerCase().includes(q) ||
+                                                (op.supervisor_name || "").toLowerCase().includes(q)
+                                            );
+                                            });
+
+                                            // Группируем по направлению
+                                            const grouped = matched.reduce((acc, op) => {
+                                            const dirName = directions.find(d => d.id === op.direction_id)?.name || "Без направления";
+                                            if (!acc[dirName]) acc[dirName] = [];
+                                            acc[dirName].push(op);
+                                            return acc;
+                                            }, {});
+
+                                            // Сортируем ключи групп (направлений) и внутри каждой группы сортируем операторов по ФИО
+                                            const sortedDirectionNames = Object.keys(grouped).sort((a, b) => a.localeCompare(b, 'ru', { sensitivity: 'base' }));
+                                            sortedDirectionNames.forEach((dir) => {
+                                            grouped[dir].sort((x, y) => (x.name || '').localeCompare(y.name || '', 'ru', { sensitivity: 'base' }));
+                                            });
+
+                                            return (
+                                            <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                                <div className="mb-4 p-4">
+                                                <input
+                                                    type="text"
+                                                    placeholder="Поиск по имени, направлению или супервайзеру..."
+                                                    value={searchQuery}
+                                                    onChange={(e) => setSearchQuery(e.target.value)}
+                                                    className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                                                />
+                                                </div>
+
+                                                <table className="min-w-full table-fixed border rounded-lg w-full">
+                                                <colgroup>
+                                                    <col style={{ width: "28%" }} /> {/* Имя */}
+                                                    <col style={{ width: "18%" }} /> {/* Направление */}
+                                                    <col style={{ width: "12%" }} /> {/* Статус */}
+                                                    <col style={{ width: "14%" }} /> {/* Hire date */}
+                                                    <col style={{ width: "10%" }} /> {/* Ставка */}
+                                                    <col style={{ width: "18%" }} /> {/* Действия */}
+                                                </colgroup>
+
+                                                <thead className="bg-gray-50">
+                                                    <tr>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Имя</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Направление</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Статус</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Дата найма</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ставка</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Действия</th>
+                                                    </tr>
+                                                </thead>
+
+                                                <tbody className="bg-white divide-y divide-gray-200">
+                                                    {sortedDirectionNames.map((dirName) => (
+                                                    <React.Fragment key={dirName}>
+                                                        {/* Заголовок группы направления */}
+                                                        <tr className="bg-gray-100">
+                                                        <td colSpan={6} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                            {dirName} <span className="ml-2 text-xs text-gray-500">({grouped[dirName].length})</span>
+                                                        </td>
+                                                        </tr>
+
+                                                        {/* Операторы в группе */}
+                                                        {grouped[dirName].map((op) => (
+                                                        <tr key={op.id} className="hover:bg-gray-50 transition-colors duration-200">
+                                                            <td className="px-6 py-4 text-left truncate">{op.name}</td>
+
+                                                            <td className="px-6 py-4 text-left">
+                                                            {op.direction_id ? directions.find((d) => d.id === op.direction_id)?.name || "-" : "Без направления"}
+                                                            </td>
+
+                                                            <td className="px-6 py-4 text-left">
+                                                            {op.status === "working" || !op.status ? (
+                                                                <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Работает</span>
+                                                            ) : op.status === "unpaid_leave" ? (
+                                                                <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">БС</span>
+                                                            ) : op.status === "fired" ? (
+                                                                <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Уволен</span>
+                                                            ) : (
+                                                                <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{op.status}</span>
+                                                            )}
+                                                            </td>
+
+                                                            <td className="px-6 py-4 text-left">
+                                                            {op.hire_date
+                                                                ? (() => {
+                                                                    const [day, month, year] = op.hire_date.split("-");
+                                                                    const date = new Date(`${year}-${month}-${day}`);
+                                                                    return date.toLocaleDateString("ru-RU");
+                                                                })()
+                                                                : "-"}
+                                                            </td>
+
+                                                            <td className="px-6 py-4 text-left">
+                                                            <div className="inline-flex items-center justify-start">
+                                                                <RateCircle rate={op.rate || 1.0} />
+                                                            </div>
+                                                            </td>
+
+                                                            <td className="px-6 py-4 text-left">
+                                                            <div className="flex space-x-2">
+                                                                <button
+                                                                onClick={() => {
+                                                                    setUserToEdit({ ...op, supervisor_id: user?.id });
+                                                                    setShowUserEditModal(true);
+                                                                }}
+                                                                className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
+                                                                >
+                                                                <i className="fas fa-edit"></i> Править
+                                                                </button>
+
+                                                                <button
+                                                                onClick={() => {
+                                                                    setSelectedUserForHistory(op);
+                                                                    fetchUserHistory(op.id);
+                                                                }}
+                                                                disabled={loadingHistoryId === op.id}
+                                                                className={`bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700 text-sm transition-all duration-200 flex items-center gap-1 ${
+                                                                    loadingHistoryId === op.id ? "opacity-50 cursor-not-allowed" : ""
+                                                                }`}
+                                                                >
+                                                                {loadingHistoryId === op.id ? (
+                                                                    <>
+                                                                    <i className="fas fa-spinner fa-spin"></i> Загрузка...
+                                                                    </>
+                                                                ) : (
+                                                                    <>
+                                                                    <i className="fas fa-history"></i> История
+                                                                    </>
+                                                                )}
+                                                                </button>
+                                                            </div>
+                                                            </td>
+                                                        </tr>
+                                                        ))}
+                                                    </React.Fragment>
+                                                    ))}
+                                                </tbody>
+
+                                                <tfoot className="bg-gray-50">
+                                                    <tr>
+                                                    <td className="px-6 py-3 font-medium text-gray-700">{matched.length} операторов</td>
+                                                    <td className="px-6 py-3 text-gray-700">
+                                                        {Array.from(new Set(matched.map((o) => directions.find(d => d.id === o.direction_id)?.name || "Без направления"))).join(", ")}
+                                                    </td>
+                                                    <td className="px-6 py-3">
+                                                        <div className="flex gap-2 flex-wrap">
+                                                        {Object.entries(matched.reduce((acc, u) => {
+                                                            const st = u.status || "working";
+                                                            acc[st] = (acc[st] || 0) + 1;
+                                                            return acc;
+                                                        }, {})).map(([status, count]) => (
+                                                            <span
+                                                            key={status}
+                                                            title={status}
+                                                            className={`px-2 py-1 rounded-full text-xs font-medium border ${
+                                                                status === "working" || !status ? "border-green-500 text-green-700" :
+                                                                status === "unpaid_leave" ? "border-yellow-500 text-yellow-700" :
+                                                                status === "fired" ? "border-red-500 text-red-700" : "border-gray-500 text-gray-700"
+                                                            }`}
+                                                            >
+                                                            {count}
+                                                            </span>
+                                                        ))}
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-6 py-3"></td>
+                                                    <td className="px-6 py-3">
+                                                        <RateCircle rate={matched.reduce((s, o) => s + (o.rate || 0), 0)} len={matched.length} />
+                                                    </td>
+                                                    <td className="px-6 py-3"></td>
+                                                    </tr>
+                                                </tfoot>
+                                                </table>
+                                            </div>
+                                            );
+                                        })()
+                                        )}
+                                    </div>
                                     )}
-                                </div>
-                                )}
                                 {view === 'operators' && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     {/* Header: title + controls */}
