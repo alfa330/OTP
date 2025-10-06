@@ -441,6 +441,7 @@ def sv_daily_hours():
     Если запрос делает обычный оператор — возвращаем только его daily_hours.
     Параметры:
       - month (query param) — YYYY-MM (опционально, по умолчанию текущий месяц)
+      - id (query param) — (только для admin) id нужного supervisor
     Заголовки:
       - X-User-Id (обязательно) — id супервайзера/оператора (проверяется роль)
     """
@@ -450,17 +451,30 @@ def sv_daily_hours():
         if not month:
             month = datetime.now().strftime('%Y-%m')
 
-        # requester
+        # requester id header
         requester_header = request.headers.get('X-User-Id')
         if not requester_header or not requester_header.isdigit():
             return jsonify({"error": "Invalid or missing X-User-Id header"}), 400
         requester_id = int(requester_header)
 
+        # get requester from db
         requester = db.get_user(id=requester_id)
         if not requester:
             return jsonify({"error": "Requester not found"}), 403
 
-        role = requester[3]  # u.role
+        # try to read role in a robust way (support tuple or dict)
+        role = None
+        if isinstance(requester, dict):
+            role = requester.get('role')
+        elif isinstance(requester, (list, tuple)) and len(requester) > 3:
+            role = requester[3]
+        else:
+            # fallback: try attribute access
+            role = getattr(requester, 'role', None)
+
+        if not role:
+            # если роль не определена — ошибка
+            return jsonify({"error": "User role not determined"}), 500
 
         # -----------------------
         # Behavior for supervisors
@@ -470,139 +484,64 @@ def sv_daily_hours():
                 result = db.get_daily_hours_by_supervisor_month(requester_id, month)
             except ValueError as e:
                 return jsonify({"error": str(e)}), 400
-
-            # Дополняем каждый operator.norm_hours и operator.fines из get_hours_summary
-            ops = result.get("operators", [])
-            for op in ops:
-                op_id = op.get("operator_id")
-                if not op_id:
-                    # пропускаем если нет id
-                    op["norm_hours"] = op.get("norm_hours", 0.0)
-                    op["fines"] = op.get("fines", 0.0)
-                    continue
-
-                try:
-                    summary = db.get_hours_summary(operator_id=op_id, month=month)
-                    # summary может быть dict или list
-                    if isinstance(summary, list) and len(summary) > 0:
-                        summary = summary[0]
-                    if not summary:
-                        raise ValueError("empty summary")
-
-                    op["norm_hours"] = float(summary.get("norm_hours", op.get("norm_hours", 0.0)))
-                    # some schemas use 'fines' or 'total_fines' — пробуем оба
-                    op["fines"] = float(summary.get("fines",
-                                         summary.get("total_fines",
-                                                     op.get("fines", 0.0))))
-                except Exception:
-                    # на случай ошибки — не ломаем ответ, ставим значения по умолчанию
-                    op["norm_hours"] = float(op.get("norm_hours", 0.0))
-                    op["fines"] = float(op.get("fines", 0.0))
-
+            # result expected to contain "operators" list
             return jsonify({
                 "status": "success",
                 "month": result.get("month", month),
                 "days_in_month": result.get("days_in_month"),
-                "operators": ops
+                "operators": result.get("operators", [])
             }), 200
 
         # -----------------------
         # Behavior for operators
         # -----------------------
         elif role == 'operator':
-            # get daily entries for this operator for the month
             try:
-                daily_list = db.get_daily_hours_for_operator_month(requester_id, month)
+                result = db.get_daily_hours_for_operator_month(requester_id, month)
             except Exception as e:
                 logging.exception("Error fetching daily hours for operator")
                 return jsonify({"error": "Failed to fetch daily hours"}), 500
 
-            # convert list -> map as in supervisor response: { "1": {...}, "2": {...} ... }
-            daily_map = {}
-            for entry in daily_list:
-                # entry["day"] is expected 'YYYY-MM-DD'
-                try:
-                    day_num = str(int(datetime.fromisoformat(entry["day"]).day))
-                except Exception:
-                    day_num = str(int(entry["day"].split('-')[-1]))
-                daily_map[day_num] = {
-                    "work_time": float(entry.get("work_time", 0.0)),
-                    "break_time": float(entry.get("break_time", 0.0)),
-                    "talk_time": float(entry.get("talk_time", 0.0)),
-                    "calls": int(entry.get("calls", 0)),
-                    "efficiency": float(entry.get("efficiency", 0.0))
-                }
-
-            # aggregates: суммируем daily и обновляем work_hours (и получаем агрегаты)
-            try:
-                aggregates = db.aggregate_month_from_daily(requester_id, month)
-            except Exception as e:
-                logging.exception("Error aggregating month from daily")
-                aggregates = {
-                    "regular_hours": 0.0,
-                    "total_break_time": 0.0,
-                    "total_talk_time": 0.0,
-                    "total_calls": 0,
-                    "total_efficiency_hours": 0.0,
-                    "calls_per_hour": 0.0
-                }
-
-            # try to fetch norm_hours and fines from work_hours / users summary if available
-            norm_hours = 0.0
-            fines = 0.0
-            try:
-                summary = db.get_hours_summary(operator_id=requester_id, month=month)
-                if isinstance(summary, list) and len(summary) > 0:
-                    summary = summary[0]
-                if summary:
-                    norm_hours = float(summary.get("norm_hours", 0.0))
-                    fines = float(summary.get("fines",
-                                      summary.get("total_fines",
-                                                  0.0)))
-            except Exception:
-                # ignore if not available
-                norm_hours = 0.0
-                fines = 0.0
-
-            rate = float(requester[12]) if len(requester) > 12 and requester[12] is not None else 0.0
-
-            operator_obj = {
-                "operator_id": requester_id,
-                "name": requester[2],
-                "rate": rate,
-                "norm_hours": norm_hours,
-                "fines": fines,
-                "daily": daily_map,
-                "aggregates": {
-                    "regular_hours": float(aggregates.get("regular_hours", 0.0)),
-                    "total_break_time": float(aggregates.get("total_break_time", 0.0)),
-                    "total_talk_time": float(aggregates.get("total_talk_time", 0.0)),
-                    "total_calls": int(aggregates.get("total_calls", 0)),
-                    "total_efficiency_hours": float(aggregates.get("total_efficiency_hours", 0.0)),
-                    "calls_per_hour": float(aggregates.get("calls_per_hour", 0.0))
-                }
-            }
-
-            # calculate days_in_month
-            try:
-                import calendar as _calendar
-                year, mon = map(int, month.split('-'))
-                days_in_month = _calendar.monthrange(year, mon)[1]
-            except Exception:
-                days_in_month = None
-
+            operator_obj = result.get("operator") if isinstance(result, dict) else None
             return jsonify({
                 "status": "success",
-                "month": month,
-                "days_in_month": days_in_month,
-                "operators": [operator_obj]
+                "month": result.get("month", month) if isinstance(result, dict) else month,
+                "days_in_month": result.get("days_in_month") if isinstance(result, dict) else None,
+                "operators": [operator_obj] if operator_obj else []
             }), 200
 
         # -----------------------
-        # Other roles not allowed
+        # Behavior for admins
         # -----------------------
+        elif role == 'admin':
+            # admin must pass id (supervisor id) as query param "id"
+            user_id = request.args.get('id')
+            if not user_id or not str(user_id).isdigit():
+                return jsonify({"error": "Missing or invalid 'id' parameter (supervisor id)"}), 400
+
+            supervisor_id = int(user_id)
+            try:
+                result = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
+            except Exception as e:
+                logging.exception("Error fetching daily hours for supervisor (admin request)")
+                return jsonify({"error": str(e)}), 400
+
+            # Normalize: expect result to contain "operators" list
+            operators = result.get("operators") if isinstance(result, dict) else None
+            if operators is None:
+                # if older API returned single operator under "operator", handle it
+                single = result.get("operator") if isinstance(result, dict) else None
+                operators = [single] if single else []
+
+            return jsonify({
+                "status": "success",
+                "month": result.get("month", month) if isinstance(result, dict) else month,
+                "days_in_month": result.get("days_in_month"),
+                "operators": operators
+            }), 200
+
         else:
-            return jsonify({"error": "Only supervisors or operators can request this endpoint"}), 403
+            return jsonify({"error": "Only supervisors, operators and admins can request this endpoint"}), 403
 
     except Exception as e:
         logging.exception("Error in sv_daily_hours")
@@ -685,7 +624,19 @@ def upload_group_day():
                     efficiency = float(row.get('efficiency') or 0.0)  # в часах
                 except Exception:
                     efficiency = 0.0
+                try:
+                    fine_amount = float(row.get('fine_amount') or 0.0)
+                except Exception:
+                    fine_amount = 0.0
+                
+                fine_reason = (row.get('fine_reason') or None)
+                # защита: принимаем только разрешённые причины (опционально)
+                ALLOWED_FINE_REASONS = ['Корп такси', 'Опоздание', 'Прокси карта', 'Другое']
+                if fine_reason and fine_reason not in ALLOWED_FINE_REASONS:
+                    # если невалидная причина — помечаем как "Другое" или сохраняем как есть, в примере — нормализуем в 'Другое'
+                    fine_reason = 'Другое'
 
+                fine_comment = (row.get('fine_comment') or None)
                 month = row.get('month') or default_month
 
                 # resolve operator_id if not provided
@@ -749,13 +700,17 @@ def upload_group_day():
 
                 # Insert/update daily_hours
                 try:
+                    logging.info(fine_amount,fine_reason,fine_comment)
                     # use the Database helper (assumes method exists)
                     db.insert_or_update_daily_hours(resolved_operator_id, date_str,
                                                     work_time=work_time,
                                                     break_time=break_time,
                                                     talk_time=talk_time,
                                                     calls=calls,
-                                                    efficiency=efficiency)
+                                                    efficiency=efficiency,
+                                                    fine_amount=fine_amount,
+                                                    fine_reason=fine_reason,
+                                                    fine_comment=fine_comment)
                     processed.append({"row": idx, "operator_id": resolved_operator_id, "name": name})
                     processed_operator_ids.add(resolved_operator_id)
                 except Exception as e:
@@ -789,33 +744,6 @@ def upload_group_day():
 
     except Exception as e:
         logging.exception("Error in upload_group_day")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/api/sv/preview_table', methods=['POST'])
-@require_api_key
-def preview_table():
-    try:
-        data = request.get_json()
-        if not data or 'table_url' not in data:
-            return jsonify({"error": "Missing table_url"}), 400
-
-        table_url = data['table_url']
-        user_id = int(request.headers.get('X-User-Id'))
-        user = db.get_user(id=user_id)
-        if not user or user[3] != 'sv':
-            return jsonify({"error": "Unauthorized: Only supervisors can preview tables"}), 403
-
-        sheet_name, operators, error = extract_fio_and_links(table_url)
-        if error:
-            return jsonify({"error": error}), 400
-
-        return jsonify({
-            "status": "success",
-            "sheet_name": sheet_name,
-            "operators": operators
-        }), 200
-    except Exception as e:
-        logging.error(f"Error previewing table: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/sv/save_table', methods=['POST'])
@@ -1422,52 +1350,122 @@ def get_sv_operators_moderka():
 @app.route('/api/sv/data', methods=['GET'])
 def get_sv_data():
     try:
-        user_id = request.args.get('id')
-        if not user_id:
+        # id
+        user_id_raw = request.args.get('id')
+        if not user_id_raw:
             return jsonify({"error": "Missing ID parameter"}), 400
-        user_id = int(user_id)
-        
+        try:
+            user_id = int(user_id_raw)
+        except ValueError:
+            return jsonify({"error": "Invalid ID parameter"}), 400
+
+        # optional month YYYY-MM
+        month = request.args.get('month')
+        from datetime import datetime
+        if month:
+            try:
+                datetime.strptime(month, "%Y-%m")
+            except ValueError:
+                return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
+        else:
+            month = datetime.now().strftime("%Y-%m")
+
+        # fetch user (accept any caller role; admin can call this endpoint)
         user = db.get_user(id=user_id)
-        if not user or user[3] not in ['sv', 'operator']:
-            return jsonify({"error": "User not found or invalid role"}), 404
-        
-        # Initialize response data
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        # normalize user name (support tuple/list or dict)
+        if isinstance(user, dict):
+            user_name = user.get("name") or user.get("full_name") or ""
+        else:
+            user_name = user[2] if len(user) > 2 else ""
+
         response_data = {
             "status": "success",
-            "name": user[2],
-            "table": user[9],  # scores_table_url
+            "name": user_name,
+            "table": user[9] if (not isinstance(user, dict) and len(user) > 9) else (user.get("scores_table_url") if isinstance(user, dict) else None),
+            "requested_month": month,
             "operators": []
         }
 
-        # If user is a supervisor, fetch their operators and call statistics
-        if user[3] == 'sv':
-            operators = db.get_operators_by_supervisor(user_id)
-            current_month = datetime.now().strftime('%Y-%m')
-            
-            for operator in operators:
-                operator_id, operator_name, direction_id, hire_date, hours_table_url, scores_table_url, supervisor_name, status, rate =[operator[kkk] for kkk in operator]
-                # Get direction name from direction_id
-                
-                # Get call evaluations for the operator
-                evaluations = db.get_call_evaluations(operator_id, month=current_month)
-                call_count = len(evaluations)
-                avg_score = sum(float(e['score']) for e in evaluations) / call_count if call_count > 0 else 0
-                
-                response_data["operators"].append({
-                    "id": operator_id,
-                    "name": operator_name,
-                    "direction_id": direction_id,
-                    "call_count": call_count,
-                    "avg_score": round(avg_score, 2) if call_count > 0 else None,
-                    "scores_table_url": scores_table_url,
-                    "status": status,
-                    "rate": rate
-                })
-        
+        # try to get operators for this supervisor id (works when admin requests data for some sv)
+        try:
+            operators = db.get_operators_by_supervisor(user_id) or []
+        except Exception:
+            operators = []
+
+        for op in operators:
+            # flexible unpacking: support dict or sequence rows
+            if isinstance(op, dict):
+                operator_id = op.get("id") or op.get("operator_id") or op.get("user_id")
+                operator_name = op.get("name") or op.get("operator_name")
+                direction_id = op.get("direction_id")
+                hire_date = op.get("hire_date")
+                hours_table_url = op.get("hours_table_url")
+                scores_table_url = op.get("scores_table_url")
+                status = op.get("status")
+                rate = op.get("rate")
+            else:
+                operator_id = op[0] if len(op) > 0 else None
+                operator_name = op[1] if len(op) > 1 else None
+                direction_id = op[2] if len(op) > 2 else None
+                hire_date = op[3] if len(op) > 3 else None
+                hours_table_url = op[4] if len(op) > 4 else None
+                scores_table_url = op[5] if len(op) > 5 else None
+                status = op[7] if len(op) > 7 else None
+                rate = op[8] if len(op) > 8 else None
+
+            # skip invalid rows
+            if not operator_id:
+                continue
+
+            # get evaluations for requested month (be tolerant to db method return shape)
+            try:
+                evaluations = db.get_call_evaluations(operator_id, month=month) or []
+            except Exception:
+                evaluations = []
+
+            call_count = len(evaluations)
+            scores = []
+            for ev in evaluations:
+                try:
+                    if isinstance(ev, dict):
+                        raw = ev.get("score") or ev.get("points") or ev.get("value")
+                    else:
+                        # if sequence-like, try common positions
+                        raw = None
+                        if hasattr(ev, "score"):
+                            raw = getattr(ev, "score")
+                        elif len(ev) > 0:
+                            raw = ev[0]
+                    if raw is None:
+                        continue
+                    scores.append(float(raw))
+                except Exception:
+                    # ignore malformed score entries
+                    continue
+
+            avg_score = round(sum(scores) / len(scores), 2) if len(scores) > 0 else None
+
+            response_data["operators"].append({
+                "id": operator_id,
+                "name": operator_name,
+                "hire_date": hire_date,
+                "direction_id": direction_id,
+                "call_count": call_count,
+                "avg_score": avg_score,
+                "scores_table_url": scores_table_url,
+                "status": status,
+                "rate": float(rate) if rate is not None else 1.0
+            })
+
         return jsonify(response_data), 200
-    except Exception as e:
-        logging.error(f"Error fetching SV data: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+    except Exception:
+        # log full traceback on server, but return a simple message to client
+        logging.exception("Error fetching SV data")
+        return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/admin/notify_sv', methods=['POST'])
 @require_api_key
@@ -1512,61 +1510,6 @@ def notify_supervisor():
         return jsonify({"status": "success", "message": f"Notification sent to {user[2]}"}), 200
     except Exception as e:
         logging.error(f"Error in notify_supervisor: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/api/admin/sv_operators', methods=['GET'])
-@require_api_key
-def get_sv_operators():
-    try:
-        sv_id = request.args.get('sv_id')
-        if not sv_id:
-            return jsonify({"error": "Missing sv_id parameter"}), 400
-        
-        sv_id = int(sv_id)
-        user = db.get_user(id=sv_id)
-        if not user or user[3] != 'sv':
-            return jsonify({"error": "SV not found"}), 404
-        
-        table_url = user[6]  # table_url stored in 7th column
-        operators = []
-        error = None
-        
-        if table_url:
-            sheet_name, operators, error = extract_fio_and_links(table_url)
-            if error:
-                return jsonify({"error": error}), 400
-        
-        current_week = get_current_week_of_month()
-        expected_calls = get_expected_calls(current_week)
-        
-        operators_with_issues = []
-        for op in operators:
-            call_count = op.get('call_count', 0)
-            if call_count in [None, "#DIV/0!"]:
-                call_count = 0
-            else:
-                try:
-                    call_count = int(call_count)
-                except (ValueError, TypeError):
-                    call_count = 0
-            
-            if call_count < expected_calls:
-                operators_with_issues.append({
-                    'name': op.get('name', ''),
-                    'call_count': call_count,
-                    'expected_calls': expected_calls,
-                    'avg_score': op.get('avg_score', None)
-                })
-        
-        return jsonify({
-            "status": "success",
-            "operators": operators,
-            "operators_with_issues": operators_with_issues,
-            "current_week": current_week,
-            "expected_calls": expected_calls
-        })
-    except Exception as e:
-        logging.error(f"Error fetching SV operators: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/admin/monthly_report', methods=['GET'])
@@ -1736,41 +1679,96 @@ def get_users_report():
         logging.error(f"Error generating users report: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/sv/update_table', methods=['POST'])
-def update_sv_table():
+@app.route('/api/call_evaluation/sv_request', methods=['POST'])
+@require_api_key
+def sv_request_call():
+    """
+    Супервайзер отправляет запрос на переоценку по конкретному звонку (call_id).
+    Тело JSON: { "call_id": int, "comment": "..." }
+    Заголовки: X-User-Id, X-API-Key (require_api_key обеспечит авторизацию)
+    """
     try:
         data = request.get_json()
-        required_fields = ['id', 'table_url']
-        if not data or not all(field in data for field in required_fields):
-            return jsonify({"error": "Missing required fields"}), 400
+        if not data or 'call_id' not in data:
+            return jsonify({"error": "Missing call_id"}), 400
 
-        user_id = int(data['id'])
-        table_url = data['table_url']
-        
-        user = db.get_user(id=user_id)
-        if not user or user[3] not in ['sv', 'operator']:
-            return jsonify({"error": "User not found"}), 404
-        
-        sheet_name, operators, error = extract_fio_and_links(table_url)
-        if error:
-            return jsonify({"error": error}), 400
-        
-        db.update_user_table(user_id = user_id, hours_table_url = table_url)
-        
-        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": user[1],
-            "text": f"Таблица успешно обновлена <b>успешно✅</b>",
-            "parse_mode": "HTML"
-        }
-        response = requests.post(telegram_url, json=payload, timeout=10)
-        if response.status_code != 200:
-            error_detail = response.json().get('description', 'Unknown error')
-            logging.error(f"Telegram API error: {error_detail}")
-        
-        return jsonify({"status": "success", "message": "Table updated", "operators": operators})
+        call_id = int(data['call_id'])
+        comment = data.get('comment', '').strip()
+        requester_id = int(request.headers.get('X-User-Id'))
+
+        # Проверка: существует ли звонок и принадлежит ли оператор супервайзеру
+        call = db.get_call_by_id(call_id)
+        if not call:
+            return jsonify({"error": "Call not found"}), 404
+
+        # получить запись звонка с operator_id
+        with db._get_cursor() as cursor:
+            cursor.execute("SELECT operator_id, evaluator_id, month FROM calls WHERE id = %s", (call_id,))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({"error": "Call not found"}), 404
+            operator_id, evaluator_id, call_month = row
+
+        operator = db.get_user(id=operator_id)
+        if not operator:
+            return jsonify({"error": "Operator not found"}), 404
+
+        # Проверяем что requester — супервайзер этого оператора (или админ)
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 403
+
+        if requester[3] != 'admin' and operator[6] != requester_id:
+            return jsonify({"error": "Only the operator's supervisor or admin can request reevaluation"}), 403
+
+        # Сохраняем заявку в calls
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE calls
+                SET sv_request = TRUE,
+                    sv_request_comment = %s,
+                    sv_request_by = %s,
+                    sv_request_at = %s,
+                    sv_request_approved = FALSE,
+                    sv_request_approved_by = NULL,
+                    sv_request_approved_at = NULL
+                WHERE id = %s
+            """, (comment, requester_id, datetime.utcnow(), call_id))
+
+        # Уведомляем админа через Telegram с inline-кнопкой
+        API_TOKEN = os.getenv('BOT_TOKEN')
+        admin_chat_id = os.getenv('ADMIN_ID')
+        if API_TOKEN and admin_chat_id:
+            telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+            text = (
+                f"⚠️ <b>Запрос на переоценку (от СВ)</b>\n\n"
+                f"📞 Call ID: <b>{call_id}</b>\n"
+                f"👤 Оператор ID: <b>{operator_id}</b> / {operator[2]}\n"
+                f"📄 Месяц: <b>{call_month}</b>\n"
+                f"📝 Комментарий: {comment or '-'}\n\n"
+                f"Нажмите кнопку, чтобы одобрить переоценку и открыть звонок для переоценки."
+            )
+            reply_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "Одобрить переоценку ✅", "callback_data": f"approve_reval:{call_id}"}
+                    ]
+                ]
+            }
+            try:
+                requests.post(telegram_url, json={
+                    "chat_id": admin_chat_id,
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "reply_markup": json.dumps(reply_markup)
+                }, timeout=10)
+            except Exception as e:
+                logging.error(f"Failed to send telegram sv_request notification: {e}")
+
+        return jsonify({"status": "success", "message": "sv_request created"}), 200
+
     except Exception as e:
-        logging.error(f"Error updating table: {e}")
+        logging.error(f"Error in sv_request_call: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/call_versions/<int:call_id>', methods=['GET'])
@@ -1946,8 +1944,42 @@ def receive_call_evaluation():
         if is_correction:
             requester_id = int(request.headers.get('X-User-Id'))
             requester = db.get_user(id=requester_id)
-            if not requester or requester[3] != 'admin':
-                return jsonify({"error": "Only admins can perform re-evaluations"}), 403
+            if not requester:
+                return jsonify({"error": "Requester not found"}), 403
+
+            # admins всегда могут делать переоценки
+            if requester[3] == 'admin':
+                allowed = True
+            else:
+                # non-admin может переоценивать ТОЛЬКО если:
+                # - передан previous_version_id
+                # - previous call exists AND sv_request == TRUE AND sv_request_approved == TRUE
+                # - и sv_request_by == requester_id (т.е. именно этот СВ отправил запрос)
+                allowed = False
+                if previous_version_id:
+                    try:
+                        prev_id = int(previous_version_id)
+                    except Exception:
+                        prev_id = None
+                    if prev_id:
+                        try:
+                            with db._get_cursor() as cursor:
+                                cursor.execute("SELECT sv_request, sv_request_approved, sv_request_by FROM calls WHERE id = %s", (prev_id,))
+                                prev = cursor.fetchone()
+                        except Exception as e:
+                            logging.error(f"Error checking previous call for re-eval permissions: {e}")
+                            prev = None
+
+                        if prev:
+                            sv_request_flag = bool(prev[0])
+                            sv_request_approved_flag = bool(prev[1])
+                            sv_request_by_id = prev[2]
+                            if sv_request_flag and sv_request_approved_flag and sv_request_by_id == requester_id:
+                                allowed = True
+
+            if not allowed:
+                return jsonify({"error": "Only admins or the supervisor who requested and was approved can perform re-evaluations"}), 403
+
 
         audio_path = None
         audio_data = None
@@ -2044,8 +2076,8 @@ def background_upload_and_notify(audio_data, bucket_name, blob_path, evaluation_
 
 def send_telegram_notification(evaluator_name, operator_name, month, phone_number, score, comment, is_correction, previous_version_id, audio_path, appeal_date):
     try:
-        API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-        admin = os.getenv('TELEGRAM_ADMIN_CHAT_ID')
+        API_TOKEN = os.getenv('BOT_TOKEN')
+        admin = os.getenv('ADMIN_ID')
         if not admin:
             return
 
@@ -2238,6 +2270,109 @@ def get_monthly_report():
     except Exception as e:
         logging.error(f"Error generating monthly report: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+MONTH_RE = re.compile(r'^\d{4}-\d{2}$')
+
+def build_trainings_map(trainings_list):
+    """
+    Преобразует список тренингов в структуру { operator_id: { dayNum: [training...] } }.
+    Ожидается, что у тренинга есть поле 'operator_id' и 'date' в формате 'YYYY-MM-DD'.
+    """
+    tmap = {}
+    if not trainings_list:
+        return tmap
+    for t in trainings_list:
+        op = t.get('operator_id')
+        if op is None:
+            continue
+        dt = t.get('date') or t.get('date_str') or t.get('day')
+        day = None
+        if isinstance(dt, str) and len(dt) >= 10:
+            try:
+                day = int(dt[8:10])
+            except Exception:
+                day = None
+        elif isinstance(dt, int):
+            day = dt
+        if day is None:
+            # пропускаем записи без понятного дня
+            continue
+        tmap.setdefault(op, {}).setdefault(day, []).append(t)
+    return tmap
+
+@app.route('/api/report/monthly_hours', methods=['GET'])
+@require_api_key
+def get_monthly_report_hours():
+    try:
+        supervisor_id = request.args.get('supervisor_id')
+        month = request.args.get('month')
+        if not month or not MONTH_RE.match(month):
+            return jsonify({"error": "month required in format YYYY-MM"}), 400
+
+        # requester
+        try:
+            requester_id = int(request.headers.get('X-User-Id'))
+        except Exception:
+            return jsonify({"error": "X-User-Id header required"}), 400
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+
+        # роль в requester ожидается в requester[3] как в вашем примере
+        role = requester[3] if len(requester) > 3 else None
+
+        # разрешаем sv без supervisor_id - тогда смотрим на себя
+        if not supervisor_id:
+            if role == 'sv':
+                supervisor_id = requester_id
+            else:
+                return jsonify({"error": "supervisor_id required"}), 400
+        else:
+            try:
+                supervisor_id = int(supervisor_id)
+            except ValueError:
+                return jsonify({"error": "supervisor_id must be integer"}), 400
+
+        # проверка прав: admin или тот же sv
+        if role != 'admin' and (role != 'sv' or supervisor_id != requester_id):
+            return jsonify({"error": "Unauthorized to access this report"}), 403
+
+        logging.info("Начало генерации отчета: supervisor_id=%s month=%s", supervisor_id, month)
+
+        # Иначе собираем данные вручную и используем функцию-генератор (если есть)
+        # Ожидаемые методы: get_daily_hours_by_supervisor_month / get_daily_hours_for_all_month и get_trainings_for_month / get_trainings_by_sv_month
+        try:
+            operators = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
+        except Exception as e:
+            logging.exception("Ошибка получения operators из db")
+            return jsonify({"error": f"Ошибка получения операторов: {str(e)}"}), 500
+
+        try:
+            trainings_list = db.get_trainings(supervisor_id, month)
+        except Exception as e:
+            logging.exception("Ошибка получения trainings из db")
+            trainings_list = []
+
+        trainings_map = build_trainings_map(trainings_list)
+        
+        filename, content = db.generate_excel_report_from_view(operators, trainings_map, month)
+            
+        if not filename or not content:
+            logging.error("Генерация отчёта вернула пустой результат")
+            return jsonify({"error": "Failed to generate report"}), 500
+
+        return send_file(
+            BytesIO(content),
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+
+    except Exception as e:
+        logging.exception("Error generating monthly report")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 
 @app.route('/api/trainings', methods=['GET'])
 @require_api_key
@@ -2555,7 +2690,6 @@ def get_editor_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(KeyboardButton('Добавить СВ➕'))
     kb.insert(KeyboardButton('Убрать СВ❌'))
-    kb.add(KeyboardButton('Изменить таблицу СВ🔄'))
     kb.add(KeyboardButton('Назад 🔙'))
     return kb
 
@@ -3034,187 +3168,6 @@ async def delSVcall(callback: types.CallbackQuery, state: FSMContext):
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
     await state.finish()
 
-
-@dp.message_handler(regexp='Изменить таблицу СВ🔄')
-async def change_sv_table(message: types.Message):
-    user = db.get_user(telegram_id=message.from_user.id)
-    if user and user[3] == 'admin':
-        supervisors = db.get_supervisors()
-        if not supervisors:
-            await bot.send_message(
-                chat_id=message.from_user.id,
-                text="<b>Нет доступных супервайзеров</b>",
-                parse_mode='HTML',
-                reply_markup=get_editor_keyboard()
-            )
-            return
-
-        ikb = InlineKeyboardMarkup(row_width=1)
-        for sv_id, sv_name, _, _, _, _ in supervisors:
-            ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"change_hours_table_{sv_id}"))
-        
-        await bot.send_message(
-            chat_id=message.from_user.id,
-            text="<b>Выберите супервайзера для изменения таблицы часов</b>",
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-
-        await bot.send_message(
-            chat_id=message.from_user.id,
-            text="<b>Лист СВ:</b>",
-            parse_mode='HTML',
-            reply_markup=ikb
-        )
-
-        await sv.change_table.set()
-    await message.delete()
-
-@dp.callback_query_handler(lambda c: c.data.startswith('change_hours_table_'), state=sv.change_table)
-async def select_sv_for_hours_table_change(callback: types.CallbackQuery, state: FSMContext):
-    sv_id = int(callback.data.split('_')[-1])
-    async with state.proxy() as data:
-        data['sv_id'] = sv_id
-    user = db.get_user(id=sv_id)
-    if user:
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text=f'<b>Отправьте новую таблицу часов для {user[2]}🖊</b>',
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-        await state.set_state("waiting_for_hours_table_admin")
-    else:
-        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
-        await state.finish()
-
-@dp.message_handler(state="waiting_for_hours_table_admin")
-async def save_hours_table_admin(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        sv_id = data.get('sv_id')
-    user = db.get_user(id=sv_id)
-    if user and user[3] == 'sv':
-        try:
-            sheet_name, operators, error = extract_fio_and_links(message.text)
-            if error:
-                await bot.send_message(
-                    chat_id=message.from_user.id,
-                    text=f"{error}\n\n<b>Пожалуйста, отправьте корректную ссылку на таблицу.</b>",
-                    parse_mode="HTML",
-                    reply_markup=get_cancel_keyboard()
-                )
-                return
-
-            async with state.proxy() as data:
-                data['hours_table_url'] = message.text
-                data['operators'] = operators
-                data['sheet_name'] = sheet_name
-                data['sv_id'] = user[0]
-
-            message_text = f"<b>Название листа:</b> {sheet_name}\n\n<b>ФИО операторов:</b>\n"
-            for op in operators:
-                    message_text += f"👤 {op['name']}\n"
-            message_text += "\n<b>Это все операторы для этого СВ?</b>"
-
-            await bot.send_message(
-                chat_id=message.from_user.id,
-                text=message_text,
-                parse_mode="HTML",
-                reply_markup=get_verify_keyboard(),
-                disable_web_page_preview=True
-            )
-            await state.set_state("verify_hours_table_admin")
-            await message.delete()
-        except Exception as e:
-            await bot.send_message(
-                chat_id=message.from_user.id,
-                text=f"<b>Ошибка при обработке таблицы: {str(e)}</b>",
-                parse_mode='HTML'
-            )
-            await state.finish()
-
-@dp.callback_query_handler(state="verify_hours_table_admin")
-async def verify_hours_table_admin(callback: types.CallbackQuery, state: FSMContext):
-    async with state.proxy() as data:
-        hours_table_url = data.get('hours_table_url')
-        sv_id = data.get('sv_id')
-        operators = data.get('operators')
-        sheet_name = data.get('sheet_name')
-
-    user = db.get_user(id=sv_id)
-    if not user:
-        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
-        await state.finish()
-        return
-
-    if callback.data == "verify_yes":
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text="Выберите направление для операторов:",
-            reply_markup=get_direction_keyboard()
-        )
-        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-        await state.set_state("select_hours_direction_admin")
-    elif callback.data == "verify_no":
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text=f'<b>Отправьте корректную таблицу часов для {user[2]}🖊</b>',
-            parse_mode='HTML',
-            reply_markup=get_cancel_keyboard()
-        )
-        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-        await state.set_state("waiting_for_hours_table_admin")
-
-@dp.callback_query_handler(state="select_hours_direction_admin")
-async def select_hours_direction_admin(callback: types.CallbackQuery, state: FSMContext):
-    async with state.proxy() as data:
-        hours_table_url = data.get('hours_table_url')
-        sv_id = data.get('sv_id')
-        operators = data.get('operators')
-
-    direction_id = None
-    if callback.data.startswith("dir_"):
-        try:
-            direction_id = int(callback.data.replace("dir_", ""))
-        except ValueError:
-            await bot.answer_callback_query(callback.id, text="Ошибка: Неверный формат направления")
-            return
-
-    direction = next((d for d in db.get_directions() if d['id'] == direction_id), None)
-    if not direction:
-        await bot.answer_callback_query(callback.id, text="Ошибка: Направление не найдено")
-        await state.finish()
-        return
-
-    user = db.get_user(id=sv_id)
-    if not user:
-        await bot.answer_callback_query(callback.id, text="Ошибка: СВ не найден")
-        await state.finish()
-        return
-
-    # Обновляем таблицу часов супервайзера
-    db.update_user_table(user[0], hours_table_url=hours_table_url)
-
-    # Создаём/обновляем операторов с direction_id
-    for op in operators:
-        db.create_user(
-            telegram_id=None,
-            name=op['name'],
-            role='operator',
-            direction_id=direction_id,
-            supervisor_id=user[0]
-        )
-
-    await bot.send_message(
-        chat_id=callback.from_user.id,
-        text=f"""<b>Таблица часов для {user[2]} сохранена, операторы добавлены/обновлены с направлением "{direction['name']}"✅</b>""",
-        parse_mode='HTML',
-        reply_markup=get_editor_keyboard()
-    )
-    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
-    await state.finish()
-
 @dp.message_handler(regexp='Данные📈')
 async def view_data_menu(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)
@@ -3545,6 +3498,132 @@ async def notify_supervisor_handler(callback: types.CallbackQuery):
             text="Ошибка отправки уведомления",
             show_alert=True
         )
+
+async def _is_admin_user(tg_id):
+    """Проверка админа: сначала сравнение с переменной admin, затем fallback — проверка в БД."""
+    try:
+        if admin is not None and str(tg_id) == str(admin):
+            return True
+
+        # fallback: проверить в users по telegram_id и role='admin'
+        loop = asyncio.get_event_loop()
+        def _check():
+            with db._get_cursor() as cur:
+                cur.execute("SELECT role FROM users WHERE telegram_id = %s LIMIT 1", (tg_id,))
+                row = cur.fetchone()
+                return bool(row and row[0] == 'admin')
+        return await loop.run_in_executor(None, _check)
+    except Exception as e:
+        logger.exception("Error checking admin: %s", e)
+        return False
+
+async def _approve_call_and_get_notify_row(call_id, approver_tg_id):
+    """
+    Пометить звонок одобренным и вернуть данные для уведомлений:
+    (sv_request_by, sv_tg, evaluator_id, eval_tg)
+    """
+    loop = asyncio.get_event_loop()
+
+    def _update():
+        with db._get_cursor() as cur:
+            # получить internal user id админа (если есть)
+            cur.execute("SELECT id FROM users WHERE telegram_id = %s LIMIT 1", (approver_tg_id,))
+            row = cur.fetchone()
+            approver_user_id = row[0] if row else None
+
+            cur.execute("""
+                UPDATE calls
+                SET sv_request_approved = TRUE,
+                    sv_request_approved_by = %s,
+                    sv_request_approved_at = %s
+                WHERE id = %s
+            """, (approver_user_id, datetime.utcnow(), call_id))
+
+            cur.execute("""
+                SELECT c.sv_request_by, u_super.telegram_id AS sv_tg, c.evaluator_id, u_eval.telegram_id AS eval_tg
+                FROM calls c
+                LEFT JOIN users u_super ON u_super.id = c.sv_request_by
+                LEFT JOIN users u_eval ON u_eval.id = c.evaluator_id
+                WHERE c.id = %s
+            """, (call_id,))
+            return cur.fetchone()
+
+    result = await loop.run_in_executor(None, _update)
+    return result  # None или кортеж (sv_request_by, sv_tg, evaluator_id, eval_tg)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('approve_reval:'))
+async def handle_approve_reval(callback_query: types.CallbackQuery):
+    """
+    Обработка approve_reval:{call_id}.
+    Требования:
+      - admin (telegram id) доступен в переменной `admin`.
+      - db доступен и синхронен (используем run_in_executor).
+    """
+    cq = callback_query
+    user = cq.from_user
+    data = cq.data
+
+    # извлечь call_id
+    try:
+        _, call_id_str = data.split(':', 1)
+        call_id = int(call_id_str)
+    except Exception:
+        await cq.answer("Неверный идентификатор звонка", show_alert=True)
+        return
+
+    # проверить, что нажал админ
+    try:
+        is_admin = await _is_admin_user(user.id)
+    except Exception as e:
+        logger.exception("Ошибка проверки администратора: %s", e)
+        is_admin = False
+
+    if not is_admin:
+        await cq.answer("Только администратор может одобрять переоценку", show_alert=True)
+        return
+
+    # пометим звонок как одобренный и получим данные для уведомлений
+    try:
+        notify_row = await _approve_call_and_get_notify_row(call_id, user.id)
+    except Exception as e:
+        logger.exception("Ошибка при пометке звонка: %s", e)
+        await cq.answer("Ошибка сервера при одобрении", show_alert=True)
+        return
+
+    # ответ на callback (чтобы кнопка показала результат)
+    try:
+        await cq.answer("Переоценка одобрена администратором", show_alert=False)
+    except Exception as e:
+        logger.debug("Не удалось послать answerCallbackQuery: %s", e)
+
+    # убрать inline-кнопку (если возможно)
+    try:
+        if cq.message:
+            await cq.bot.edit_message_reply_markup(chat_id=cq.message.chat.id, message_id=cq.message.message_id, reply_markup=None)
+    except Exception as e:
+        logger.debug("Не удалось удалить reply_markup: %s", e)
+
+    # уведомить супервайзера и оценивающего (если есть tg id)
+    if notify_row:
+        try:
+            sv_request_by, sv_tg, evaluator_id, eval_tg = notify_row
+            if sv_tg:
+                try:
+                    await cq.bot.send_message(int(sv_tg),
+                        f"✅ Ваша заявка на переоценку для Call ID {call_id} одобрена администратором. Можете инициировать переоценку.")
+                except Exception as e:
+                    logger.debug("Не удалось уведомить супервайзера: %s", e)
+            if eval_tg:
+                try:
+                    await cq.bot.send_message(int(eval_tg),
+                        f"ℹ️ Админ одобрил запрос на переоценку для Call ID {call_id}. Для переоценки создайте новую оценку с is_correction=true и previous_version_id={call_id}.")
+                except Exception as e:
+                    logger.debug("Не удалось уведомить оценивающего: %s", e)
+        except Exception as e:
+            logger.exception("Ошибка при отправке уведомлений после approve: %s", e)
+
+    # (опционально) логирование
+    logger.info("Call %s approved by tg_user %s", call_id, user.id)
 
 
 # === Супервайзерам =============================================================================================
@@ -4219,11 +4298,7 @@ if __name__ == '__main__':
         CronTrigger(day_of_week='mon', hour=9, minute=0),
         misfire_grace_time=3600
     )
-    # scheduler.add_job(
-    #     db.process_and_upload_timesheet,
-    #     CronTrigger(minute='*/3'),
-    #     misfire_grace_time=3600
-    # )
+
     scheduler.start()
     
     logging.info("🔄 Планировщик запущен")
