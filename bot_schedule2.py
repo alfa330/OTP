@@ -1431,7 +1431,7 @@ def get_sv_data():
             for ev in evaluations:
                 try:
                     if isinstance(ev, dict):
-                        raw = ev.get("score") or ev.get("points") or ev.get("value")
+                        raw = ev.get("score",0)
                     else:
                         # if sequence-like, try common positions
                         raw = None
