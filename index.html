@@ -2289,38 +2289,39 @@
             );
         };
 
+        // HoursAccountingView (updated with Active / Fired tabs)
         const TABS = [
             { key: "work_time", label: "Отработанные часы", unit: "ч" },
             { key: "break_time", label: "Перерыв", unit: "ч" },
             { key: "calls", label: "Звонки", unit: "" },
             { key: "efficiency", label: "Эффективность", unit: "ч" },
             { key: "trainings", label: "Тренинги", unit: "" } // новый таб
-            ];
+        ];
 
         function parseTimeToMinutes(t) {
-        // expects HH:mm or H:mm, returns minutes since 00:00, or null
-        if (!t) return null;
-        const m = t.match(/(\d{1,2}):(\d{2})/);
-        if (!m) return null;
-        const hh = parseInt(m[1], 10);
-        const mm = parseInt(m[2], 10);
-        return hh * 60 + mm;
+            // expects HH:mm or H:mm, returns minutes since 00:00, or null
+            if (!t) return null;
+            const m = t.match(/(\d{1,2}):(\d{2})/);
+            if (!m) return null;
+            const hh = parseInt(m[1], 10);
+            const mm = parseInt(m[2], 10);
+            return hh * 60 + mm;
         }
 
         function computeTrainingDurationHours(t) {
-        // First try explicit duration field (minutes or hours), then compute from start/end
-        if (t.duration_minutes != null) return Number((t.duration_minutes / 60).toFixed(2));
-        if (t.duration_hours != null) return Number(Number(t.duration_hours).toFixed(2));
-        const s = parseTimeToMinutes(t.start_time);
-        const e = parseTimeToMinutes(t.end_time);
-        if (s == null || e == null) return 0;
-        // handle overnight (end < start) by adding 24h
-        let diff = e - s;
-        if (diff < 0) diff += 24 * 60;
-        return Number((diff / 60).toFixed(2));
+            // First try explicit duration field (minutes or hours), then compute from start/end
+            if (t.duration_minutes != null) return Number((t.duration_minutes / 60).toFixed(2));
+            if (t.duration_hours != null) return Number(Number(t.duration_hours).toFixed(2));
+            const s = parseTimeToMinutes(t.start_time);
+            const e = parseTimeToMinutes(t.end_time);
+            if (s == null || e == null) return 0;
+            // handle overnight (end < start) by adding 24h
+            let diff = e - s;
+            if (diff < 0) diff += 24 * 60;
+            return Number((diff / 60).toFixed(2));
         }
 
-        const HoursAccountingView = ({ user, svList, onUploaded, showToast }) => {
+        const HoursAccountingView = ({ user, onUploaded, showToast }) => {
             const [month, setMonth] = useState(() => {
                 const d = new Date();
                 return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -2330,6 +2331,9 @@
             const [trainingsMap, setTrainingsMap] = useState({}); // { operatorId: { dayNum: [trainings...] } }
             const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
             const [isLoading, setIsLoading] = useState(false);
+
+            // ADDED: active/fired tab state
+            const [activeTab, setActiveTab] = useState('active'); // 'active' | 'fired'
 
             // cell modal
             const [selectedCell, setSelectedCell] = useState(null);
@@ -2344,88 +2348,15 @@
             const [isPreviewing, setIsPreviewing] = useState(false);
             const [isSavingPreview, setIsSavingPreview] = useState(false);
             const [uploadProgress, setUploadProgress] = useState(0);
-            const [isDownloadingReport, setIsDownloadingReport] = useState(false);
 
             const [selectedTab, setSelectedTab] = useState('work_time');
-
-            async function downloadMonthlyReport() {
-                if (!user) {
-                    fallbackToast('Пользователь не авторизован', 'error');
-                    return;
-                }
-                if (!month) {
-                    fallbackToast('Выберите месяц', 'error');
-                    return;
-                }
-
-                const params = new URLSearchParams();
-                params.append('month', month);
-
-                if (user.role === 'admin' && selectedSvId) {
-                    params.append('supervisor_id', selectedSvId);
-                } else if (selectedSvId) {
-                    params.append('supervisor_id', selectedSvId);
-                } else if (user.role === 'sv') {
-                    params.append('supervisor_id', String(user.id));
-                }
-
-                const url = `${API_BASE_URL}/api/report/monthly_hours?${params.toString()}`;
-
-                setIsDownloadingReport(true);
-
-                try {
-                    const resp = await fetch(url, {
-                    method: 'GET',
-                    headers: {
-                        'X-API-Key': user.apiKey || '',
-                        'X-User-Id': String(user.id)
-                    }
-                    });
-
-                    if (!resp.ok) {
-                    // попытка прочитать JSON ошибки
-                    let errText = `Ошибка ${resp.status}`;
-                    try {
-                        const j = await resp.json();
-                        errText = j.error || JSON.stringify(j);
-                    } catch (e) {
-                        errText = await resp.text();
-                    }
-                    fallbackToast(`Не удалось получить файл: ${errText}`, 'error');
-                    return;
-                    }
-
-                    // Получаем blob
-                    const blob = await resp.blob();
-
-                    // Попытка взять имя файла из заголовка Content-Disposition
-                    const cd = resp.headers.get('Content-Disposition') || resp.headers.get('content-disposition') || '';
-                    let filename = `report_${month}.xlsx`;
-                    if (cd) {
-                    const m = cd.match(/filename\*?=(?:UTF-8'')?["']?([^;"']+)["']?/i);
-                    if (m && m[1]) {
-                        filename = decodeURIComponent(m[1]);
-                    }
-                    }
-
-                    // Создаём ссылку и кликаем
-                    const link = document.createElement('a');
-                    const urlBlob = window.URL.createObjectURL(blob);
-                    link.href = urlBlob;
-                    link.download = filename;
-                    document.body.appendChild(link);
-                    link.click();
-                    link.remove();
-                    window.URL.revokeObjectURL(urlBlob);
-
-                    fallbackToast('Отчет загружен', 'success');
-                } catch (err) {
-                    console.error('downloadMonthlyReport error', err);
-                    fallbackToast(err.message || 'Ошибка при скачивании отчёта', 'error');
-                } finally {
-                    setIsDownloadingReport(false);
-                }
-                }
+            
+            const opsCount = useMemo(() => {
+                if (!Array.isArray(operators)) return { active: 0, fired: 0 };
+                const active = operators.filter(op => op.status === "working" || op.status === "unpaid_leave" || !op.status).length;
+                const fired = operators.filter(op => op.status === "fired").length;
+                return { active, fired };
+            }, [operators]);
 
             // helpers: month parts
             const monthParts = useMemo(() => {
@@ -2455,79 +2386,56 @@
 
             function fallbackToast(msg, type = 'success') {
                 try {
-                if (showToast) showToast(msg, type);
-                else if (window.showToast) window.showToast(msg, type);
-                else alert(msg);
+                    if (showToast) showToast(msg, type);
+                    else if (window.showToast) window.showToast(msg, type);
+                    else alert(msg);
                 } catch (e) {
-                alert(msg);
+                    alert(msg);
                 }
             }
 
             // ---- fetch daily hours + trainings ----
             async function fetchDailyHoursAndTrainings() {
-                if (!user || !selectedSvId) return;
+                if (!user) return;
                 setIsLoading(true);
                 try {
-                    // build params: month always, but if admin + selectedSvId -> use id
-                    const hoursParams = new URLSearchParams();
-                    hoursParams.append('month', month);
-                    if (user.role === 'admin' && selectedSvId) {
-                    hoursParams.append('id', selectedSvId);
-                    } else if (selectedSvId) {
-                    // for supervisors or when admin didn't choose - use sv_id
-                    hoursParams.append('sv_id', selectedSvId);
-                    } else if (user.role === 'sv') {
-                    hoursParams.append('sv_id', String(user.id));
-                    }
-
-                    const trainingsParams = new URLSearchParams();
-                    trainingsParams.append('month', month);
-                    if (user.role === 'admin' && selectedSvId) {
-                    trainingsParams.append('id', selectedSvId);
-                    } else if (selectedSvId) {
-                    trainingsParams.append('sv_id', selectedSvId);
-                    } else if (user.role === 'sv') {
-                    trainingsParams.append('sv_id', String(user.id));
-                    }
-
-                    const url = `${API_BASE_URL}/api/sv/daily_hours?${hoursParams.toString()}`;
-                    const trainingsUrl = `${API_BASE_URL}/api/trainings?${trainingsParams.toString()}`;
-
+                    const url = `${API_BASE_URL}/api/sv/daily_hours?month=${encodeURIComponent(month)}`;
+                    const trainingsUrl = `${API_BASE_URL}/api/trainings?month=${encodeURIComponent(month)}${selectedSvId ? `&sv_id=${selectedSvId}` : ''}`;
                     const [hoursResp, trainingsResp] = await Promise.all([
-                    axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
-                    axios.get(trainingsUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
+                        axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
+                        axios.get(trainingsUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
                     ]);
 
-                if (hoursResp.data && hoursResp.data.status === 'success' && Array.isArray(hoursResp.data.operators)) {
-                    setOperators(hoursResp.data.operators);
-                } else {
-                    setOperators([]);
-                    fallbackToast('Не удалось загрузить daily hours', 'error');
-                }
-
-                const trainingsList = Array.isArray(trainingsResp.data) ? trainingsResp.data : (trainingsResp.data?.trainings || []);
-                const tmap = {};
-                for (const t of trainingsList) {
-                    const op = t.operator_id;
-                    let dayNum;
-                    try {
-                    dayNum = new Date(t.date + 'T00:00:00').getDate();
-                    } catch (e) {
-                    dayNum = parseInt(t.date.slice(-2), 10);
+                    if (hoursResp.data && hoursResp.data.status === 'success' && Array.isArray(hoursResp.data.operators)) {
+                        setOperators(hoursResp.data.operators);
+                    } else {
+                        setOperators([]);
+                        fallbackToast('Не удалось загрузить daily hours', 'error');
                     }
-                    if (!tmap[op]) tmap[op] = {};
-                    if (!tmap[op][dayNum]) tmap[op][dayNum] = [];
-                    tmap[op][dayNum].push(t);
-                }
-                setTrainingsMap(tmap);
+
+                    const trainingsList = Array.isArray(trainingsResp.data) ? trainingsResp.data : (trainingsResp.data?.trainings || []);
+                    const tmap = {};
+                    for (const t of trainingsList) {
+                        const op = t.operator_id;
+                        let dayNum;
+                        try {
+                            dayNum = new Date(t.date + 'T00:00:00').getDate();
+                        } catch (e) {
+                            dayNum = parseInt(t.date.slice(-2), 10);
+                        }
+                        if (!tmap[op]) tmap[op] = {};
+                        if (!tmap[op][dayNum]) tmap[op][dayNum] = [];
+                        tmap[op][dayNum].push(t);
+                    }
+                    setTrainingsMap(tmap);
 
                 } catch (err) {
-                console.error('fetchDailyHoursAndTrainings error', err);
-                fallbackToast('Ошибка загрузки данных', 'error');
-                setOperators([]);
-                setTrainingsMap({});
+                    console.error('fetchDailyHoursAndTrainings error', err);
+                    fallbackToast('Ошибка загрузки данных', 'error');
+                    setOperators([]);
+                    setTrainingsMap({});
                 } finally {
-                setIsLoading(false);
+                    setIsLoading(false);
                 }
             }
 
@@ -2551,82 +2459,82 @@
             async function handlePreviewUpload(e) {
                 e.preventDefault();
                 if (!selectedDayUpload || !uploadFile) {
-                fallbackToast('Выберите файл', 'error');
-                return;
+                    fallbackToast('Выберите файл', 'error');
+                    return;
                 }
                 setIsPreviewing(true);
                 try {
-                const form = new FormData();
-                form.append('file', uploadFile);
-                const resp = await axios.post(`${API_BASE_URL}/api/sv/preview_calls_table`, form, {
-                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'multipart/form-data' },
-                    onUploadProgress: (p) => {
-                    if (p.total) setUploadProgress(Math.round((p.loaded / p.total) * 100));
+                    const form = new FormData();
+                    form.append('file', uploadFile);
+                    const resp = await axios.post(`${API_BASE_URL}/api/sv/preview_calls_table`, form, {
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'multipart/form-data' },
+                        onUploadProgress: (p) => {
+                            if (p.total) setUploadProgress(Math.round((p.loaded / p.total) * 100));
+                        }
+                    });
+                    if (resp.data && resp.data.status === 'success') {
+                        const normalized = (resp.data.operators || []).map((r, idx) => ({
+                            _rowIndex: idx,
+                            operator_id: r.operator_id ?? null,
+                            name: r.name ?? '',
+                            work_time: Number(r.work_time ?? 0),
+                            break_time: Number(r.break_time ?? 0),
+                            talk_time: Number(r.talk_time ?? 0),
+                            calls: Number(r.calls ?? 0),
+                            efficiency: Number(r.efficiency ?? 0),
+                            month: selectedDayUpload.dateStr.slice(0, 7)
+                        }));
+                        setPreviewOperators(normalized);
+                        setPreviewSheetName(resp.data.sheet_name || null);
+                    } else {
+                        fallbackToast(resp.data?.error || 'Ошибка парсинга файла', 'error');
                     }
-                });
-                if (resp.data && resp.data.status === 'success') {
-                    const normalized = (resp.data.operators || []).map((r, idx) => ({
-                    _rowIndex: idx,
-                    operator_id: r.operator_id ?? null,
-                    name: r.name ?? '',
-                    work_time: Number(r.work_time ?? 0),
-                    break_time: Number(r.break_time ?? 0),
-                    talk_time: Number(r.talk_time ?? 0),
-                    calls: Number(r.calls ?? 0),
-                    efficiency: Number(r.efficiency ?? 0),
-                    month: selectedDayUpload.dateStr.slice(0, 7)
-                    }));
-                    setPreviewOperators(normalized);
-                    setPreviewSheetName(resp.data.sheet_name || null);
-                } else {
-                    fallbackToast(resp.data?.error || 'Ошибка парсинга файла', 'error');
-                }
                 } catch (err) {
-                console.error('preview error', err);
-                fallbackToast(err.response?.data?.error || err.message || 'Ошибка предпросмотра', 'error');
+                    console.error('preview error', err);
+                    fallbackToast(err.response?.data?.error || err.message || 'Ошибка предпросмотра', 'error');
                 } finally {
-                setIsPreviewing(false);
-                setUploadProgress(0);
+                    setIsPreviewing(false);
+                    setUploadProgress(0);
                 }
             }
 
             async function handleConfirmSave() {
                 if (!selectedDayUpload || previewOperators.length === 0) {
-                fallbackToast('Нет данных для сохранения', 'error');
-                return;
+                    fallbackToast('Нет данных для сохранения', 'error');
+                    return;
                 }
                 setIsSavingPreview(true);
                 try {
-                const payload = {
-                    date: selectedDayUpload.dateStr,
-                    sv_id: selectedSvId || null,
-                    operators: previewOperators.map(r => ({
-                    operator_id: r.operator_id,
-                    name: r.name,
-                    work_time: Number(r.work_time) || 0,
-                    break_time: Number(r.break_time) || 0,
-                    talk_time: Number(r.talk_time) || 0,
-                    calls: Number(r.calls) || 0,
-                    efficiency: Number(r.efficiency) || 0,
-                    month: r.month
-                    }))
-                };
-                const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, payload, {
-                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'application/json' }
-                });
-                if (resp.data && resp.data.status === 'success') {
-                    fallbackToast('Данные сохранены', 'success');
-                    await fetchDailyHoursAndTrainings();
-                    setSelectedDayUpload(null);
-                    setPreviewOperators([]);
-                } else {
-                    fallbackToast(resp.data?.error || 'Ошибка сохранения', 'error');
-                }
+                    const payload = {
+                        date: selectedDayUpload.dateStr,
+                        sv_id: selectedSvId || null,
+                        operators: previewOperators.map(r => ({
+                            operator_id: r.operator_id,
+                            name: r.name,
+                            work_time: Number(r.work_time) || 0,
+                            break_time: Number(r.break_time) || 0,
+                            talk_time: Number(r.talk_time) || 0,
+                            calls: Number(r.calls) || 0,
+                            efficiency: Number(r.efficiency) || 0,
+                            month: r.month
+                        }))
+                    };
+                    const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, payload, {
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'application/json' }
+                    });
+                    if (resp.data && resp.data.status === 'success') {
+                        fallbackToast('Данные сохранены', 'success');
+                        await fetchDailyHoursAndTrainings();
+                        setSelectedDayUpload(null);
+                        setPreviewOperators([]);
+                    } else {
+                        fallbackToast(resp.data?.error || 'Ошибка сохранения', 'error');
+                    }
                 } catch (err) {
-                console.error('save error', err);
-                fallbackToast(err.response?.data?.error || err.message || 'Ошибка сохранения', 'error');
+                    console.error('save error', err);
+                    fallbackToast(err.response?.data?.error || err.message || 'Ошибка сохранения', 'error');
                 } finally {
-                setIsSavingPreview(false);
+                    setIsSavingPreview(false);
                 }
             }
 
@@ -2636,19 +2544,16 @@
                 const dayData = operator.daily?.[dayKey] ?? { work_time: 0, break_time: 0, talk_time: 0, calls: 0, efficiency: 0 };
                 setSelectedCell({ operator, day, dateStr: dayToDateStr(day) });
                 setCellModel({
-                operator_id: operator.operator_id,
-                name: operator.name,
-                day,
-                dateStr: dayToDateStr(day),
-                work_time: Number(dayData.work_time || 0),
-                break_time: Number(dayData.break_time || 0),
-                talk_time: Number(dayData.talk_time || 0),
-                calls: Number(dayData.calls || 0),
-                efficiency: Number(dayData.efficiency || 0),
-                fine_amount: Number(dayData.fine_amount || 0),
-                fine_reason: dayData.fine_reason || '',
-                fine_comment: dayData.fine_comment || '',
-                month
+                    operator_id: operator.operator_id,
+                    name: operator.name,
+                    day,
+                    dateStr: dayToDateStr(day),
+                    work_time: Number(dayData.work_time || 0),
+                    break_time: Number(dayData.break_time || 0),
+                    talk_time: Number(dayData.talk_time || 0),
+                    calls: Number(dayData.calls || 0),
+                    efficiency: Number(dayData.efficiency || 0),
+                    month
                 });
             }
 
@@ -2658,71 +2563,68 @@
             }
 
             function updateCellField(field, value) {
-            setCellModel(prev => {
-                if (!prev) return prev;
-                const next = { ...prev };
-                if (['work_time', 'break_time', 'talk_time', 'efficiency', 'fine_amount'].includes(field)) next[field] = value === '' ? '' : Number(value);
-                else if (field === 'calls') next[field] = value === '' ? '' : parseInt(value, 10) || 0;
-                else next[field] = value;
-                return next;
-            });
+                setCellModel(prev => {
+                    if (!prev) return prev;
+                    const next = { ...prev };
+                    if (['work_time', 'break_time', 'talk_time', 'efficiency'].includes(field)) next[field] = value === '' ? '' : Number(value);
+                    else if (field === 'calls') next[field] = value === '' ? '' : parseInt(value, 10) || 0;
+                    else next[field] = value;
+                    return next;
+                });
             }
 
             async function saveCell() {
                 if (!cellModel || !user) return;
                 setIsSavingCell(true);
                 try {
-                const payload = {
-                    date: cellModel.dateStr,
-                    sv_id: selectedSvId || null,
-                    operators: [{
-                    operator_id: cellModel.operator_id,
-                    name: cellModel.name,
-                    work_time: Number(cellModel.work_time) || 0,
-                    break_time: Number(cellModel.break_time) || 0,
-                    talk_time: Number(cellModel.talk_time) || 0,
-                    calls: parseInt(cellModel.calls, 10) || 0,
-                    efficiency: Number(cellModel.efficiency) || 0,
-                    fine_amount: Number(cellModel.fine_amount) || 0,
-                    fine_reason: cellModel.fine_reason || null,
-                    fine_comment: cellModel.fine_comment || null,
-                    month: cellModel.month
-                }]
-                };
-                const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, payload, {
-                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'application/json' },
-                    timeout: 60000
-                });
-                if (resp.data && resp.data.status === 'success') {
-                    fallbackToast('Данные сохранены', 'success');
-                    await fetchDailyHoursAndTrainings();
-                    if (onUploaded) onUploaded(resp.data);
-                    closeCellModal();
-                } else {
-                    fallbackToast(resp.data?.error || 'Ошибка сохранения', 'error');
-                }
+                    const payload = {
+                        date: cellModel.dateStr,
+                        sv_id: selectedSvId || null,
+                        operators: [{
+                            operator_id: cellModel.operator_id,
+                            name: cellModel.name,
+                            work_time: Number(cellModel.work_time) || 0,
+                            break_time: Number(cellModel.break_time) || 0,
+                            talk_time: Number(cellModel.talk_time) || 0,
+                            calls: parseInt(cellModel.calls, 10) || 0,
+                            efficiency: Number(cellModel.efficiency) || 0,
+                            month: cellModel.month
+                        }]
+                    };
+                    const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, payload, {
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'application/json' },
+                        timeout: 60000
+                    });
+                    if (resp.data && resp.data.status === 'success') {
+                        fallbackToast('Данные сохранены', 'success');
+                        await fetchDailyHoursAndTrainings();
+                        if (onUploaded) onUploaded(resp.data);
+                        closeCellModal();
+                    } else {
+                        fallbackToast(resp.data?.error || 'Ошибка сохранения', 'error');
+                    }
                 } catch (err) {
-                console.error('saveCell error', err);
-                fallbackToast(err.response?.data?.error || err.message || 'Ошибка при сохранении', 'error');
+                    console.error('saveCell error', err);
+                    fallbackToast(err.response?.data?.error || err.message || 'Ошибка при сохранении', 'error');
                 } finally {
-                setIsSavingCell(false);
+                    setIsSavingCell(false);
                 }
             }
 
             // ====== Norm change ======
             async function handleNormChange(operatorId, value) {
                 try {
-                const norm = Number(value) || 0;
-                await axios.post(`${API_BASE_URL}/api/sv/update_norm_hours`, {
-                    operator_id: operatorId,
-                    month,
-                    norm_hours: norm
-                }, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
-                setOperators(prev => prev.map(op => op.operator_id === operatorId ? { ...op, norm_hours: norm } : op));
-                fallbackToast('Норма часов обновлена', 'success');
+                    const norm = Number(value) || 0;
+                    await axios.post(`${API_BASE_URL}/api/sv/update_norm_hours`, {
+                        operator_id: operatorId,
+                        month,
+                        norm_hours: norm
+                    }, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } });
+                    setOperators(prev => prev.map(op => op.operator_id === operatorId ? { ...op, norm_hours: norm } : op));
+                    fallbackToast('Норма часов обновлена', 'success');
                 } catch (err) {
-                console.error('update norm_hours error', err);
-                fallbackToast('Ошибка обновления нормы часов', 'error');
+                    console.error('update norm_hours error', err);
+                    fallbackToast('Ошибка обновления нормы часов', 'error');
                 }
             }
 
@@ -2730,11 +2632,11 @@
             const maxWork = useMemo(() => {
                 let max = 8;
                 for (const op of operators) {
-                if (!op.daily) continue;
-                for (const k of Object.keys(op.daily)) {
-                    const v = Number(op.daily[k]?.work_time || 0);
-                    if (v > max) max = v;
-                }
+                    if (!op.daily) continue;
+                    for (const k of Object.keys(op.daily)) {
+                        const v = Number(op.daily[k]?.work_time || 0);
+                        if (v > max) max = v;
+                    }
                 }
                 return max;
             }, [operators]);
@@ -2743,10 +2645,10 @@
             const maxTrainingsHours = useMemo(() => {
                 let max = 0;
                 for (const opId of Object.keys(trainingsMap)) {
-                for (const dayKey of Object.keys(trainingsMap[opId] || {})) {
-                    const sum = (trainingsMap[opId][dayKey] || []).reduce((acc, t) => acc + computeTrainingDurationHours(t), 0);
-                    if (sum > max) max = sum;
-                }
+                    for (const dayKey of Object.keys(trainingsMap[opId] || {})) {
+                        const sum = (trainingsMap[opId][dayKey] || []).reduce((acc, t) => acc + computeTrainingDurationHours(t), 0);
+                        if (sum > max) max = sum;
+                    }
                 }
                 return Math.max(1, max);
             }, [trainingsMap]);
@@ -2774,100 +2676,112 @@
                 return num.toFixed(decimals);
             }
 
+            // ADDED: filteredOperators according to activeTab
+            const filteredOperators = useMemo(() => {
+                if (!Array.isArray(operators)) return [];
+                if (activeTab === 'active') {
+                    return operators.filter(
+                        (op) => op.status === "working" || op.status === "unpaid_leave" || !op.status
+                    );
+                } else {
+                    return operators.filter((op) => op.status === "fired");
+                }
+            }, [operators, activeTab]);
+
             // render cell with trainings marker and trainings-tab rendering
             function renderCellByMetricWithStyleAndMarker(op, day, metricKey) {
                 const dayKey = String(day);
                 const d = op.daily && op.daily[dayKey];
                 const isPast = (() => {
-                if (monthRel < 0) return true;
-                if (monthRel > 0) return false;
-                return day < todayD;
+                    if (monthRel < 0) return true;
+                    if (monthRel > 0) return false;
+                    return day < todayD;
                 })();
                 const isFuture = (() => {
-                if (monthRel > 0) return true;
-                if (monthRel < 0) return false;
-                return day > todayD;
+                    if (monthRel > 0) return true;
+                    if (monthRel < 0) return false;
+                    return day > todayD;
                 })();
 
                 const trainings = (trainingsMap[op.operator_id] && trainingsMap[op.operator_id][day]) || [];
 
                 // For work_time tab coloring (unchanged)
                 if (selectedTab === 'work_time') {
-                const work = d ? Number(d.work_time || 0) : 0;
-                const hasData = d && Number(d.work_time || 0) > 0;
+                    const work = d ? Number(d.work_time || 0) : 0;
+                    const hasData = d && Number(d.work_time || 0) > 0;
 
-                if (!hasData && isPast) {
-                    return (
-                    <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-400 text-white">
-                        <span>—</span>
-                        {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
-                    </div>
-                    );
-                }
-                if (!hasData && isFuture) {
-                    return (
-                    <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-200 text-gray-600">
-                        <span>—</span>
-                        {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
-                    </div>
-                    );
-                }
-                if (!hasData && !isPast && !isFuture) {
-                    return (
-                    <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-100 text-gray-600">
-                        <span>—</span>
-                        {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
-                    </div>
-                    );
-                }
+                    if (!hasData && isPast) {
+                        return (
+                            <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-400 text-white">
+                                <span>—</span>
+                                {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                            </div>
+                        );
+                    }
+                    if (!hasData && isFuture) {
+                        return (
+                            <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-200 text-gray-600">
+                                <span>—</span>
+                                {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                            </div>
+                        );
+                    }
+                    if (!hasData && !isPast && !isFuture) {
+                        return (
+                            <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-100 text-gray-600">
+                                <span>—</span>
+                                {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                            </div>
+                        );
+                    }
 
-                const ratio = maxWork > 0 ? Math.max(0, Math.min(1, work / maxWork)) : 0;
-                const alpha = 0.18 + 0.77 * ratio;
-                const bg = `rgba(16,185,129,${alpha})`;
-                const textClass = ratio > 0.5 ? 'text-white' : 'text-gray-900';
-                const display = work ? work.toFixed(2) : '0.00';
+                    const ratio = maxWork > 0 ? Math.max(0, Math.min(1, work / maxWork)) : 0;
+                    const alpha = 0.18 + 0.77 * ratio;
+                    const bg = `rgba(16,185,129,${alpha})`;
+                    const textClass = ratio > 0.5 ? 'text-white' : 'text-gray-900';
+                    const display = work ? work.toFixed(2) : '0.00';
 
-                return (
-                    <div className={`relative w-full h-8 rounded-md flex items-center justify-center ${textClass}`} style={{ backgroundColor: bg }}>
-                    <span className="text-sm font-medium">{display}</span>
-                    {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
-                    </div>
-                );
+                    return (
+                        <div className={`relative w-full h-8 rounded-md flex items-center justify-center ${textClass}`} style={{ backgroundColor: bg }}>
+                            <span className="text-sm font-medium">{display}</span>
+                            {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                        </div>
+                    );
                 }
 
                 // Trainings tab: show SUM of training durations converted to hours
                 if (selectedTab === 'trainings') {
-                if (!trainings || trainings.length === 0) return <div className="text-sm text-gray-400">—</div>;
+                    if (!trainings || trainings.length === 0) return <div className="text-sm text-gray-400">—</div>;
 
-                // sum hours for counted and not-counted
-                let countedHours = 0;
-                let notCountedHours = 0;
-                for (const t of trainings) {
-                    const h = computeTrainingDurationHours(t);
-                    if (t.count_in_hours) countedHours += h; else notCountedHours += h;
-                }
+                    // sum hours for counted and not-counted
+                    let countedHours = 0;
+                    let notCountedHours = 0;
+                    for (const t of trainings) {
+                        const h = computeTrainingDurationHours(t);
+                        if (t.count_in_hours) countedHours += h; else notCountedHours += h;
+                    }
 
-                const parts = [];
-                if (countedHours > 0) {
-                    const ratio = Math.min(1, countedHours / maxTrainingsHours);
-                    const alpha = 0.18 + 0.77 * ratio;
-                    parts.push(
-                    <div key="c" className="inline-flex items-center justify-center px-2 py-1 rounded-md text-sm font-medium" style={{ backgroundColor: `rgba(16,185,129,${alpha})` }}>
-                        <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{countedHours.toFixed(2)}</span>
-                    </div>
-                    );
-                }
-                if (notCountedHours > 0) {
-                    const ratio = Math.min(1, notCountedHours / maxTrainingsHours);
-                    const alpha = 0.18 + 0.77 * ratio;
-                    parts.push(
-                    <div key="n" className="inline-flex items-center justify-center px-2 py-1 rounded-md text-sm font-medium ml-1" style={{ backgroundColor: `rgba(250,204,21,${alpha})` }}>
-                        <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{notCountedHours.toFixed(2)}</span>
-                    </div>
-                    );
-                }
+                    const parts = [];
+                    if (countedHours > 0) {
+                        const ratio = Math.min(1, countedHours / maxTrainingsHours);
+                        const alpha = 0.18 + 0.77 * ratio;
+                        parts.push(
+                            <div key="c" className="inline-flex items-center justify-center px-2 py-1 rounded-md text-sm font-medium" style={{ backgroundColor: `rgba(16,185,129,${alpha})` }}>
+                                <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{countedHours.toFixed(2)}</span>
+                            </div>
+                        );
+                    }
+                    if (notCountedHours > 0) {
+                        const ratio = Math.min(1, notCountedHours / maxTrainingsHours);
+                        const alpha = 0.18 + 0.77 * ratio;
+                        parts.push(
+                            <div key="n" className="inline-flex items-center justify-center px-2 py-1 rounded-md text-sm font-medium ml-1" style={{ backgroundColor: `rgba(250,204,21,${alpha})` }}>
+                                <span className={ratio > 0.5 ? 'text-white' : 'text-gray-900'}>{notCountedHours.toFixed(2)}</span>
+                            </div>
+                        );
+                    }
 
-                return <div className="flex items-center justify-center gap-1">{parts}</div>;
+                    return <div className="flex items-center justify-center gap-1">{parts}</div>;
                 }
 
                 // Non-work tabs: default rendering
@@ -2882,12 +2796,12 @@
                 return (trainingsMap[opId] && trainingsMap[opId][day]) ? trainingsMap[opId][day] : [];
             }
 
-            // gather trainings for a day across operators (used for day modal if needed)
+            // ADJUSTED: gather trainings only for filtered operators
             function getAllTrainingsForDay(day) {
                 const all = [];
-                for (const op of operators) {
-                const arr = getTrainingsFor(op.operator_id, day);
-                for (const t of arr) all.push({ ...t, operator_name: op.name, operator_id: op.operator_id });
+                for (const op of filteredOperators) {
+                    const arr = getTrainingsFor(op.operator_id, day);
+                    for (const t of arr) all.push({ ...t, operator_name: op.name, operator_id: op.operator_id });
                 }
                 return all.sort((a, b) => (a.start_time || '').localeCompare(b.start_time || ''));
             }
@@ -2901,519 +2815,338 @@
 
             return (
                 <div className="bg-white p-5 rounded-xl shadow-md">
-                <div className="flex items-center justify-between mb-4 gap-4">
-                    <div className="flex items-center gap-3">
-                    <label className="text-sm font-medium text-gray-700">Месяц</label>
-                    <input type="month" className="px-3 py-2 border rounded-md" value={month} onChange={e => setMonth(e.target.value)} />
-                    </div>
+                    <div className="flex items-center justify-between mb-4 gap-4">
+                        <div className="flex items-center gap-3">
+                            <label className="text-sm font-medium text-gray-700">Месяц</label>
+                            <input type="month" className="px-3 py-2 border rounded-md" value={month} onChange={e => setMonth(e.target.value)} />
+                        </div>
 
-                    <div className="flex items-center gap-3">
-                        {user?.role === 'admin' && (
-                            <select
-                                value={selectedSvId || ''}
-                                onChange={e => setSelectedSvId(e.target.value)}
-                                className="px-3 py-2 border rounded-md"
-                            >
-                                <option value="">Выберите супервайзера</option>
-                                {svList?.map(sv => (
-                                    <option key={sv.id} value={sv.id}>
-                                        {sv.name}
-                                    </option>
-                                ))}
-                            </select>
-                        )}
-
-                        <button
-                            onClick={fetchDailyHoursAndTrainings}
-                            className="px-3 py-2 bg-blue-600 text-white rounded-md shadow-sm hover:bg-blue-700"
-                        >
-                            Обновить
-                        </button>
-
-                        <button
-                            onClick={downloadMonthlyReport}
-                            disabled={isDownloadingReport}
-                            className={`px-3 py-2 rounded-md text-white ${isDownloadingReport ? 'bg-green-400 cursor-wait' : 'bg-green-600 hover:bg-green-700'}`}
-                            title="Скачать месячный отчёт в XLSX"
-                        >
-                            {isDownloadingReport ? (
-                            <>
-                                <i className="fas fa-spinner fa-spin mr-2" /> Формируется...
-                            </>
-                            ) : (
-                            <>
-                                <i className="fas fa-file-excel mr-2" /> Сформировать отчёт
-                            </>
+                        <div className="flex items-center gap-3">
+                            {user?.role === 'admin' && (
+                                <select value={selectedSvId || ''} onChange={e => setSelectedSvId(e.target.value)} className="px-3 py-2 border rounded-md">
+                                    <option value="">Все супервайзеры</option>
+                                </select>
                             )}
-                        </button>
+                            <button onClick={fetchDailyHoursAndTrainings} className="px-3 py-2 bg-blue-600 text-white rounded-md shadow-sm hover:bg-blue-700">Обновить</button>
+                        </div>
                     </div>
-                </div>
 
-                {/* Tabs */}
-                <div className="mb-4 flex items-center gap-2">
-                    {TABS.map(tab => (
+                    {/* ADDED: Active / Fired tabs similar to manage_operators */}
+                    <div className="mb-3 flex space-x-2 items-center">
                     <button
-                        key={tab.key}
-                        onClick={() => setSelectedTab(tab.key)}
-                        className={`px-3 py-2 rounded-md text-sm font-medium transition ${selectedTab === tab.key ? 'bg-blue-600 text-white shadow' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
-                        title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
+                        onClick={() => setActiveTab("active")}
+                        className={`px-4 py-2 rounded-lg font-medium ${activeTab === "active" ? "bg-green-600 text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"}`}
+                        title="Показать активных операторов"
                     >
-                        {tab.label}
+                        Активные <span className="ml-2 text-sm text-gray-700 bg-white/20 px-2 py-0.5 rounded">{opsCount.active}</span>
                     </button>
-                    ))}
-                </div>
 
-                {/* Table */}
-                <div className="overflow-auto border rounded-md">
-                    <div className="min-w-max">
-                    {/* Header row */}
-                    <div className="flex sticky top-0 bg-gray-50 border-b z-30">
-                        <div className="w-48 p-2 border-r sticky left-0 z-40 bg-gray-50 text-sm font-medium">Операторы</div>
-
-                        <div className="w-28 p-2 text-center border-r bg-gray-50 text-sm">Ставка</div>
-                        <div className="w-36 p-2 text-center border-r bg-gray-50 text-sm">Норма часов</div>
-
-                        {daysArray.map(day => (
-                        <div key={day} className="p-2 min-w-[72px] text-center border-l">
-                            <button onClick={() => openUploadForDay(day)} className="text-xs font-semibold px-2 py-1 rounded hover:bg-gray-100">
-                            {formatHeaderLabel(day)}
-                            </button>
-                        </div>
-                        ))}
-
-                        {/* Right summary headers */}
-                        {selectedTab === 'work_time' && (
-                        <>
-                            <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Итого часов</div>
-                            <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">С выч. тренинга</div>
-                            <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Вып. нормы (%)</div>
-                            <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Выработка</div>
-                        </>
-                        )}
-                        {selectedTab === 'calls' && (
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">КВЗ</div>
-                        )}
-                        {selectedTab === 'efficiency' && (
-                        <>
-                            <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Итого (ч)</div>
-                            <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">OCC (%)</div>
-                        </>
-                        )}
-                        {selectedTab === 'trainings' && (
-                        <>
-                            <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Часы (всего)</div>
-                            <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Засчитано (ч)</div>
-                            <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Не засчитано (ч)</div>
-                        </>
-                        )}
-                    </div>
-
-                    {/* Rows */}
-                    <div>
-                        {isLoading ? (
-                        <div className="p-4 text-gray-600">Загрузка данных...</div>
-                        ) : user?.role === 'admin' && !selectedSvId ? (
-                        <div className="p-4 text-gray-600">Супервайзер не выбран.</div>
-                        ) : operators.length === 0 ? (
-                        <div className="p-4 text-gray-600">Операторы не найдены.</div>
-                        ) : operators.map(op => {
-                        const aggr = op.aggregates || {};
-                        const regular = Number(aggr.regular_hours || 0);
-                        const norm = Number(op.norm_hours || 0);
-
-                        // precompute trainings summary for row (month-wide)
-                        let totalHoursAll = 0;
-                        let totalHoursCounted = 0;   // нужно менять — поэтому let
-                        let totalHoursNotCounted = 0;
-
-                        const byDay = trainingsMap[op.operator_id] || {};
-                        for (const dKey of Object.keys(byDay)) {
-                        const arr = byDay[dKey] || [];
-                        for (const t of arr) {
-                            const h = computeTrainingDurationHours(t) || 0;
-                            totalHoursAll += h;
-                            if (t.count_in_hours) totalHoursCounted += h;
-                            else totalHoursNotCounted += h;
-                        }
-                        }
-
-                        // итоговые величины для рендера
-                        const displayedTotal = regular + totalHoursCounted; // отработанные + засчитанные тренинги
-                        const prodDiff = displayedTotal - norm; // выработка относительно нормы (с учётом тренингов)
-
-                        const callsTotal = Number(aggr.total_calls || 0);
-                        const effTotal = Number(aggr.total_efficiency_hours || 0);
-
-                        return (
-                            <div key={op.operator_id} className="flex items-center border-b hover:bg-gray-50 relative">
-                            {/* Name */}
-                            <div className="w-48 p-2 text-sm font-medium border-r sticky left-0 z-20 bg-white">
-                                {op.name}
-                            </div>
-
-                            {/* Rate */}
-                            <div className="w-28 p-2 text-sm text-center border-r">
-                                <div className="text-sm text-gray-700">{op.rate ?? '—'}</div>
-                            </div>
-
-                            {/* Norm (editable) */}
-                            <div className="w-36 p-2 text-sm text-center border-r">
-                                <input
-                                type="number"
-                                step="0.1"
-                                className="w-full p-1 border rounded-md text-center text-sm"
-                                value={op.norm_hours ?? 0}
-                                onChange={e => handleNormChange(op.operator_id, e.target.value)}
-                                />
-                            </div>
-
-                            {/* Days */}
-                            {daysArray.map(day => (
-                                <div key={day} className="p-2 min-w-[72px] text-center border-l">
-                                <button
-                                    onClick={() => openCellDetail(op, day)}
-                                    className="w-full h-8 rounded-md text-sm flex items-center justify-center"
-                                    aria-label={`Данные ${op.name} за ${day}-${monthLabel}`}>
-                                    {renderCellByMetricWithStyleAndMarker(op, day, selectedTab)}
-                                </button>
-                                </div>
-                            ))}
-
-                            {/* Right summary values */}
-                            {selectedTab === 'work_time' && (
-                                <>
-                                <div className="w-36 p-2 text-sm text-center border-l">{displayedTotal.toFixed(2)}</div>
-                                <div className="w-36 p-2 text-sm text-center border-l">{formatNumber(regular, 1)}</div>
-                                <div className="w-32 p-2 text-sm text-center border-l">
-                                    {norm > 0 ? `${((regular / norm) * 100).toFixed(1)}%` : '—'}
-                                </div>
-                                <div className="w-36 p-2 text-sm text-center border-l">
-                                    <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-md ${productionColorClass(prodDiff, norm)}`}> 
-                                    <span className="font-medium">{formatNumber(prodDiff, 1)}</span>
-                                    <span className="text-xs text-gray-500">ч</span>
-                                    </div>
-                                </div>
-                                </>
-                            )}
-
-                            {selectedTab === 'calls' && (
-                                <div className="w-36 p-2 text-sm text-center border-l">
-                                {regular > 0 ? formatNumber(callsTotal / regular, 1) : '—'}
-                                </div>
-                            )}
-
-                            {selectedTab === 'efficiency' && (
-                                <>
-                                <div className="w-36 p-2 text-sm text-center border-l">{formatNumber(effTotal, 1)}</div>
-                                <div className="w-32 p-2 text-sm text-center border-l">{regular > 0 ? `${((effTotal / regular) * 100).toFixed(1)}%` : '—'}</div>
-                                </>
-                            )}
-
-                            {selectedTab === 'trainings' && (
-                                <>
-                                <div className="w-36 p-2 text-sm text-center border-l">{totalHoursAll.toFixed(2)}</div>
-                                <div className="w-32 p-2 text-sm text-center border-l">{totalHoursCounted.toFixed(2)}</div>
-                                <div className="w-36 p-2 text-sm text-center border-l">{totalHoursNotCounted.toFixed(2)}</div>
-                                </>
-                            )}
-                            </div>
-                        );
-                        })}
-                    </div>
-                    </div>
-                </div>
-
-                {/* Upload modal (file selector -> preview) */}
-                {selectedDayUpload && previewOperators.length === 0 && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-                    <form onSubmit={handlePreviewUpload} className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md" onClick={e => e.stopPropagation()}>
-                        <h3 className="text-lg font-semibold mb-3">Загрузить файл для {selectedDayUpload.dateStr}</h3>
-                        <input type="file" accept=".xlsx,.xls,.csv" onChange={e => setUploadFile(e.target.files?.[0] || null)} className="mb-3" />
-                        <div className="flex justify-end gap-2">
-                        <button type="button" onClick={() => setSelectedDayUpload(null)} className="px-3 py-2 rounded-md border">Отмена</button>
-                        <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded-md">{isPreviewing ? `Загрузка ${uploadProgress}%` : 'Предпросмотр'}</button>
-                        </div>
-                    </form>
-                    </div>
-                )}
-
-                {/* Preview modal */}
-                {selectedDayUpload && previewOperators.length > 0 && (
-                    <div className="fixed inset-0 z-50 flex items-start pt-12 justify-center bg-black/40">
-                    <div className="bg-white p-4 rounded-lg shadow-lg w-[95%] max-w-6xl">
-                        <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-lg font-semibold">Предпросмотр: {previewSheetName || 'файл'} — {selectedDayUpload.dateStr}</h3>
-                        <div className="flex gap-2">
-                            <button onClick={() => { setSelectedDayUpload(null); setPreviewOperators([]); setPreviewSheetName(null); }} className="px-3 py-1 rounded-md border">Отмена</button>
-                            <button onClick={handleConfirmSave} disabled={isSavingPreview} className="px-3 py-1 bg-green-600 text-white rounded-md">
-                            {isSavingPreview ? 'Сохранение...' : 'Сохранить'}
-                            </button>
-                        </div>
-                        </div>
-
-                        <div className="overflow-auto max-h-[60vh] border rounded-md">
-                        <table className="min-w-full text-sm">
-                            <thead className="bg-gray-100 sticky top-0">
-                            <tr>
-                                <th className="p-2 text-left">Имя</th>
-                                <th className="p-2 text-center">Work</th>
-                                <th className="p-2 text-center">Break</th>
-                                <th className="p-2 text-center">Calls</th>
-                                <th className="p-2 text-center">Efficiency</th>
-                            </tr>
-                            </thead>
-                            <tbody>
-                            {previewOperators.map((row, idx) => (
-                                <tr key={idx} className="border-b">
-                                <td className="p-2">{row.name}</td>
-                                <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" value={row.work_time} onChange={e => { const copy = [...previewOperators]; copy[idx].work_time = +e.target.value; setPreviewOperators(copy); }} /></td>
-                                <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" value={row.break_time} onChange={e => { const copy = [...previewOperators]; copy[idx].break_time = +e.target.value; setPreviewOperators(copy); }} /></td>
-                                <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" value={row.calls} onChange={e => { const copy = [...previewOperators]; copy[idx].calls = +e.target.value; setPreviewOperators(copy); }} /></td>
-                                <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" value={row.efficiency} onChange={e => { const copy = [...previewOperators]; copy[idx].efficiency = +e.target.value; setPreviewOperators(copy); }} /></td>
-                                </tr>
-                            ))}
-                            </tbody>
-                        </table>
-                        </div>
-                    </div>
-                    </div>
-                )}
-
-                {/* Detail modal for a single cell (trainings shown only in work_time tab) */}
-                {selectedCell && cellModel && (
-                <div
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-                    onClick={closeCellModal}
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby="cell-modal-title"
-                >
-                    <div
-                    className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl border border-gray-100 overflow-y-auto max-h-[90vh]"
-                    onClick={e => e.stopPropagation()}
+                    <button
+                        onClick={() => setActiveTab("fired")}
+                        className={`px-4 py-2 rounded-lg font-medium ${activeTab === "fired" ? "bg-red-600 text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"}`}
+                        title="Показать уволенных операторов"
                     >
-                    {/* Header */}
-                    <div className="flex items-start justify-between gap-4 p-6 border-b">
-                        <div>
-                        <h3 id="cell-modal-title" className="text-lg font-semibold text-gray-800 flex items-center gap-2">
-                            <i className="fas fa-info-circle text-sm text-gray-500" aria-hidden="true" />
-                            Детали: <span className="ml-1 text-primary-700">{cellModel.name}</span>
-                            <span className="ml-2 text-sm text-gray-500">— {cellModel.dateStr}</span>
-                        </h3>
-                        <div className="text-xs text-gray-500 mt-1">Оператор: {selectedCell.operator?.name}</div>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                        <button
-                            onClick={closeCellModal}
-                            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm text-gray-600 hover:bg-gray-50"
-                            aria-label="Закрыть"
-                        >
-                            <i className="fas fa-times" aria-hidden="true" /> Закрыть
-                        </button>
-                        </div>
+                        Уволенные <span className="ml-2 text-sm text-gray-700 bg-white/20 px-2 py-0.5 rounded">{opsCount.fired}</span>
+                    </button>
                     </div>
 
-                    {/* Body */}
-                    <div className="p-6">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <label className="flex flex-col text-xs text-gray-700">
-                            <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-clock" aria-hidden="true" /> Work time (ч)
-                            </span>
-                            <input
-                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
-                            type="number"
-                            step="0.01"
-                            value={cellModel.work_time}
-                            onChange={e => updateCellField('work_time', e.target.value)}
-                            />
-                        </label>
+                    {/* Tabs */}
+                    <div className="mb-4 flex items-center gap-2">
+                        {TABS.map(tab => (
+                            <button
+                                key={tab.key}
+                                onClick={() => setSelectedTab(tab.key)}
+                                className={`px-3 py-2 rounded-md text-sm font-medium transition ${selectedTab === tab.key ? 'bg-blue-600 text-white shadow' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                                title={tab.unit ? `${tab.label} (${tab.unit})` : tab.label}
+                            >
+                                {tab.label}
+                            </button>
+                        ))}
+                    </div>
 
-                        <label className="flex flex-col text-xs text-gray-700">
-                            <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-coffee" aria-hidden="true" /> Break time (ч)
-                            </span>
-                            <input
-                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
-                            type="number"
-                            step="0.01"
-                            value={cellModel.break_time}
-                            onChange={e => updateCellField('break_time', e.target.value)}
-                            />
-                        </label>
+                    {/* Table */}
+                    <div className="overflow-auto border rounded-md">
+                        <div className="min-w-max">
+                            {/* Header row */}
+                            <div className="flex sticky top-0 bg-gray-50 border-b z-30">
+                                <div className="w-48 p-2 border-r sticky left-0 z-40 bg-gray-50 text-sm font-medium">Операторы</div>
 
-                        <label className="flex flex-col text-xs text-gray-700">
-                            <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-comments" aria-hidden="true" /> Talk time (ч)
-                            </span>
-                            <input
-                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
-                            type="number"
-                            step="0.01"
-                            value={cellModel.talk_time}
-                            onChange={e => updateCellField('talk_time', e.target.value)}
-                            />
-                        </label>
+                                <div className="w-28 p-2 text-center border-r bg-gray-50 text-sm">Ставка</div>
+                                <div className="w-36 p-2 text-center border-r bg-gray-50 text-sm">Норма часов</div>
 
-                        <label className="flex flex-col text-xs text-gray-700">
-                            <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-phone" aria-hidden="true" /> Calls
-                            </span>
-                            <input
-                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
-                            type="number"
-                            value={cellModel.calls}
-                            onChange={e => updateCellField('calls', e.target.value)}
-                            />
-                        </label>
+                                {daysArray.map(day => (
+                                    <div key={day} className="p-2 min-w-[72px] text-center border-l">
+                                        <button onClick={() => openUploadForDay(day)} className="text-xs font-semibold px-2 py-1 rounded hover:bg-gray-100">
+                                            {formatHeaderLabel(day)}
+                                        </button>
+                                    </div>
+                                ))}
 
-                        <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
-                            <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-percent" aria-hidden="true" /> Efficiency (ч)
-                            </span>
-                            <input
-                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
-                            type="number"
-                            step="0.01"
-                            value={cellModel.efficiency}
-                            onChange={e => updateCellField('efficiency', e.target.value)}
-                            />
-                        </label>
-                        </div>
-
-                        {/* Trainings — visible for work_time/trainings tab */}
-                        {(selectedTab === 'work_time' || selectedTab === 'trainings') && (
-                        <div className="mt-6">
-                            <div className="flex items-center justify-between mb-3">
-                            <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-                                <i className="fas fa-chalkboard-teacher" aria-hidden="true" /> Тренинги
-                            </h4>
-                            <div className="text-xs text-gray-500">{getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).length} найдено</div>
+                                {/* Right summary headers */}
+                                {selectedTab === 'work_time' && (
+                                    <>
+                                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Итого часов</div>
+                                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">С выч. тренинга</div>
+                                        <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Вып. нормы (%)</div>
+                                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Выработка</div>
+                                    </>
+                                )}
+                                {selectedTab === 'calls' && (
+                                    <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">КВЗ</div>
+                                )}
+                                {selectedTab === 'efficiency' && (
+                                    <>
+                                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Итого (ч)</div>
+                                        <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">OCC (%)</div>
+                                    </>
+                                )}
+                                {selectedTab === 'trainings' && (
+                                    <>
+                                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Часы (всего)</div>
+                                        <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Засчитано (ч)</div>
+                                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Не засчитано (ч)</div>
+                                    </>
+                                )}
                             </div>
 
-                            {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).length === 0 ? (
-                            <div className="text-sm text-gray-500">Тренингов нет.</div>
-                            ) : (
-                            <div className="space-y-2">
-                                {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).map(t => {
-                                const dur = computeTrainingDurationHours(t);
-                                return (
-                                    <div
-                                    key={t.id}
-                                    className={`p-3 rounded-lg border flex flex-col gap-2 ${
-                                        t.count_in_hours ? 'bg-green-50 border-green-200' : 'bg-yellow-50 border-yellow-200'
-                                    }`}
-                                    >
-                                    <div className="flex items-center justify-between">
-                                        <div className="text-sm font-medium flex items-center gap-3">
-                                        <i className="fas fa-clock" aria-hidden="true" />
-                                        <span>{t.start_time || '—'} — {t.end_time || '—'}</span>
-                                        <span className="text-xs text-gray-600">· {dur.toFixed(2)} ч</span>
+                            {/* Rows */}
+                            <div>
+                                {isLoading ? (
+                                    <div className="p-4 text-gray-600">Загрузка данных...</div>
+                                ) : filteredOperators.length === 0 ? (
+                                    <div className="p-4 text-gray-600">Операторы не найдены.</div>
+                                ) : filteredOperators.map(op => {
+                                    const aggr = op.aggregates || {};
+                                    const regular = Number(aggr.regular_hours || 0);
+                                    const norm = Number(op.norm_hours || 0);
+
+                                    // precompute trainings summary for row (month-wide)
+                                    let totalHoursAll = 0;
+                                    let totalHoursCounted = 0;   // нужно менять — поэтому let
+                                    let totalHoursNotCounted = 0;
+
+                                    const byDay = trainingsMap[op.operator_id] || {};
+                                    for (const dKey of Object.keys(byDay)) {
+                                        const arr = byDay[dKey] || [];
+                                        for (const t of arr) {
+                                            const h = computeTrainingDurationHours(t) || 0;
+                                            totalHoursAll += h;
+                                            if (t.count_in_hours) totalHoursCounted += h;
+                                            else totalHoursNotCounted += h;
+                                        }
+                                    }
+
+                                    // итоговые величины для рендера
+                                    const displayedTotal = regular + totalHoursCounted; // отработанные + засчитанные тренинги
+                                    const prodDiff = displayedTotal - norm; // выработка относительно нормы (с учётом тренингов)
+
+                                    const callsTotal = Number(aggr.total_calls || 0);
+                                    const effTotal = Number(aggr.total_efficiency_hours || 0);
+
+                                    return (
+                                        <div key={op.operator_id} className="flex items-center border-b hover:bg-gray-50 relative">
+                                            {/* Name */}
+                                            <div className="w-48 p-2 text-sm font-medium border-r sticky left-0 z-20 bg-white">
+                                                {op.name}
+                                            </div>
+
+                                            {/* Rate */}
+                                            <div className="w-28 p-2 text-sm text-center border-r">
+                                                <div className="text-sm text-gray-700">{op.rate ?? '—'}</div>
+                                            </div>
+
+                                            {/* Norm (editable) */}
+                                            <div className="w-36 p-2 text-sm text-center border-r">
+                                                <input
+                                                    type="number"
+                                                    step="0.1"
+                                                    className="w-full p-1 border rounded-md text-center text-sm"
+                                                    value={op.norm_hours ?? 0}
+                                                    onChange={e => handleNormChange(op.operator_id, e.target.value)}
+                                                />
+                                            </div>
+
+                                            {/* Days */}
+                                            {daysArray.map(day => (
+                                                <div key={day} className="p-2 min-w-[72px] text-center border-l">
+                                                    <button
+                                                        onClick={() => openCellDetail(op, day)}
+                                                        className="w-full h-8 rounded-md text-sm flex items-center justify-center"
+                                                        aria-label={`Данные ${op.name} за ${day}-${monthLabel}`}>
+                                                        {renderCellByMetricWithStyleAndMarker(op, day, selectedTab)}
+                                                    </button>
+                                                </div>
+                                            ))}
+
+                                            {/* Right summary values */}
+                                            {selectedTab === 'work_time' && (
+                                                <>
+                                                    <div className="w-36 p-2 text-sm text-center border-l">{displayedTotal.toFixed(2)}</div>
+                                                    <div className="w-36 p-2 text-sm text-center border-l">{formatNumber(regular, 1)}</div>
+                                                    <div className="w-32 p-2 text-sm text-center border-l">
+                                                        {norm > 0 ? `${((regular / norm) * 100).toFixed(1)}%` : '—'}
+                                                    </div>
+                                                    <div className="w-36 p-2 text-sm text-center border-l">
+                                                        <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-md ${productionColorClass(prodDiff, norm)}`}>
+                                                            <span className="font-medium">{formatNumber(prodDiff, 1)}</span>
+                                                            <span className="text-xs text-gray-500">ч</span>
+                                                        </div>
+                                                    </div>
+                                                </>
+                                            )}
+
+                                            {selectedTab === 'calls' && (
+                                                <div className="w-36 p-2 text-sm text-center border-l">
+                                                    {regular > 0 ? formatNumber(callsTotal / regular, 1) : '—'}
+                                                </div>
+                                            )}
+
+                                            {selectedTab === 'efficiency' && (
+                                                <>
+                                                    <div className="w-36 p-2 text-sm text-center border-l">{formatNumber(effTotal, 1)}</div>
+                                                    <div className="w-32 p-2 text-sm text-center border-l">{regular > 0 ? `${((effTotal / regular) * 100).toFixed(1)}%` : '—'}</div>
+                                                </>
+                                            )}
+
+                                            {selectedTab === 'trainings' && (
+                                                <>
+                                                    <div className="w-36 p-2 text-sm text-center border-l">{totalHoursAll.toFixed(2)}</div>
+                                                    <div className="w-32 p-2 text-sm text-center border-l">{totalHoursCounted.toFixed(2)}</div>
+                                                    <div className="w-36 p-2 text-sm text-center border-l">{totalHoursNotCounted.toFixed(2)}</div>
+                                                </>
+                                            )}
                                         </div>
-                                        <div className="text-xs text-gray-500">by {t.created_by_name}</div>
-                                    </div>
-
-                                    <div className="text-sm text-gray-700">{t.reason || '—'}</div>
-                                    {t.comment && <div className="text-xs text-gray-600">{t.comment}</div>}
-
-                                    <div className="flex items-center gap-2 text-xs">
-                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border">
-                                        <i className="fas fa-info-circle" /> {t.count_in_hours ? 'Засчитывается в часы' : 'Не засчитывается'}
-                                        </span>
-                                        {t.verified && (
-                                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border">
-                                            <i className="fas fa-check" /> Проверено
-                                        </span>
-                                        )}
-                                    </div>
-                                    </div>
-                                );
+                                    );
                                 })}
                             </div>
-                            )}
-                        </div>
-                        )}
-
-                        <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <label className="flex flex-col text-xs text-gray-700">
-                            <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-wallet" aria-hidden="true" /> Штраф (сумма)
-                            </span>
-                            <input
-                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
-                            type="number"
-                            step="0.01"
-                            value={cellModel.fine_amount}
-                            onChange={e => updateCellField('fine_amount', e.target.value)}
-                            />
-                        </label>
-
-                        <label className="flex flex-col text-xs text-gray-700">
-                            <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-flag" aria-hidden="true" /> Причина
-                            </span>
-                            <select
-                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
-                            value={cellModel.fine_reason}
-                            onChange={e => updateCellField('fine_reason', e.target.value)}
-                            >
-                            <option value="">—</option>
-                            <option>Корп такси</option>
-                            <option>Опоздание</option>
-                            <option>Прокси карта</option>
-                            <option>Другое</option>
-                            </select>
-                        </label>
-
-                        <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
-                            <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-comment-dots" aria-hidden="true" /> Комментарий
-                            </span>
-                            <textarea
-                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
-                            value={cellModel.fine_comment}
-                            onChange={e => updateCellField('fine_comment', e.target.value)}
-                            rows={3}
-                            />
-                        </label>
                         </div>
                     </div>
 
-                    {/* Footer actions */}
-                    <div className="flex items-center justify-end gap-3 p-4 border-t">
-                        <button
-                        onClick={closeCellModal}
-                        className="px-4 py-2 rounded-md border text-sm text-gray-600 hover:bg-gray-50"
-                        >
-                        Отмена
-                        </button>
+                    {/* Upload modal (file selector -> preview) */}
+                    {selectedDayUpload && previewOperators.length === 0 && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                            <form onSubmit={handlePreviewUpload} className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-lg font-semibold mb-3">Загрузить файл для {selectedDayUpload.dateStr}</h3>
+                                <input type="file" accept=".xlsx,.xls,.csv" onChange={e => setUploadFile(e.target.files?.[0] || null)} className="mb-3" />
+                                <div className="flex justify-end gap-2">
+                                    <button type="button" onClick={() => setSelectedDayUpload(null)} className="px-3 py-2 rounded-md border">Отмена</button>
+                                    <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded-md">{isPreviewing ? `Загрузка ${uploadProgress}%` : 'Предпросмотр'}</button>
+                                </div>
+                            </form>
+                        </div>
+                    )}
 
-                        <button
-                        onClick={saveCell}
-                        disabled={isSavingCell}
-                        className={`inline-flex items-center gap-2 px-5 py-2 rounded-md text-sm text-white ${
-                            isSavingCell ? 'bg-green-400 cursor-wait' : 'bg-green-600 hover:bg-green-700'
-                        }`}
-                        >
-                        {isSavingCell ? (
-                            <>
-                            <i className="fas fa-spinner fa-spin" aria-hidden="true" /> Сохранение...
-                            </>
-                        ) : (
-                            <>
-                            <i className="fas fa-save" aria-hidden="true" /> Сохранить
-                            </>
-                        )}
-                        </button>
-                    </div>
-                    </div>
-                </div>
-                )}
+                    {/* Preview modal */}
+                    {selectedDayUpload && previewOperators.length > 0 && (
+                        <div className="fixed inset-0 z-50 flex items-start pt-12 justify-center bg-black/40">
+                            <div className="bg-white p-4 rounded-lg shadow-lg w-[95%] max-w-6xl">
+                                <div className="flex items-center justify-between mb-4">
+                                    <h3 className="text-lg font-semibold">Предпросмотр: {previewSheetName || 'файл'} — {selectedDayUpload.dateStr}</h3>
+                                    <div className="flex gap-2">
+                                        <button onClick={() => { setSelectedDayUpload(null); setPreviewOperators([]); setPreviewSheetName(null); }} className="px-3 py-1 rounded-md border">Отмена</button>
+                                        <button onClick={handleConfirmSave} disabled={isSavingPreview} className="px-3 py-1 bg-green-600 text-white rounded-md">
+                                            {isSavingPreview ? 'Сохранение...' : 'Сохранить'}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="overflow-auto max-h-[60vh] border rounded-md">
+                                    <table className="min-w-full text-sm">
+                                        <thead className="bg-gray-100 sticky top-0">
+                                            <tr>
+                                                <th className="p-2 text-left">Имя</th>
+                                                <th className="p-2 text-center">Work</th>
+                                                <th className="p-2 text-center">Break</th>
+                                                <th className="p-2 text-center">Calls</th>
+                                                <th className="p-2 text-center">Efficiency</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {previewOperators.map((row, idx) => (
+                                                <tr key={idx} className="border-b">
+                                                    <td className="p-2">{row.name}</td>
+                                                    <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" value={row.work_time} onChange={e => { const copy = [...previewOperators]; copy[idx].work_time = +e.target.value; setPreviewOperators(copy); }} /></td>
+                                                    <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" value={row.break_time} onChange={e => { const copy = [...previewOperators]; copy[idx].break_time = +e.target.value; setPreviewOperators(copy); }} /></td>
+                                                    <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" value={row.calls} onChange={e => { const copy = [...previewOperators]; copy[idx].calls = +e.target.value; setPreviewOperators(copy); }} /></td>
+                                                    <td className="p-2"><input className="w-full p-1 border rounded-md" type="number" value={row.efficiency} onChange={e => { const copy = [...previewOperators]; copy[idx].efficiency = +e.target.value; setPreviewOperators(copy); }} /></td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Detail modal for a single cell (trainings shown only in work_time tab) */}
+                    {selectedCell && cellModel && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                            <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-lg" onClick={e => e.stopPropagation()}>
+                                <div className="flex items-center justify-between mb-4">
+                                    <h3 className="text-lg font-semibold">Детали: {cellModel.name} — {cellModel.dateStr}</h3>
+                                    <button onClick={closeCellModal} className="px-2 py-1 rounded-md border">Закрыть</button>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-3 mb-4">
+                                    <label className="text-xs text-gray-600">Work time (ч)
+                                        <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.work_time} onChange={e => updateCellField('work_time', e.target.value)} />
+                                    </label>
+                                    <label className="text-xs text-gray-600">Break time (ч)
+                                        <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.break_time} onChange={e => updateCellField('break_time', e.target.value)} />
+                                    </label>
+
+                                    <label className="text-xs text-gray-600">Talk time (ч)
+                                        <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.talk_time} onChange={e => updateCellField('talk_time', e.target.value)} />
+                                    </label>
+
+                                    <label className="text-xs text-gray-600">Calls
+                                        <input className="w-full p-2 mt-1 border rounded-md" type="number" value={cellModel.calls} onChange={e => updateCellField('calls', e.target.value)} />
+                                    </label>
+
+                                    <label className="col-span-2 text-xs text-gray-600">Efficiency (ч)
+                                        <input className="w-full p-2 mt-1 border rounded-md" type="number" step="0.01" value={cellModel.efficiency} onChange={e => updateCellField('efficiency', e.target.value)} />
+                                    </label>
+                                </div>
+
+                                {/* Trainings list — show ONLY if currently viewing work_time tab */}
+                                {(selectedTab === 'work_time' || selectedTab === 'trainings') && (
+                                    <div className="mb-4">
+                                        <h4 className="text-sm font-semibold mb-2">Тренинги</h4>
+                                        {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).length === 0 ? (
+                                            <div className="text-sm text-gray-500">Тренингов нет.</div>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).map(t => {
+                                                    const dur = computeTrainingDurationHours(t);
+                                                    return (
+                                                        <div key={t.id} className={`p-2 border rounded-md ${t.count_in_hours ? 'bg-green-50' : 'bg-yellow-50'}`}>
+                                                            <div className="flex items-center justify-between">
+                                                                <div className="text-sm font-medium">{t.start_time || '—'} — {t.end_time || '—'} · {dur.toFixed(2)} ч</div>
+                                                                <div className="text-xs text-gray-500">by {t.created_by_name}</div>
+                                                            </div>
+                                                            <div className="text-sm text-gray-700">{t.reason || '—'}</div>
+                                                            {t.comment && <div className="text-xs text-gray-600 mt-1">{t.comment}</div>}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                <div className="mt-4 flex items-center justify-end gap-3">
+                                    <button onClick={closeCellModal} className="px-3 py-2 rounded-md border">Отмена</button>
+                                    <button onClick={saveCell} disabled={isSavingCell} className="px-4 py-2 bg-green-600 text-white rounded-md">
+                                        {isSavingCell ? 'Сохранение...' : 'Сохранить'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                 </div>
             );
-            }
+        }
 
         function AudioPlayer({ audioSrc, uniqueKey }) {
             const [duration, setDuration] = React.useState(0);
