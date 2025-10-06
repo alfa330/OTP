@@ -3655,6 +3655,50 @@
             const [activeTab, setActiveTab] = useState("active");
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
+            const [sortField, setSortField] = useState('name');
+            const [sortDirection, setSortDirection] = useState('asc');
+
+            const handleSort = (field) => {
+            if (sortField === field) {
+                setSortDirection(prev => (prev === 'asc' ? 'desc' : 'asc'));
+            } else {
+                setSortField(field);
+                setSortDirection('asc');
+            }
+            };
+
+            const getSortIcon = (field) => {
+            if (sortField !== field) return <span className="ml-2 text-gray-400 text-xs">⇅</span>;
+            return sortDirection === 'asc' ? <span className="ml-2 text-xs">▲</span> : <span className="ml-2 text-xs">▼</span>;
+            };
+
+            const parseDateForSort = (str) => {
+            if (!str) return 0;
+            const [d, m, y] = str.split("-");
+            const dt = new Date(`${y}-${m}-${d}`);
+            return dt.getTime() || 0;
+            };
+
+            const compareByField = (a, b, field) => {
+            const dir = sortDirection === 'asc' ? 1 : -1;
+            const va = a?.[field];
+            const vb = b?.[field];
+
+            if (field === 'rate') {
+                const na = Number(va || 0);
+                const nb = Number(vb || 0);
+                return (na - nb) * dir;
+            }
+
+            if (field === 'hire_date') {
+                return (parseDateForSort(va) - parseDateForSort(vb)) * dir;
+            }
+
+            // string comparison (name, status, supervisor_name, etc.)
+            const sa = (va || '').toString();
+            const sb = (vb || '').toString();
+            return sa.localeCompare(sb, 'ru', { sensitivity: 'base' }) * dir;
+            };
 
             const handleToggleDropdown = (forceClose = null) => {
             if (forceClose === true) {
@@ -7451,10 +7495,21 @@
                                             return acc;
                                             }, {});
 
-                                            // Сортируем ключи групп (направлений) и внутри каждой группы сортируем операторов по ФИО
-                                            const sortedDirectionNames = Object.keys(grouped).sort((a, b) => a.localeCompare(b, 'ru', { sensitivity: 'base' }));
+                                            // Сортировка направлений (если сортируем по direction) или просто получить список направлений
+                                            let sortedDirectionNames = Object.keys(grouped);
+                                            if (sortField === 'direction') {
+                                            sortedDirectionNames = sortedDirectionNames.sort((a, b) => {
+                                                const res = a.localeCompare(b, 'ru', { sensitivity: 'base' });
+                                                return sortDirection === 'asc' ? res : -res;
+                                            });
+                                            } else {
+                                            sortedDirectionNames = sortedDirectionNames.sort((a, b) => a.localeCompare(b, 'ru', { sensitivity: 'base' }));
+                                            }
+
+                                            // Внутри каждой группы сортируем операторов по выбранному полю (если поле direction — это уже обработано выше)
                                             sortedDirectionNames.forEach((dir) => {
-                                            grouped[dir].sort((x, y) => (x.name || '').localeCompare(y.name || '', 'ru', { sensitivity: 'base' }));
+                                            if (sortField === 'direction') return; // группы уже отсортированы
+                                            grouped[dir].sort((x, y) => compareByField(x, y, sortField));
                                             });
 
                                             return (
@@ -7481,11 +7536,36 @@
 
                                                 <thead className="bg-gray-50">
                                                     <tr>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Имя</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Направление</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Статус</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Дата найма</th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ставка</th>
+                                                    <th
+                                                        onClick={() => handleSort('name')}
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none"
+                                                    >
+                                                        Имя {getSortIcon('name')}
+                                                    </th>
+                                                    <th
+                                                        onClick={() => handleSort('direction')}
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none"
+                                                    >
+                                                        Направление {getSortIcon('direction')}
+                                                    </th>
+                                                    <th
+                                                        onClick={() => handleSort('status')}
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none"
+                                                    >
+                                                        Статус {getSortIcon('status')}
+                                                    </th>
+                                                    <th
+                                                        onClick={() => handleSort('hire_date')}
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none"
+                                                    >
+                                                        Дата найма {getSortIcon('hire_date')}
+                                                    </th>
+                                                    <th
+                                                        onClick={() => handleSort('rate')}
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer select-none"
+                                                    >
+                                                        Ставка {getSortIcon('rate')}
+                                                    </th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Действия</th>
                                                     </tr>
                                                 </thead>
