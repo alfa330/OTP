@@ -64,7 +64,7 @@ executor_pool = ThreadPoolExecutor(max_workers=4)
 app = Flask(__name__)
 CORS(app, resources={
     r"/api/*": {
-        "origins": ["https://alfa330.github.io", "http://localhost:*"],
+        "origins": ["https://alfa330.github.io", "http://localhost:*", "https://call-evalution.pages.dev", "https://szov.pages.dev", "https://moders.pages.dev"],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "X-API-Key", "X-User-Id"],
         "supports_credentials": False,
@@ -97,10 +97,21 @@ def require_api_key(f):
     return decorated
 
 def _build_cors_preflight_response():
+    allowed_origins = {
+        "https://alfa330.github.io",
+        "https://call-evalution.pages.dev",
+        "https://szov.pages.dev",
+        "https://moders.pages.dev"
+    }
+
+    origin = request.headers.get("Origin")
     response = jsonify({"status": "ok"})
-    response.headers.add("Access-Control-Allow-Origin", "https://alfa330.github.io")
-    response.headers.add("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-User-Id")
-    response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+
+    if origin in allowed_origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, X-User-Id"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
     return response
 
 @app.route('/')
@@ -109,9 +120,19 @@ def index():
 
 @app.after_request
 def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', 'https://alfa330.github.io')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, X-User-Id')
-    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE, PUT')
+    allowed_origins = {
+        "https://alfa330.github.io",
+        "https://call-evalution.pages.dev",
+        "https://szov.pages.dev",
+        "https://moders.pages.dev"
+    }
+
+    origin = request.headers.get('Origin')
+    if origin in allowed_origins:
+        response.headers['Access-Control-Allow-Origin'] = origin
+
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-User-Id'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, DELETE, PUT'
     return response
 
 @app.route('/api/health', methods=['GET'])
