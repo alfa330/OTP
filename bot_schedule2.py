@@ -64,7 +64,7 @@ executor_pool = ThreadPoolExecutor(max_workers=4)
 app = Flask(__name__)
 CORS(app, resources={
     r"/api/*": {
-        "origins": ["https://alfa330.github.io", "http://localhost:*", "https://call-evalution.pages.dev", "https://szov.pages.dev", "https://moders.pages.dev"],
+        "origins": ["https://alfa330.github.io", "http://localhost:*", "https://call-evalution.pages.dev", "https://szov.pages.dev", "https://moders.pages.dev", "https://table-7kx.pages.dev"],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "X-API-Key", "X-User-Id"],
         "supports_credentials": False,
@@ -101,7 +101,8 @@ def _build_cors_preflight_response():
         "https://alfa330.github.io",
         "https://call-evalution.pages.dev",
         "https://szov.pages.dev",
-        "https://moders.pages.dev"
+        "https://moders.pages.dev", 
+        "https://table-7kx.pages.dev"
     }
 
     origin = request.headers.get("Origin")
@@ -124,7 +125,8 @@ def after_request(response):
         "https://alfa330.github.io",
         "https://call-evalution.pages.dev",
         "https://szov.pages.dev",
-        "https://moders.pages.dev"
+        "https://moders.pages.dev", 
+        "https://table-7kx.pages.dev"
     }
 
     origin = request.headers.get('Origin')
