@@ -2249,8 +2249,8 @@ def toggle_user_active():
 @require_api_key
 def get_active_operators():
     try:
-        #direction_name = request.args.get("direction")  # например: /api/active_operators?direction=Sales
-        operators = db.get_active_operators("")
+        direction_name = request.args.get("direction")  # например: /api/active_operators?direction=Sales
+        operators = db.get_active_operators(direction_name)
         return jsonify({"status": "success", "operators": operators})
     except Exception as e:
         logging.error(f"Error fetching active operators: {e}")
