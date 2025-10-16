@@ -81,8 +81,8 @@ class Database:
             # Users table (без direction_id на этом этапе)
             cursor.execute("""
                 UPDATE users
-                SET name = 'Динмухамад Пахриддинов'
-                WHERE id = 126;
+                SET name = 'Кайрбек Диаз'
+                WHERE id = 128;
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
                     telegram_id BIGINT UNIQUE,
