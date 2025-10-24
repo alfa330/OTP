@@ -3571,46 +3571,42 @@
             );
             }
 
-            // Компонент: Админ/Супервайзер — загрузка и распределение звонков (CSV)
-            // Обновлено: учёт дробных секунд (float) при парсинге и фильтрации
-            // Исправлено: теперь отображаются только операторы, у которых хотя бы одно совпадение (count > 0)
-
+            // Helpers for duration parsing and formatting
             function pad(n) { return String(n).padStart(2, '0'); }
+
             function secondsToHms(sec) {
             if (sec == null || isNaN(Number(sec))) return '00:00:00';
-            // показ времени целыми секундами (floor) — фильтрация работает с float
+            // Отображаем целые секунды (floor), фильтрация работает с float
             const s = Math.max(0, Math.floor(Number(sec)));
             const h = Math.floor(s / 3600);
             const m = Math.floor((s % 3600) / 60);
             const ss = s % 60;
             return `${pad(h)}:${pad(m)}:${pad(ss)}`;
             }
+
             function hmsToSeconds(h, m, s) {
             const hh = Number(h) || 0;
             const mm = Number(m) || 0;
-            // allow fractional seconds input string (but UI inputs are integers)
             const ss = Number(s) || 0;
             return hh * 3600 + mm * 60 + ss;
             }
+
             function parseDurationString(str) {
             if (str == null) return 0;
             let s = String(str).trim();
             if (s === '') return 0;
 
-            // If contains colon -> hh:mm:ss or mm:ss (allow fractional seconds with comma or dot)
+            // Формат hh:mm:ss или mm:ss, допускаем дробные секунды с запятой или точкой
             if (s.includes(':')) {
                 const parts = s.split(':').map(p => p.trim());
-                // normalize seconds part (replace comma with dot)
-                const secPart = parts[parts.length - 1].replace(',', '.');
+                const secPart = (parts[parts.length - 1] || '0').replace(',', '.');
                 const sec = parseFloat(secPart) || 0;
                 const min = parseInt(parts[parts.length - 2] || '0', 10) || 0;
                 const hr = parts.length >= 3 ? (parseInt(parts[parts.length - 3] || '0', 10) || 0) : 0;
                 return hr * 3600 + min * 60 + sec;
             }
 
-            // Otherwise numeric string: could use comma as decimal separator -> replace comma with dot
-            // Also trim spaces and remove non-digit characters except dot/minus if present
-            // Simple approach: replace comma with dot, then parseFloat
+            // Число в секундах, возможно с запятой в качестве дробного разделителя
             const normalized = s.replace(/\s+/g, '').replace(',', '.');
             const n = parseFloat(normalized);
             return isNaN(n) ? 0 : n;
@@ -3618,20 +3614,18 @@
 
             // Duration input split into hh / mm / ss blocks
             function DurationInput({ valueSec, onChange, ariaLabel }) {
-            // valueSec may be null (meaning empty/optional)
             const secs = valueSec == null ? 0 : Number(valueSec) || 0;
             const hh = Math.floor(secs / 3600);
             const mm = Math.floor((secs % 3600) / 60);
-            const ss = Math.floor(secs % 60); // input blocks are integer seconds
+            const ss = Math.floor(secs % 60);
 
             function handlePartChange(part, v) {
-                // allow empty string to indicate clearing value
                 if (v === '' || v == null) {
                 if (typeof onChange === 'function') onChange(null);
                 return;
                 }
                 const nv = Number(v);
-                if (isNaN(nv) || nv < 0) return; // ignore invalid
+                if (isNaN(nv) || nv < 0) return;
                 let newSec = secs;
                 if (part === 'h') newSec = hmsToSeconds(v, mm, ss);
                 if (part === 'm') newSec = hmsToSeconds(hh, v, ss);
@@ -3652,21 +3646,46 @@
             }
 
         function AdminCallsUploadView({ onAssignSelected }) {
-            const [files, setFiles] = useState([]);
-            const [minDurationSec, setMinDurationSec] = useState(null); // seconds (float) or null
-            const [maxDurationSec, setMaxDurationSec] = useState(null);
-            const [variationSec, setVariationSec] = useState(0);
-            const [sampleCount, setSampleCount] = useState(3);
-            const [parsing, setParsing] = useState(false);
-            const [calls, setCalls] = useState([]); // все разобранные звонки
-            const [operatorMap, setOperatorMap] = useState({}); // operator -> {count,samples,all}
-            const [operatorParams, setOperatorParams] = useState({}); // per-operator overrides: { op: { min, max, variation, sampleCount } }
-            const [selectedOperator, setSelectedOperator] = useState(null);
-            const [selectedCalls, setSelectedCalls] = useState(new Set());
-            const [activeRange, setActiveRange] = useState(null); // {min, max} после парсинга (в секундах; max=null для бесконечности)
-            const [editingOperator, setEditingOperator] = useState(null);
-            const [editingValues, setEditingValues] = useState({ min: null, max: null, variation: 0, sampleCount: 0 });
-            const fileInputRef = useRef(null);
+            // CSV / parsing state (unchanged)
+            const [files, setFiles] = React.useState([]);
+            const [minDurationSec, setMinDurationSec] = React.useState(null);
+            const [maxDurationSec, setMaxDurationSec] = React.useState(null);
+            const [variationSec, setVariationSec] = React.useState(0);
+            const [sampleCount, setSampleCount] = React.useState(3);
+            const [parsing, setParsing] = React.useState(false);
+            const [calls, setCalls] = React.useState([]);
+            const [operatorMap, setOperatorMap] = React.useState({});
+            const [operatorParams, setOperatorParams] = React.useState({});
+            const [selectedOperator, setSelectedOperator] = React.useState(null);
+            const [selectedCalls, setSelectedCalls] = React.useState(new Set());
+            const [activeRange, setActiveRange] = React.useState(null);
+            const [editingOperator, setEditingOperator] = React.useState(null);
+            const [editingValues, setEditingValues] = React.useState({ min: null, max: null, variation: 0, sampleCount: 0 });
+            const fileInputRef = React.useRef(null);
+
+            // New: month + directions + sv data (operators)
+            const [selectedMonth, setSelectedMonth] = React.useState(new Date().toISOString().slice(0,7)); // YYYY-MM
+            const [directions, setDirections] = React.useState([]); // from /api/admin/directions
+            const [svOperators, setSvOperators] = React.useState([]); // operators from /api/sv/data
+            const [loadingOperators, setLoadingOperators] = React.useState(false);
+
+            // Helpers: generate last 12 months options
+            function getMonthOptions() {
+                const options = [];
+                const today = new Date();
+                for (let i = 0; i < 12; i++) {
+                const date = new Date(today.getFullYear(), today.getMonth() - i, 1);
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const year = date.getFullYear();
+                const monthStr = `${year}-${month}`;
+                options.push(
+                    <option key={monthStr} value={monthStr}>
+                    {date.toLocaleString('default', { month: 'long', year: 'numeric' })}
+                    </option>
+                );
+                }
+                return options;
+            }
 
             function parseDateDMY(str) {
                 if (!str) return null;
@@ -3686,7 +3705,6 @@
                 const r = window.Papa.parse(text, { skipEmptyLines: true });
                 return r.data;
                 }
-
                 const lines = text.split(/\r?\n/).filter(Boolean);
                 return lines.map(l => {
                 const parts = [];
@@ -3708,7 +3726,7 @@
                 if (r.length < 7) while (r.length < 7) r.push('');
                 const [id, dtRaw, typeRaw, phone, project, operator, durationRaw] = r;
                 const dt = parseDateDMY(dtRaw);
-                const duration = parseDurationString(durationRaw); // теперь float
+                const duration = parseDurationString(durationRaw); // float-aware
                 const type = (String(typeRaw || '')).toLowerCase().includes('вход') || String(typeRaw || '').toLowerCase().includes('in') ? 'in' : 'out';
 
                 return {
@@ -3764,7 +3782,6 @@
             }
 
             function recomputeOperatorMap(allRows, globalMin, globalMax, globalSampleCnt, globalVar, params = {}) {
-                // Build raw map first (all rows per operator)
                 const raw = {};
                 for (const c of allRows) {
                 const op = c.operator || 'Неизвестный';
@@ -3775,12 +3792,10 @@
                 const summary = {};
                 Object.keys(raw).forEach(op => {
                 let list = raw[op].slice();
-                // sort by datetime desc
                 list.sort((a,b) => (b.datetime?.getTime() || 0) - (a.datetime?.getTime() || 0));
 
                 const opParams = params[op] || null;
 
-                // decide which params to apply: operator-specific overrides global if present
                 const minD = opParams && opParams.min != null ? opParams.min : globalMin;
                 const maxD = opParams && opParams.max != null ? opParams.max : globalMax;
                 const varD = opParams && opParams.variation != null ? opParams.variation : globalVar;
@@ -3792,7 +3807,6 @@
                     const computedMin = Math.max(0, (Number(baseMin) || 0) - (Number(varD) || 0));
                     const computedMax = baseMax === Infinity ? Infinity : (Number(baseMax) || 0) + (Number(varD) || 0);
                     list = list.filter(c => {
-                    // c.durationSec is float (or 0)
                     if (c.durationSec == null || isNaN(Number(c.durationSec))) return false;
                     const dur = Number(c.durationSec);
                     if (dur < computedMin) return false;
@@ -3813,7 +3827,6 @@
                 setSelectedOperator(null);
                 setSelectedCalls(new Set());
 
-                // set activeRange for GLOBAL filter (not per-operator)
                 if (globalMin != null || globalMax != null) {
                 const baseMin = globalMin != null ? Number(globalMin) : 0;
                 const baseMax = globalMax != null ? Number(globalMax) : (globalMin != null ? Number(globalMin) : Infinity);
@@ -3825,14 +3838,9 @@
                 }
             }
 
-            useEffect(() => {
-                // whenever operatorParams is changed, recompute using current calls and global filters
-                recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams);
-                // eslint-disable-next-line react-hooks/exhaustive-deps
-            }, [operatorParams]);
-
+            // show operator samples (existing UI logic)
             function handleShowOperator(op) {
-                if (!(operatorMap[op] && operatorMap[op].count > 0)) return; // don't open empty operators
+                if (!(operatorMap[op] && operatorMap[op].count > 0)) return;
                 setSelectedOperator(op);
                 const samples = operatorMap[op]?.samples || [];
                 const s = new Set(selectedCalls);
@@ -3880,15 +3888,9 @@
             function saveOperatorParams() {
                 const op = editingOperator;
                 const cleaned = { ...editingValues };
-                // if sampleCount is empty or 0, set to 0
                 cleaned.sampleCount = Number(cleaned.sampleCount) || 0;
                 setOperatorParams(prev => ({ ...prev, [op]: cleaned }));
                 setEditingOperator(null);
-            }
-
-            function applyOperatorParamsWithoutSaving() {
-                // temporary apply (doesn't persist in operatorParams) - useful for preview but here we will save
-                saveOperatorParams();
             }
 
             function resetOperatorParams(op) {
@@ -3900,15 +3902,122 @@
                 if (editingOperator === op) setEditingOperator(null);
             }
 
-            // compute visible operators (only those with count > 0)
+            // --- New: fetch directions and sv data (operators) ---
+            async function fetchDirections() {
+                try {
+                if (typeof axios === 'undefined') return;
+                // If you have a global user/apiKey available in this file, use it:
+                const headers = {};
+                if (typeof user !== 'undefined' && user?.apiKey) headers['X-API-Key'] = user.apiKey;
+                if (typeof user !== 'undefined' && user?.id) headers['X-User-Id'] = user.id;
+                const resp = await axios.get(`${API_BASE_URL}/api/admin/directions`, { headers });
+                const data = resp.data;
+                if (data && data.status === 'success' && Array.isArray(data.directions)) {
+                    setDirections(data.directions.filter(d => d.isActive !== false));
+                } else {
+                    // fallback: empty
+                    setDirections([]);
+                    if (typeof showToast === 'function') showToast?.(data?.error || 'Не удалось получить направления', 'error');
+                }
+                } catch (err) {
+                console.error('Fetch directions error:', err);
+                setDirections([]);
+                if (typeof showToast === 'function') showToast?.(err.response?.data?.error || 'Ошибка при получении направлений', 'error');
+                }
+            }
+
+            async function fetchSvOperators(month = selectedMonth) {
+                try {
+                if (typeof axios === 'undefined') return;
+                setLoadingOperators(true);
+                // Попытка GET /api/sv/data?month=YYYY-MM
+                const headers = {};
+                if (typeof user !== 'undefined' && user?.apiKey) headers['X-API-Key'] = user.apiKey;
+                if (typeof user !== 'undefined' && user?.id) headers['X-User-Id'] = user.id;
+                // If backend requires `id` param (sv id), you can append &id=... Otherwise this should return all operators grouped by SV.
+                const resp = await axios.get(`${API_BASE_URL}/api/sv/data?month=${encodeURIComponent(month)}`, { headers });
+                const data = resp.data;
+                if (data && data.status === 'success') {
+                    // Try a few common shapes
+                    // 1) { operators: [...] }
+                    if (Array.isArray(data.operators)) {
+                    setSvOperators(data.operators);
+                    } else if (Array.isArray(data.users)) {
+                    setSvOperators(data.users);
+                    } else if (Array.isArray(data.data)) {
+                    setSvOperators(data.data);
+                    } else {
+                    // If server returns a different shape (sv -> operators), try to collect operators
+                    const collected = [];
+                    if (Array.isArray(data.sv_list)) {
+                        data.sv_list.forEach(sv => {
+                        (sv.operators || []).forEach(op => collected.push(op));
+                        });
+                    }
+                    setSvOperators(collected);
+                    }
+                } else {
+                    setSvOperators([]);
+                    if (typeof showToast === 'function') showToast?.(data?.error || 'Не удалось получить данные операторов', 'error');
+                }
+                } catch (err) {
+                console.error('Fetch sv data error:', err);
+                setSvOperators([]);
+                if (typeof showToast === 'function') showToast?.(err.response?.data?.error || 'Ошибка при получении данных операторов', 'error');
+                } finally {
+                setLoadingOperators(false);
+                }
+            }
+
+            // Groupings computed from svOperators + directions
+            const operatorsByDirection = React.useMemo(() => {
+                // directions may have id/name mapping
+                const map = {};
+                // use direction id or name from operator fields
+                svOperators.forEach(op => {
+                // possible fields: direction_id, direction, directionName
+                const dirId = op.direction_id ?? op.direction_id?.toString?.() ?? null;
+                const dirName = op.direction_name ?? op.direction ?? (dirId ? String(dirId) : 'Без направления');
+                const key = dirId || dirName || 'Без направления';
+                if (!map[key]) map[key] = { name: dirName, operators: [] };
+                map[key].operators.push(op);
+                });
+                return map;
+            }, [svOperators, directions]);
+
+            const operatorsBySv = React.useMemo(() => {
+                const map = {};
+                svOperators.forEach(op => {
+                const sv = op.supervisor_name || op.sv_name || op.supervisor || 'Без SV';
+                if (!map[sv]) map[sv] = [];
+                map[sv].push(op);
+                });
+                return map;
+            }, [svOperators]);
+
+            // Fetch on mount and when month changes
+            React.useEffect(() => {
+                fetchDirections();
+                fetchSvOperators(selectedMonth);
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, [selectedMonth]);
+
+            // If operatorParams changed, recompute CSV-based operatorMap
+            React.useEffect(() => {
+                recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams);
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, [operatorParams]);
+
+            // visibleOperators list (only operators with count > 0 from CSV)
             const visibleOperators = Object.entries(operatorMap).filter(([op, info]) => info && info.count > 0);
 
             return (
                 <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
                 <h3 className="text-lg font-semibold mb-4">Загрузка звонков (CSV) — Админ / Супервайзер</h3>
 
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
-                    <div>
+                {/* Top row: files + month selector + duration inputs */}
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-4">
+                    <div className="md:col-span-2">
                     <label className="block text-sm font-medium text-gray-700">Файлы (CSV)</label>
                     <input ref={fileInputRef} type="file" accept=".csv,.xls,.xlsx" multiple onChange={handleFilesSelected} className="mt-1" />
                     {files.length > 0 && (
@@ -3916,6 +4025,14 @@
                         {files.map((f,i) => <li key={i} className="text-gray-600">{f.name} — {Math.round(f.size/1024)} KB</li>)}
                         </ul>
                     )}
+                    </div>
+
+                    <div>
+                    <label className="block text-sm font-medium text-gray-700">Выберите месяц</label>
+                    <select value={selectedMonth} onChange={e=>setSelectedMonth(e.target.value)} className="w-full mt-1 p-2 border rounded">
+                        {getMonthOptions()}
+                    </select>
+                    <div className="text-xs text-gray-500 mt-1">Данные операторов будут подгружены для выбранного месяца.</div>
                     </div>
 
                     <div>
@@ -3929,7 +4046,7 @@
                     </div>
 
                     <div>
-                    <label className="block text-sm font-medium text-gray-700">Вариация (+- hh:mm:ss) — опционально</label>
+                    <label className="block text-sm font-medium text-gray-700">Вариация (+- hh:mm:ss)</label>
                     <div className="mt-1"><DurationInput valueSec={variationSec || 0} onChange={v=>setVariationSec(v)} ariaLabel="variation" /></div>
                     </div>
                 </div>
@@ -3947,6 +4064,7 @@
                         {parsing ? 'Парсинг...' : 'Парсить и показать совпадения'}
                     </button>
                     <button onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); setActiveRange(null); setOperatorParams({}); if (fileInputRef.current) fileInputRef.current.value = null; }} className="px-4 py-2 rounded border">Сброс</button>
+                    <button onClick={() => { fetchDirections(); fetchSvOperators(selectedMonth); }} className="px-4 py-2 rounded border">Обновить операторов</button>
                     </div>
                 </div>
 
@@ -3956,8 +4074,82 @@
                     <div className="text-sm mb-3 text-gray-500">Диапазон не задан — показываются все звонки (если оператор не имеет кастомных настроек).</div>
                 )}
 
-                <div className="mt-4">
-                    <h4 className="text-sm font-medium mb-2">Совпадения по операторам</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* Left: operators grouped by direction */}
+                    <div className="bg-gray-50 p-4 rounded border">
+                    <h4 className="text-sm font-medium mb-3">Операторы по направлениям ({Object.keys(operatorsByDirection).length})</h4>
+                    {loadingOperators ? (
+                        <div className="text-sm text-gray-500">Загрузка операторов...</div>
+                    ) : Object.keys(operatorsByDirection).length === 0 ? (
+                        <div className="text-sm text-gray-500">Нет данных операторов за выбранный месяц.</div>
+                    ) : (
+                        <div className="space-y-3 max-h-72 overflow-auto">
+                        {Object.entries(operatorsByDirection).map(([dirKey, info]) => (
+                            <div key={dirKey} className="p-3 bg-white rounded shadow-sm border">
+                            <div className="flex items-center justify-between mb-2">
+                                <div className="text-sm font-medium">{info.name || dirKey}</div>
+                                <div className="text-xs text-gray-500">{info.operators.length} оператор(ов)</div>
+                            </div>
+                            <ul className="text-xs space-y-1">
+                                {info.operators.map(op => (
+                                <li key={op.id || op.operator_id || op.login} className="flex items-center justify-between">
+                                    <div>
+                                    <div className="font-medium">{op.name || op.login || op.operator_name || '—'}</div>
+                                    <div className="text-gray-500">{op.phone || op.login || ''}</div>
+                                    </div>
+                                    <div className="flex flex-col items-end gap-1">
+                                    <div className="text-xs text-gray-600">{op.supervisor_name || op.sv_name || '—'}</div>
+                                    <div className="flex gap-2">
+                                        <button onClick={() => { /* можно поставить фильтр по оператору для CSV */ }} className="text-sm px-2 py-1 border rounded">Просмотр</button>
+                                    </div>
+                                    </div>
+                                </li>
+                                ))}
+                            </ul>
+                            </div>
+                        ))}
+                        </div>
+                    )}
+                    </div>
+
+                    {/* Right: operators grouped by SV (supervisor) */}
+                    <div className="bg-gray-50 p-4 rounded border">
+                    <h4 className="text-sm font-medium mb-3">Операторы по SV ({Object.keys(operatorsBySv).length})</h4>
+                    {loadingOperators ? (
+                        <div className="text-sm text-gray-500">Загрузка операторов...</div>
+                    ) : Object.keys(operatorsBySv).length === 0 ? (
+                        <div className="text-sm text-gray-500">Нет данных операторов за выбранный месяц.</div>
+                    ) : (
+                        <div className="space-y-3 max-h-72 overflow-auto">
+                        {Object.entries(operatorsBySv).map(([svName, ops]) => (
+                            <div key={svName} className="p-3 bg-white rounded shadow-sm border">
+                            <div className="flex items-center justify-between mb-2">
+                                <div className="text-sm font-medium">{svName || 'Без SV'}</div>
+                                <div className="text-xs text-gray-500">{ops.length} оператор(ов)</div>
+                            </div>
+                            <ul className="text-xs space-y-1">
+                                {ops.map(op => (
+                                <li key={op.id || op.operator_id || op.login} className="flex items-center justify-between">
+                                    <div>
+                                    <div className="font-medium">{op.name || op.login || op.operator_name || '—'}</div>
+                                    <div className="text-gray-500">{op.direction_name || op.direction || ''}</div>
+                                    </div>
+                                    <div className="flex gap-2 items-center">
+                                    <div className="text-xs text-gray-600">{op.status || ''}</div>
+                                    <button onClick={() => { /* можно показать детализацию */ }} className="text-sm px-2 py-1 border rounded">Просмотр</button>
+                                    </div>
+                                </li>
+                                ))}
+                            </ul>
+                            </div>
+                        ))}
+                        </div>
+                    )}
+                    </div>
+                </div>
+
+                <div className="mt-6">
+                    <h4 className="text-sm font-medium mb-2">Совпадения по операторам (по CSV)</h4>
                     {visibleOperators.length === 0 ? (
                     <p className="text-gray-500">Нет совпадений — распарсите файлы.</p>
                     ) : (
@@ -3971,13 +4163,11 @@
                             </div>
 
                             <div className="flex items-center gap-2">
-                                {/* prominent count badge */}
                                 <div className="flex flex-col items-end">
                                 <div className="text-2xl font-bold text-blue-600">{info.count}</div>
                                 <div className="text-xs text-gray-500">{info.samples.length > 0 ? `${info.samples.length} прим.` : 'Нет примеров'}</div>
                                 </div>
 
-                                {/* edit params icon (Font Awesome) */}
                                 <div className="flex flex-col items-end gap-1">
                                 <button title="Редактировать параметры оператора" onClick={() => openEditOperator(op)} className="p-2 bg-white border rounded text-sm hover:shadow">
                                     <i className="fas fa-edit" aria-hidden></i>
@@ -3986,13 +4176,12 @@
                                 </div>
 
                                 <div className="flex flex-col items-end gap-1">
-                                <button onClick={() => handleShowOperator(op)} className="px-3 py-1 text-sm bg-white border rounded">Просмотр</button>
+                                <button onClick={() => { handleShowOperator(op); setSelectedOperator(op); }} className="px-3 py-1 text-sm bg-white border rounded">Просмотр</button>
                                 <button onClick={() => selectAllForOperator(op)} className="px-3 py-1 text-sm bg-green-600 text-white rounded">Выбрать все</button>
                                 </div>
                             </div>
                             </div>
 
-                            {/* small sample preview */}
                             <div className="mt-3 text-sm">
                             {info.samples.length === 0 ? (
                                 <div className="text-gray-500">Нет примеров для этого оператора.</div>
