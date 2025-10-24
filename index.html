@@ -3573,6 +3573,7 @@
 
             // Компонент: Админ/Супервайзер — загрузка и распределение звонков (CSV)
             // Обновлено: кол-во совпадений сделано более заметным; добавлена возможность задать параметры выборки для конкретного оператора
+            // Исправлено: теперь отображаются только операторы, у которых хотя бы одно совпадение (count > 0)
 
             function pad(n) { return String(n).padStart(2, '0'); }
             function secondsToHms(sec) {
@@ -3641,7 +3642,7 @@
             );
             }
 
-        function AdminCallsUploadView({ onAssignSelected }) {
+            export default function AdminCallsUploadView({ onAssignSelected }) {
             const [files, setFiles] = useState([]);
             const [minDurationSec, setMinDurationSec] = useState(null); // seconds or null
             const [maxDurationSec, setMaxDurationSec] = useState(null);
@@ -3820,6 +3821,7 @@
             }, [operatorParams]);
 
             function handleShowOperator(op) {
+                if (!(operatorMap[op] && operatorMap[op].count > 0)) return; // don't open empty operators
                 setSelectedOperator(op);
                 const samples = operatorMap[op]?.samples || [];
                 const s = new Set(selectedCalls);
@@ -3834,6 +3836,7 @@
             }
 
             function selectAllForOperator(op) {
+                if (!(operatorMap[op] && operatorMap[op].count > 0)) return;
                 const s = new Set(selectedCalls);
                 (operatorMap[op]?.all || []).forEach(c => s.add(c.id));
                 setSelectedCalls(s);
@@ -3885,6 +3888,9 @@
                 });
                 if (editingOperator === op) setEditingOperator(null);
             }
+
+            // compute visible operators (only those with count > 0)
+            const visibleOperators = Object.entries(operatorMap).filter(([op, info]) => info && info.count > 0);
 
             return (
                 <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
@@ -3941,11 +3947,11 @@
 
                 <div className="mt-4">
                     <h4 className="text-sm font-medium mb-2">Совпадения по операторам</h4>
-                    {Object.keys(operatorMap).length === 0 ? (
+                    {visibleOperators.length === 0 ? (
                     <p className="text-gray-500">Нет совпадений — распарсите файлы.</p>
                     ) : (
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        {Object.entries(operatorMap).map(([op, info]) => (
+                        {visibleOperators.map(([op, info]) => (
                         <div key={op} className="p-3 border rounded bg-gray-50 relative">
                             <div className="flex items-start justify-between">
                             <div>
@@ -3996,7 +4002,7 @@
                     )}
                 </div>
 
-                {selectedOperator && operatorMap[selectedOperator] && (
+                {selectedOperator && operatorMap[selectedOperator] && operatorMap[selectedOperator].count > 0 && (
                     <div className="mt-6 p-4 border rounded">
                     <div className="flex items-center justify-between mb-3">
                         <div>
