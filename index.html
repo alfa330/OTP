@@ -3572,7 +3572,7 @@
             }
 
             // Компонент: Админ/Супервайзер — загрузка и распределение звонков (CSV)
-            // Обновлено: ввод и отображение длительностей в формате hh:mm:ss (разделено на блоки)
+            // Обновлено: кол-во совпадений сделано более заметным; добавлена возможность задать параметры выборки для конкретного оператора
 
             function pad(n) { return String(n).padStart(2, '0'); }
             function secondsToHms(sec) {
@@ -3608,12 +3608,18 @@
 
             // Duration input split into hh / mm / ss blocks
             function DurationInput({ valueSec, onChange, ariaLabel }) {
-            const secs = Number(valueSec) || 0;
+            // valueSec may be null (meaning empty/optional)
+            const secs = valueSec == null ? 0 : Number(valueSec) || 0;
             const hh = Math.floor(secs / 3600);
             const mm = Math.floor((secs % 3600) / 60);
             const ss = secs % 60;
 
             function handlePartChange(part, v) {
+                // allow empty string to indicate clearing value
+                if (v === '' || v == null) {
+                if (typeof onChange === 'function') onChange(null);
+                return;
+                }
                 const nv = Number(v);
                 if (isNaN(nv) || nv < 0) return; // ignore invalid
                 let newSec = secs;
@@ -3623,14 +3629,14 @@
                 if (typeof onChange === 'function') onChange(newSec);
             }
 
-            const inputClass = 'w-10 p-1 border rounded text-sm text-center';
+            const inputClass = 'w-12 p-1 border rounded text-sm text-center';
             return (
                 <div className="flex gap-1 items-center">
-                <input aria-label={ariaLabel ? ariaLabel + ' hours' : 'hours'} className={inputClass} type="number" min="0" value={hh > 0 ? hh : ''} placeholder="00" onChange={e=>handlePartChange('h', e.target.value)} />
+                <input aria-label={ariaLabel ? ariaLabel + ' hours' : 'hours'} className={inputClass} type="number" min="0" value={hh > 0 ? hh : ''} placeholder="hh" onChange={e=>handlePartChange('h', e.target.value)} />
                 <div>:</div>
-                <input aria-label={ariaLabel ? ariaLabel + ' minutes' : 'minutes'} className={inputClass} type="number" min="0" max="59" value={mm > 0 ? mm : ''} placeholder="00" onChange={e=>handlePartChange('m', e.target.value)} />
+                <input aria-label={ariaLabel ? ariaLabel + ' minutes' : 'minutes'} className={inputClass} type="number" min="0" max="59" value={mm > 0 ? mm : ''} placeholder="mm" onChange={e=>handlePartChange('m', e.target.value)} />
                 <div>:</div>
-                <input aria-label={ariaLabel ? ariaLabel + ' seconds' : 'seconds'} className={inputClass} type="number" min="0" max="59" value={ss > 0 ? ss : ''} placeholder="00" onChange={e=>handlePartChange('s', e.target.value)} />
+                <input aria-label={ariaLabel ? ariaLabel + ' seconds' : 'seconds'} className={inputClass} type="number" min="0" max="59" value={ss > 0 ? ss : ''} placeholder="ss" onChange={e=>handlePartChange('s', e.target.value)} />
                 </div>
             );
             }
@@ -3644,9 +3650,12 @@
             const [parsing, setParsing] = useState(false);
             const [calls, setCalls] = useState([]); // все разобранные звонки
             const [operatorMap, setOperatorMap] = useState({}); // operator -> {count,samples,all}
+            const [operatorParams, setOperatorParams] = useState({}); // per-operator overrides: { op: { min, max, variation, sampleCount } }
             const [selectedOperator, setSelectedOperator] = useState(null);
             const [selectedCalls, setSelectedCalls] = useState(new Set());
             const [activeRange, setActiveRange] = useState(null); // {min, max} после парсинга (в секундах; max=null для бесконечности)
+            const [editingOperator, setEditingOperator] = useState(null);
+            const [editingValues, setEditingValues] = useState({ min: null, max: null, variation: 0, sampleCount: 0 });
             const fileInputRef = useRef(null);
 
             function parseDateDMY(str) {
@@ -3735,7 +3744,7 @@
                 const maxDVal = maxDurationSec === null ? null : Number(maxDurationSec);
                 const varVal = variationSec === '' ? 0 : Number(variationSec);
 
-                recomputeOperatorMap(allRows, minDVal, maxDVal, Number(sampleCount) || 0, Number(varVal) || 0);
+                recomputeOperatorMap(allRows, minDVal, maxDVal, Number(sampleCount) || 0, Number(varVal) || 0, operatorParams);
                 } catch (err) {
                 console.error('parse error', err);
                 alert('Ошибка парсинга файлов');
@@ -3744,51 +3753,71 @@
                 }
             }
 
-            function recomputeOperatorMap(allRows, minD, maxD, sampleCnt, varSec) {
-                // Если не задано ни min, ни max — не фильтруем
-                let filtered = allRows.slice();
+            function recomputeOperatorMap(allRows, globalMin, globalMax, globalSampleCnt, globalVar, params = {}) {
+                // Build raw map first (all rows per operator)
+                const raw = {};
+                for (const c of allRows) {
+                const op = c.operator || 'Неизвестный';
+                if (!raw[op]) raw[op] = [];
+                raw[op].push(c);
+                }
+
+                const summary = {};
+                Object.keys(raw).forEach(op => {
+                let list = raw[op].slice();
+                // sort by datetime desc
+                list.sort((a,b) => (b.datetime?.getTime() || 0) - (a.datetime?.getTime() || 0));
+
+                const opParams = params[op] || null;
+
+                // decide which params to apply: operator-specific overrides global if present
+                const minD = opParams && opParams.min != null ? opParams.min : globalMin;
+                const maxD = opParams && opParams.max != null ? opParams.max : globalMax;
+                const varD = opParams && opParams.variation != null ? opParams.variation : globalVar;
+                const sampleCnt = opParams && (opParams.sampleCount != null) ? opParams.sampleCount : globalSampleCnt;
+
                 if (minD != null || maxD != null) {
-                // базовый диапазон
-                const baseMin = minD != null ? minD : 0;
-                const baseMax = maxD != null ? maxD : (minD != null ? minD : Infinity);
-
-                const computedMin = Math.max(0, (Number(baseMin) || 0) - (Number(varSec) || 0));
-                const computedMax = baseMax === Infinity ? Infinity : (Number(baseMax) || 0) + (Number(varSec) || 0);
-
-                filtered = allRows.filter(c => {
+                    const baseMin = minD != null ? minD : 0;
+                    const baseMax = maxD != null ? maxD : (minD != null ? minD : Infinity);
+                    const computedMin = Math.max(0, (Number(baseMin) || 0) - (Number(varD) || 0));
+                    const computedMax = baseMax === Infinity ? Infinity : (Number(baseMax) || 0) + (Number(varD) || 0);
+                    list = list.filter(c => {
                     if (c.durationSec == null) return false;
                     if (c.durationSec < computedMin) return false;
                     if (computedMax !== Infinity && c.durationSec > computedMax) return false;
                     return true;
-                });
-
-                setActiveRange({ min: computedMin, max: computedMax === Infinity ? null : computedMax });
-                } else {
-                setActiveRange(null);
+                    });
                 }
 
-                const map = {};
-                for (const c of filtered) {
-                const op = c.operator || 'Неизвестный';
-                if (!map[op]) map[op] = [];
-                map[op].push(c);
-                }
-
-                const summary = {};
-                Object.keys(map).forEach(op => {
-                const list = map[op];
-                list.sort((a,b) => (b.datetime?.getTime() || 0) - (a.datetime?.getTime() || 0));
                 summary[op] = {
                     count: list.length,
                     samples: sampleCnt > 0 ? list.slice(0, sampleCnt) : [],
                     all: list,
+                    custom: !!opParams,
                 };
                 });
 
                 setOperatorMap(summary);
                 setSelectedOperator(null);
                 setSelectedCalls(new Set());
+
+                // set activeRange for GLOBAL filter (not per-operator)
+                if (globalMin != null || globalMax != null) {
+                const baseMin = globalMin != null ? globalMin : 0;
+                const baseMax = globalMax != null ? globalMax : (globalMin != null ? globalMin : Infinity);
+                const computedMin = Math.max(0, (Number(baseMin) || 0) - (Number(globalVar) || 0));
+                const computedMax = baseMax === Infinity ? null : (Number(baseMax) || 0) + (Number(globalVar) || 0);
+                setActiveRange({ min: computedMin, max: computedMax });
+                } else {
+                setActiveRange(null);
+                }
             }
+
+            useEffect(() => {
+                // whenever operatorParams is changed, recompute using current calls and global filters
+                recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams);
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, [operatorParams]);
 
             function handleShowOperator(op) {
                 setSelectedOperator(op);
@@ -3826,6 +3855,35 @@
                 const a = document.createElement('a');
                 a.href = url; a.download = 'selected_calls.csv'; a.click(); URL.revokeObjectURL(url);
                 }
+            }
+
+            function openEditOperator(op) {
+                setEditingOperator(op);
+                const existing = operatorParams[op] || { min: null, max: null, variation: 0, sampleCount: 0 };
+                setEditingValues({ min: existing.min ?? null, max: existing.max ?? null, variation: existing.variation ?? 0, sampleCount: existing.sampleCount ?? 0 });
+            }
+
+            function saveOperatorParams() {
+                const op = editingOperator;
+                const cleaned = { ...editingValues };
+                // if sampleCount is empty or 0, set to 0
+                cleaned.sampleCount = Number(cleaned.sampleCount) || 0;
+                setOperatorParams(prev => ({ ...prev, [op]: cleaned }));
+                setEditingOperator(null);
+            }
+
+            function applyOperatorParamsWithoutSaving() {
+                // temporary apply (doesn't persist in operatorParams) - useful for preview but here we will save
+                saveOperatorParams();
+            }
+
+            function resetOperatorParams(op) {
+                setOperatorParams(prev => {
+                const clone = { ...prev };
+                delete clone[op];
+                return clone;
+                });
+                if (editingOperator === op) setEditingOperator(null);
             }
 
             return (
@@ -3871,14 +3929,14 @@
                     <button onClick={handleParseFiles} disabled={parsing || files.length===0} className={`px-4 py-2 rounded text-white ${parsing ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
                         {parsing ? 'Парсинг...' : 'Парсить и показать совпадения'}
                     </button>
-                    <button onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); setActiveRange(null); if (fileInputRef.current) fileInputRef.current.value = null; }} className="px-4 py-2 rounded border">Сброс</button>
+                    <button onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); setActiveRange(null); setOperatorParams({}); if (fileInputRef.current) fileInputRef.current.value = null; }} className="px-4 py-2 rounded border">Сброс</button>
                     </div>
                 </div>
 
                 {activeRange ? (
                     <div className="text-sm mb-3 text-gray-600">Ищем звонки с длительностью от {secondsToHms(activeRange.min)} {activeRange.max != null ? `до ${secondsToHms(activeRange.max)}` : 'и больше'} (с учётом вариации)</div>
                 ) : (
-                    <div className="text-sm mb-3 text-gray-500">Диапазон не задан — показываются все звонки.</div>
+                    <div className="text-sm mb-3 text-gray-500">Диапазон не задан — показываются все звонки (если оператор не имеет кастомных настроек).</div>
                 )}
 
                 <div className="mt-4">
@@ -3888,16 +3946,49 @@
                     ) : (
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                         {Object.entries(operatorMap).map(([op, info]) => (
-                        <div key={op} className="p-3 border rounded bg-gray-50">
-                            <div className="flex items-center justify-between">
+                        <div key={op} className="p-3 border rounded bg-gray-50 relative">
+                            <div className="flex items-start justify-between">
                             <div>
-                                <div className="font-medium">{op}</div>
-                                <div className="text-xs text-gray-500">{info.count} совпадающих звонков</div>
+                                <div className="font-medium text-lg">{op}</div>
+                                <div className="text-xs text-gray-500">Кол-во совпадений</div>
                             </div>
-                            <div className="flex flex-col items-end gap-2">
+
+                            <div className="flex items-center gap-2">
+                                {/* prominent count badge */}
+                                <div className="flex flex-col items-end">
+                                <div className="text-2xl font-bold text-blue-600">{info.count}</div>
+                                <div className="text-xs text-gray-500">{info.samples.length > 0 ? `${info.samples.length} прим.` : 'Нет примеров'}</div>
+                                </div>
+
+                                {/* edit params icon (Font Awesome) */}
+                                <div className="flex flex-col items-end gap-1">
+                                <button title="Редактировать параметры оператора" onClick={() => openEditOperator(op)} className="p-2 bg-white border rounded text-sm hover:shadow">
+                                    <i className="fas fa-edit" aria-hidden></i>
+                                </button>
+                                {info.custom && <div className="text-xs text-green-700">Custom</div>}
+                                </div>
+
+                                <div className="flex flex-col items-end gap-1">
                                 <button onClick={() => handleShowOperator(op)} className="px-3 py-1 text-sm bg-white border rounded">Просмотр</button>
                                 <button onClick={() => selectAllForOperator(op)} className="px-3 py-1 text-sm bg-green-600 text-white rounded">Выбрать все</button>
+                                </div>
                             </div>
+                            </div>
+
+                            {/* small sample preview */}
+                            <div className="mt-3 text-sm">
+                            {info.samples.length === 0 ? (
+                                <div className="text-gray-500">Нет примеров для этого оператора.</div>
+                            ) : (
+                                <ul className="text-xs">
+                                {info.samples.map(s => (
+                                    <li key={s.id} className="flex justify-between py-1">
+                                    <div>{s.datetime ? s.datetime.toLocaleString() : s.datetimeRaw} — {s.phone}</div>
+                                    <div className="ml-2 font-mono">{secondsToHms(s.durationSec)}</div>
+                                    </li>
+                                ))}
+                                </ul>
+                            )}
                             </div>
                         </div>
                         ))}
@@ -3945,6 +4036,49 @@
                             ))}
                         </tbody>
                         </table>
+                    </div>
+                    </div>
+                )}
+
+                {/* Operator edit panel (simple inline modal) */}
+                {editingOperator && (
+                    <div className="fixed inset-0 flex items-center justify-center z-50">
+                    <div className="absolute inset-0 bg-black opacity-30" onClick={() => setEditingOperator(null)}></div>
+                    <div className="bg-white w-full max-w-lg p-6 rounded shadow-lg relative z-10">
+                        <div className="flex items-center justify-between mb-4">
+                        <h4 className="font-medium">Параметры для оператора: {editingOperator}</h4>
+                        <div className="flex items-center gap-2">
+                            <button onClick={() => { resetOperatorParams(editingOperator); }} className="px-3 py-1 border rounded text-sm">Сброс</button>
+                            <button onClick={() => setEditingOperator(null)} className="px-3 py-1 border rounded text-sm">Закрыть</button>
+                        </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700">Мин. длительность (hh:mm:ss)</label>
+                            <div className="mt-1"><DurationInput valueSec={editingValues.min || 0} onChange={v=>setEditingValues(ev=>({...ev, min: v}))} ariaLabel="min duration" /></div>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700">Макс. длительность (hh:mm:ss) — опционально</label>
+                            <div className="mt-1"><DurationInput valueSec={editingValues.max || 0} onChange={v=>setEditingValues(ev=>({...ev, max: v}))} ariaLabel="max duration" /></div>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700">Вариация (+- hh:mm:ss)</label>
+                            <div className="mt-1"><DurationInput valueSec={editingValues.variation || 0} onChange={v=>setEditingValues(ev=>({...ev, variation: v}))} ariaLabel="variation" /></div>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700">Сколько выбрать звонков (sampleCount)</label>
+                            <input className="w-40 mt-1 p-2 border rounded" type="number" min="0" value={editingValues.sampleCount} onChange={e=>setEditingValues(ev=>({...ev, sampleCount: e.target.value}))} />
+                        </div>
+                        </div>
+
+                        <div className="mt-6 flex justify-end gap-2">
+                        <button onClick={() => { resetOperatorParams(editingOperator); }} className="px-4 py-2 border rounded">Сбросить</button>
+                        <button onClick={() => { saveOperatorParams(); }} className="px-4 py-2 bg-blue-600 text-white rounded">Сохранить и применить</button>
+                        </div>
                     </div>
                     </div>
                 )}
