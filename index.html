@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -58,6 +57,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 </head>
 <body class="bg-gray-50 font-sans antialiased text-gray-900">
@@ -3571,6 +3571,319 @@
             );
             }
 
+
+            // Компонент: Админ/Супервайзер — загрузка и распределение звонков (CSV)
+            // Требования реализованы:
+            // - Поддержка множественных CSV-файлов
+            // - Фильтрация по минимальной и (опционально) максимальной длительности (в секундах)
+            // - Указание, сколько звонков нужно выбрать для оценки (sampleCount)
+            // - Показ количества совпадающих звонков для каждого оператора (имена берутся из файла)
+            // - Предпросмотр и выбор конкретных звонков для назначения / экспорта
+
+         function AdminCallsUploadView({ onAssignSelected }) {
+            const [files, setFiles] = useState([]);
+            const [minDuration, setMinDuration] = useState('');
+            const [maxDuration, setMaxDuration] = useState('');
+            const [sampleCount, setSampleCount] = useState(3);
+            const [parsing, setParsing] = useState(false);
+            const [calls, setCalls] = useState([]); // все разобранные звонки
+            const [operatorMap, setOperatorMap] = useState({}); // operator -> [calls]
+            const [selectedOperator, setSelectedOperator] = useState(null);
+            const [selectedCalls, setSelectedCalls] = useState(new Set());
+            const fileInputRef = useRef(null);
+
+            // Простой нормализатор/парсер строки datetime dd.mm.yyyy hh:mm:ss -> ISO
+            function parseDateDMY(str) {
+                if (!str) return null;
+                try {
+                const [datePart, timePart] = String(str).trim().split(' ');
+                const [dd, mm, yyyy] = datePart.split('.').map(s => parseInt(s, 10));
+                if (!dd || !mm || !yyyy) return null;
+                const iso = `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}T${timePart || '00:00:00'}`;
+                const d = new Date(iso);
+                if (isNaN(d)) return null;
+                return d;
+                } catch (e) { return null; }
+            }
+
+            // Универсальный CSV-парсер: если доступен PapaParse — используем его, иначе fallback
+            function parseCSVText(text) {
+                if (window && window.Papa && window.Papa.parse) {
+                const r = window.Papa.parse(text, { skipEmptyLines: true });
+                return r.data;
+                }
+
+                // Fallback: очень простой парсер (не идеален для всех CSV), предполагает запятую-разделитель
+                const lines = text.split(/\r?\n/).filter(Boolean);
+                return lines.map(l => {
+                // Разберём кавычки и запятые — простой подход
+                const parts = [];
+                let cur = '';
+                let inQuotes = false;
+                for (let i = 0; i < l.length; i++) {
+                    const ch = l[i];
+                    if (ch === '"') { inQuotes = !inQuotes; continue; }
+                    if (ch === ',' && !inQuotes) { parts.push(cur); cur = ''; continue; }
+                    cur += ch;
+                }
+                parts.push(cur);
+                return parts;
+                });
+            }
+
+            // Нормализовать строку из CSV в объект звонка
+            function normalizeRow(row) {
+                // Ожидаемый формат (7 полей): id, dd.mm.yyyy hh:mm:ss, type(in|out), phone, project, operator, durationSec
+                // Но строки могут приходить и в другом порядке/с пробелами — делаем безопасные приведения
+                const r = row.map(cell => (cell == null ? '' : String(cell).trim()));
+                if (r.length < 7) {
+                // если меньше полей — заполним пустыми
+                while (r.length < 7) r.push('');
+                }
+                const [id, dtRaw, typeRaw, phone, project, operator, durationRaw] = r;
+                const dt = parseDateDMY(dtRaw);
+                const duration = Number(durationRaw) || 0;
+                const type = (String(typeRaw || '')).toLowerCase().includes('вход') || String(typeRaw || '').toLowerCase().includes('in') ? 'in' : 'out';
+
+                return {
+                id: id || (Math.random().toString(36).slice(2,10)),
+                datetime: dt,
+                datetimeRaw: dtRaw,
+                type,
+                phone: phone || '',
+                project: project || '',
+                operator: operator || 'Неизвестный',
+                durationSec: duration,
+                };
+            }
+
+            async function handleFilesSelected(e) {
+                const fl = Array.from(e.target.files || []);
+                setFiles(fl);
+            }
+
+            async function handleParseFiles() {
+                if (!files || files.length === 0) return;
+                setParsing(true);
+                try {
+                const allRows = [];
+                for (const f of files) {
+                    const text = await f.text();
+                    const parsed = parseCSVText(text);
+                    // parsed: array of arrays; пропускаем заголовки если они явно содержат 'id' или 'дата'
+                    let start = 0;
+                    if (parsed.length > 0) {
+                    const first = parsed[0].map(c => String(c || '').toLowerCase()).join(';');
+                    if (first.includes('id') || first.includes('дата') || first.includes('date')) start = 1;
+                    }
+                    for (let i = start; i < parsed.length; i++) {
+                    const row = parsed[i];
+                    if (!row || row.length === 0) continue;
+                    allRows.push(normalizeRow(row));
+                    }
+                }
+
+                setCalls(allRows);
+                recomputeOperatorMap(allRows, Number(minDuration) || 0, maxDuration ? Number(maxDuration) : null, Number(sampleCount) || 0);
+                } catch (err) {
+                console.error('parse error', err);
+                alert('Ошибка парсинга файлов');
+                } finally {
+                setParsing(false);
+                }
+            }
+
+            function recomputeOperatorMap(allRows, minD, maxD, sampleCnt) {
+                const map = {};
+                const filtered = allRows.filter(c => {
+                if (c.durationSec == null) return false;
+                if (minD && c.durationSec < minD) return false;
+                if (maxD != null && maxD !== '' && c.durationSec > maxD) return false;
+                return true;
+                });
+
+                for (const c of filtered) {
+                const op = c.operator || 'Неизвестный';
+                if (!map[op]) map[op] = [];
+                map[op].push(c);
+                }
+
+                // Для каждой связки — вычислим сколько совпадающих звонков и подготовим примеры (sampleCnt)
+                const summary = {};
+                Object.keys(map).forEach(op => {
+                const list = map[op];
+                // сортируем по дате (новые сперва)
+                list.sort((a,b) => (b.datetime?.getTime() || 0) - (a.datetime?.getTime() || 0));
+                summary[op] = {
+                    count: list.length,
+                    samples: sampleCnt > 0 ? list.slice(0, sampleCnt) : [],
+                    all: list,
+                };
+                });
+
+                setOperatorMap(summary);
+                // очистим выбор
+                setSelectedOperator(null);
+                setSelectedCalls(new Set());
+            }
+
+            function handleShowOperator(op) {
+                setSelectedOperator(op);
+                // предварительно выберем первые sampleCount звонков
+                const samples = operatorMap[op]?.samples || [];
+                const s = new Set(selectedCalls);
+                samples.forEach(c => s.add(c.id));
+                setSelectedCalls(s);
+            }
+
+            function toggleSelectCall(callId) {
+                const s = new Set(selectedCalls);
+                if (s.has(callId)) s.delete(callId); else s.add(callId);
+                setSelectedCalls(s);
+            }
+
+            function selectAllForOperator(op) {
+                const s = new Set(selectedCalls);
+                (operatorMap[op]?.all || []).forEach(c => s.add(c.id));
+                setSelectedCalls(s);
+            }
+
+            function clearSelection() { setSelectedCalls(new Set()); }
+
+            function handleAssign() {
+                const picks = calls.filter(c => selectedCalls.has(c.id));
+                if (picks.length === 0) return alert('Выберите звонки для назначения');
+                // Передаём вверх — обработчик может сделать API-вызов или распределение
+                if (typeof onAssignSelected === 'function') onAssignSelected(picks);
+                else {
+                // по умолчанию — экспорт в CSV
+                const csv = ['id,datetime,type,phone,project,operator,durationSec'];
+                for (const p of picks) {
+                    csv.push([p.id, p.datetimeRaw || '', p.type, p.phone, p.project, p.operator, p.durationSec].map(x => '"'+String(x).replace(/"/g,'""')+'"').join(','));
+                }
+                const blob = new Blob([csv.join('\n')], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = 'selected_calls.csv'; a.click(); URL.revokeObjectURL(url);
+                }
+            }
+
+            return (
+                <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+                <h3 className="text-lg font-semibold mb-4">Загрузка звонков (CSV) — Админ / Супервайзер</h3>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+                    <div>
+                    <label className="block text-sm font-medium text-gray-700">Файлы (CSV)</label>
+                    <input ref={fileInputRef} type="file" accept=".csv,.xls,.xlsx" multiple onChange={handleFilesSelected} className="mt-1" />
+                    {files.length > 0 && (
+                        <ul className="text-sm mt-2">
+                        {files.map((f,i) => <li key={i} className="text-gray-600">{f.name} — {Math.round(f.size/1024)} KB</li>)}
+                        </ul>
+                    )}
+                    </div>
+
+                    <div>
+                    <label className="block text-sm font-medium text-gray-700">Мин. длительность (сек)</label>
+                    <input type="number" min="0" value={minDuration} onChange={e=>setMinDuration(e.target.value)} className="w-full mt-1 p-2 border rounded" />
+                    </div>
+
+                    <div>
+                    <label className="block text-sm font-medium text-gray-700">Макс. длительность (сек) — опционально</label>
+                    <input type="number" min="0" value={maxDuration} onChange={e=>setMaxDuration(e.target.value)} className="w-full mt-1 p-2 border rounded" />
+                    </div>
+                </div>
+
+                <div className="flex items-end gap-3 mb-4">
+                    <div>
+                    <label className="block text-sm font-medium text-gray-700">Сколько выбрать звонков для оценки (на оператора)</label>
+                    <input type="number" min="0" value={sampleCount} onChange={e=>setSampleCount(e.target.value)} className="w-32 mt-1 p-2 border rounded" />
+                    </div>
+
+                    <div className="flex-1" />
+
+                    <div className="flex gap-2">
+                    <button onClick={handleParseFiles} disabled={parsing || files.length===0} className={`px-4 py-2 rounded text-white ${parsing ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                        {parsing ? 'Парсинг...' : 'Парсить и показать совпадения'}
+                    </button>
+                    <button onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); if (fileInputRef.current) fileInputRef.current.value = null; }} className="px-4 py-2 rounded border">Сброс</button>
+                    </div>
+                </div>
+
+                {/* Summary per operator */}
+                <div className="mt-4">
+                    <h4 className="text-sm font-medium mb-2">Совпадения по операторам</h4>
+                    {Object.keys(operatorMap).length === 0 ? (
+                    <p className="text-gray-500">Нет совпадений — распарсите файлы.</p>
+                    ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        {Object.entries(operatorMap).map(([op, info]) => (
+                        <div key={op} className="p-3 border rounded bg-gray-50">
+                            <div className="flex items-center justify-between">
+                            <div>
+                                <div className="font-medium">{op}</div>
+                                <div className="text-xs text-gray-500">{info.count} совпадающих звонков</div>
+                            </div>
+                            <div className="flex flex-col items-end gap-2">
+                                <button onClick={() => handleShowOperator(op)} className="px-3 py-1 text-sm bg-white border rounded">Просмотр</button>
+                                <button onClick={() => selectAllForOperator(op)} className="px-3 py-1 text-sm bg-green-600 text-white rounded">Выбрать все</button>
+                            </div>
+                            </div>
+                        </div>
+                        ))}
+                    </div>
+                    )}
+                </div>
+
+                {/* Operator detail & selectable calls */}
+                {selectedOperator && operatorMap[selectedOperator] && (
+                    <div className="mt-6 p-4 border rounded">
+                    <div className="flex items-center justify-between mb-3">
+                        <div>
+                        <h5 className="font-medium">Оператор: {selectedOperator}</h5>
+                        <div className="text-sm text-gray-500">Всего: {operatorMap[selectedOperator].count}</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                        <button onClick={() => clearSelection()} className="px-3 py-1 border rounded">Очистить выбор</button>
+                        <button onClick={handleAssign} className="px-3 py-1 bg-blue-600 text-white rounded">Назначить / Экспорт</button>
+                        </div>
+                    </div>
+
+                    <div className="max-h-72 overflow-auto">
+                        <table className="w-full text-sm table-auto">
+                        <thead className="bg-gray-100">
+                            <tr>
+                            <th className="p-2">#</th>
+                            <th className="p-2">ID</th>
+                            <th className="p-2">Дата/время</th>
+                            <th className="p-2">Телефон</th>
+                            <th className="p-2">Длит., с</th>
+                            <th className="p-2">Выбрать</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {operatorMap[selectedOperator].all.map((c, idx) => (
+                            <tr key={c.id} className="even:bg-white odd:bg-gray-50">
+                                <td className="p-2">{idx+1}</td>
+                                <td className="p-2">{c.id}</td>
+                                <td className="p-2">{c.datetime ? c.datetime.toLocaleString() : c.datetimeRaw}</td>
+                                <td className="p-2">{c.phone}</td>
+                                <td className="p-2">{c.durationSec}</td>
+                                <td className="p-2">
+                                <input type="checkbox" checked={selectedCalls.has(c.id)} onChange={() => toggleSelectCall(c.id)} />
+                                </td>
+                            </tr>
+                            ))}
+                        </tbody>
+                        </table>
+                    </div>
+                    </div>
+                )}
+                </div>
+            );
+            }
+
+
         const App = () => {
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
@@ -6845,6 +7158,14 @@
                                             </button>
                                         </li>
                                         <li>
+                                            <button
+                                                onClick={() => setView('call_division')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <i className="fas fa-arrows-split" /> Деление звонков
+                                            </button>
+                                        </li>
+                                        <li>
                                             <button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3">
                                                 <i className="fas fa-sliders-h"></i> Мониторинговая шкала
                                             </button>
@@ -6874,6 +7195,14 @@
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <i className="fas fa-clock" /> Учет часов
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button
+                                                onClick={() => setView('call_division')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <i className="fas fa-arrows-split" /> Деление звонков
                                             </button>
                                         </li>
                                     </>
@@ -7678,6 +8007,7 @@
                                 )}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
+                                {( view === "call_division" && (<AdminCallsUploadView />))}
                             </>
                         )}
                         {user.role === 'sv' && (
