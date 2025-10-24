@@ -3572,12 +3572,13 @@
             }
 
             // Компонент: Админ/Супервайзер — загрузка и распределение звонков (CSV)
-            // Обновлено: кол-во совпадений сделано более заметным; добавлена возможность задать параметры выборки для конкретного оператора
+            // Обновлено: учёт дробных секунд (float) при парсинге и фильтрации
             // Исправлено: теперь отображаются только операторы, у которых хотя бы одно совпадение (count > 0)
 
             function pad(n) { return String(n).padStart(2, '0'); }
             function secondsToHms(sec) {
             if (sec == null || isNaN(Number(sec))) return '00:00:00';
+            // показ времени целыми секундами (floor) — фильтрация работает с float
             const s = Math.max(0, Math.floor(Number(sec)));
             const h = Math.floor(s / 3600);
             const m = Math.floor((s % 3600) / 60);
@@ -3587,24 +3588,32 @@
             function hmsToSeconds(h, m, s) {
             const hh = Number(h) || 0;
             const mm = Number(m) || 0;
+            // allow fractional seconds input string (but UI inputs are integers)
             const ss = Number(s) || 0;
             return hh * 3600 + mm * 60 + ss;
             }
             function parseDurationString(str) {
             if (str == null) return 0;
-            const s = String(str).trim();
+            let s = String(str).trim();
             if (s === '') return 0;
+
+            // If contains colon -> hh:mm:ss or mm:ss (allow fractional seconds with comma or dot)
             if (s.includes(':')) {
-                const parts = s.split(':').map(p => p.trim()).reverse();
-                // allow mm:ss or hh:mm:ss
-                const sec = Number(parts[0]) || 0;
-                const min = Number(parts[1]) || 0;
-                const hr = Number(parts[2]) || 0;
+                const parts = s.split(':').map(p => p.trim());
+                // normalize seconds part (replace comma with dot)
+                const secPart = parts[parts.length - 1].replace(',', '.');
+                const sec = parseFloat(secPart) || 0;
+                const min = parseInt(parts[parts.length - 2] || '0', 10) || 0;
+                const hr = parts.length >= 3 ? (parseInt(parts[parts.length - 3] || '0', 10) || 0) : 0;
                 return hr * 3600 + min * 60 + sec;
             }
-            // numeric seconds string
-            const n = Number(s);
-            return isNaN(n) ? 0 : Math.floor(n);
+
+            // Otherwise numeric string: could use comma as decimal separator -> replace comma with dot
+            // Also trim spaces and remove non-digit characters except dot/minus if present
+            // Simple approach: replace comma with dot, then parseFloat
+            const normalized = s.replace(/\s+/g, '').replace(',', '.');
+            const n = parseFloat(normalized);
+            return isNaN(n) ? 0 : n;
             }
 
             // Duration input split into hh / mm / ss blocks
@@ -3613,7 +3622,7 @@
             const secs = valueSec == null ? 0 : Number(valueSec) || 0;
             const hh = Math.floor(secs / 3600);
             const mm = Math.floor((secs % 3600) / 60);
-            const ss = secs % 60;
+            const ss = Math.floor(secs % 60); // input blocks are integer seconds
 
             function handlePartChange(part, v) {
                 // allow empty string to indicate clearing value
@@ -3644,7 +3653,7 @@
 
         function AdminCallsUploadView({ onAssignSelected }) {
             const [files, setFiles] = useState([]);
-            const [minDurationSec, setMinDurationSec] = useState(null); // seconds or null
+            const [minDurationSec, setMinDurationSec] = useState(null); // seconds (float) or null
             const [maxDurationSec, setMaxDurationSec] = useState(null);
             const [variationSec, setVariationSec] = useState(0);
             const [sampleCount, setSampleCount] = useState(3);
@@ -3699,7 +3708,7 @@
                 if (r.length < 7) while (r.length < 7) r.push('');
                 const [id, dtRaw, typeRaw, phone, project, operator, durationRaw] = r;
                 const dt = parseDateDMY(dtRaw);
-                const duration = parseDurationString(durationRaw);
+                const duration = parseDurationString(durationRaw); // теперь float
                 const type = (String(typeRaw || '')).toLowerCase().includes('вход') || String(typeRaw || '').toLowerCase().includes('in') ? 'in' : 'out';
 
                 return {
@@ -3778,14 +3787,16 @@
                 const sampleCnt = opParams && (opParams.sampleCount != null) ? opParams.sampleCount : globalSampleCnt;
 
                 if (minD != null || maxD != null) {
-                    const baseMin = minD != null ? minD : 0;
-                    const baseMax = maxD != null ? maxD : (minD != null ? minD : Infinity);
+                    const baseMin = minD != null ? Number(minD) : 0;
+                    const baseMax = maxD != null ? Number(maxD) : (minD != null ? Number(minD) : Infinity);
                     const computedMin = Math.max(0, (Number(baseMin) || 0) - (Number(varD) || 0));
                     const computedMax = baseMax === Infinity ? Infinity : (Number(baseMax) || 0) + (Number(varD) || 0);
                     list = list.filter(c => {
-                    if (c.durationSec == null) return false;
-                    if (c.durationSec < computedMin) return false;
-                    if (computedMax !== Infinity && c.durationSec > computedMax) return false;
+                    // c.durationSec is float (or 0)
+                    if (c.durationSec == null || isNaN(Number(c.durationSec))) return false;
+                    const dur = Number(c.durationSec);
+                    if (dur < computedMin) return false;
+                    if (computedMax !== Infinity && dur > computedMax) return false;
                     return true;
                     });
                 }
@@ -3804,8 +3815,8 @@
 
                 // set activeRange for GLOBAL filter (not per-operator)
                 if (globalMin != null || globalMax != null) {
-                const baseMin = globalMin != null ? globalMin : 0;
-                const baseMax = globalMax != null ? globalMax : (globalMin != null ? globalMin : Infinity);
+                const baseMin = globalMin != null ? Number(globalMin) : 0;
+                const baseMax = globalMax != null ? Number(globalMax) : (globalMin != null ? Number(globalMin) : Infinity);
                 const computedMin = Math.max(0, (Number(baseMin) || 0) - (Number(globalVar) || 0));
                 const computedMax = baseMax === Infinity ? null : (Number(baseMax) || 0) + (Number(globalVar) || 0);
                 setActiveRange({ min: computedMin, max: computedMax });
