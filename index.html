@@ -3623,7 +3623,7 @@
                 if (typeof onChange === 'function') onChange(newSec);
             }
 
-            const inputClass = 'w-16 p-1 border rounded text-sm text-center';
+            const inputClass = 'w-10 p-1 border rounded text-sm text-center';
             return (
                 <div className="flex gap-1 items-center">
                 <input aria-label={ariaLabel ? ariaLabel + ' hours' : 'hours'} className={inputClass} type="number" min="0" value={hh > 0 ? hh : ''} placeholder="00" onChange={e=>handlePartChange('h', e.target.value)} />
