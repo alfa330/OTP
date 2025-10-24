@@ -3571,28 +3571,82 @@
             );
             }
 
+            // Компонент: Админ/Супервайзер — загрузка и распределение звонков (CSV)
+            // Обновлено: ввод и отображение длительностей в формате hh:mm:ss (разделено на блоки)
 
-        // Компонент: Админ/Супервайзер — загрузка и распределение звонков (CSV)
-        // Добавлена опция "variation" — расширение границ длительности на +/- variation секунд
-        // Поведение:
-        // - Если не указаны min и max, фильтрация не применяется (все звонки)
-        // - Если указан только min, базовый диапазон = [min, min]
-        // - Если указан только max, базовый диапазон = [0, max]
-        // - Если указан variation, диапазон расширяется: [max(0, baseMin - variation), baseMax + variation]
-        // - Если baseMax отсутствует (Infinity), верхняя граница остаётся бесконечной
+            function pad(n) { return String(n).padStart(2, '0'); }
+            function secondsToHms(sec) {
+            if (sec == null || isNaN(Number(sec))) return '00:00:00';
+            const s = Math.max(0, Math.floor(Number(sec)));
+            const h = Math.floor(s / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            const ss = s % 60;
+            return `${pad(h)}:${pad(m)}:${pad(ss)}`;
+            }
+            function hmsToSeconds(h, m, s) {
+            const hh = Number(h) || 0;
+            const mm = Number(m) || 0;
+            const ss = Number(s) || 0;
+            return hh * 3600 + mm * 60 + ss;
+            }
+            function parseDurationString(str) {
+            if (str == null) return 0;
+            const s = String(str).trim();
+            if (s === '') return 0;
+            if (s.includes(':')) {
+                const parts = s.split(':').map(p => p.trim()).reverse();
+                // allow mm:ss or hh:mm:ss
+                const sec = Number(parts[0]) || 0;
+                const min = Number(parts[1]) || 0;
+                const hr = Number(parts[2]) || 0;
+                return hr * 3600 + min * 60 + sec;
+            }
+            // numeric seconds string
+            const n = Number(s);
+            return isNaN(n) ? 0 : Math.floor(n);
+            }
+
+            // Duration input split into hh / mm / ss blocks
+            function DurationInput({ valueSec, onChange, ariaLabel }) {
+            const secs = Number(valueSec) || 0;
+            const hh = Math.floor(secs / 3600);
+            const mm = Math.floor((secs % 3600) / 60);
+            const ss = secs % 60;
+
+            function handlePartChange(part, v) {
+                const nv = Number(v);
+                if (isNaN(nv) || nv < 0) return; // ignore invalid
+                let newSec = secs;
+                if (part === 'h') newSec = hmsToSeconds(v, mm, ss);
+                if (part === 'm') newSec = hmsToSeconds(hh, v, ss);
+                if (part === 's') newSec = hmsToSeconds(hh, mm, v);
+                if (typeof onChange === 'function') onChange(newSec);
+            }
+
+            const inputClass = 'w-16 p-1 border rounded text-sm text-center';
+            return (
+                <div className="flex gap-1 items-center">
+                <input aria-label={ariaLabel ? ariaLabel + ' hours' : 'hours'} className={inputClass} type="number" min="0" value={hh > 0 ? hh : ''} placeholder="00" onChange={e=>handlePartChange('h', e.target.value)} />
+                <div>:</div>
+                <input aria-label={ariaLabel ? ariaLabel + ' minutes' : 'minutes'} className={inputClass} type="number" min="0" max="59" value={mm > 0 ? mm : ''} placeholder="00" onChange={e=>handlePartChange('m', e.target.value)} />
+                <div>:</div>
+                <input aria-label={ariaLabel ? ariaLabel + ' seconds' : 'seconds'} className={inputClass} type="number" min="0" max="59" value={ss > 0 ? ss : ''} placeholder="00" onChange={e=>handlePartChange('s', e.target.value)} />
+                </div>
+            );
+            }
 
         function AdminCallsUploadView({ onAssignSelected }) {
             const [files, setFiles] = useState([]);
-            const [minDuration, setMinDuration] = useState('');
-            const [maxDuration, setMaxDuration] = useState('');
-            const [variation, setVariation] = useState('');
+            const [minDurationSec, setMinDurationSec] = useState(null); // seconds or null
+            const [maxDurationSec, setMaxDurationSec] = useState(null);
+            const [variationSec, setVariationSec] = useState(0);
             const [sampleCount, setSampleCount] = useState(3);
             const [parsing, setParsing] = useState(false);
             const [calls, setCalls] = useState([]); // все разобранные звонки
             const [operatorMap, setOperatorMap] = useState({}); // operator -> {count,samples,all}
             const [selectedOperator, setSelectedOperator] = useState(null);
             const [selectedCalls, setSelectedCalls] = useState(new Set());
-            const [activeRange, setActiveRange] = useState(null); // {min, max} после парсинга (учёт вариации)
+            const [activeRange, setActiveRange] = useState(null); // {min, max} после парсинга (в секундах; max=null для бесконечности)
             const fileInputRef = useRef(null);
 
             function parseDateDMY(str) {
@@ -3635,7 +3689,7 @@
                 if (r.length < 7) while (r.length < 7) r.push('');
                 const [id, dtRaw, typeRaw, phone, project, operator, durationRaw] = r;
                 const dt = parseDateDMY(dtRaw);
-                const duration = Number(durationRaw) || 0;
+                const duration = parseDurationString(durationRaw);
                 const type = (String(typeRaw || '')).toLowerCase().includes('вход') || String(typeRaw || '').toLowerCase().includes('in') ? 'in' : 'out';
 
                 return {
@@ -3677,11 +3731,11 @@
 
                 setCalls(allRows);
 
-                const minDVal = minDuration === '' ? null : Number(minDuration);
-                const maxDVal = maxDuration === '' ? null : Number(maxDuration);
-                const varVal = variation === '' ? 0 : Number(variation);
+                const minDVal = minDurationSec === null ? null : Number(minDurationSec);
+                const maxDVal = maxDurationSec === null ? null : Number(maxDurationSec);
+                const varVal = variationSec === '' ? 0 : Number(variationSec);
 
-                recomputeOperatorMap(allRows, minDVal, maxDVal, Number(sampleCount) || 0, varVal);
+                recomputeOperatorMap(allRows, minDVal, maxDVal, Number(sampleCount) || 0, Number(varVal) || 0);
                 } catch (err) {
                 console.error('parse error', err);
                 alert('Ошибка парсинга файлов');
@@ -3790,18 +3844,18 @@
                     </div>
 
                     <div>
-                    <label className="block text-sm font-medium text-gray-700">Мин. длительность (сек)</label>
-                    <input type="number" min="0" value={minDuration} onChange={e=>setMinDuration(e.target.value)} className="w-full mt-1 p-2 border rounded" />
+                    <label className="block text-sm font-medium text-gray-700">Мин. длительность (hh:mm:ss)</label>
+                    <div className="mt-1"><DurationInput valueSec={minDurationSec || 0} onChange={v=>setMinDurationSec(v)} ariaLabel="min duration" /></div>
                     </div>
 
                     <div>
-                    <label className="block text-sm font-medium text-gray-700">Макс. длительность (сек) — опционально</label>
-                    <input type="number" min="0" value={maxDuration} onChange={e=>setMaxDuration(e.target.value)} className="w-full mt-1 p-2 border rounded" />
+                    <label className="block text-sm font-medium text-gray-700">Макс. длительность (hh:mm:ss) — опционально</label>
+                    <div className="mt-1"><DurationInput valueSec={maxDurationSec || 0} onChange={v=>setMaxDurationSec(v)} ariaLabel="max duration" /></div>
                     </div>
 
                     <div>
-                    <label className="block text-sm font-medium text-gray-700">Вариация (+- сек) — опционально</label>
-                    <input type="number" min="0" value={variation} onChange={e=>setVariation(e.target.value)} className="w-full mt-1 p-2 border rounded" />
+                    <label className="block text-sm font-medium text-gray-700">Вариация (+- hh:mm:ss) — опционально</label>
+                    <div className="mt-1"><DurationInput valueSec={variationSec || 0} onChange={v=>setVariationSec(v)} ariaLabel="variation" /></div>
                     </div>
                 </div>
 
@@ -3822,7 +3876,7 @@
                 </div>
 
                 {activeRange ? (
-                    <div className="text-sm mb-3 text-gray-600">Ищем звонки с длительностью от {activeRange.min} секунд {activeRange.max != null ? `до ${activeRange.max} секунд` : 'и больше'} (с учётом вариации)</div>
+                    <div className="text-sm mb-3 text-gray-600">Ищем звонки с длительностью от {secondsToHms(activeRange.min)} {activeRange.max != null ? `до ${secondsToHms(activeRange.max)}` : 'и больше'} (с учётом вариации)</div>
                 ) : (
                     <div className="text-sm mb-3 text-gray-500">Диапазон не задан — показываются все звонки.</div>
                 )}
@@ -3872,7 +3926,7 @@
                             <th className="p-2">ID</th>
                             <th className="p-2">Дата/время</th>
                             <th className="p-2">Телефон</th>
-                            <th className="p-2">Длит., с</th>
+                            <th className="p-2">Длит. (hh:mm:ss)</th>
                             <th className="p-2">Выбрать</th>
                             </tr>
                         </thead>
@@ -3883,7 +3937,7 @@
                                 <td className="p-2">{c.id}</td>
                                 <td className="p-2">{c.datetime ? c.datetime.toLocaleString() : c.datetimeRaw}</td>
                                 <td className="p-2">{c.phone}</td>
-                                <td className="p-2">{c.durationSec}</td>
+                                <td className="p-2">{secondsToHms(c.durationSec)}</td>
                                 <td className="p-2">
                                 <input type="checkbox" checked={selectedCalls.has(c.id)} onChange={() => toggleSelectCall(c.id)} />
                                 </td>
