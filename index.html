@@ -3571,7 +3571,6 @@
             );
             }
 
-
             // AdminCallsUploadView — обновлённая версия: добавлены кнопки "Закрыть" и "Настройки"
             // для панели выбранного оператора (как в закреплённом виде, так и в обычном).
 
@@ -3916,34 +3915,48 @@
 
             async function fetchSvOperators(month = selectedMonth) {
                 try {
-                if (typeof axios === 'undefined') return;
-                setLoadingOperators(true);
-                const headers = {};
-                if (typeof user !== 'undefined' && user?.apiKey) headers['X-API-Key'] = user.apiKey;
-                if (typeof user !== 'undefined' && user?.id) headers['X-User-Id'] = user.id;
-                const resp = await axios.get(`${API_BASE_URL}/api/sv/data?month=${encodeURIComponent(month)}`, { headers });
-                const data = resp.data;
-                if (data && data.status === 'success') {
-                    if (Array.isArray(data.operators)) setSvOperators(data.operators);
-                    else if (Array.isArray(data.users)) setSvOperators(data.users);
-                    else if (Array.isArray(data.data)) setSvOperators(data.data);
+                    if (typeof axios === 'undefined') return;
+                    setLoadingOperators(true);
+                    const headers = {};
+                    if (typeof user !== 'undefined' && user?.apiKey) headers['X-API-Key'] = user.apiKey;
+                    if (typeof user !== 'undefined' && user?.id) headers['X-User-Id'] = user.id;
+
+                    // Use the new aggregated endpoint which returns operators summary for the month
+                    const resp = await axios.get(`${API_BASE_URL}/api/admin/operators_summary?month=${encodeURIComponent(month)}`, { headers });
+                    const data = resp.data;
+                    if (data && data.status === 'success' && Array.isArray(data.operators)) {
+                    // normalize to svOperators shape expected by the UI
+                    const ops = data.operators.map(op => ({
+                        id: op.id,
+                        name: op.name,
+                        supervisor_id: op.supervisor_id,
+                        supervisor_name: op.supervisor_name,
+                        direction_id: op.direction_id,
+                        direction_name: op.direction_name,
+                        status: op.status,
+                        call_count: op.call_count
+                    }));
+                    setSvOperators(ops);
+                    } else {
+                    // fallbacks for older response shapes
+                    if (data && Array.isArray(data.operators)) setSvOperators(data.operators);
+                    else if (data && Array.isArray(data.users)) setSvOperators(data.users);
+                    else if (data && Array.isArray(data.data)) setSvOperators(data.data);
                     else {
-                    const collected = [];
-                    if (Array.isArray(data.sv_list)) {
+                        // try to collect from sv_list as before
+                        const collected = [];
+                        if (data && Array.isArray(data.sv_list)) {
                         data.sv_list.forEach(sv => { (sv.operators || []).forEach(op => collected.push(op)); });
+                        }
+                        setSvOperators(collected);
                     }
-                    setSvOperators(collected);
                     }
-                } else {
-                    setSvOperators([]);
-                    if (typeof showToast === 'function') showToast?.(data?.error || 'Не удалось получить данные операторов', 'error');
-                }
                 } catch (err) {
-                console.error('Fetch sv data error:', err);
-                setSvOperators([]);
-                if (typeof showToast === 'function') showToast?.(err.response?.data?.error || 'Ошибка при получении данных операторов', 'error');
+                    console.error('Fetch sv data error:', err);
+                    setSvOperators([]);
+                    if (typeof showToast === 'function') showToast?.(err.response?.data?.error || 'Ошибка при получении данных операторов', 'error');
                 } finally { setLoadingOperators(false); }
-            }
+                }
 
             const operatorsByDirection = React.useMemo(() => {
                 const map = {};
