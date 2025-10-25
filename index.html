@@ -3974,7 +3974,20 @@
                     status: op.status,
                     call_count: op.call_count
                     }));
+
+                    // set operators
                     setSvOperators(ops);
+
+                    // BUILD directions from operators' direction_name (fix: если /api/admin/directions не возвращает корректно)
+                    const dirsMap = {};
+                    ops.forEach(o => {
+                    const did = o.direction_id != null ? String(o.direction_id) : 'null';
+                    const dname = (o.direction_name || o.direction || 'Без направления').trim();
+                    if (!dirsMap[did]) dirsMap[did] = { id: did, name: dname };
+                    });
+                    const builtDirs = Object.values(dirsMap).sort((a,b) => String((a.name||'')).localeCompare(String((b.name||''))));
+                    setDirections(builtDirs);
+
                 } else {
                     if (data && Array.isArray(data.operators)) setSvOperators(data.operators);
                     else if (data && Array.isArray(data.users)) setSvOperators(data.users);
@@ -3985,6 +3998,16 @@
                         data.sv_list.forEach(sv => { (sv.operators || []).forEach(op => collected.push(op)); });
                     }
                     setSvOperators(collected);
+
+                    // also attempt to build directions from collected in the fallback
+                    const dirsMap = {};
+                    collected.forEach(o => {
+                        const did = (o.direction_id != null ? String(o.direction_id) : (o.direction_id === 0 ? '0' : 'null'));
+                        const dname = (o.direction_name || o.direction || 'Без направления').trim();
+                        if (!dirsMap[did]) dirsMap[did] = { id: did, name: dname };
+                    });
+                    const builtDirs = Object.values(dirsMap).sort((a,b) => String((a.name||'')).localeCompare(String((b.name||''))));
+                    if (builtDirs.length > 0) setDirections(builtDirs);
                     }
                 }
                 } catch (err) {
