@@ -3641,7 +3641,7 @@
             );
             }
 
-        function AdminCallsUploadView({ onAssignSelected, user }) {
+        function AdminCallsUploadView({ onAssignSelected }) {
             const [files, setFiles] = useState([]);
             const [minDurationSec, setMinDurationSec] = useState(null);
             const [maxDurationSec, setMaxDurationSec] = useState(null);
@@ -4183,16 +4183,37 @@
                                     const csvCount = info ? info.count : 0;
                                     if (onlyWithCsv && csvCount === 0) return null; // skip if filter on
                                     return (
-                                        <li key={op.id || displayName} className="flex items-center justify-between p-2 rounded hover:bg-gray-50">
-                                        <div>
+                                        <li key={op.id || displayName} className="flex items-center justify-between p-3 rounded-md hover:shadow-sm border bg-white">
+                                        <div className="flex-1">
                                             <div className="font-medium">{displayName}</div>
                                             <div className="text-xs text-gray-500">{op.direction_name || op.direction || ''}</div>
+                                        </div>
+
+                                        {/* visual bars: 18 circles */}
+                                        <div className="mx-4 flex-shrink-0">
+                                            {(() => {
+                                            const apiCount = Number(op.call_count || 0);
+                                            const csvCount = info ? Number(info.count || 0) : 0;
+                                            const green = Math.min(apiCount, 18);
+                                            const yellow = Math.min(csvCount, Math.max(0, 18 - green));
+                                            return (
+                                                <div className="flex gap-1">
+                                                {Array.from({ length: 18 }).map((_, i) => {
+                                                    const cls = i < green ? 'bg-green-500' : i < green + yellow ? 'bg-yellow-400' : 'bg-gray-300';
+                                                    return <span key={i} className={`w-3 h-3 rounded-full ${cls} border`} />;
+                                                })}
+                                                </div>
+                                            );
+                                            })()}
                                         </div>
 
                                         <div className="flex items-center gap-2">
                                             <div className="text-xs text-gray-600">{op.status || ''}</div>
                                             <div className="text-xs font-semibold px-2 py-0.5 rounded border">API: {op.call_count ?? 0}</div>
                                             <div className="text-xs font-semibold px-2 py-0.5 rounded border">CSV: {csvCount}</div>
+                                            {info?.custom && (
+                                            <div className="inline-flex items-center gap-1 text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded">Custom</div>
+                                            )}
                                             <button onClick={() => openEditOperator(displayName)} className="px-2 py-1 border rounded text-sm" title="Настройки">Настройки</button>
                                             <button onClick={() => { handleShowOperator(displayName); }} className="px-2 py-1 border rounded text-sm">Просмотр</button>
                                         </div>
@@ -4215,11 +4236,30 @@
                             </div>
                             <ul className="space-y-2">
                             {unmatchedCsvOperators.map(k => (
-                                <li key={k} className="flex items-center justify-between p-2 border rounded bg-white">
-                                <div>
+                                <li key={k} className="flex items-center justify-between p-3 border rounded bg-white">
+                                <div className="flex-1">
                                     <div className="font-medium">{k}</div>
                                     <div className="text-xs text-gray-500">Кол-во совпадений: {operatorMap[k]?.count ?? 0}</div>
+                                    {operatorMap[k]?.custom && (
+                                    <span className="inline-flex items-center gap-1 text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded mt-1">Custom</span>
+                                    )}
                                 </div>
+
+                                <div className="mx-4 flex-shrink-0">
+                                    {(() => {
+                                    const csvOnly = Number(operatorMap[k]?.count || 0);
+                                    const yellow = Math.min(csvOnly, 18);
+                                    return (
+                                        <div className="flex gap-1">
+                                        {Array.from({ length: 18 }).map((_, i) => {
+                                            const cls = i < yellow ? 'bg-yellow-400' : 'bg-gray-300';
+                                            return <span key={i} className={`w-3 h-3 rounded-full ${cls} border`} />;
+                                        })}
+                                        </div>
+                                    );
+                                    })()}
+                                </div>
+
                                 <div className="flex gap-2">
                                     <button onClick={() => openEditOperator(k)} className="px-2 py-1 border rounded text-sm">Настройки</button>
                                     <button onClick={() => { setSelectedOperator(k); setPinnedOperator(true); setSelectedCalls(new Set((operatorMap[k]?.all || []).map(c=>c.id))); }} className="px-2 py-1 border rounded text-sm">Просмотр</button>
