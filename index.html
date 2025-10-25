@@ -3573,10 +3573,10 @@
 
 
             // AdminCallsUploadView — refactored view: единый список операторов,
-            // сгруппированный по SV, внутри — по направлению. Добавлены:
-            // - выбор направления (фильтрация)
-            // - глобальный блок "Недостаточно звонков" сверху (включает matched API operators и csv-only, если применимо)
-            // - упрощённая сортировка в группах (после вывода недостаточных)
+            // сгруппированный по SV, внутри — по направлению. Обновления:
+            // - onlyWithCsv теперь показывает API-оператора если у него хотя бы один звонок в загруженных CSV (даже без точного совпадения имени)
+            // - метки "API" -> "Оценки", "CSV" -> "Подходящие"
+            // - выбор направлений — multi-select, аналогичен выбору статусов
 
             function pad(n) { return String(n).padStart(2, '0'); }
             function secondsToHms(sec) {
@@ -3667,10 +3667,10 @@
 
             // new: status multi-select
             const [selectedStatuses, setSelectedStatuses] = useState(['all']);
-            // new: show only operators that have at least one CSV match
+            // new: show only operators that have at least one call in uploaded CSVs (not necessarily exact matched name)
             const [onlyWithCsv, setOnlyWithCsv] = useState(false);
-            // new: selected direction filter (single select)
-            const [selectedDirection, setSelectedDirection] = useState('all');
+            // new: selected directions multi-select (works like statuses)
+            const [selectedDirections, setSelectedDirections] = useState(['all']);
 
             function getMonthOptions() {
                 const options = [];
@@ -3831,6 +3831,20 @@
                 } else {
                 setActiveRange(null);
                 }
+            }
+
+            // helper: count any calls in uploaded CSVs that relate to a display name (loose match)
+            function countAnyCallsForDisplayName(displayName) {
+                if (!displayName || !calls || calls.length === 0) return 0;
+                const norm = String(displayName || '').trim().toLowerCase();
+                let cnt = 0;
+                for (const c of calls) {
+                const co = String(c.operator || '').trim().toLowerCase();
+                if (!co) continue;
+                if (co === norm) { cnt++; continue; }
+                if (co.includes(norm) || norm.includes(co)) { cnt++; continue; }
+                }
+                return cnt;
             }
 
             function handleShowOperator(opKey) {
@@ -4003,6 +4017,27 @@
                 }
             }
 
+            // directions multi-select (works like statuses)
+            const directionOptions = React.useMemo(() => {
+                return (directions || []).map(d => ({ id: d.id, name: d.name || d.title || d.displayName || d.direction_name || d.direction }));
+            }, [directions]);
+
+            function toggleDirectionSelection(dirId) {
+                const s = (selectedDirections || []).slice();
+                const lower = String(dirId);
+                if (s.includes('all')) {
+                if (lower === 'all') return setSelectedDirections(['all']);
+                setSelectedDirections([lower]);
+                return;
+                }
+                if (s.includes(lower)) {
+                const idx = s.indexOf(lower); s.splice(idx,1);
+                if (s.length === 0) setSelectedDirections(['all']); else setSelectedDirections(s);
+                } else {
+                setSelectedDirections(prev => prev.filter(Boolean).concat(lower));
+                }
+            }
+
             // apply status + direction filter to operators list before grouping
             const filteredSvOperators = React.useMemo(() => {
                 let list = svOperators.slice();
@@ -4012,11 +4047,14 @@
                 const lowerSet = new Set(selectedStatuses.map(s=>String(s).toLowerCase()));
                 list = list.filter(op => lowerSet.has(String(op.status || '').toLowerCase()));
                 }
-                if (selectedDirection && selectedDirection !== 'all') {
-                list = list.filter(op => String(op.direction_id) === String(selectedDirection));
+                if (!selectedDirections || selectedDirections.length === 0 || selectedDirections.includes('all')) {
+                // do nothing
+                } else {
+                const dirSet = new Set(selectedDirections.map(s=>String(s)));
+                list = list.filter(op => dirSet.has(String(op.direction_id)));
                 }
                 return list;
-            }, [svOperators, selectedStatuses, selectedDirection]);
+            }, [svOperators, selectedStatuses, selectedDirections]);
 
             // helper: get desired sampleCount for an operator (uses operatorParams if set for matched key OR display name)
             function getDesiredSampleCountForOperator(displayName, matchedKey) {
@@ -4040,14 +4078,15 @@
                 const displayName = op.name || op.login || op.operator_name || String(op.id || '—');
                 const matchedKey = findOperatorMapKeyByName(displayName);
                 const info = matchedKey ? operatorMap[matchedKey] : null;
-                const csvCount = info ? info.count : 0;
-                if (onlyWithCsv && csvCount === 0) continue; // respect "only with csv" filter
+                const csvMatchedCount = info ? info.count : 0; // "Подходящие"
+                const anyCsvCount = countAnyCallsForDisplayName(displayName); // any call in files
+                if (onlyWithCsv && anyCsvCount === 0) continue; // respect "only with csv" filter: show operator only if he has at least one call in files
                 const desired = getDesiredSampleCountForOperator(displayName, matchedKey);
-                const isInsufficient = (Number(desired) || 0) > 0 && (Number(csvCount) || 0) < Number(desired);
-                if (isInsufficient) res.push({ op, csvCount, desired, matchedKey });
+                const isInsufficient = (Number(desired) || 0) > 0 && (Number(csvMatchedCount) || 0) < Number(desired);
+                if (isInsufficient) res.push({ op, csvCount: csvMatchedCount, desired, matchedKey });
                 }
-                // also include unmatched csv-only insufficient operators only when direction=='all' (they have no direction info)
-                if (selectedDirection === 'all') {
+                // also include unmatched csv-only insufficient operators only when directions selection includes 'all' (они без направления)
+                if (selectedDirections.includes('all')) {
                 for (const k of Object.keys(operatorMap || {})) {
                     const info = operatorMap[k];
                     if (!info || info.count === 0) continue;
@@ -4070,7 +4109,7 @@
                 return String(an || '').localeCompare(String(bn || ''));
                 });
                 return res;
-            }, [filteredSvOperators, operatorMap, operatorParams, sampleCount, onlyWithCsv, selectedDirection, svOperators]);
+            }, [filteredSvOperators, operatorMap, operatorParams, sampleCount, onlyWithCsv, selectedDirections, svOperators, calls]);
 
             // group operators by supervisor and then by direction (but exclude those already shown as insufficient)
             const groupedBySvThenDir = React.useMemo(() => {
@@ -4139,7 +4178,7 @@
                 if (selectedOperator) openEditOperator(selectedOperator);
             }
 
-            // render helpers for visual bar (18 circles): use desired = min(csvCount, desiredSampleCount); green = API; yellow = desired (but capacity limited by 18)
+            // render helpers for visual bar (18 circles): use desired = min(csvCount, desiredSampleCount); green = Оценки; yellow = Подходящие
             function renderCircles({ apiCount=0, csvCount=0, desiredForOp=0 }) {
                 const totalSlots = 18;
                 const green = Math.min(Number(apiCount || 0), totalSlots);
@@ -4218,7 +4257,7 @@
                         </div>
 
                         <div>
-                        <label className="block text-xs text-gray-700">Показывать только операторов, у которых есть совпадения в CSV</label>
+                        <label className="block text-xs text-gray-700">Показывать только операторов, у которых есть звонки в загруженных CSV</label>
                         <div className="mt-2">
                             <label className="inline-flex items-center gap-2">
                             <input type="checkbox" checked={onlyWithCsv} onChange={e=>setOnlyWithCsv(e.target.checked)} />
@@ -4228,13 +4267,12 @@
                         </div>
 
                         <div>
-                        <label className="block text-xs text-gray-700">Фильтр по направлению</label>
-                        <div className="mt-1">
-                            <select value={selectedDirection} onChange={e=>setSelectedDirection(e.target.value)} className="w-full p-2 border rounded text-sm">
-                            <option value="all">Все направления</option>
-                            {directions.map(d => <option key={d.id} value={d.id}>{d.name || d.title || d.displayName || d.direction_name || d.direction}</option>)}
-                            </select>
-                            <div className="text-xs text-gray-500 mt-1">Выберите конкретное направление для фильтрации операторов.</div>
+                        <label className="block text-xs text-gray-700">Направления (мультивыбор)</label>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                            <button onClick={()=>setSelectedDirections(['all'])} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes('all') ? 'bg-blue-600 text-white' : ''}`}>Все</button>
+                            {directionOptions.map(d => (
+                            <button key={d.id} onClick={()=>toggleDirectionSelection(d.id)} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes(String(d.id)) ? 'bg-blue-600 text-white' : ''}`}>{d.name}</button>
+                            ))}
                         </div>
                         </div>
 
@@ -4261,7 +4299,7 @@
 
                         <div className="flex gap-2">
                         <button onClick={applyFilters} className="px-3 py-2 rounded bg-green-600 text-white">Применить фильтр</button>
-                        <button onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); setSelectedStatuses(['all']); setOnlyWithCsv(false); setSelectedDirection('all'); applyFilters(); }} className="px-3 py-2 rounded border">Сброс фильтров</button>
+                        <button onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); setSelectedStatuses(['all']); setOnlyWithCsv(false); setSelectedDirections(['all']); applyFilters(); }} className="px-3 py-2 rounded border">Сброс фильтров</button>
                         </div>
                     </div>
                     </div>
@@ -4293,8 +4331,8 @@
                                     <div className="text-xs text-red-600 mt-1">НЕДОСТАТОЧНО ({it.csvCount} / {it.desired})</div>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                    <div className="text-xs font-semibold px-2 py-0.5 rounded border">API: {it.op.call_count ?? 0}</div>
-                                    <div className="text-xs font-semibold px-2 py-0.5 rounded border">CSV: {it.csvCount}</div>
+                                    <div className="text-xs font-semibold px-2 py-0.5 rounded border">Оценки: {it.op.call_count ?? 0}</div>
+                                    <div className="text-xs font-semibold px-2 py-0.5 rounded border">Подходящие: {it.csvCount}</div>
                                     <button onClick={() => openEditOperator(displayName)} className="px-2 py-1 border rounded text-sm">Настройки</button>
                                     <button onClick={() => handleShowOperator(displayName)} className="px-2 py-1 border rounded text-sm">Просмотр</button>
                                 </div>
@@ -4310,7 +4348,7 @@
                                 <div className="text-xs text-red-600 mt-1">НЕДОСТАТОЧНО ({it.csvCount} / {it.desired})</div>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                <div className="text-xs font-semibold px-2 py-0.5 rounded border">CSV: {it.csvCount}</div>
+                                <div className="text-xs font-semibold px-2 py-0.5 rounded border">Подходящие: {it.csvCount}</div>
                                 <button onClick={() => openEditOperator(it.csvName)} className="px-2 py-1 border rounded text-sm">Настройки</button>
                                 <button onClick={() => { setSelectedOperator(it.matchedKey || it.csvName); setPinnedOperator(true); setSelectedCalls(new Set((operatorMap[it.matchedKey || it.csvName]?.all || []).map(c=>c.id))); }} className="px-2 py-1 border rounded text-sm">Просмотр</button>
                                 </div>
@@ -4346,7 +4384,10 @@
                                     const matchedKey = findOperatorMapKeyByName(displayName);
                                     const info = matchedKey ? operatorMap[matchedKey] : null;
                                     const csvCount = info ? info.count : 0;
-                                    if (onlyWithCsv && csvCount === 0) return null; // skip if filter on
+
+                                    // onlyWithCsv now checks if there is at least one call in files related to this displayName (loose match)
+                                    const anyCsvCount = countAnyCallsForDisplayName(displayName);
+                                    if (onlyWithCsv && anyCsvCount === 0) return null; // skip if filter on and no calls in files
 
                                     const apiCount = Number(op.call_count || 0);
                                     const desired = getDesiredSampleCountForOperator(displayName, matchedKey);
@@ -4358,6 +4399,8 @@
                                         <div className="flex-1">
                                             <div className="font-medium">{displayName}</div>
                                             <div className="text-xs text-gray-500">{op.direction_name || op.direction || ''}</div>
+                                            {/* show hint if there are calls in files but no exact matches */}
+                                            {anyCsvCount > 0 && csvCount === 0 && <div className="text-xs text-yellow-700 mt-1">Есть звонки в файле ({anyCsvCount}), но они не сопоставлены как "Подходящие"</div>}
                                         </div>
 
                                         {/* visual bars: 18 circles */}
@@ -4367,8 +4410,8 @@
 
                                         <div className="flex items-center gap-2">
                                             <div className="text-xs text-gray-600">{op.status || ''}</div>
-                                            <div className="text-xs font-semibold px-2 py-0.5 rounded border">API: {op.call_count ?? 0}</div>
-                                            <div className="text-xs font-semibold px-2 py-0.5 rounded border">CSV: {csvCount}</div>
+                                            <div className="text-xs font-semibold px-2 py-0.5 rounded border">Оценки: {op.call_count ?? 0}</div>
+                                            <div className="text-xs font-semibold px-2 py-0.5 rounded border">Подходящие: {csvCount}</div>
                                             {info?.custom && (
                                             <div className="inline-flex items-center gap-1 text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded">Custom</div>
                                             )}
@@ -4386,7 +4429,7 @@
                         ))}
 
                         {/* CSV-only operators (не сопоставлены с API) — показаны тут, в том же блоке */}
-                        {unmatchedCsvOperators.length > 0 && selectedDirection === 'all' && (
+                        {unmatchedCsvOperators.length > 0 && selectedDirections.includes('all') && (
                         <div className="p-3 bg-gray-50 rounded border">
                             <div className="flex items-center justify-between mb-2">
                             <div className="text-sm font-medium">Операторы из CSV — не сопоставлены с API</div>
