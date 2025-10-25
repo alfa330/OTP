@@ -3641,7 +3641,7 @@
             );
             }
 
-        function AdminCallsUploadView({ onAssignSelected }) {
+        function AdminCallsUploadView({ onAssignSelected, user }) {
             const [files, setFiles] = useState([]);
             const [minDurationSec, setMinDurationSec] = useState(null);
             const [maxDurationSec, setMaxDurationSec] = useState(null);
