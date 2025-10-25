@@ -4007,6 +4007,20 @@
                 return svOperators.filter(op => lowerSet.has(String(op.status || '').toLowerCase()));
             }, [svOperators, selectedStatuses]);
 
+            // helper: get desired sampleCount for an operator (uses operatorParams if set for matched key OR display name)
+            function getDesiredSampleCountForOperator(displayName, matchedKey) {
+                // try matchedKey first
+                if (matchedKey && operatorParams[matchedKey] && operatorParams[matchedKey].sampleCount != null) {
+                return Number(operatorParams[matchedKey].sampleCount) || 0;
+                }
+                // then try displayName key (some params may be saved under CSV name)
+                if (displayName && operatorParams[displayName] && operatorParams[displayName].sampleCount != null) {
+                return Number(operatorParams[displayName].sampleCount) || 0;
+                }
+                // fallback to global
+                return Number(sampleCount) || 0;
+            }
+
             // group operators by supervisor and then by direction
             const groupedBySvThenDir = React.useMemo(() => {
                 const map = {};
@@ -4017,8 +4031,28 @@
                 if (!map[sv][dir]) map[sv][dir] = [];
                 map[sv][dir].push(op);
                 });
+                // sort operators inside each direction: those with insufficient CSV first
+                Object.keys(map).forEach(sv => {
+                Object.keys(map[sv]).forEach(dir => {
+                    map[sv][dir].sort((a,b) => {
+                    const aDisplay = a.name || a.login || a.operator_name || String(a.id || '');
+                    const bDisplay = b.name || b.login || b.operator_name || String(b.id || '');
+                    const aMatched = findOperatorMapKeyByName(aDisplay);
+                    const bMatched = findOperatorMapKeyByName(bDisplay);
+                    const aCsv = operatorMap[aMatched]?.count ?? 0;
+                    const bCsv = operatorMap[bMatched]?.count ?? 0;
+                    const aDesired = getDesiredSampleCountForOperator(aDisplay, aMatched);
+                    const bDesired = getDesiredSampleCountForOperator(bDisplay, bMatched);
+                    const aIns = aCsv < aDesired ? 1 : 0;
+                    const bIns = bCsv < bDesired ? 1 : 0;
+                    if (aIns !== bIns) return bIns - aIns; // put insufficient (aIns===1) first -> descending
+                    // otherwise keep by name
+                    return String(aDisplay).localeCompare(String(bDisplay));
+                    });
+                });
+                });
                 return map;
-            }, [filteredSvOperators]);
+            }, [filteredSvOperators, operatorMap, operatorParams, sampleCount]);
 
             // compute unmatched CSV operator names (present in operatorMap but not matched to ANY API operator name)
             const unmatchedCsvOperators = React.useMemo(() => {
@@ -4031,8 +4065,18 @@
                     if (a.includes(nk) || nk.includes(a)) return false;
                 }
                 return true;
+                }).sort((a,b) => {
+                // sort unmatched: insufficient (csvCount < desired) first
+                const aCsv = operatorMap[a]?.count ?? 0;
+                const bCsv = operatorMap[b]?.count ?? 0;
+                const aDesired = operatorParams[a]?.sampleCount != null ? Number(operatorParams[a].sampleCount) : Number(sampleCount) || 0;
+                const bDesired = operatorParams[b]?.sampleCount != null ? Number(operatorParams[b].sampleCount) : Number(sampleCount) || 0;
+                const aIns = aCsv < aDesired ? 1 : 0;
+                const bIns = bCsv < bDesired ? 1 : 0;
+                if (aIns !== bIns) return bIns - aIns; // insufficient first
+                return String(a).localeCompare(String(b));
                 });
-            }, [operatorMap, svOperators]);
+            }, [operatorMap, svOperators, operatorParams, sampleCount]);
 
             useEffect(() => {
                 recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams, !!selectedOperator);
@@ -4048,6 +4092,23 @@
             }
             function handleOpenSettings() {
                 if (selectedOperator) openEditOperator(selectedOperator);
+            }
+
+            // render helpers for visual bar (18 circles): use desired = min(csvCount, desiredSampleCount); green = API; yellow = desired (but capacity limited by 18)
+            function renderCircles({ apiCount=0, csvCount=0, desiredForOp=0 }) {
+                const totalSlots = 18;
+                const green = Math.min(Number(apiCount || 0), totalSlots);
+                // yellow should reflect min(csvCount, desired) per user request
+                let desiredYellow = Math.min(Number(csvCount || 0), Number(desiredForOp || 0));
+                // but ensure visual cap: remaining slots after green
+                const remaining = Math.max(0, totalSlots - green);
+                const yellow = Math.min(desiredYellow, remaining);
+                const grey = Math.max(0, totalSlots - green - yellow);
+                const circles = [];
+                for (let i = 0; i < green; i++) circles.push(<span key={'g'+i} className={`w-3 h-3 rounded-full bg-green-500 border`} />);
+                for (let i = 0; i < yellow; i++) circles.push(<span key={'y'+i} className={`w-3 h-3 rounded-full bg-yellow-400 border`} />);
+                for (let i = 0; i < grey; i++) circles.push(<span key={'z'+i} className={`w-3 h-3 rounded-full bg-gray-300 border`} />);
+                return <div className="flex gap-1">{circles}</div>;
             }
 
             return (
@@ -4139,6 +4200,7 @@
                         <div>
                         <label className="block text-xs text-gray-700">Сколько выбрать звонков (на оператора)</label>
                         <input type="number" min="0" value={sampleCount} onChange={e=>setSampleCount(e.target.value)} className="w-28 mt-1 p-2 border rounded" />
+                        <div className="text-xs text-gray-500 mt-1">Жёлтое = min(кол-во в CSV, это значение или per-operator sampleCount)</div>
                         </div>
 
                         <div className="flex gap-2">
@@ -4182,29 +4244,25 @@
                                     const info = matchedKey ? operatorMap[matchedKey] : null;
                                     const csvCount = info ? info.count : 0;
                                     if (onlyWithCsv && csvCount === 0) return null; // skip if filter on
+
+                                    const apiCount = Number(op.call_count || 0);
+                                    const desired = getDesiredSampleCountForOperator(displayName, matchedKey);
+                                    const insufficient = csvCount < desired;
+
+                                    // visual class for insufficient
+                                    const itemClass = `flex items-center justify-between p-3 rounded-md hover:shadow-sm border ${insufficient ? 'border-red-400 bg-red-50' : 'bg-white'}`;
+
                                     return (
-                                        <li key={op.id || displayName} className="flex items-center justify-between p-3 rounded-md hover:shadow-sm border bg-white">
+                                        <li key={op.id || displayName} className={itemClass}>
                                         <div className="flex-1">
                                             <div className="font-medium">{displayName}</div>
                                             <div className="text-xs text-gray-500">{op.direction_name || op.direction || ''}</div>
+                                            {insufficient && <div className="text-xs text-red-600 mt-1">НЕДОСТАТОЧНО звонков ({csvCount} / {desired}) — поменяйте настройки</div>}
                                         </div>
 
                                         {/* visual bars: 18 circles */}
                                         <div className="mx-4 flex-shrink-0">
-                                            {(() => {
-                                            const apiCount = Number(op.call_count || 0);
-                                            const csvCount = info ? Number(info.count || 0) : 0;
-                                            const green = Math.min(apiCount, 18);
-                                            const yellow = Math.min(csvCount, Math.max(0, 18 - green));
-                                            return (
-                                                <div className="flex gap-1">
-                                                {Array.from({ length: 18 }).map((_, i) => {
-                                                    const cls = i < green ? 'bg-green-500' : i < green + yellow ? 'bg-yellow-400' : 'bg-gray-300';
-                                                    return <span key={i} className={`w-3 h-3 rounded-full ${cls} border`} />;
-                                                })}
-                                                </div>
-                                            );
-                                            })()}
+                                            {renderCircles({ apiCount, csvCount, desiredForOp: desired })}
                                         </div>
 
                                         <div className="flex items-center gap-2">
@@ -4235,37 +4293,36 @@
                             <div className="text-xs text-gray-500">{unmatchedCsvOperators.length}</div>
                             </div>
                             <ul className="space-y-2">
-                            {unmatchedCsvOperators.map(k => (
-                                <li key={k} className="flex items-center justify-between p-3 border rounded bg-white">
-                                <div className="flex-1">
+                            {unmatchedCsvOperators.map(k => {
+                                const csvOnly = Number(operatorMap[k]?.count || 0);
+                                const desired = operatorParams[k]?.sampleCount != null ? Number(operatorParams[k].sampleCount) : Number(sampleCount) || 0;
+                                const insufficient = csvOnly < desired;
+                                const itemClass = `flex items-center justify-between p-3 border rounded ${insufficient ? 'border-red-400 bg-red-50' : 'bg-white'}`;
+
+                                if (onlyWithCsv && csvOnly === 0) return null;
+
+                                return (
+                                <li key={k} className={itemClass}>
+                                    <div className="flex-1">
                                     <div className="font-medium">{k}</div>
-                                    <div className="text-xs text-gray-500">Кол-во совпадений: {operatorMap[k]?.count ?? 0}</div>
+                                    <div className="text-xs text-gray-500">Кол-во совпадений: {csvOnly}</div>
                                     {operatorMap[k]?.custom && (
-                                    <span className="inline-flex items-center gap-1 text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded mt-1">Custom</span>
+                                        <span className="inline-flex items-center gap-1 text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded mt-1">Custom</span>
                                     )}
-                                </div>
+                                    {insufficient && <div className="text-xs text-red-600 mt-1">НЕДОСТАТОЧНО звонков ({csvOnly} / {desired}) — поменяйте настройки</div>}
+                                    </div>
 
-                                <div className="mx-4 flex-shrink-0">
-                                    {(() => {
-                                    const csvOnly = Number(operatorMap[k]?.count || 0);
-                                    const yellow = Math.min(csvOnly, 18);
-                                    return (
-                                        <div className="flex gap-1">
-                                        {Array.from({ length: 18 }).map((_, i) => {
-                                            const cls = i < yellow ? 'bg-yellow-400' : 'bg-gray-300';
-                                            return <span key={i} className={`w-3 h-3 rounded-full ${cls} border`} />;
-                                        })}
-                                        </div>
-                                    );
-                                    })()}
-                                </div>
+                                    <div className="mx-4 flex-shrink-0">
+                                    {renderCircles({ apiCount: 0, csvCount: csvOnly, desiredForOp: desired })}
+                                    </div>
 
-                                <div className="flex gap-2">
+                                    <div className="flex gap-2">
                                     <button onClick={() => openEditOperator(k)} className="px-2 py-1 border rounded text-sm">Настройки</button>
                                     <button onClick={() => { setSelectedOperator(k); setPinnedOperator(true); setSelectedCalls(new Set((operatorMap[k]?.all || []).map(c=>c.id))); }} className="px-2 py-1 border rounded text-sm">Просмотр</button>
-                                </div>
+                                    </div>
                                 </li>
-                            ))}
+                                );
+                            })}
                             </ul>
                         </div>
                         )}
