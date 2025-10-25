@@ -3967,8 +3967,13 @@
                 return map;
             }, [svOperators]);
 
-            useEffect(() => { fetchDirections(); fetchSvOperators(selectedMonth); }, [selectedMonth]);
-            useEffect(() => { recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams); }, [operatorParams]);
+            useEffect(() => {
+                            // When operatorParams change we recompute the map.
+                            // If there's a currently opened operator panel — keep it open (keepSelection = true),
+                            // otherwise allow recomputeOperatorMap to reset selection.
+                            recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams, !!selectedOperator);
+                            // eslint-disable-next-line react-hooks/exhaustive-deps
+                        }, [operatorParams, calls, minDurationSec, maxDurationSec, sampleCount, variationSec, selectedOperator]);
 
             const visibleOperators = Object.entries(operatorMap).filter(([op, info]) => info && info.count > 0);
             function applyFilters() { recomputeOperatorMap(calls, minDurationSec === null ? null : Number(minDurationSec), maxDurationSec === null ? null : Number(maxDurationSec), Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams); }
