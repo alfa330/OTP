@@ -3571,9 +3571,11 @@
             );
             }
 
-            // Утилиты
-            function pad(n) { return String(n).padStart(2, '0'); }
 
+            // AdminCallsUploadView — обновлённая версия: добавлены кнопки "Закрыть" и "Настройки"
+            // для панели выбранного оператора (как в закреплённом виде, так и в обычном).
+
+            function pad(n) { return String(n).padStart(2, '0'); }
             function secondsToHms(sec) {
             if (sec == null || isNaN(Number(sec))) return '00:00:00';
             const s = Math.max(0, Math.floor(Number(sec)));
@@ -3582,14 +3584,12 @@
             const ss = s % 60;
             return `${pad(h)}:${pad(m)}:${pad(ss)}`;
             }
-
             function hmsToSeconds(h, m, s) {
             const hh = Number(h) || 0;
             const mm = Number(m) || 0;
             const ss = Number(s) || 0;
             return hh * 3600 + mm * 60 + ss;
             }
-
             function parseDurationString(str) {
             if (str == null) return 0;
             let s = String(str).trim();
@@ -3607,7 +3607,6 @@
             return isNaN(n) ? 0 : n;
             }
 
-            // Duration input split into hh / mm / ss blocks
             function DurationInput({ valueSec, onChange, ariaLabel }) {
             const secs = valueSec == null ? 0 : Number(valueSec) || 0;
             const hh = Math.floor(secs / 3600);
@@ -3640,8 +3639,7 @@
             );
             }
 
-        function AdminCallsUploadView({ onAssignSelected }) {
-            // CSV / parsing state
+            function AdminCallsUploadView({ onAssignSelected }) {
             const [files, setFiles] = useState([]);
             const [minDurationSec, setMinDurationSec] = useState(null);
             const [maxDurationSec, setMaxDurationSec] = useState(null);
@@ -3658,16 +3656,12 @@
             const [editingValues, setEditingValues] = useState({ min: null, max: null, variation: 0, sampleCount: 0 });
             const fileInputRef = useRef(null);
 
-            // Pin state: если true — панель звонков закреплена снизу
             const [pinnedOperator, setPinnedOperator] = useState(false);
-
-            // New: month + directions + sv data (operators)
-            const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0,7)); // YYYY-MM
+            const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0,7));
             const [directions, setDirections] = useState([]);
             const [svOperators, setSvOperators] = useState([]);
             const [loadingOperators, setLoadingOperators] = useState(false);
 
-            // Helpers: generate last 12 months options
             function getMonthOptions() {
                 const options = [];
                 const today = new Date();
@@ -3739,10 +3733,7 @@
                 };
             }
 
-            async function handleFilesSelected(e) {
-                const fl = Array.from(e.target.files || []);
-                setFiles(fl);
-            }
+            async function handleFilesSelected(e) { const fl = Array.from(e.target.files || []); setFiles(fl); }
 
             async function handleParseFiles() {
                 if (!files || files.length === 0) return;
@@ -3765,18 +3756,14 @@
                 }
 
                 setCalls(allRows);
-
                 const minDVal = minDurationSec === null ? null : Number(minDurationSec);
                 const maxDVal = maxDurationSec === null ? null : Number(maxDurationSec);
                 const varVal = variationSec === '' ? 0 : Number(variationSec);
-
                 recomputeOperatorMap(allRows, minDVal, maxDVal, Number(sampleCount) || 0, Number(varVal) || 0, operatorParams);
                 } catch (err) {
                 console.error('parse error', err);
                 alert('Ошибка парсинга файлов');
-                } finally {
-                setParsing(false);
-                }
+                } finally { setParsing(false); }
             }
 
             function recomputeOperatorMap(allRows, globalMin, globalMax, globalSampleCnt, globalVar, params = {}) {
@@ -3791,9 +3778,7 @@
                 Object.keys(raw).forEach(op => {
                 let list = raw[op].slice();
                 list.sort((a,b) => (b.datetime?.getTime() || 0) - (a.datetime?.getTime() || 0));
-
                 const opParams = params[op] || null;
-
                 const minD = opParams && opParams.min != null ? opParams.min : globalMin;
                 const maxD = opParams && opParams.max != null ? opParams.max : globalMax;
                 const varD = opParams && opParams.variation != null ? opParams.variation : globalVar;
@@ -3836,20 +3821,15 @@
                 }
             }
 
-            // show operator samples (existing UI logic)
-            // show operator samples and pin to bottom
             function handleShowOperator(op) {
                 if (!(operatorMap[op] && operatorMap[op].count > 0)) return;
                 setSelectedOperator(op);
-                setPinnedOperator(true); // закрепляем панель внизу при просмотре
+                setPinnedOperator(true);
                 const samples = operatorMap[op]?.samples || [];
                 const s = new Set(selectedCalls);
                 samples.forEach(c => s.add(c.id));
                 setSelectedCalls(s);
-                // scroll to bottom (to make sure the pinned panel is visible on small screens)
-                setTimeout(() => {
-                window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-                }, 50);
+                setTimeout(() => { window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); }, 50);
             }
 
             function toggleSelectCall(callId) {
@@ -3906,7 +3886,6 @@
                 if (editingOperator === op) setEditingOperator(null);
             }
 
-            // --- New: fetch directions and sv data (operators) ---
             async function fetchDirections() {
                 try {
                 if (typeof axios === 'undefined') return;
@@ -3938,18 +3917,13 @@
                 const resp = await axios.get(`${API_BASE_URL}/api/sv/data?month=${encodeURIComponent(month)}`, { headers });
                 const data = resp.data;
                 if (data && data.status === 'success') {
-                    if (Array.isArray(data.operators)) {
-                    setSvOperators(data.operators);
-                    } else if (Array.isArray(data.users)) {
-                    setSvOperators(data.users);
-                    } else if (Array.isArray(data.data)) {
-                    setSvOperators(data.data);
-                    } else {
+                    if (Array.isArray(data.operators)) setSvOperators(data.operators);
+                    else if (Array.isArray(data.users)) setSvOperators(data.users);
+                    else if (Array.isArray(data.data)) setSvOperators(data.data);
+                    else {
                     const collected = [];
                     if (Array.isArray(data.sv_list)) {
-                        data.sv_list.forEach(sv => {
-                        (sv.operators || []).forEach(op => collected.push(op));
-                        });
+                        data.sv_list.forEach(sv => { (sv.operators || []).forEach(op => collected.push(op)); });
                     }
                     setSvOperators(collected);
                     }
@@ -3961,9 +3935,7 @@
                 console.error('Fetch sv data error:', err);
                 setSvOperators([]);
                 if (typeof showToast === 'function') showToast?.(err.response?.data?.error || 'Ошибка при получении данных операторов', 'error');
-                } finally {
-                setLoadingOperators(false);
-                }
+                } finally { setLoadingOperators(false); }
             }
 
             const operatorsByDirection = React.useMemo(() => {
@@ -3988,32 +3960,28 @@
                 return map;
             }, [svOperators]);
 
-            // Fetch on mount and when month changes
-            useEffect(() => {
-                fetchDirections();
-                fetchSvOperators(selectedMonth);
-                // eslint-disable-next-line react-hooks/exhaustive-deps
-            }, [selectedMonth]);
-
-            useEffect(() => {
-                recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams);
-                // eslint-disable-next-line react-hooks/exhaustive-deps
-            }, [operatorParams]);
+            useEffect(() => { fetchDirections(); fetchSvOperators(selectedMonth); }, [selectedMonth]);
+            useEffect(() => { recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams); }, [operatorParams]);
 
             const visibleOperators = Object.entries(operatorMap).filter(([op, info]) => info && info.count > 0);
+            function applyFilters() { recomputeOperatorMap(calls, minDurationSec === null ? null : Number(minDurationSec), maxDurationSec === null ? null : Number(maxDurationSec), Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams); }
 
-            // --- NEW: small helper to apply filters without reparsing files ---
-            function applyFilters() {
-                recomputeOperatorMap(calls, minDurationSec === null ? null : Number(minDurationSec), maxDurationSec === null ? null : Number(maxDurationSec), Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams);
+            // New handlers: close panel, open settings (calls existing openEditOperator)
+            function handleClosePanel() {
+                setPinnedOperator(false);
+                setSelectedOperator(null);
+            }
+            function handleOpenSettings() {
+                if (selectedOperator) openEditOperator(selectedOperator);
             }
 
             return (
                 <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
                 <h3 className="text-lg font-semibold mb-4">Загрузка звонков (CSV) — Админ / Супервайзер</h3>
 
-                {/* Top area: files / month / compact settings */}
+                {/* --- top area (unchanged) --- */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
-                    {/* Files + actions */}
+                    {/* files */}
                     <div className="p-3 bg-gray-50 rounded border">
                     <label className="block text-sm font-medium text-gray-700">Файлы (CSV)</label>
                     <input ref={fileInputRef} type="file" accept=".csv,.xls,.xlsx" multiple onChange={handleFilesSelected} className="mt-2" />
@@ -4032,7 +4000,7 @@
                     </div>
                     </div>
 
-                    {/* Month + quick fetch */}
+                    {/* month + quick fetch */}
                     <div className="p-3 bg-gray-50 rounded border flex flex-col justify-between">
                     <div>
                         <label className="block text-sm font-medium text-gray-700">Выберите месяц</label>
@@ -4040,19 +4008,17 @@
                         {getMonthOptions()}
                         </select>
                         <div className="text-xs text-gray-500 mt-1">Данные операторов будут подгружены для выбранного месяца.</div>
-
                         <div className="mt-3">
                         <div className="text-sm font-medium">Направления: <span className="text-gray-600">{directions.length}</span></div>
                         <div className="text-sm font-medium mt-1">Операторы: <span className="text-gray-600">{svOperators.length}</span></div>
                         </div>
                     </div>
-
                     <div className="mt-3">
                         <button onClick={() => fetchSvOperators(selectedMonth)} className="w-full px-3 py-2 rounded border">Подгрузить операторов</button>
                     </div>
                     </div>
 
-                    {/* Compact settings panel */}
+                    {/* compact settings */}
                     <div className="p-3 bg-gray-50 rounded border">
                     <div className="flex items-center justify-between mb-2">
                         <div className="text-sm font-medium">Фильтры и параметры</div>
@@ -4094,7 +4060,7 @@
                     <div className="text-sm mb-3 text-gray-500">Диапазон не задан — показываются все звонки (если оператор не имеет кастомных настроек).</div>
                 )}
 
-                {/* Operators lists (unchanged layout) */}
+                {/* operators lists */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="bg-gray-50 p-4 rounded border">
                     <h4 className="text-sm font-medium mb-3">Операторы по направлениям ({Object.keys(operatorsByDirection).length})</h4>
@@ -4223,6 +4189,7 @@
                     )}
                 </div>
 
+                {/* Selected operator panel: теперь с кнопками Закрыть и Настройки */}
                 {selectedOperator && operatorMap[selectedOperator] && operatorMap[selectedOperator].count > 0 && (
                     <div className={"transition-all " + (pinnedOperator ? 'fixed left-30 right-8 bottom-6 max-h-[45vh] bg-white z-50 shadow-lg rounded border overflow-auto' : 'mt-6 p-4 border rounded') }>
                     <div className="flex items-center justify-between mb-3">
@@ -4230,7 +4197,23 @@
                         <h5 className="font-medium">Оператор: {selectedOperator}</h5>
                         <div className="text-sm text-gray-500">Всего: {operatorMap[selectedOperator].count}</div>
                         </div>
+
+                        {/* Кнопки управления панелью: Settings, Close, Clear, Assign */}
                         <div className="flex items-center gap-2">
+                        <button title="Настройки оператора" onClick={handleOpenSettings} className="p-2 border rounded text-sm bg-white hover:shadow" aria-label="Настройки">
+                            {/* simple gear svg */}
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                            <path d="M11.3 1.046a1 1 0 00-2.6 0l-.2.693A7.002 7.002 0 004.66 4.1l-.63-.364a1 1 0 00-1.07 1.66l.51.436A7.003 7.003 0 002.046 11.3l-.693.2a1 1 0 000 2.6l.693.2A7.002 7.002 0 004.1 15.34l-.364.63a1 1 0 001.66 1.07l.436-.51A7.003 7.003 0 0111.3 17.954l.2.693a1 1 0 002.6 0l.2-.693a7.002 7.002 0 006.64-2.6l.63.364a1 1 0 001.07-1.66l-.51-.436a7.003 7.003 0 001.654-6.64l.693-.2a1 1 0 000-2.6l-.693-.2A7.002 7.002 0 0015.34 4.1l.364-.63a1 1 0 00-1.66-1.07l-.436.51A7.003 7.003 0 0111.3 1.046z" />
+                            </svg>
+                        </button>
+
+                        <button title="Закрыть панель" onClick={handleClosePanel} className="p-2 border rounded text-sm bg-white hover:shadow" aria-label="Закрыть">
+                            {/* simple X svg */}
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                            <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                            </svg>
+                        </button>
+
                         <button onClick={() => clearSelection()} className="px-3 py-1 border rounded">Очистить выбор</button>
                         <button onClick={handleAssign} className="px-3 py-1 bg-blue-600 text-white rounded">Назначить / Экспорт</button>
                         </div>
@@ -4267,7 +4250,7 @@
                     </div>
                 )}
 
-                {/* Operator edit panel (simple inline modal) */}
+                {/* Operator edit panel (modal) */}
                 {editingOperator && (
                     <div className="fixed inset-0 flex items-center justify-center z-50">
                     <div className="absolute inset-0 bg-black opacity-30" onClick={() => setEditingOperator(null)}></div>
