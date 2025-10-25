@@ -3573,8 +3573,9 @@
 
 
             // AdminCallsUploadView — refactored view: единый список операторов,
-            // сгруппированный по SV, внутри — по направлению. У оператора кнопки настроек.
-            // Внизу — операторы из CSV, которые не сопоставились с API.
+            // сгруппированный по SV, внутри — по направлению. Операторы из CSV, которые
+            // не сопоставились с API, показаны в отдельной секции внутри той же области.
+            // Вся логика парсинга/фильтрации/назначения оставлена и интегрирована.
 
             function pad(n) { return String(n).padStart(2, '0'); }
             function secondsToHms(sec) {
@@ -3828,7 +3829,6 @@
             }
 
             function handleShowOperator(opKey) {
-                // opKey is a display name from API; try to find matching key in operatorMap
                 const foundKey = findOperatorMapKeyByName(opKey);
                 if (!foundKey || !(operatorMap[foundKey] && operatorMap[foundKey].count > 0)) return;
                 setSelectedOperator(foundKey);
@@ -3843,13 +3843,10 @@
             function findOperatorMapKeyByName(name) {
                 if (!name) return null;
                 const norm = String(name).trim().toLowerCase();
-                // direct match
                 if (operatorMap[norm] && operatorMap[norm].count != null) return norm;
-                // try exact keys
                 for (const k of Object.keys(operatorMap)) {
                 if (String(k).trim().toLowerCase() === norm) return k;
                 }
-                // try partial / includes
                 for (const k of Object.keys(operatorMap)) {
                 if (String(k).trim().toLowerCase().includes(norm) || norm.includes(String(k).trim().toLowerCase())) return k;
                 }
@@ -3889,7 +3886,6 @@
             }
 
             function openEditOperator(opKey) {
-                // open modal for operator. Prefer CSV-key if exists
                 const key = findOperatorMapKeyByName(opKey) || opKey;
                 setEditingOperator(key);
                 const existing = operatorParams[key] || { min: null, max: null, variation: 0, sampleCount: 0 };
@@ -4029,7 +4025,6 @@
                 if (!operatorMap[k] || operatorMap[k].count === 0) return false;
                 const nk = String(k).trim().toLowerCase();
                 if (apiNames.has(nk)) return false;
-                // if any api name includes or is included -> consider matched
                 for (const a of apiNames) {
                     if (a.includes(nk) || nk.includes(a)) return false;
                 }
@@ -4148,13 +4143,13 @@
                     <div className="text-sm mb-3 text-gray-500">Диапазон не задан — показываются все звонки (если оператор не имеет кастомных настроек).</div>
                 )}
 
-                {/* Unified operators list grouped by SV -> direction (combined with CSV matches) */}
+                {/* Unified operators list grouped by SV -> direction. Now includes call counts from CSV matching and shows CSV-only operators below within same area. */}
                 <div className="space-y-4">
-                    <h4 className="text-sm font-medium">Операторы (группировка: SV → Направления) — с информацией из CSV</h4>
+                    <h4 className="text-sm font-medium">Операторы (группировка: SV → Направления) — с данными из CSV</h4>
                     {loadingOperators ? (
                     <div className="text-sm text-gray-500">Загрузка операторов...</div>
-                    ) : Object.keys(groupedBySvThenDir).length === 0 ? (
-                    <div className="text-sm text-gray-500">Нет данных операторов за выбранный месяц.</div>
+                    ) : Object.keys(groupedBySvThenDir).length === 0 && unmatchedCsvOperators.length === 0 ? (
+                    <div className="text-sm text-gray-500">Нет данных операторов за выбранный месяц и нет совпадений в CSV.</div>
                     ) : (
                     <div className="space-y-3">
                         {Object.entries(groupedBySvThenDir).map(([svName, dirs]) => (
@@ -4178,19 +4173,13 @@
                                         <div>
                                             <div className="font-medium">{displayName}</div>
                                             <div className="text-xs text-gray-500">{op.direction_name || op.direction || ''}</div>
-                                            {info && info.samples && info.samples.length > 0 && (
-                                            <div className="text-xs text-gray-600 mt-1">Примеры: {info.samples.map(s => secondsToHms(s.durationSec)).join(', ')} — {info.samples.length} шт.</div>
-                                            )}
                                         </div>
 
                                         <div className="flex items-center gap-2">
                                             <div className="text-xs text-gray-600">{op.status || ''}</div>
-                                            <div className="text-xs font-semibold px-2 py-0.5 rounded border">{info ? `Звонков: ${info.count}` : '—'}</div>
+                                            <div className="text-xs font-semibold px-2 py-0.5 rounded border">{info ? `Звонков: ${info.count}` : 'Звонков: 0'}</div>
                                             <button onClick={() => openEditOperator(displayName)} className="px-2 py-1 border rounded text-sm" title="Настройки">Настройки</button>
                                             <button onClick={() => { handleShowOperator(displayName); }} className="px-2 py-1 border rounded text-sm">Просмотр</button>
-                                            {info && (
-                                            <button onClick={() => selectAllForOperator(displayName)} className="px-2 py-1 bg-green-600 text-white rounded text-sm">Выбрать все</button>
-                                            )}
                                         </div>
                                         </li>
                                     );
@@ -4201,73 +4190,35 @@
                             </div>
                         </div>
                         ))}
-                    </div>
-                    )}
-                </div>
 
-                {/* Matches by CSV (merged into grouped list above) */}
-                <div className="mt-6">
-                    <h4 className="text-sm font-medium mb-2">Совпадения по операторам (по CSV)</h4>
-                    {visibleOperators.length === 0 ? (
-                    <p className="text-gray-500">Нет совпадений — распарсите файлы.</p>
-                    ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        {visibleOperators.map(([op, info]) => (
-                        <div key={op} className="p-3 border rounded bg-gray-50 relative">
-                            <div className="flex items-start justify-between">
-                            <div>
-                                <div className="font-medium text-lg">{op}</div>
-                                <div className="text-xs text-gray-500">Кол-во совпадений</div>
+                        {/* CSV-only operators (не сопоставлены с API) — показаны тут, в том же блоке */}
+                        {unmatchedCsvOperators.length > 0 && (
+                        <div className="p-3 bg-gray-50 rounded border">
+                            <div className="flex items-center justify-between mb-2">
+                            <div className="text-sm font-medium">Операторы из CSV — не сопоставлены с API</div>
+                            <div className="text-xs text-gray-500">{unmatchedCsvOperators.length}</div>
                             </div>
-
-                            <div className="flex items-center gap-2">
-                                <div className="flex flex-col items-end">
-                                <div className="text-2xl font-bold text-blue-600">{info.count}</div>
-                                <div className="text-xs text-gray-500">{info.samples.length > 0 ? `${info.samples.length} прим.` : 'Нет примеров'}</div>
+                            <ul className="space-y-2">
+                            {unmatchedCsvOperators.map(k => (
+                                <li key={k} className="flex items-center justify-between p-2 border rounded bg-white">
+                                <div>
+                                    <div className="font-medium">{k}</div>
+                                    <div className="text-xs text-gray-500">Кол-во совпадений: {operatorMap[k]?.count ?? 0}</div>
                                 </div>
-
-                                <div className="flex flex-col items-end gap-1">
                                 <div className="flex gap-2">
-                                    <button title="Редактировать параметры оператора" onClick={() => openEditOperator(op)} className="p-2 bg-white border rounded text-sm hover:shadow">
-                                    <i className="fas fa-edit" aria-hidden></i>
-                                    </button>
-                                    {info.custom && (
-                                    <div className="inline-flex items-center gap-2 text-sm font-semibold bg-green-100 text-green-800 px-2 py-0.5 rounded">
-                                        <i className="fas fa-certificate" aria-hidden></i>
-                                        <span>Custom</span>
-                                    </div>
-                                    )}
+                                    <button onClick={() => openEditOperator(k)} className="px-2 py-1 border rounded text-sm">Настройки</button>
+                                    <button onClick={() => { setSelectedOperator(k); setPinnedOperator(true); setSelectedCalls(new Set((operatorMap[k]?.all || []).map(c=>c.id))); }} className="px-2 py-1 border rounded text-sm">Просмотр</button>
                                 </div>
-
-                                <div className="flex gap-2 mt-1">
-                                    <button onClick={() => { handleShowOperator(op); setSelectedOperator(op); }} className="px-3 py-1 text-sm bg-white border rounded">Просмотр</button>
-                                    <button onClick={() => selectAllForOperator(op)} className="px-3 py-1 text-sm bg-green-600 text-white rounded">Выбрать все</button>
-                                </div>
-                                </div>
-                            </div>
-                            </div>
-
-                            <div className="mt-3 text-sm">
-                            {info.samples.length === 0 ? (
-                                <div className="text-gray-500">Нет примеров для этого оператора.</div>
-                            ) : (
-                                <ul className="text-xs">
-                                {info.samples.map(s => (
-                                    <li key={s.id} className="flex justify-between py-1">
-                                    <div>{s.datetime ? s.datetime.toLocaleString() : s.datetimeRaw} — {s.phone}</div>
-                                    <div className="ml-2 font-mono">{secondsToHms(s.durationSec)}</div>
-                                    </li>
-                                ))}
-                                </ul>
-                            )}
-                            </div>
+                                </li>
+                            ))}
+                            </ul>
                         </div>
-                        ))}
+                        )}
                     </div>
                     )}
                 </div>
 
-                {/* Selected operator panel */}
+                {/* Selected operator panel (unchanged) */}
                 {selectedOperator && operatorMap[selectedOperator] && operatorMap[selectedOperator].count > 0 && (
                     <div className={"transition-all " + (pinnedOperator ? 'fixed left-30 right-8 bottom-6 max-h-[45vh] bg-white z-50 shadow-lg rounded border overflow-auto' : 'mt-6 p-4 border rounded') }>
                     <div className="flex items-center justify-between mb-3">
@@ -4364,28 +4315,6 @@
                     </div>
                 )}
 
-                {/* Unmatched operators from CSV */}
-                <div className="mt-6">
-                    <h4 className="text-sm font-medium mb-2">Операторы из CSV — не сопоставлены с API ({unmatchedCsvOperators.length})</h4>
-                    {unmatchedCsvOperators.length === 0 ? (
-                    <div className="text-sm text-gray-500">Все операторы CSV сопоставлены с данными API или не имеют совпадений.</div>
-                    ) : (
-                    <ul className="space-y-1">
-                        {unmatchedCsvOperators.map(k => (
-                        <li key={k} className="flex items-center justify-between p-2 border rounded bg-gray-50">
-                            <div>
-                            <div className="font-medium">{k}</div>
-                            <div className="text-xs text-gray-500">Кол-во совпадений: {operatorMap[k]?.count ?? 0}</div>
-                            </div>
-                            <div className="flex gap-2">
-                            <button onClick={() => openEditOperator(k)} className="px-2 py-1 border rounded text-sm">Настройки</button>
-                            <button onClick={() => { setSelectedOperator(k); setPinnedOperator(true); setSelectedCalls(new Set((operatorMap[k]?.all || []).map(c=>c.id))); }} className="px-2 py-1 border rounded text-sm">Просмотр</button>
-                            </div>
-                        </li>
-                        ))}
-                    </ul>
-                    )}
-                </div>
                 </div>
             );
             }
