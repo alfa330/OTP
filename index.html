@@ -3666,6 +3666,8 @@
 
             // new: status multi-select
             const [selectedStatuses, setSelectedStatuses] = useState(['all']);
+            // new: show only operators that have at least one CSV match
+            const [onlyWithCsv, setOnlyWithCsv] = useState(false);
 
             function getMonthOptions() {
                 const options = [];
@@ -4110,6 +4112,16 @@
                         </div>
 
                         <div>
+                        <label className="block text-xs text-gray-700">Показывать только операторов, у которых есть совпадения в CSV</label>
+                        <div className="mt-2">
+                            <label className="inline-flex items-center gap-2">
+                            <input type="checkbox" checked={onlyWithCsv} onChange={e=>setOnlyWithCsv(e.target.checked)} />
+                            <span className="text-xs text-gray-700">Только с CSV</span>
+                            </label>
+                        </div>
+                        </div>
+
+                        <div>
                         <label className="block text-xs text-gray-700">Мин. длительность (hh:mm:ss)</label>
                         <div className="mt-1"><DurationInput valueSec={minDurationSec} onChange={v=>setMinDurationSec(v)} ariaLabel="min duration" /></div>
                         </div>
@@ -4131,7 +4143,7 @@
 
                         <div className="flex gap-2">
                         <button onClick={applyFilters} className="px-3 py-2 rounded bg-green-600 text-white">Применить фильтр</button>
-                        <button onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); setSelectedStatuses(['all']); applyFilters(); }} className="px-3 py-2 rounded border">Сброс фильтров</button>
+                        <button onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); setSelectedStatuses(['all']); setOnlyWithCsv(false); applyFilters(); }} className="px-3 py-2 rounded border">Сброс фильтров</button>
                         </div>
                     </div>
                     </div>
@@ -4145,7 +4157,7 @@
 
                 {/* Unified operators list grouped by SV -> direction. Now includes call counts from CSV matching and shows CSV-only operators below within same area. */}
                 <div className="space-y-4">
-                    <h4 className="text-sm font-medium">Операторы (группировка: SV → Направления) — с данными из CSV</h4>
+                    <h4 className="text-sm font-medium">Операторы (группировка: SV → Направления) — с данными из CSV и API</h4>
                     {loadingOperators ? (
                     <div className="text-sm text-gray-500">Загрузка операторов...</div>
                     ) : Object.keys(groupedBySvThenDir).length === 0 && unmatchedCsvOperators.length === 0 ? (
@@ -4168,6 +4180,8 @@
                                     const displayName = op.name || op.login || op.operator_name || String(op.id || '—');
                                     const matchedKey = findOperatorMapKeyByName(displayName);
                                     const info = matchedKey ? operatorMap[matchedKey] : null;
+                                    const csvCount = info ? info.count : 0;
+                                    if (onlyWithCsv && csvCount === 0) return null; // skip if filter on
                                     return (
                                         <li key={op.id || displayName} className="flex items-center justify-between p-2 rounded hover:bg-gray-50">
                                         <div>
@@ -4177,7 +4191,8 @@
 
                                         <div className="flex items-center gap-2">
                                             <div className="text-xs text-gray-600">{op.status || ''}</div>
-                                            <div className="text-xs font-semibold px-2 py-0.5 rounded border">{info ? `Звонков: ${info.count}` : 'Звонков: 0'}</div>
+                                            <div className="text-xs font-semibold px-2 py-0.5 rounded border">API: {op.call_count ?? 0}</div>
+                                            <div className="text-xs font-semibold px-2 py-0.5 rounded border">CSV: {csvCount}</div>
                                             <button onClick={() => openEditOperator(displayName)} className="px-2 py-1 border rounded text-sm" title="Настройки">Настройки</button>
                                             <button onClick={() => { handleShowOperator(displayName); }} className="px-2 py-1 border rounded text-sm">Просмотр</button>
                                         </div>
