@@ -3658,6 +3658,9 @@
             const [editingValues, setEditingValues] = useState({ min: null, max: null, variation: 0, sampleCount: 0 });
             const fileInputRef = useRef(null);
 
+            // Pin state: если true — панель звонков закреплена снизу
+            const [pinnedOperator, setPinnedOperator] = useState(false);
+
             // New: month + directions + sv data (operators)
             const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0,7)); // YYYY-MM
             const [directions, setDirections] = useState([]);
@@ -3834,13 +3837,19 @@
             }
 
             // show operator samples (existing UI logic)
+            // show operator samples and pin to bottom
             function handleShowOperator(op) {
                 if (!(operatorMap[op] && operatorMap[op].count > 0)) return;
                 setSelectedOperator(op);
+                setPinnedOperator(true); // закрепляем панель внизу при просмотре
                 const samples = operatorMap[op]?.samples || [];
                 const s = new Set(selectedCalls);
                 samples.forEach(c => s.add(c.id));
                 setSelectedCalls(s);
+                // scroll to bottom (to make sure the pinned panel is visible on small screens)
+                setTimeout(() => {
+                window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+                }, 50);
             }
 
             function toggleSelectCall(callId) {
@@ -4215,7 +4224,7 @@
                 </div>
 
                 {selectedOperator && operatorMap[selectedOperator] && operatorMap[selectedOperator].count > 0 && (
-                    <div className="mt-6 p-4 border rounded">
+                    <div className={"transition-all " + (pinnedOperator ? 'fixed left-4 right-4 bottom-4 max-h-[45vh] bg-white z-50 shadow-lg rounded border overflow-auto' : 'mt-6 p-4 border rounded') }>
                     <div className="flex items-center justify-between mb-3">
                         <div>
                         <h5 className="font-medium">Оператор: {selectedOperator}</h5>
