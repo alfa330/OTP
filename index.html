@@ -3639,7 +3639,7 @@
             );
             }
 
-            function AdminCallsUploadView({ onAssignSelected }) {
+        function AdminCallsUploadView({ onAssignSelected }) {
             const [files, setFiles] = useState([]);
             const [minDurationSec, setMinDurationSec] = useState(null);
             const [maxDurationSec, setMaxDurationSec] = useState(null);
@@ -3766,7 +3766,7 @@
                 } finally { setParsing(false); }
             }
 
-            function recomputeOperatorMap(allRows, globalMin, globalMax, globalSampleCnt, globalVar, params = {}) {
+            function recomputeOperatorMap(allRows, globalMin, globalMax, globalSampleCnt, globalVar, params = {}, keepSelection = false) {
                 const raw = {};
                 for (const c of allRows) {
                 const op = c.operator || 'Неизвестный';
@@ -3807,8 +3807,10 @@
                 });
 
                 setOperatorMap(summary);
-                setSelectedOperator(null);
-                setSelectedCalls(new Set());
+                            if (!keepSelection) {
+                                setSelectedOperator(null);
+                                setSelectedCalls(new Set());
+                            }
 
                 if (globalMin != null || globalMax != null) {
                 const baseMin = globalMin != null ? Number(globalMin) : 0;
@@ -3870,12 +3872,17 @@
             }
 
             function saveOperatorParams() {
-                const op = editingOperator;
-                const cleaned = { ...editingValues };
-                cleaned.sampleCount = Number(cleaned.sampleCount) || 0;
-                setOperatorParams(prev => ({ ...prev, [op]: cleaned }));
-                setEditingOperator(null);
-            }
+                            const op = editingOperator;
+                            const cleaned = { ...editingValues };
+                            cleaned.sampleCount = Number(cleaned.sampleCount) || 0;
+                            // immediately apply and recompute, but keep the current selected operator panel open
+                            setOperatorParams(prev => {
+                                const updated = { ...prev, [op]: cleaned };
+                                recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, updated, true);
+                                return updated;
+                            });
+                            setEditingOperator(null);
+                        }
 
             function resetOperatorParams(op) {
                 setOperatorParams(prev => {
@@ -4201,17 +4208,11 @@
                         {/* Кнопки управления панелью: Settings, Close, Clear, Assign */}
                         <div className="flex items-center gap-2">
                         <button title="Настройки оператора" onClick={handleOpenSettings} className="p-2 border rounded text-sm bg-white hover:shadow" aria-label="Настройки">
-                            {/* simple gear svg */}
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-                            <path d="M11.3 1.046a1 1 0 00-2.6 0l-.2.693A7.002 7.002 0 004.66 4.1l-.63-.364a1 1 0 00-1.07 1.66l.51.436A7.003 7.003 0 002.046 11.3l-.693.2a1 1 0 000 2.6l.693.2A7.002 7.002 0 004.1 15.34l-.364.63a1 1 0 001.66 1.07l.436-.51A7.003 7.003 0 0111.3 17.954l.2.693a1 1 0 002.6 0l.2-.693a7.002 7.002 0 006.64-2.6l.63.364a1 1 0 001.07-1.66l-.51-.436a7.003 7.003 0 001.654-6.64l.693-.2a1 1 0 000-2.6l-.693-.2A7.002 7.002 0 0015.34 4.1l.364-.63a1 1 0 00-1.66-1.07l-.436.51A7.003 7.003 0 0111.3 1.046z" />
-                            </svg>
+                            <i className="fas fa-cog" aria-hidden></i>
                         </button>
 
                         <button title="Закрыть панель" onClick={handleClosePanel} className="p-2 border rounded text-sm bg-white hover:shadow" aria-label="Закрыть">
-                            {/* simple X svg */}
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
-                            <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                            </svg>
+                            <i className="fas fa-times" aria-hidden></i>
                         </button>
 
                         <button onClick={() => clearSelection()} className="px-3 py-1 border rounded">Очистить выбор</button>
