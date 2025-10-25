@@ -952,6 +952,66 @@ def get_call_evaluations():
         logging.error(f"Error fetching evaluations: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/admin/operators_summary', methods=['GET'])
+@require_api_key
+def operators_summary():
+    try:
+        # month required (YYYY-MM)
+        month = request.args.get('month')
+        if not month:
+            return jsonify({"error": "Missing month parameter (YYYY-MM)"}), 400
+        from datetime import datetime
+        try:
+            datetime.strptime(month, "%Y-%m")
+        except ValueError:
+            return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
+
+        # requester identity + role check
+        user_id_header = request.headers.get('X-User-Id') or request.args.get('requester_id')
+        if not user_id_header:
+            return jsonify({"error": "Missing X-User-Id header"}), 400
+        try:
+            requester_id = int(user_id_header)
+        except (ValueError, TypeError):
+            return jsonify({"error": "Invalid X-User-Id format"}), 400
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+
+        # requester role: support tuple/dict user shapes (following your existing pattern)
+        role = None
+        if isinstance(requester, dict):
+            role = requester.get('role')
+        else:
+            # assume role in pos 3 like in other parts of code
+            role = requester[3] if len(requester) > 3 else None
+
+        if role not in ('admin', 'sv'):
+            return jsonify({"error": "Forbidden: only admins or supervisors can access"}), 403
+
+        # optional supervisor_id param: admin can request any sv; sv will be forced to their id
+        sv_param = request.args.get('supervisor_id')
+        supervisor_id = None
+        if role == 'sv':
+            # if requester is SV — restrict to their operators only
+            supervisor_id = requester_id
+        else:
+            # admin: allow optional supervisor filter
+            if sv_param:
+                try:
+                    supervisor_id = int(sv_param)
+                except ValueError:
+                    return jsonify({"error": "Invalid supervisor_id"}), 400
+
+        operators = db.get_operators_summary_for_month(month=month, supervisor_id=supervisor_id)
+
+        return jsonify({"status": "success", "month": month, "operators": operators}), 200
+
+    except Exception as e:
+        logging.exception("Error in /api/admin/operators_summary")
+        return jsonify({"error": "Internal server error"}), 500
+
 @app.route('/api/admin/change_sv_table', methods=['POST'])
 @require_api_key
 def change_sv_table():

@@ -1349,6 +1349,84 @@ class Database:
                 } for row in rows
             ]
         
+    def get_operators_summary_for_month(self, month, supervisor_id=None):
+        """
+        Возвращает список операторов с количеством последних версий звонков за месяц.
+        Последние версии определяются как MAX(created_at) для каждой комбинации:
+        (phone_number, operator_id, month, appeal_date)
+        Если supervisor_id задан — фильтрует операторов по этому SV.
+        """
+        query = """
+        WITH latest_versions AS (
+            -- для каждой пары (phone_number, operator_id, month, appeal_date) берем последний created_at
+            SELECT
+                phone_number,
+                operator_id,
+                month,
+                appeal_date,
+                MAX(created_at) AS latest_date
+            FROM calls
+            WHERE month = %s
+            GROUP BY phone_number, operator_id, month, appeal_date
+        ),
+        latest_calls AS (
+            -- берем сами записи (последние версии) для указанного месяца и appeal_date
+            SELECT c.*
+            FROM calls c
+            JOIN latest_versions lv
+            ON c.phone_number = lv.phone_number
+            AND c.operator_id = lv.operator_id
+            AND c.month = lv.month
+            AND ( (c.appeal_date IS NULL AND lv.appeal_date IS NULL) OR (c.appeal_date = lv.appeal_date) )
+            AND c.created_at = lv.latest_date
+            WHERE c.month = %s
+        ),
+        counts AS (
+            -- считаем количество последних версий звонков по оператору
+            SELECT operator_id, COUNT(*) AS call_count
+            FROM latest_calls
+            GROUP BY operator_id
+        )
+        SELECT
+            u.id AS operator_id,
+            u.name AS operator_name,
+            u.status,
+            u.direction_id,
+            d.name AS direction_name,
+            u.supervisor_id,
+            su.name AS supervisor_name,
+            COALESCE(c.call_count, 0) AS call_count
+        FROM users u
+        LEFT JOIN directions d ON u.direction_id = d.id
+        LEFT JOIN users su ON u.supervisor_id = su.id
+        LEFT JOIN counts c ON c.operator_id = u.id
+        WHERE u.role = 'operator'
+        """
+        params = [month, month]
+
+        if supervisor_id is not None:
+            query += " AND u.supervisor_id = %s"
+            params.append(supervisor_id)
+
+        query += " ORDER BY u.name"
+
+        with self._get_cursor() as cursor:
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "status": row[2],
+                    "direction_id": row[3],
+                    "direction_name": row[4],
+                    "supervisor_id": row[5],
+                    "supervisor_name": row[6],
+                    "call_count": int(row[7])
+                }
+                for row in rows
+            ]
+
     def update_user(self, user_id, field, value, changed_by=None):
         allowed_fields = ['direction_id', 'supervisor_id', 'status', 'rate', 'hire_date']  # Add new fields
         if field not in allowed_fields:
