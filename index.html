@@ -2289,6 +2289,8 @@
             );
         };
 
+        // ==================== Hours Accounting View ====================
+
         const TABS = [
         { key: "work_time", label: "Отработанные часы", unit: "ч" },
         { key: "break_time", label: "Перерыв", unit: "ч" },
@@ -2706,6 +2708,63 @@
             firedCount: firedList.length
             };
         }, [operators, operatorsViewTab]);
+
+        // ====== FOOTER AGGREGATES ======
+        const footerTotals = useMemo(() => {
+            let sumDisplayedTotal = 0; // regular + counted training
+            let sumRegular = 0; // без тренинга
+            let sumProd = 0; // displayedTotal - norm
+            let sumNorm = 0;
+            let sumEff = 0; // sum of efficiency hours
+            let occValues = [];
+            let trainingsTotal = 0;
+            let trainingsCounted = 0;
+
+            for (const op of filteredOperators) {
+            const aggr = op.aggregates || {};
+            const regular = Number(aggr.regular_hours || 0);
+            const norm = Number(op.norm_hours || 0);
+            const effTotal = Number(aggr.total_efficiency_hours || 0);
+            // compute trainings per operator
+            const byDay = trainingsMap[op.operator_id] || {};
+            let totalHoursAll = 0;
+            let totalHoursCounted = 0;
+            for (const dKey of Object.keys(byDay)) {
+                const arr = byDay[dKey] || [];
+                for (const t of arr) {
+                const h = computeTrainingDurationHours(t) || 0;
+                totalHoursAll += h;
+                if (t.count_in_hours) totalHoursCounted += h;
+                }
+            }
+
+            const displayedTotal = regular + totalHoursCounted;
+            const prodDiff = displayedTotal - norm;
+
+            sumDisplayedTotal += displayedTotal;
+            sumRegular += regular;
+            sumProd += prodDiff;
+            sumNorm += norm;
+            sumEff += effTotal;
+            trainingsTotal += totalHoursAll;
+            trainingsCounted += totalHoursCounted;
+
+            if (regular > 0) occValues.push((effTotal / regular) * 100);
+            }
+
+            const avgOcc = occValues.length ? (occValues.reduce((a, b) => a + b, 0) / occValues.length) : null;
+
+            return {
+            sumDisplayedTotal,
+            sumRegular,
+            sumProd,
+            sumNorm,
+            sumEff,
+            avgOcc,
+            trainingsTotal,
+            trainingsCounted
+            };
+        }, [filteredOperators, trainingsMap]);
 
         // render cell with trainings marker and trainings-tab rendering
         function renderCellByMetricWithStyleAndMarker(op, day, metricKey) {
@@ -3139,6 +3198,48 @@
                         </div>
                     );
                     })}
+
+                    {/* FOOTER: итоговые строки */}
+                    {filteredOperators.length > 0 && (
+                    <div className="flex items-center border-t bg-gray-50 text-sm font-semibold">
+                        <div className="w-48 p-2 border-r sticky left-0 z-20 bg-gray-50">Итого</div>
+                        <div className="w-28 p-2 text-center border-r">—</div>
+                        <div className="w-36 p-2 text-center border-r">{footerTotals.sumRegular.toFixed(2)}</div>
+
+                        {daysArray.map(day => (
+                        <div key={`f-${day}`} className="p-2 min-w-[72px] text-center border-l">&nbsp;</div>
+                        ))}
+
+                        {selectedTab === 'work_time' && (
+                        <>
+                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumDisplayedTotal.toFixed(2)}</div>
+                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumRegular.toFixed(2)}</div>
+                            <div className="w-32 p-2 text-sm text-center border-l">{footerTotals.sumNorm > 0 ? `${((footerTotals.sumRegular / footerTotals.sumNorm) * 100).toFixed(1)}%` : '—'}</div>
+                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumProd.toFixed(2)}</div>
+                        </>
+                        )}
+
+                        {selectedTab === 'calls' && (
+                        <div className="w-36 p-2 text-sm text-center border-l">—</div>
+                        )}
+
+                        {selectedTab === 'efficiency' && (
+                        <>
+                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumEff.toFixed(2)}</div>
+                            <div className="w-32 p-2 text-sm text-center border-l">{footerTotals.avgOcc != null ? `${footerTotals.avgOcc.toFixed(1)}%` : '—'}</div>
+                        </>
+                        )}
+
+                        {selectedTab === 'trainings' && (
+                        <>
+                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.trainingsTotal.toFixed(2)}</div>
+                            <div className="w-32 p-2 text-sm text-center border-l">{footerTotals.trainingsCounted.toFixed(2)}</div>
+                            <div className="w-36 p-2 text-sm text-center border-l">{(footerTotals.trainingsTotal - footerTotals.trainingsCounted).toFixed(2)}</div>
+                        </>
+                        )}
+                    </div>
+                    )}
+
                 </div>
                 </div>
             </div>
@@ -3323,8 +3424,7 @@
                                     key={t.id}
                                     className={`p-3 rounded-lg border flex flex-col gap-2 ${
                                     t.count_in_hours ? 'bg-green-50 border-green-200' : 'bg-yellow-50 border-yellow-200'
-                                    }`}
-                                >
+                                    }`}>
                                     <div className="flex items-center justify-between">
                                     <div className="text-sm font-medium flex items-center gap-3">
                                         <i className="fas fa-clock" aria-hidden="true" />
