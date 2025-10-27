@@ -4511,57 +4511,37 @@
                     </div>
 
                     <div className="p-4 bg-white rounded border">
-                    <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center justify-between mb-2">
                         <div className="text-sm font-medium">Диапазон длительности / выборка</div>
                         <div className="text-xs text-gray-500">Визуальная подсказка</div>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {[
-                        { label: 'Мин. длительность (hh:mm:ss)', value: minDurationSec, onChange: setMinDurationSec, aria: 'min duration' },
-                        { label: 'Макс. длительность (hh:mm:ss)', value: maxDurationSec, onChange: setMaxDurationSec, aria: 'max duration' },
-                        { label: 'Вариация (+- hh:mm:ss)', value: variationSec, onChange: setVariationSec, aria: 'variation' },
-                        ].map((f, i) => (
-                        <div key={i}>
-                            <label className="block text-xs text-gray-700">{f.label}</label>
-                            <div className="mt-1">
-                            <DurationInput valueSec={f.value} onChange={f.onChange} ariaLabel={f.aria} />
-                            </div>
                         </div>
-                        ))}
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                            <label className="block text-xs text-gray-700">Мин. длительность</label>
+                            <div className="mt-1"><DurationInput valueSec={minDurationSec} onChange={v=>setMinDurationSec(v)} ariaLabel="min duration" /></div>
+                        </div>
 
                         <div>
-                        <label className="block text-xs text-gray-700">Сколько выбрать (на оператора)</label>
-                        <input
-                            type="number"
-                            min="0"
-                            value={sampleCount}
-                            onChange={e => setSampleCount(Number(e.target.value))}
-                            className="w-28 mt-1 p-2 border rounded"
-                        />
-                        <div className="text-xs text-gray-500 mt-1">Жёлтое = min(кол-во в CSV, это значение или per-operator sampleCount)</div>
+                            <label className="block text-xs text-gray-700">Вариация (+-)</label>
+                            <div className="mt-1"><DurationInput valueSec={variationSec} onChange={v=>setVariationSec(v)} ariaLabel="variation" /></div>
                         </div>
-                    </div>
 
-                    <div className="mt-3 flex gap-2">
+                        <div>
+                            <label className="block text-xs text-gray-700">Макс. длительность</label>
+                            <div className="mt-1"><DurationInput valueSec={maxDurationSec} onChange={v=>setMaxDurationSec(v)} ariaLabel="max duration" /></div>
+                        </div>
+
+                        <div>
+                            <label className="block text-xs text-gray-700">Сколько выбрать (на оператора)</label>
+                            <input type="number" min="0" value={sampleCount} onChange={e=>setSampleCount(e.target.value)} className="w-28 mt-1 p-2 border rounded" />
+                        </div>
+                        </div>
+
+                        <div className="mt-3 flex gap-2">
                         <button onClick={applyFilters} className="px-3 py-2 rounded bg-green-600 text-white">Применить</button>
-
-                        <button
-                        onClick={() => {
-                            setMinDurationSec(null);
-                            setMaxDurationSec(null);
-                            setVariationSec(0);
-                            setSampleCount(3);
-                            setSelectedStatuses(['all']);
-                            setOnlyWithCsv(false);
-                            setSelectedDirections(['all']);
-                            applyFilters();
-                        }}
-                        className="px-3 py-2 rounded border"
-                        >
-                        Сброс
-                        </button>
-                    </div>
+                        <button onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); setSelectedStatuses(['all']); setOnlyWithCsv(false); setSelectedDirections(['all']); applyFilters(); }} className="px-3 py-2 rounded border">Сброс</button>
+                        </div>
                     </div>
 
                     </div>
