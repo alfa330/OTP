@@ -4475,8 +4475,8 @@
                 <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
                 <div className="flex items-start justify-between gap-4 mb-4">
                     <div>
-                    <h3 className="text-lg font-semibold">Загрузка звонков (CSV)</h3>
-                    <div className="text-sm text-gray-500">Админ / Супервайзер — визуальная версия</div>
+                    <h3 className="text-lg font-semibold">Деление звонков</h3>
+                    <div className="text-sm text-gray-500">Загружайте файл и делите звонки.</div>
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -4490,7 +4490,7 @@
                     {/* Left: Quick actions & files (larger) */}
                     <div className="lg:col-span-2 space-y-3">
                     <div className="p-4 bg-gray-50 rounded border">
-                        <label className="block text-sm font-medium text-gray-700">Файлы (CSV)</label>
+                        <label className="block text-sm font-medium text-gray-700">Загрузка файла</label>
                         <div className="mt-2 flex items-center gap-3">
                         <input ref={fileInputRef} type="file" accept=".csv,.xls,.xlsx" multiple onChange={handleFilesSelected} className="text-sm" />
                         <button onClick={handleParseFiles} disabled={parsing || files.length===0} className={`px-3 py-2 rounded text-white ${parsing ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
@@ -4507,7 +4507,7 @@
                         </div>
                         )}
 
-                        <div className="mt-3 text-xs text-gray-500">Поддерживаются CSV файлы; парсер может пропускать заголовки.</div>
+                        <div className="mt-3 text-xs text-gray-500">Поддерживаются CSV файлы; Заголовки пропускаются автоматически.</div>
                     </div>
 
                     <div className="p-4 bg-white rounded border">
@@ -4533,8 +4533,8 @@
                         </div>
 
                         <div>
-                            <label className="block text-xs text-gray-700">Сколько выбрать (на оператора)</label>
-                            <input type="number" min="0" value={sampleCount} onChange={e=>setSampleCount(e.target.value)} className="w-28 mt-1 p-2 border rounded" />
+                            <label className="block text-xs text-gray-700">Выбрать звонки</label>
+                            <input type="number" min="0" value={sampleCount} onChange={e=>setSampleCount(e.target.value)} className="w-12 mt-1 p-1 border rounded" />
                         </div>
                         </div>
 
@@ -4599,7 +4599,7 @@
                     {activeRange ? (
                         <div className="p-3 rounded border bg-white text-sm text-gray-700">Ищем звонки с длительностью от <strong>{secondsToHms(activeRange.min)}</strong> {activeRange.max != null ? <>до <strong>{secondsToHms(activeRange.max)}</strong></> : 'и больше'} (с учётом вариации)</div>
                     ) : (
-                        <div className="p-3 rounded border bg-white text-sm text-gray-500">Диапазон не задан — показываются все звонки (если оператор не имеет кастомных настроек).</div>
+                        <div className="p-3 rounded border bg-white text-sm text-gray-500">Диапазон не задан — показываются все звонки (если оператор не имеет ручных настроек).</div>
                     )}
                     </div>
                 </div>
