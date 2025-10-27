@@ -4615,19 +4615,61 @@
                         </div>
                         <ul className="space-y-2">
                         {insufficientOperators.map((it, idx) => (
-                            <li key={(it.op ? (it.op.name||it.op.id) : it.csvName) + idx} className="flex items-center justify-between p-2 rounded border bg-white">
-                            <div className="flex-1">
-                                <div className="font-medium">{it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName}</div>
-                                <div className="text-xs text-gray-500">{it.op ? (it.op.direction_name || it.op.direction || '') : 'CSV-only'}</div>
-                                <div className="text-xs text-red-600 mt-1">НЕДОСТАТОЧНО ({it.csvCount} / {it.desired})</div>
-                            </div>
+                            <li
+                                key={(it.op ? (it.op.name || it.op.id) : it.csvName) + idx}
+                                className="flex items-center justify-between p-3 rounded-xl border bg-white shadow-sm hover:shadow-md transition-all duration-200"
+                                >
+                                <div className="flex-1">
+                                    <div className="font-semibold text-gray-800 flex items-center gap-2">
+                                    <i className="fa-solid fa-user text-blue-500 text-sm"></i>
+                                    {it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName}
+                                    </div>
 
-                            <div className="flex items-center gap-2">
-                                {it.op && <div className="text-xs font-semibold px-2 py-0.5 rounded border">Оценки: {it.op.call_count ?? 0}</div>}
-                                <div className="text-xs font-semibold px-2 py-0.5 rounded border">Подходящие: {it.csvCount}</div>
-                                <button onClick={() => openEditOperator(it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName)} className="px-2 py-1 border rounded text-sm">Настройки</button>
-                                <button onClick={() => { if (it.op) handleShowOperator(it.op.name || it.op.id); else { handleShowOperator(it.matchedKey || it.csvName); } }} className="px-2 py-1 border rounded text-sm">Просмотр</button>
-                            </div>
+                                    <div className="text-xs text-gray-500 flex items-center gap-1 mt-0.5">
+                                    <i className="fa-solid fa-diagram-project text-gray-400"></i>
+                                    {it.op ? (it.op.direction_name || it.op.direction || '') : 'CSV-only'}
+                                    </div>
+
+                                    <div className="text-xs text-red-600 mt-1 flex items-center gap-1">
+                                    <i className="fa-solid fa-triangle-exclamation text-red-500"></i>
+                                    НЕДОСТАТОЧНО ({it.csvCount} / {it.desired})
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center gap-2 text-xs">
+                                    {it.op && (
+                                    <div className="px-2 py-0.5 rounded-lg border border-blue-300 text-blue-600 font-medium flex items-center gap-1 bg-blue-50">
+                                        <i className="fa-solid fa-phone"></i>
+                                        Оценки: {it.op.call_count ?? 0}
+                                    </div>
+                                    )}
+
+                                    <div className="px-2 py-0.5 rounded-lg border border-green-300 text-green-600 font-medium flex items-center gap-1 bg-green-50">
+                                    <i className="fa-solid fa-check"></i>
+                                    Подходящие: {it.csvCount}
+                                    </div>
+
+                                    <button
+                                    onClick={() =>
+                                        openEditOperator(it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName)
+                                    }
+                                    className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm bg-gray-50 hover:bg-gray-100 transition-colors"
+                                    >
+                                    <i className="fa-solid fa-gear text-gray-500"></i>
+                                    Настройки
+                                    </button>
+
+                                    <button
+                                    onClick={() => {
+                                        if (it.op) handleShowOperator(it.op.name || it.op.id);
+                                        else handleShowOperator(it.matchedKey || it.csvName);
+                                    }}
+                                    className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm bg-gray-50 hover:bg-gray-100 transition-colors"
+                                    >
+                                    <i className="fa-solid fa-eye text-gray-500"></i>
+                                    Просмотр
+                                    </button>
+                                </div>
                             </li>
                         ))}
                         </ul>
