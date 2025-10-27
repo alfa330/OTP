@@ -3671,10 +3671,6 @@
             );
             }
 
-
-
-            import React, { useState, useRef, useEffect } from "react";
-
             /**
              * Модифицированный AdminCallsUploadView
              * Основано на вашем файле ппп.html. Место исходных фрагментов: ппп.html. :contentReference[oaicite:1]{index=1}
@@ -3744,7 +3740,7 @@
             );
             }
 
-            export default function AdminCallsUploadView({ onAssignSelected, user }) {
+        function AdminCallsUploadView({ onAssignSelected, user }) {
             const [files, setFiles] = useState([]);
             const [minDurationSec, setMinDurationSec] = useState(null);
             const [maxDurationSec, setMaxDurationSec] = useState(null);
