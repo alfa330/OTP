@@ -5704,6 +5704,8 @@
                 const [search, setSearch] = useState("");
                 const [operatorsLoaded, setOperatorsLoaded] = useState(false);
                 const [calendarView, setCalendarView] = useState(false);
+                // 'active' or 'fired' — переключатель, какие операторы показывать
+                const [operatorsTab, setOperatorsTab] = useState('active');
                 const [calendarModal, setCalendarModal] = useState({ open: false, date: '', trainings: [] });
                 const [selectedCalendarTraining, setSelectedCalendarTraining] = useState(null);
                 // Цвета для SV
@@ -6076,6 +6078,23 @@
                                 <label className="block text-xs font-medium text-gray-700 mb-1">Поиск:</label>
                                 <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Поиск по оператору или супервайзеру..." className="p-1 border rounded w-full text-xs" />
                             </div>
+
+                            {/* Tabs: Активные / Уволенные */}
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={() => setOperatorsTab('active')}
+                                    className={`px-3 py-1 rounded-lg text-xs font-semibold ${operatorsTab === 'active' ? 'bg-green-600 text-white' : 'bg-white text-gray-700 border border-gray-200'}`}
+                                >
+                                    Активные
+                                </button>
+                                <button
+                                    onClick={() => setOperatorsTab('fired')}
+                                    className={`px-3 py-1 rounded-lg text-xs font-semibold ${operatorsTab === 'fired' ? 'bg-red-600 text-white' : 'bg-white text-gray-700 border border-gray-200'}`}
+                                >
+                                    Уволенные
+                                </button>
+                            </div>
+
                             <button onClick={() => setCalendarView(v => !v)} className={`ml-4 px-3 py-1 rounded-lg border text-xs font-semibold ${calendarView ? 'bg-blue-500 text-white' : 'bg-white text-blue-700 border-blue-400'} hover:bg-blue-100 transition`}>
                                 {calendarView ? 'Список' : 'Календарь'}
                             </button>
@@ -6146,35 +6165,42 @@
                                 );
                             })()
                         ) : (
-                            svGroups.map(([svName, ops]) => {
-                                const searchLower = search.trim().toLowerCase();
-                                const filteredOps = ops.filter(op => op.name.toLowerCase().includes(searchLower) || searchLower === "");
-                                const showGroup = svName && svName.toLowerCase().includes(searchLower) || filteredOps.length > 0 || searchLower === "";
-                                if (!showGroup) return null;
-                                return (
-                                    <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
-                                        <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Супервайзер: {svName === user.name ? 'Вы' : svName}</h2>
-                                        <div className="space-y-4">
-                                            {filteredOps.map(op => (
-                                                <div key={op.id} className="flex items-center bg-white rounded-lg shadow p-2 mb-2 border border-gray-200">
-                                                    <span className="font-semibold text-gray-900 w-36 min-w-[140px] text-sm truncate">{op.name}</span>
-                                                    <div className="flex flex-row flex-wrap items-center ml-2">
-                                                        {(trainings[op.id] || []).map(t => (
-                                                            <TrainingBox
-                                                                key={t.id}
-                                                                training={t}
-                                                                onEdit={() => handleEdit(op.id, t)}
-                                                                onDelete={() => handleDelete(t.id)}
-                                                            />
-                                                        ))}
-                                                        <button onClick={() => handleAdd(op.id)} className="ml-2 px-2 py-1 rounded-lg border border-dashed border-green-400 text-green-600 bg-white hover:bg-green-50 transition text-xs">+</button>
+                            (() => {
+                                // Фильтруем группы операторов по вкладке (активные / уволенные)
+                                const displaySvGroups = svGroups
+                                    .map(([svName, ops]) => [svName, ops.filter(op => operatorsTab === 'active' ? (op.status !== 'fired') : (op.status === 'fired'))])
+                                    .filter(([svName, ops]) => ops.length > 0);
+
+                                return displaySvGroups.map(([svName, ops]) => {
+                                    const searchLower = search.trim().toLowerCase();
+                                    const filteredOps = ops.filter(op => op.name.toLowerCase().includes(searchLower) || searchLower === "");
+                                    const showGroup = svName && svName.toLowerCase().includes(searchLower) || filteredOps.length > 0 || searchLower === "";
+                                    if (!showGroup) return null;
+                                    return (
+                                        <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
+                                            <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Супервайзер: {svName === user.name ? 'Вы' : svName}</h2>
+                                            <div className="space-y-4">
+                                                {filteredOps.map(op => (
+                                                    <div key={op.id} className="flex items-center bg-white rounded-lg shadow p-2 mb-2 border border-gray-200">
+                                                        <span className="font-semibold text-gray-900 w-36 min-w-[140px] text-sm truncate">{op.name}</span>
+                                                        <div className="flex flex-row flex-wrap items-center ml-2">
+                                                            {(trainings[op.id] || []).map(t => (
+                                                                <TrainingBox
+                                                                    key={t.id}
+                                                                    training={t}
+                                                                    onEdit={() => handleEdit(op.id, t)}
+                                                                    onDelete={() => handleDelete(t.id)}
+                                                                />
+                                                            ))}
+                                                            <button onClick={() => handleAdd(op.id)} className="ml-2 px-2 py-1 rounded-lg border border-dashed border-green-400 text-green-600 bg-white hover:bg-green-50 transition text-xs">+</button>
+                                                        </div>
                                                     </div>
-                                                </div>
-                                            ))}
+                                                ))}
+                                            </div>
                                         </div>
-                                    </div>
-                                );
-                            })
+                                    );
+                                });
+                            })()
                         )}
                         <TrainingModal isOpen={showModal} onClose={() => setShowModal(false)} onSave={handleSave} initialData={editingTraining || {}} />
                         {/* Модальное окно календаря по дню (общий) */}
