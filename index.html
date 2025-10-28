@@ -4288,6 +4288,29 @@
             const visibleOperators = Object.entries(operatorMap).filter(([op, info]) => info && info.count > 0);
             function applyFilters() { recomputeOperatorMap(calls, minDurationSec === null ? null : Number(minDurationSec), maxDurationSec === null ? null : Number(maxDurationSec), Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams); }
 
+            // Combined action: parse uploaded files, fetch operators for the selected month, then apply filters
+            async function splitAll() {
+                if (!files || files.length === 0) return;
+                try {
+                    // parse files (this already recomputes operator map)
+                    await handleParseFiles();
+                } catch (err) {
+                    console.error('Error during parsing in splitAll:', err);
+                }
+                try {
+                    // refresh operators from server for the selected month
+                    await fetchSvOperators(selectedMonth);
+                } catch (err) {
+                    console.error('Error fetching operators in splitAll:', err);
+                }
+                try {
+                    // ensure filters are applied (recompute map)
+                    applyFilters();
+                } catch (err) {
+                    console.error('Error applying filters in splitAll:', err);
+                }
+            }
+
             function handleClosePanel() {
                 setPinnedOperator(false);
                 setSelectedOperator(null);
@@ -4491,8 +4514,8 @@
                         <label className="block text-sm font-medium text-gray-700">Загрузка файла</label>
                         <div className="mt-2 flex items-center gap-3">
                         <input ref={fileInputRef} type="file" accept=".csv,.xls,.xlsx" multiple onChange={handleFilesSelected} className="text-sm" />
-                        <button onClick={handleParseFiles} disabled={parsing || files.length===0} className={`px-3 py-2 rounded text-white ${parsing ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
-                            {parsing ? 'Парсинг...' : 'Парсить и показать'}
+                        <button onClick={splitAll} disabled={files.length===0 || parsing || loadingOperators} className={`px-3 py-2 rounded text-white ${(parsing || loadingOperators) ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                            {(parsing || loadingOperators) ? 'Работа...' : 'Делить'}
                         </button>
                         <button onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); setActiveRange(null); setOperatorParams({}); if (fileInputRef.current) fileInputRef.current.value = null; }} className="px-3 py-2 rounded border">Сброс</button>
                         </div>
@@ -4537,7 +4560,6 @@
                         </div>
 
                         <div className="mt-3 flex gap-2">
-                        <button onClick={applyFilters} className="px-3 py-2 rounded bg-green-600 text-white">Применить</button>
                         <button onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); setSelectedStatuses(['all']); setOnlyWithCsv(false); setSelectedDirections(['all']); applyFilters(); }} className="px-3 py-2 rounded border">Сброс</button>
                         </div>
                     </div>
@@ -4586,7 +4608,6 @@
                             <select value={selectedMonth} onChange={e=>setSelectedMonth(e.target.value)} className="p-2 border rounded flex-1">
                                 {getMonthOptions()}
                             </select>
-                            <button onClick={() => fetchSvOperators(selectedMonth)} className="px-3 py-2 rounded border">Подгрузить</button>
                             </div>
                         </div>
 
