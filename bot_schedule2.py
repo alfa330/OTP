@@ -3597,7 +3597,7 @@ async def _is_admin_user(tg_id):
                 return bool(row and row[0] == 'admin')
         return await loop.run_in_executor(None, _check)
     except Exception as e:
-        logger.exception("Error checking admin: %s", e)
+        logging.exception("Error checking admin: %s", e)
         return False
 
 async def _approve_call_and_get_notify_row(call_id, approver_tg_id):
@@ -3658,7 +3658,7 @@ async def handle_approve_reval(callback_query: types.CallbackQuery):
     try:
         is_admin = await _is_admin_user(user.id)
     except Exception as e:
-        logger.exception("Ошибка проверки администратора: %s", e)
+        logging.exception("Ошибка проверки администратора: %s", e)
         is_admin = False
 
     if not is_admin:
@@ -3669,7 +3669,7 @@ async def handle_approve_reval(callback_query: types.CallbackQuery):
     try:
         notify_row = await _approve_call_and_get_notify_row(call_id, user.id)
     except Exception as e:
-        logger.exception("Ошибка при пометке звонка: %s", e)
+        logging.exception("Ошибка при пометке звонка: %s", e)
         await cq.answer("Ошибка сервера при одобрении", show_alert=True)
         return
 
@@ -3677,14 +3677,14 @@ async def handle_approve_reval(callback_query: types.CallbackQuery):
     try:
         await cq.answer("Переоценка одобрена администратором", show_alert=False)
     except Exception as e:
-        logger.debug("Не удалось послать answerCallbackQuery: %s", e)
+        logging.debug("Не удалось послать answerCallbackQuery: %s", e)
 
     # убрать inline-кнопку (если возможно)
     try:
         if cq.message:
             await cq.bot.edit_message_reply_markup(chat_id=cq.message.chat.id, message_id=cq.message.message_id, reply_markup=None)
     except Exception as e:
-        logger.debug("Не удалось удалить reply_markup: %s", e)
+        logging.debug("Не удалось удалить reply_markup: %s", e)
 
     # уведомить супервайзера и оценивающего (если есть tg id)
     if notify_row:
@@ -3695,18 +3695,18 @@ async def handle_approve_reval(callback_query: types.CallbackQuery):
                     await cq.bot.send_message(int(sv_tg),
                         f"✅ Ваша заявка на переоценку для Call ID {call_id} одобрена администратором. Можете инициировать переоценку.")
                 except Exception as e:
-                    logger.debug("Не удалось уведомить супервайзера: %s", e)
+                    logging.debug("Не удалось уведомить супервайзера: %s", e)
             if eval_tg:
                 try:
                     await cq.bot.send_message(int(eval_tg),
                         f"ℹ️ Админ одобрил запрос на переоценку для Call ID {call_id}. Для переоценки создайте новую оценку с is_correction=true и previous_version_id={call_id}.")
                 except Exception as e:
-                    logger.debug("Не удалось уведомить оценивающего: %s", e)
+                    logging.debug("Не удалось уведомить оценивающего: %s", e)
         except Exception as e:
-            logger.exception("Ошибка при отправке уведомлений после approve: %s", e)
+            logging.exception("Ошибка при отправке уведомлений после approve: %s", e)
 
     # (опционально) логирование
-    logger.info("Call %s approved by tg_user %s", call_id, user.id)
+    logging.info("Call %s approved by tg_user %s", call_id, user.id)
 
 
 # === Супервайзерам =============================================================================================
