@@ -4853,16 +4853,17 @@
                             </div>
 
                             <div className="flex items-center gap-3">
-                            <button title="Настройки оператора" onClick={handleOpenSettings} className="p-3 border rounded text-base bg-white hover:shadow" aria-label="Настройки">
-                                <i className="fa-solid fa-gear text-xl text-gray-700"></i>
-                            </button>
-
-                            <button title="Закрыть панель" onClick={handleClosePanel} className="p-3 border rounded text-base bg-white hover:shadow" aria-label="Закрыть">
-                                <i className="fa-solid fa-xmark text-xl text-gray-700"></i>
-                            </button>
 
                             <button onClick={() => clearSelection()} className="px-4 py-2 border rounded text-sm">Очистить выбор</button>
                             <button onClick={handleAssign} className="px-4 py-2 bg-blue-600 text-white rounded text-sm">Экспорт</button>
+
+                            <button title="Настройки оператора" onClick={handleOpenSettings} className="px-2 p-1 border rounded text-base bg-white hover:shadow" aria-label="Настройки">
+                                <i className="fa-solid fa-gear text-xl text-gray-700"></i>
+                            </button>
+
+                            <button title="Закрыть панель" onClick={handleClosePanel} className="px-2 p-1 border rounded text-base bg-white hover:shadow" aria-label="Закрыть">
+                                <i className="fa-solid fa-xmark text-xl text-gray-700"></i>
+                            </button>
                             </div>
                         </div>
 
