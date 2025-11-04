@@ -721,20 +721,28 @@ class Database:
         start = date(year, mon, 1)
         end = date(year, mon, calendar.monthrange(year, mon)[1])
         with self._get_cursor() as cursor:
+            # Sum daily_hours fields independently to avoid duplication when multiple fines exist per day.
             cursor.execute("""
                 SELECT
-                    COALESCE(SUM(dh.work_time),0),
-                    COALESCE(SUM(dh.break_time),0),
-                    COALESCE(SUM(dh.talk_time),0),
-                    COALESCE(SUM(dh.calls),0),
-                    COALESCE(SUM(dh.efficiency),0),
-                    COALESCE(SUM(df.amount),0)
-                FROM daily_hours dh
-                LEFT JOIN daily_fines df ON df.daily_hours_id = dh.id
-                WHERE dh.operator_id = %s AND dh.day >= %s AND dh.day <= %s
+                    COALESCE(SUM(work_time),0),
+                    COALESCE(SUM(break_time),0),
+                    COALESCE(SUM(talk_time),0),
+                    COALESCE(SUM(calls),0),
+                    COALESCE(SUM(efficiency),0)
+                FROM daily_hours
+                WHERE operator_id = %s AND day >= %s AND day <= %s
             """, (operator_id, start, end))
             row = cursor.fetchone()
-            total_work_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours, total_fines = row
+            total_work_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours = row
+
+            # Sum fines from daily_fines separately (join via daily_hours to respect day/operator filter)
+            cursor.execute("""
+                SELECT COALESCE(SUM(df.amount), 0)
+                FROM daily_fines df
+                JOIN daily_hours dh ON df.daily_hours_id = dh.id
+                WHERE dh.operator_id = %s AND dh.day >= %s AND dh.day <= %s
+            """, (operator_id, start, end))
+            total_fines = cursor.fetchone()[0] or 0.0
 
             # Защита от деления на ноль
             if total_work_time and float(total_work_time) > 0:
