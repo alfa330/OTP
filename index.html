@@ -2633,13 +2633,21 @@
                 updated.amount = Number(mins) * 50;
                 } else if (field === 'reason') {
                 updated.reason = value;
-                if (String(value) === 'Опоздание') {
+                const rv = String(value);
+                if (rv === 'Опоздание') {
                     // derive minutes from existing amount if present
                     const amt = Number(updated.amount || 0);
                     updated.minutes = amt ? Math.round(amt / 50) : 0;
                     updated.amount = Number(updated.minutes) * 50;
+                } else if (rv === 'Не выход') {
+                    // fixed fine
+                    updated.minutes = null;
+                    updated.amount = 10000;
+                } else if (rv === 'Прокси карта') {
+                    updated.minutes = null;
+                    updated.amount = 5000;
                 } else {
-                    // clear minutes when not Опоздание
+                    // clear minutes when not Опоздание and keep amount editable
                     updated.minutes = null;
                 }
                 } else {
@@ -3552,8 +3560,10 @@
                                 <div className="flex gap-3 items-center">
                                 <div className="flex-1">
                                     <label className="text-xs text-gray-700">Сумма</label>
-                                    <input type="number" step="0.01" className="w-full p-2 rounded-md border" value={f.amount} onChange={e => updateFineField(idx, 'amount', e.target.value)} disabled={String(f.reason) === 'Опоздание'} />
+                                    <input type="number" step="0.01" className="w-full p-2 rounded-md border" value={f.amount} onChange={e => updateFineField(idx, 'amount', e.target.value)} disabled={[ 'Опоздание', 'Не выход', 'Прокси карта' ].includes(String(f.reason))} />
                                     {String(f.reason) === 'Опоздание' && <div className="text-xs text-gray-500 mt-1">Сумма рассчитывается автоматически: минуты × 50</div>}
+                                    {String(f.reason) === 'Не выход' && <div className="text-xs text-gray-500 mt-1">Фиксированная сумма: 10000</div>}
+                                    {String(f.reason) === 'Прокси карта' && <div className="text-xs text-gray-500 mt-1">Фиксированная сумма: 5000</div>}
                                 </div>
                                 <div className="flex-1">
                                     <label className="text-xs text-gray-700">Причина</label>
