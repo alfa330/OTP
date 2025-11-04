@@ -6610,7 +6610,8 @@
                     // проверяем тренинги
                     const hasTraining = trainings.some(t => t.date === dateStr);
 
-                    cells.push({ day, dateStr, hours, dayData, isPastDayWithZero, isToday, hasTraining });
+                    const hasFines = Array.isArray(dayData?.fines) && dayData.fines.length > 0;
+                    cells.push({ day, dateStr, hours, dayData, isPastDayWithZero, isToday, hasTraining, hasFines });
                 }
 
                 const handleDayClick = (cell) => {
@@ -6734,6 +6735,8 @@
 
                             {/* 🔶 Маркер тренинга */}
                             {cell.hasTraining && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 shadow" />}
+                            {/* 🔴 Маркер штрафов */}
+                            {cell.hasFines && <span className="absolute top-1 right-4 w-2 h-2 rounded-full bg-red-400 shadow" />}
 
                             {/* Tooltip ячейки (дата) */}
                             <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1 bg-gray-900 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 group-focus:opacity-100 z-50 transition-opacity">
@@ -6768,6 +6771,10 @@
                         {/* 🔶 Маркер тренинга */}
                         <span className="inline-flex items-center gap-1">
                             <span className="inline-block w-2 h-2 rounded-full bg-yellow-400" /> Тренинг
+                        </span>
+                        {/* 🔴 Маркер штрафа */}
+                        <span className="inline-flex items-center gap-1">
+                            <span className="inline-block w-2 h-2 rounded-full bg-red-400" /> Штраф
                         </span>
                         </p>
                     </div>
@@ -6991,6 +6998,41 @@
                                                     </div>
                                                 )}
                                                 </div>
+                                            </div>
+                                            </div>
+                                        </div>
+                                        );
+                                    })}
+                                    </div>
+                                </div>
+                                );
+                            })()}
+
+                            {/* Штрафы (если есть) */}
+                            {(() => {
+                                const finesOnDay = Array.isArray(selectedDay.dayData?.fines) ? selectedDay.dayData.fines : [];
+                                if (finesOnDay.length === 0) return null;
+                                const total = finesOnDay.reduce((s, f) => s + (Number(f.amount || f.fine_amount || 0) || 0), 0);
+                                return (
+                                <div className="mb-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                    <h4 className="text-md font-semibold text-gray-800">Штрафы</h4>
+                                    <div className="text-sm text-gray-600">Сумма: <span className="font-medium">{total}</span></div>
+                                    </div>
+
+                                    <div className="space-y-2">
+                                    {finesOnDay.map((f, idx) => {
+                                        const amt = Number(f.amount || f.fine_amount || 0) || 0;
+                                        const minutes = (String(f.reason) === 'Опоздание') ? Math.round(amt / 50) : null;
+                                        return (
+                                        <div key={idx} className="p-3 bg-red-50 border-l-4 border-red-400 rounded-md">
+                                            <div className="flex items-start justify-between">
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-sm text-gray-800"><span className="font-semibold">Причина:</span> {f.reason || f.fine_reason || '—'}</p>
+                                                <p className="text-sm text-gray-800"><span className="font-semibold">Сумма:</span> {amt}</p>
+                                                {minutes !== null && <p className="text-sm text-gray-800"><span className="font-semibold">Минуты:</span> {minutes}</p>}
+                                                {f.comment && <p className="text-sm text-gray-600 italic">"{f.comment}"</p>}
+                                                <p className="text-xs text-gray-500 mt-1">Добавлено: {f.created_at || ''}</p>
                                             </div>
                                             </div>
                                         </div>
