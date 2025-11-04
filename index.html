@@ -2556,24 +2556,6 @@
             const dayKey = String(day);
             const dayData = operator.daily?.[dayKey] ?? { work_time: 0, break_time: 0, talk_time: 0, calls: 0, efficiency: 0 };
             setSelectedCell({ operator, day, dateStr: dayToDateStr(day) });
-            // support multiple fines per day: if dayData.fines exists use it, otherwise migrate single fine fields
-            const finesFromData = (dayData.fines && Array.isArray(dayData.fines)) ? dayData.fines.map(f => {
-            const amount = Number(f.amount ?? f.fine_amount ?? 0) || 0;
-            const reason = f.reason ?? f.fine_reason ?? '';
-            const minutes = reason === 'Опоздание' ? (Number(f.minutes) || Math.round(amount / 50)) : null;
-            return {
-                amount,
-                reason,
-                comment: f.comment ?? f.fine_comment ?? '',
-                minutes
-            };
-            }) : ((dayData.fine_amount || dayData.fine_reason || dayData.fine_comment) ? [{
-            amount: Number(dayData.fine_amount || 0) || 0,
-            reason: dayData.fine_reason || '',
-            comment: dayData.fine_comment || '',
-            minutes: (dayData.fine_reason === 'Опоздание') ? Math.round((Number(dayData.fine_amount||0) || 0) / 50) : null
-            }] : []);
-
             setCellModel({
             operator_id: operator.operator_id,
             name: operator.name,
@@ -2584,7 +2566,23 @@
             talk_time: Number(dayData.talk_time || 0),
             calls: Number(dayData.calls || 0),
             efficiency: Number(dayData.efficiency || 0),
-            fines: finesFromData,
+            // support multiple fines per day: prefer dayData.fines (array), fallback to single fine fields
+            fines: Array.isArray(dayData.fines) && dayData.fines.length > 0 ? dayData.fines.map(f => {
+                const amt = Number(f.amount || f.fine_amount || 0);
+                const reason = f.reason || f.fine_reason || '';
+                return {
+                amount: amt,
+                minutes: String(reason) === 'Опоздание' ? Math.round(amt / 50) : null,
+                reason,
+                comment: f.comment || f.fine_comment || ''
+                };
+            }) : (
+                (dayData.fine_amount || dayData.fine_reason || dayData.fine_comment) ? (function(){
+                const amt = Number(dayData.fine_amount || 0);
+                const reason = dayData.fine_reason || '';
+                return [{ amount: amt, minutes: String(reason) === 'Опоздание' ? Math.round(amt / 50) : null, reason, comment: dayData.fine_comment || '' }];
+                })() : []
+            ),
             month
             });
         }
@@ -2598,21 +2596,19 @@
             setCellModel(prev => {
             if (!prev) return prev;
             const next = { ...prev };
-            if (['work_time', 'break_time', 'talk_time', 'efficiency'].includes(field)) next[field] = value === '' ? '' : Number(value);
+            if (['work_time', 'break_time', 'talk_time', 'efficiency', 'fine_amount'].includes(field)) next[field] = value === '' ? '' : Number(value);
             else if (field === 'calls') next[field] = value === '' ? '' : parseInt(value, 10) || 0;
             else next[field] = value;
             return next;
             });
         }
 
-        // fines helpers: add, update, remove
+        // Fines: support multiple fines per day in the UI
         function addFine() {
             setCellModel(prev => {
             if (!prev) return prev;
             const next = { ...prev };
-            const arr = Array.isArray(next.fines) ? [...next.fines] : [];
-            arr.push({ amount: 0, reason: '', comment: '' });
-            next.fines = arr;
+            next.fines = Array.isArray(next.fines) ? [...next.fines, { amount: 0, minutes: 0, reason: '', comment: '' }] : [{ amount: 0, minutes: 0, reason: '', comment: '' }];
             return next;
             });
         }
@@ -2621,39 +2617,36 @@
             setCellModel(prev => {
             if (!prev) return prev;
             const next = { ...prev };
-            const arr = Array.isArray(next.fines) ? [...next.fines] : [];
-            if (idx < 0 || idx >= arr.length) return prev;
-            const fine = { ...arr[idx] };
-            if (field === 'amount') {
-            // only allow direct amount edits for non-Опоздание fines
-            fine.amount = value === '' ? '' : Number(value);
-            // if reason is Опоздание and user types amount (should be disabled in UI), also update minutes
-            if (fine.reason === 'Опоздание') {
-                fine.minutes = Math.round((Number(fine.amount) || 0) / 50);
-            }
-            } else if (field === 'minutes') {
-            // minutes -> amount
-            const mins = value === '' ? '' : parseInt(value, 10) || 0;
-            fine.minutes = mins;
-            fine.amount = mins !== '' ? Number(mins) * 50 : '';
-            } else if (field === 'reason') {
-            const newReason = value;
-            fine.reason = newReason;
-            if (newReason === 'Опоздание') {
-                // convert existing amount to minutes if possible
-                const existingAmount = Number(fine.amount) || 0;
-                fine.minutes = fine.minutes != null ? fine.minutes : (existingAmount ? Math.round(existingAmount / 50) : 0);
-                // ensure amount matches minutes
-                fine.amount = Number(fine.minutes || 0) * 50;
-            } else {
-                // leaving Опоздание -> remove minutes field
-                if (fine.minutes != null) delete fine.minutes;
-            }
-            } else {
-            fine[field] = value;
-            }
-            arr[idx] = fine;
-            next.fines = arr;
+            next.fines = Array.isArray(next.fines) ? next.fines.map((f, i) => {
+                if (i !== idx) return f;
+                const updated = { ...f };
+                if (field === 'amount') {
+                updated.amount = (value === '' ? '' : Number(value));
+                // if reason is Опоздание keep minutes in sync
+                if (String(updated.reason) === 'Опоздание') {
+                    updated.minutes = updated.amount ? Math.round(Number(updated.amount) / 50) : 0;
+                }
+                } else if (field === 'minutes') {
+                // minutes -> compute amount (backend wants amount = minutes * 50)
+                const mins = value === '' ? 0 : Number(value);
+                updated.minutes = mins;
+                updated.amount = Number(mins) * 50;
+                } else if (field === 'reason') {
+                updated.reason = value;
+                if (String(value) === 'Опоздание') {
+                    // derive minutes from existing amount if present
+                    const amt = Number(updated.amount || 0);
+                    updated.minutes = amt ? Math.round(amt / 50) : 0;
+                    updated.amount = Number(updated.minutes) * 50;
+                } else {
+                    // clear minutes when not Опоздание
+                    updated.minutes = null;
+                }
+                } else {
+                updated[field] = value;
+                }
+                return updated;
+            }) : [];
             return next;
             });
         }
@@ -2662,10 +2655,7 @@
             setCellModel(prev => {
             if (!prev) return prev;
             const next = { ...prev };
-            const arr = Array.isArray(next.fines) ? [...next.fines] : [];
-            if (idx < 0 || idx >= arr.length) return prev;
-            arr.splice(idx, 1);
-            next.fines = arr;
+            next.fines = Array.isArray(next.fines) ? next.fines.filter((_, i) => i !== idx) : [];
             return next;
             });
         }
@@ -2674,24 +2664,6 @@
             if (!cellModel || !user) return;
             setIsSavingCell(true);
             try {
-            const finesArr = (cellModel.fines || []).map(f => {
-                // for Опоздание reason amount is minutes * 50
-                let amountVal = 0;
-                if (f.reason === 'Опоздание') {
-                const mins = f.minutes != null && f.minutes !== '' ? parseInt(f.minutes, 10) || 0 : null;
-                if (mins != null) amountVal = Number(mins) * 50; else amountVal = Number(f.amount) || 0;
-                } else {
-                amountVal = Number(f.amount) || 0;
-                }
-                return {
-                amount: amountVal,
-                reason: f.reason || null,
-                comment: f.comment || null
-                };
-            });
-
-            const firstFine = finesArr[0] || { amount: 0, reason: null, comment: null };
-
             const payload = {
                 date: cellModel.dateStr,
                 sv_id: selectedSvId || null,
@@ -2703,11 +2675,18 @@
                 talk_time: Number(cellModel.talk_time) || 0,
                 calls: parseInt(cellModel.calls, 10) || 0,
                 efficiency: Number(cellModel.efficiency) || 0,
-                // keep backward-compatible single-fine fields (first fine) and provide full fines array
-                fine_amount: Number(firstFine.amount) || 0,
-                fine_reason: firstFine.reason || null,
-                fine_comment: firstFine.comment || null,
-                fines: finesArr,
+                // include fines array (new) for backend that supports multiple fines
+                fines: Array.isArray(cellModel.fines) ? cellModel.fines.map(f => ({
+                // if reason is Опоздание, backend expects amount = minutes * 50
+                amount: String(f.reason) === 'Опоздание' ? Number((Number(f.minutes || 0) * 50)) : Number(f.amount || 0),
+                reason: f.reason || null,
+                comment: f.comment || null,
+                minutes: String(f.reason) === 'Опоздание' ? Number(f.minutes || 0) : null
+                })) : [],
+                // backward-compatible single fields: total fine amount, first reason, concatenated comments
+                fine_amount: (Array.isArray(cellModel.fines) ? cellModel.fines.reduce((s, f) => s + Number(f.amount || 0), 0) : Number(cellModel.fine_amount || 0)) || 0,
+                fine_reason: (Array.isArray(cellModel.fines) && cellModel.fines.length > 0) ? (cellModel.fines[0].reason || null) : (cellModel.fine_reason || null),
+                fine_comment: (Array.isArray(cellModel.fines) && cellModel.fines.length > 0) ? cellModel.fines.map(f => f.comment || '').filter(Boolean).join('; ') : (cellModel.fine_comment || null),
                 month: cellModel.month
                 }]
             };
@@ -3556,58 +3535,59 @@
                         </div>
                     )}
 
-                    <div className="mt-6">
-                    <div className="flex items-center justify-between mb-2">
-                        <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-                        <i className="fas fa-wallet" aria-hidden="true" /> Штрафы
-                        </h4>
-                        <button type="button" onClick={addFine} className="px-2 py-1 text-xs rounded-md bg-blue-600 text-white">+ Добавить штраф</button>
-                    </div>
+                    <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Multiple fines UI */}
+                        <div className="col-span-1 md:col-span-2">
+                        <div className="flex items-center justify-between mb-2">
+                            <div className="text-sm font-semibold text-gray-800">Штрафы</div>
+                            <button type="button" onClick={addFine} className="px-3 py-1 rounded-md border text-sm">Добавить штраф</button>
+                        </div>
 
-                    {(!cellModel.fines || cellModel.fines.length === 0) ? (
-                        <div className="text-sm text-gray-500">Штрафов нет.</div>
-                    ) : (
+                        {(!cellModel.fines || cellModel.fines.length === 0) && (
+                            <div className="text-sm text-gray-500 mb-3">Штрафы не добавлены.</div>
+                        )}
+
                         <div className="space-y-3">
-                        {cellModel.fines.map((f, idx) => (
-                            <div key={idx} className="p-3 rounded-lg border bg-white">
-                            <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
-                                <label className="flex flex-col text-xs text-gray-700">
-                                <span className="mb-1">Сумма</span>
-                                {f.reason === 'Опоздание' ? (
-                                    <div className="flex items-center gap-2">
-                                    <input type="number" step="1" className="p-2 rounded-md border bg-gray-100" value={f.minutes != null ? f.minutes : 0} onChange={e => updateFineField(idx, 'minutes', e.target.value)} />
-                                    <span className="text-xs text-gray-600">минут (сумма: {(Number(f.minutes || 0) * 50).toFixed(0)} ₽)</span>
-                                    </div>
-                                ) : (
-                                    <input type="number" step="0.01" className="p-2 rounded-md border" value={f.amount} onChange={e => updateFineField(idx, 'amount', e.target.value)} />
-                                )}
-                                </label>
-
-                                <label className="flex flex-col text-xs text-gray-700">
-                                <span className="mb-1">Причина</span>
-                                <select className="p-2 rounded-md border" value={f.reason} onChange={e => updateFineField(idx, 'reason', e.target.value)}>
+                            {(cellModel.fines || []).map((f, idx) => (
+                            <div key={idx} className="p-3 rounded-lg border bg-white flex flex-col gap-3">
+                                <div className="flex gap-3 items-center">
+                                <div className="flex-1">
+                                    <label className="text-xs text-gray-700">Сумма</label>
+                                    <input type="number" step="0.01" className="w-full p-2 rounded-md border" value={f.amount} onChange={e => updateFineField(idx, 'amount', e.target.value)} disabled={String(f.reason) === 'Опоздание'} />
+                                    {String(f.reason) === 'Опоздание' && <div className="text-xs text-gray-500 mt-1">Сумма рассчитывается автоматически: минуты × 50</div>}
+                                </div>
+                                <div className="flex-1">
+                                    <label className="text-xs text-gray-700">Причина</label>
+                                    <select className="w-full p-2 rounded-md border" value={f.reason} onChange={e => updateFineField(idx, 'reason', e.target.value)}>
                                     <option value="">—</option>
                                     <option>Корп такси</option>
                                     <option>Опоздание</option>
                                     <option>Прокси карта</option>
                                     <option>Не выход</option>
                                     <option>Другое</option>
-                                </select>
-                                </label>
+                                    </select>
+                                </div>
+                                <div className="w-12 flex items-end">
+                                    <button type="button" onClick={() => removeFine(idx)} className="text-red-600 text-sm">Удалить</button>
+                                </div>
+                                </div>
 
-                                <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
-                                <span className="mb-1">Комментарий</span>
-                                <input className="p-2 rounded-md border" value={f.comment} onChange={e => updateFineField(idx, 'comment', e.target.value)} />
-                                </label>
+                                {/* minutes input shown only for Опоздание */}
+                                {String(f.reason) === 'Опоздание' ? (
+                                <div>
+                                    <label className="text-xs text-gray-700">Минут опоздания</label>
+                                    <input type="number" min="0" className="w-full p-2 rounded-md border" value={f.minutes ?? 0} onChange={e => updateFineField(idx, 'minutes', e.target.value)} />
+                                </div>
+                                ) : null}
 
-                                <div className="flex justify-end md:justify-center">
-                                <button type="button" onClick={() => removeFine(idx)} className="px-2 py-1 rounded-md text-sm border text-red-600">Удалить</button>
+                                <div>
+                                <label className="text-xs text-gray-700">Комментарий</label>
+                                <input type="text" className="w-full p-2 rounded-md border" value={f.comment} onChange={e => updateFineField(idx, 'comment', e.target.value)} />
                                 </div>
                             </div>
-                            </div>
-                        ))}
+                            ))}
                         </div>
-                    )}
+                        </div>
                     </div>
                     </div>
 
