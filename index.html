@@ -2869,6 +2869,7 @@
             })();
 
             const trainings = (trainingsMap[op.operator_id] && trainingsMap[op.operator_id][day]) || [];
+            const fines = (op.daily && op.daily[dayKey] && Array.isArray(op.daily[dayKey].fines)) ? op.daily[dayKey].fines : [];
 
             if (selectedTab === 'work_time') {
             const work = d ? Number(d.work_time || 0) : 0;
@@ -2879,6 +2880,7 @@
                 <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-400 text-white">
                     <span>—</span>
                     {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                    {fines.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
                 </div>
                 );
             }
@@ -2887,6 +2889,7 @@
                 <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-200 text-gray-600">
                     <span>—</span>
                     {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                    {fines.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
                 </div>
                 );
             }
@@ -2895,6 +2898,7 @@
                 <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-100 text-gray-600">
                     <span>—</span>
                     {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                    {fines.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
                 </div>
                 );
             }
@@ -2905,10 +2909,11 @@
             const textClass = ratio > 0.5 ? 'text-white' : 'text-gray-900';
             const display = work ? work.toFixed(2) : '0.00';
 
-            return (
+                return (
                 <div className={`relative w-full h-8 rounded-md flex items-center justify-center ${textClass}`} style={{ backgroundColor: bg }}>
                 <span className="text-sm font-medium">{display}</span>
                 {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
+                {fines.length > 0 && <div className="absolute top-1 right-4 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
                 </div>
             );
             }
