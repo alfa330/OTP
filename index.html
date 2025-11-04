@@ -2569,6 +2569,16 @@
             minutes: Number(dayData.fine_minutes || 0) || 0
             }] : []);
 
+            // enforce fixed amounts for known reasons if not provided
+            for (const f of finesFromData) {
+            if (String(f.reason) === 'Не выход') f.amount = 10000;
+            if (String(f.reason) === 'Прокси карта') f.amount = 5000;
+            if (String(f.reason) === 'Опоздание') {
+                const mins = Number(f.minutes || 0) || 0;
+                f.amount = mins * 50;
+            }
+            }
+
             setCellModel({
             operator_id: operator.operator_id,
             name: operator.name,
@@ -2621,8 +2631,8 @@
             const fine = { ...arr[idx] };
 
             if (field === 'amount') {
-            // manual amount allowed only when reason is not 'Опоздание'
-            if (String(fine.reason) !== 'Опоздание') fine.amount = value === '' ? '' : Number(value);
+            // manual amount allowed only when reason is not 'Опоздание' or fixed-reason
+            if (!['Опоздание', 'Не выход', 'Прокси карта'].includes(String(fine.reason))) fine.amount = value === '' ? '' : Number(value);
             } else if (field === 'minutes') {
             // minutes for lateness -> compute amount = minutes * 50
             const mins = Number(value) || 0;
@@ -2630,11 +2640,16 @@
             if (String(fine.reason) === 'Опоздание') fine.amount = mins * 50;
             } else if (field === 'reason') {
             fine.reason = value;
+            // auto-set amount for special reasons
             if (String(value) === 'Опоздание') {
                 const mins = Number(fine.minutes || 0) || 0;
                 fine.amount = mins * 50;
+            } else if (String(value) === 'Не выход') {
+                fine.amount = 10000;
+            } else if (String(value) === 'Прокси карта') {
+                fine.amount = 5000;
             }
-            // if switching away from Опоздание, keep amount as-is (user can edit it manually)
+            // if switching away from special reasons, keep amount as-is (user can edit it manually)
             } else {
             fine[field] = value;
             }
@@ -3552,7 +3567,7 @@
                             <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
                                 <label className="flex flex-col text-xs text-gray-700">
                                 <span className="mb-1">Сумма</span>
-                                <input type="number" step="0.01" className="p-2 rounded-md border" value={f.amount} onChange={e => updateFineField(idx, 'amount', e.target.value)} disabled={String(f.reason) === 'Опоздание'} />
+                                <input type="number" step="0.01" className="p-2 rounded-md border" value={f.amount} onChange={e => updateFineField(idx, 'amount', e.target.value)} disabled={['Опоздание','Не выход','Прокси карта'].includes(String(f.reason))} />
                                 </label>
 
                                 <label className="flex flex-col text-xs text-gray-700">
