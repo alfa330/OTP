@@ -2556,6 +2556,17 @@
             const dayKey = String(day);
             const dayData = operator.daily?.[dayKey] ?? { work_time: 0, break_time: 0, talk_time: 0, calls: 0, efficiency: 0 };
             setSelectedCell({ operator, day, dateStr: dayToDateStr(day) });
+            // support multiple fines per day: if dayData.fines exists use it, otherwise migrate single fine fields
+            const finesFromData = (dayData.fines && Array.isArray(dayData.fines)) ? dayData.fines.map(f => ({
+            amount: Number(f.amount ?? f.fine_amount ?? 0) || 0,
+            reason: f.reason ?? f.fine_reason ?? '',
+            comment: f.comment ?? f.fine_comment ?? ''
+            })) : ((dayData.fine_amount || dayData.fine_reason || dayData.fine_comment) ? [{
+            amount: Number(dayData.fine_amount || 0) || 0,
+            reason: dayData.fine_reason || '',
+            comment: dayData.fine_comment || ''
+            }] : []);
+
             setCellModel({
             operator_id: operator.operator_id,
             name: operator.name,
@@ -2566,9 +2577,7 @@
             talk_time: Number(dayData.talk_time || 0),
             calls: Number(dayData.calls || 0),
             efficiency: Number(dayData.efficiency || 0),
-            fine_amount: Number(dayData.fine_amount || 0),
-            fine_reason: dayData.fine_reason || '',
-            fine_comment: dayData.fine_comment || '',
+            fines: finesFromData,
             month
             });
         }
@@ -2582,9 +2591,48 @@
             setCellModel(prev => {
             if (!prev) return prev;
             const next = { ...prev };
-            if (['work_time', 'break_time', 'talk_time', 'efficiency', 'fine_amount'].includes(field)) next[field] = value === '' ? '' : Number(value);
+            if (['work_time', 'break_time', 'talk_time', 'efficiency'].includes(field)) next[field] = value === '' ? '' : Number(value);
             else if (field === 'calls') next[field] = value === '' ? '' : parseInt(value, 10) || 0;
             else next[field] = value;
+            return next;
+            });
+        }
+
+        // fines helpers: add, update, remove
+        function addFine() {
+            setCellModel(prev => {
+            if (!prev) return prev;
+            const next = { ...prev };
+            const arr = Array.isArray(next.fines) ? [...next.fines] : [];
+            arr.push({ amount: 0, reason: '', comment: '' });
+            next.fines = arr;
+            return next;
+            });
+        }
+
+        function updateFineField(idx, field, value) {
+            setCellModel(prev => {
+            if (!prev) return prev;
+            const next = { ...prev };
+            const arr = Array.isArray(next.fines) ? [...next.fines] : [];
+            if (idx < 0 || idx >= arr.length) return prev;
+            const fine = { ...arr[idx] };
+            if (field === 'amount') fine.amount = value === '' ? '' : Number(value);
+            else fine[field] = value;
+            arr[idx] = fine;
+            next.fines = arr;
+            return next;
+            });
+        }
+
+        function removeFine(idx) {
+            setCellModel(prev => {
+            if (!prev) return prev;
+            const next = { ...prev };
+            const arr = Array.isArray(next.fines) ? [...next.fines] : [];
+            if (idx < 0 || idx >= arr.length) return prev;
+            arr.splice(idx, 1);
+            next.fines = arr;
             return next;
             });
         }
@@ -2593,6 +2641,14 @@
             if (!cellModel || !user) return;
             setIsSavingCell(true);
             try {
+            const finesArr = (cellModel.fines || []).map(f => ({
+                amount: Number(f.amount) || 0,
+                reason: f.reason || null,
+                comment: f.comment || null
+            }));
+
+            const firstFine = finesArr[0] || { amount: 0, reason: null, comment: null };
+
             const payload = {
                 date: cellModel.dateStr,
                 sv_id: selectedSvId || null,
@@ -2604,9 +2660,11 @@
                 talk_time: Number(cellModel.talk_time) || 0,
                 calls: parseInt(cellModel.calls, 10) || 0,
                 efficiency: Number(cellModel.efficiency) || 0,
-                fine_amount: Number(cellModel.fine_amount) || 0,
-                fine_reason: cellModel.fine_reason || null,
-                fine_comment: cellModel.fine_comment || null,
+                // keep backward-compatible single-fine fields (first fine) and provide full fines array
+                fine_amount: Number(firstFine.amount) || 0,
+                fine_reason: firstFine.reason || null,
+                fine_comment: firstFine.comment || null,
+                fines: finesArr,
                 month: cellModel.month
                 }]
             };
@@ -3455,48 +3513,51 @@
                         </div>
                     )}
 
-                    <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <label className="flex flex-col text-xs text-gray-700">
-                        <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-wallet" aria-hidden="true" /> Штраф (сумма)
-                        </span>
-                        <input
-                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
-                            type="number"
-                            step="0.01"
-                            value={cellModel.fine_amount}
-                            onChange={e => updateCellField('fine_amount', e.target.value)}
-                        />
-                        </label>
+                    <div className="mt-6">
+                    <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                        <i className="fas fa-wallet" aria-hidden="true" /> Штрафы
+                        </h4>
+                        <button type="button" onClick={addFine} className="px-2 py-1 text-xs rounded-md bg-blue-600 text-white">+ Добавить штраф</button>
+                    </div>
 
-                        <label className="flex flex-col text-xs text-gray-700">
-                        <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-flag" aria-hidden="true" /> Причина
-                        </span>
-                        <select
-                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
-                            value={cellModel.fine_reason}
-                            onChange={e => updateCellField('fine_reason', e.target.value)}
-                        >
-                            <option value="">—</option>
-                            <option>Корп такси</option>
-                            <option>Опоздание</option>
-                            <option>Прокси карта</option>
-                            <option>Другое</option>
-                        </select>
-                        </label>
+                    {(!cellModel.fines || cellModel.fines.length === 0) ? (
+                        <div className="text-sm text-gray-500">Штрафов нет.</div>
+                    ) : (
+                        <div className="space-y-3">
+                        {cellModel.fines.map((f, idx) => (
+                            <div key={idx} className="p-3 rounded-lg border bg-white">
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
+                                <label className="flex flex-col text-xs text-gray-700">
+                                <span className="mb-1">Сумма</span>
+                                <input type="number" step="0.01" className="p-2 rounded-md border" value={f.amount} onChange={e => updateFineField(idx, 'amount', e.target.value)} />
+                                </label>
 
-                        <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
-                        <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-comment-dots" aria-hidden="true" /> Комментарий
-                        </span>
-                        <textarea
-                            className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
-                            value={cellModel.fine_comment}
-                            onChange={e => updateCellField('fine_comment', e.target.value)}
-                            rows={3}
-                        />
-                        </label>
+                                <label className="flex flex-col text-xs text-gray-700">
+                                <span className="mb-1">Причина</span>
+                                <select className="p-2 rounded-md border" value={f.reason} onChange={e => updateFineField(idx, 'reason', e.target.value)}>
+                                    <option value="">—</option>
+                                    <option>Корп такси</option>
+                                    <option>Опоздание</option>
+                                    <option>Прокси карта</option>
+                                    <option>Не выход</option>
+                                    <option>Другое</option>
+                                </select>
+                                </label>
+
+                                <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
+                                <span className="mb-1">Комментарий</span>
+                                <input className="p-2 rounded-md border" value={f.comment} onChange={e => updateFineField(idx, 'comment', e.target.value)} />
+                                </label>
+
+                                <div className="flex justify-end md:justify-center">
+                                <button type="button" onClick={() => removeFine(idx)} className="px-2 py-1 rounded-md text-sm border text-red-600">Удалить</button>
+                                </div>
+                            </div>
+                            </div>
+                        ))}
+                        </div>
+                    )}
                     </div>
                     </div>
 
