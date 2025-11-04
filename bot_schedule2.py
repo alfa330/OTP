@@ -654,12 +654,14 @@ def upload_group_day():
                 
                 fine_reason = (row.get('fine_reason') or None)
                 # защита: принимаем только разрешённые причины (опционально)
-                ALLOWED_FINE_REASONS = ['Корп такси', 'Опоздание', 'Прокси карта', 'Другое']
+                ALLOWED_FINE_REASONS = ['Корп такси', 'Опоздание', 'Прокси карта', 'Не выход', 'Другое']
                 if fine_reason and fine_reason not in ALLOWED_FINE_REASONS:
                     # если невалидная причина — помечаем как "Другое" или сохраняем как есть, в примере — нормализуем в 'Другое'
                     fine_reason = 'Другое'
 
                 fine_comment = (row.get('fine_comment') or None)
+                # accept fines array (new format): list of {amount, reason, comment}
+                fines_arr = row.get('fines') if isinstance(row.get('fines'), list) else None
                 month = row.get('month') or default_month
 
                 # resolve operator_id if not provided
@@ -733,7 +735,8 @@ def upload_group_day():
                                                     efficiency=efficiency,
                                                     fine_amount=fine_amount,
                                                     fine_reason=fine_reason,
-                                                    fine_comment=fine_comment)
+                                                    fine_comment=fine_comment,
+                                                    fines=fines_arr)
                     processed.append({"row": idx, "operator_id": resolved_operator_id, "name": name})
                     processed_operator_ids.add(resolved_operator_id)
                 except Exception as e:

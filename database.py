@@ -225,6 +225,20 @@ class Database:
                 );
             """)
 
+            # Table for multiple fines per day (new schema)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS daily_fines (
+                    id SERIAL PRIMARY KEY,
+                    daily_hours_id UUID REFERENCES daily_hours(id) ON DELETE CASCADE,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    day DATE NOT NULL,
+                    amount FLOAT NOT NULL DEFAULT 0,
+                    reason VARCHAR(64),
+                    comment TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
             cursor.execute("""
                 ALTER TABLE daily_hours
                     ADD COLUMN IF NOT EXISTS fine_amount FLOAT NOT NULL DEFAULT 0,
@@ -367,7 +381,8 @@ class Database:
 
     def insert_or_update_daily_hours(self, operator_id, day, work_time=0.0, break_time=0.0,
                                     talk_time=0.0, calls=0, efficiency=0.0,
-                                    fine_amount=0.0, fine_reason=None, fine_comment=None):
+                                    fine_amount=0.0, fine_reason=None, fine_comment=None,
+                                    fines: List[Dict[str, Any]] = None):
         """
         Вставляет/обновляет запись daily_hours (operator_id + day).
         efficiency и fine_amount ожидаются в часах/суммах соответственно.
@@ -375,6 +390,7 @@ class Database:
         if isinstance(day, str):
             day = datetime.strptime(day, "%Y-%m-%d").date()
         with self._get_cursor() as cursor:
+            # Insert or update daily_hours and return its id for managing daily_fines
             cursor.execute("""
                 INSERT INTO daily_hours (
                     operator_id, day, work_time, break_time, talk_time, calls, efficiency,
@@ -392,9 +408,44 @@ class Database:
                     fine_reason = EXCLUDED.fine_reason,
                     fine_comment = EXCLUDED.fine_comment,
                     created_at = CURRENT_TIMESTAMP
+                RETURNING id
             """, (operator_id, day, work_time, break_time, talk_time, calls, efficiency,
                 float(fine_amount) if fine_amount is not None else 0.0,
                 fine_reason, fine_comment))
+            res = cursor.fetchone()
+            daily_id = res[0] if res else None
+
+            # If fines provided, replace existing fines for this daily_hours record
+            if daily_id and isinstance(fines, list):
+                # remove previous fines for this daily row
+                cursor.execute("DELETE FROM daily_fines WHERE daily_hours_id = %s", (daily_id,))
+                insert_vals = []
+                total_amount = 0.0
+                first_reason = None
+                comments = []
+                for f in fines:
+                    amt = float(f.get('amount') or 0)
+                    reason = f.get('reason')
+                    comment = f.get('comment')
+                    insert_vals.append((daily_id, operator_id, day, amt, reason, comment))
+                    total_amount += amt
+                    if not first_reason and reason:
+                        first_reason = reason
+                    if comment:
+                        comments.append(str(comment))
+
+                if insert_vals:
+                    cursor.executemany(
+                        "INSERT INTO daily_fines (daily_hours_id, operator_id, day, amount, reason, comment) VALUES (%s, %s, %s, %s, %s, %s)",
+                        insert_vals
+                    )
+
+                # update aggregated fields in daily_hours for backward compatibility
+                agg_comment = '; '.join(comments) if comments else None
+                cursor.execute("""
+                    UPDATE daily_hours SET fine_amount = %s, fine_reason = %s, fine_comment = %s
+                    WHERE id = %s
+                """, (float(total_amount), first_reason, agg_comment, daily_id))
 
     def get_daily_hours_for_operator_month(self, operator_id: int, month: str):
         """
@@ -452,7 +503,37 @@ class Database:
                     "fine_amount": float(row[6]) if row[6] is not None else 0.0,
                     "fine_reason": row[7],
                     "fine_comment": row[8],
+                    "fines": []  # will populate from daily_fines table if present
                 }
+
+            # fetch fines for this operator in the date range
+            cursor.execute(
+                """
+                SELECT df.amount, df.reason, df.comment, dh.day
+                FROM daily_fines df
+                JOIN daily_hours dh ON df.daily_hours_id = dh.id
+                WHERE dh.operator_id = %s AND dh.day >= %s AND dh.day <= %s
+                ORDER BY dh.day, df.id
+                """,
+                (operator_id, start, end)
+            )
+            fines_rows = cursor.fetchall()
+            for amt, reason, comment, day_obj in fines_rows:
+                day_key = str(int(day_obj.day))
+                entry = daily_map.get(day_key)
+                fine_obj = {
+                    "amount": float(amt) if amt is not None else 0.0,
+                    "reason": reason,
+                    "comment": comment
+                }
+                # include minutes for Опоздание for client convenience
+                try:
+                    if str(reason) == 'Опоздание':
+                        fine_obj['minutes'] = int(round(float(amt) / 50)) if amt else 0
+                except Exception:
+                    pass
+                if entry is not None:
+                    entry.setdefault('fines', []).append(fine_obj)
 
             # 2) Получаем имя/ставку + данные work_hours одним LEFT JOIN запросом (включая fines)
             cursor.execute(
@@ -573,9 +654,30 @@ class Database:
                     "efficiency": float(eff) if eff is not None else 0.0,
                     "fine_amount": float(fine_amount) if fine_amount is not None else 0.0,
                     "fine_reason": fine_reason,
-                    "fine_comment": fine_comment
+                    "fine_comment": fine_comment,
+                    "fines": []
                 }
                 daily_map.setdefault(op_id, {})[day_num] = d
+
+            # fetch fines for all operators in range
+            cursor.execute("""
+                SELECT df.operator_id, df.amount, df.reason, df.comment, df.day
+                FROM daily_fines df
+                WHERE df.operator_id = ANY(%s)
+                AND df.day >= %s AND df.day <= %s
+                ORDER BY df.operator_id, df.day, df.id
+            """, (op_ids, start, end))
+            fines_rows = cursor.fetchall()
+            for op_id, amt, reason, comment, day_obj in fines_rows:
+                day_num = str(int(day_obj.day))
+                fine_obj = {"amount": float(amt) if amt is not None else 0.0, "reason": reason, "comment": comment}
+                try:
+                    if str(reason) == 'Опоздание':
+                        fine_obj['minutes'] = int(round(float(amt) / 50)) if amt else 0
+                except Exception:
+                    pass
+                if op_id in daily_map and day_num in daily_map[op_id]:
+                    daily_map[op_id][day_num].setdefault('fines', []).append(fine_obj)
 
             # Сбор финального списка операторов
             operators = []
@@ -621,14 +723,15 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT
-                    COALESCE(SUM(work_time),0),
-                    COALESCE(SUM(break_time),0),
-                    COALESCE(SUM(talk_time),0),
-                    COALESCE(SUM(calls),0),
-                    COALESCE(SUM(efficiency),0),
-                    COALESCE(SUM(fine_amount),0)
-                FROM daily_hours
-                WHERE operator_id = %s AND day >= %s AND day <= %s
+                    COALESCE(SUM(dh.work_time),0),
+                    COALESCE(SUM(dh.break_time),0),
+                    COALESCE(SUM(dh.talk_time),0),
+                    COALESCE(SUM(dh.calls),0),
+                    COALESCE(SUM(dh.efficiency),0),
+                    COALESCE(SUM(df.amount),0)
+                FROM daily_hours dh
+                LEFT JOIN daily_fines df ON df.daily_hours_id = dh.id
+                WHERE dh.operator_id = %s AND dh.day >= %s AND dh.day <= %s
             """, (operator_id, start, end))
             row = cursor.fetchone()
             total_work_time, total_break_time, total_talk_time, total_calls, total_efficiency_hours, total_fines = row
@@ -789,6 +892,30 @@ class Database:
                 WHERE u.id = %s AND u.role = 'operator' AND u.supervisor_id = %s
             """, (operator_id, supervisor_id))
             return cursor.fetchone()
+
+    def migrate_daily_fines_from_daily_hours(self):
+        """
+        Migration helper: convert existing aggregated fine_amount/fine_reason/fine_comment
+        from daily_hours into individual rows in daily_fines when no daily_fines exist for that day.
+        This is idempotent: it will skip days that already have entries in daily_fines.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, operator_id, day, fine_amount, fine_reason, fine_comment
+                FROM daily_hours
+                WHERE COALESCE(fine_amount, 0) > 0
+            """)
+            rows = cursor.fetchall()
+            for dh_id, op_id, day_obj, fine_amount, fine_reason, fine_comment in rows:
+                # skip if fines already exist for this daily_hours
+                cursor.execute("SELECT 1 FROM daily_fines WHERE daily_hours_id = %s LIMIT 1", (dh_id,))
+                if cursor.fetchone():
+                    continue
+                # insert single aggregated fine as one row
+                cursor.execute(
+                    "INSERT INTO daily_fines (daily_hours_id, operator_id, day, amount, reason, comment) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (dh_id, op_id, day_obj, float(fine_amount or 0.0), fine_reason, fine_comment)
+                )
 
     def update_user_password(self, user_id, new_password):
         password_hash = pbkdf2_sha256.hash(new_password)
