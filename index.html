@@ -2560,11 +2560,13 @@
             const finesFromData = (dayData.fines && Array.isArray(dayData.fines)) ? dayData.fines.map(f => ({
             amount: Number(f.amount ?? f.fine_amount ?? 0) || 0,
             reason: f.reason ?? f.fine_reason ?? '',
-            comment: f.comment ?? f.fine_comment ?? ''
+            comment: f.comment ?? f.fine_comment ?? '',
+            minutes: Number(f.minutes ?? f.late_minutes ?? 0) || 0
             })) : ((dayData.fine_amount || dayData.fine_reason || dayData.fine_comment) ? [{
             amount: Number(dayData.fine_amount || 0) || 0,
             reason: dayData.fine_reason || '',
-            comment: dayData.fine_comment || ''
+            comment: dayData.fine_comment || '',
+            minutes: Number(dayData.fine_minutes || 0) || 0
             }] : []);
 
             setCellModel({
@@ -2604,7 +2606,7 @@
             if (!prev) return prev;
             const next = { ...prev };
             const arr = Array.isArray(next.fines) ? [...next.fines] : [];
-            arr.push({ amount: 0, reason: '', comment: '' });
+            arr.push({ amount: 0, reason: '', comment: '', minutes: 0 });
             next.fines = arr;
             return next;
             });
@@ -2617,8 +2619,26 @@
             const arr = Array.isArray(next.fines) ? [...next.fines] : [];
             if (idx < 0 || idx >= arr.length) return prev;
             const fine = { ...arr[idx] };
-            if (field === 'amount') fine.amount = value === '' ? '' : Number(value);
-            else fine[field] = value;
+
+            if (field === 'amount') {
+            // manual amount allowed only when reason is not 'Опоздание'
+            if (String(fine.reason) !== 'Опоздание') fine.amount = value === '' ? '' : Number(value);
+            } else if (field === 'minutes') {
+            // minutes for lateness -> compute amount = minutes * 50
+            const mins = Number(value) || 0;
+            fine.minutes = mins;
+            if (String(fine.reason) === 'Опоздание') fine.amount = mins * 50;
+            } else if (field === 'reason') {
+            fine.reason = value;
+            if (String(value) === 'Опоздание') {
+                const mins = Number(fine.minutes || 0) || 0;
+                fine.amount = mins * 50;
+            }
+            // if switching away from Опоздание, keep amount as-is (user can edit it manually)
+            } else {
+            fine[field] = value;
+            }
+
             arr[idx] = fine;
             next.fines = arr;
             return next;
@@ -2644,7 +2664,8 @@
             const finesArr = (cellModel.fines || []).map(f => ({
                 amount: Number(f.amount) || 0,
                 reason: f.reason || null,
-                comment: f.comment || null
+                comment: f.comment || null,
+                minutes: Number(f.minutes || 0) || 0
             }));
 
             const firstFine = finesArr[0] || { amount: 0, reason: null, comment: null };
@@ -2664,6 +2685,7 @@
                 fine_amount: Number(firstFine.amount) || 0,
                 fine_reason: firstFine.reason || null,
                 fine_comment: firstFine.comment || null,
+                fine_minutes: Number(firstFine.minutes || 0) || 0,
                 fines: finesArr,
                 month: cellModel.month
                 }]
@@ -3530,7 +3552,7 @@
                             <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
                                 <label className="flex flex-col text-xs text-gray-700">
                                 <span className="mb-1">Сумма</span>
-                                <input type="number" step="0.01" className="p-2 rounded-md border" value={f.amount} onChange={e => updateFineField(idx, 'amount', e.target.value)} />
+                                <input type="number" step="0.01" className="p-2 rounded-md border" value={f.amount} onChange={e => updateFineField(idx, 'amount', e.target.value)} disabled={String(f.reason) === 'Опоздание'} />
                                 </label>
 
                                 <label className="flex flex-col text-xs text-gray-700">
@@ -3545,10 +3567,26 @@
                                 </select>
                                 </label>
 
+                                {/* minutes input shown only for lateness */}
+                                {String(f.reason) === 'Опоздание' ? (
+                                <>
+                                <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
+                                <span className="mb-1">Минуты опоздания</span>
+                                <input type="number" min="0" step="1" className="p-2 rounded-md border" value={f.minutes || 0} onChange={e => updateFineField(idx, 'minutes', e.target.value)} />
+                                <div className="text-xs text-gray-500 mt-1">Сумма вычисляется как Минуты × 50</div>
+                                </label>
+
                                 <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
                                 <span className="mb-1">Комментарий</span>
                                 <input className="p-2 rounded-md border" value={f.comment} onChange={e => updateFineField(idx, 'comment', e.target.value)} />
                                 </label>
+                                </>
+                                ) : (
+                                <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
+                                <span className="mb-1">Комментарий</span>
+                                <input className="p-2 rounded-md border" value={f.comment} onChange={e => updateFineField(idx, 'comment', e.target.value)} />
+                                </label>
+                                )}
 
                                 <div className="flex justify-end md:justify-center">
                                 <button type="button" onClick={() => removeFine(idx)} className="px-2 py-1 rounded-md text-sm border text-red-600">Удалить</button>
