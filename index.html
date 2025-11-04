@@ -2677,11 +2677,10 @@
                 efficiency: Number(cellModel.efficiency) || 0,
                 // include fines array (new) for backend that supports multiple fines
                 fines: Array.isArray(cellModel.fines) ? cellModel.fines.map(f => ({
-                // if reason is Опоздание, backend expects amount = minutes * 50
+                // if reason is Опоздание, backend expects amount = minutes * 50 (minutes are NOT sent)
                 amount: String(f.reason) === 'Опоздание' ? Number((Number(f.minutes || 0) * 50)) : Number(f.amount || 0),
                 reason: f.reason || null,
-                comment: f.comment || null,
-                minutes: String(f.reason) === 'Опоздание' ? Number(f.minutes || 0) : null
+                comment: f.comment || null
                 })) : [],
                 // backward-compatible single fields: total fine amount, first reason, concatenated comments
                 fine_amount: (Array.isArray(cellModel.fines) ? cellModel.fines.reduce((s, f) => s + Number(f.amount || 0), 0) : Number(cellModel.fine_amount || 0)) || 0,
