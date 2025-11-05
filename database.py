@@ -80,8 +80,6 @@ class Database:
         with self._get_cursor() as cursor:
             # Users table (без direction_id на этом этапе)
             cursor.execute("""
-                UPDATE calls SET month='2025-10' WHERE id=1102;
-                UPDATE calls SET month='2025-10' WHERE id=1101;
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
                     telegram_id BIGINT UNIQUE,
@@ -236,18 +234,6 @@ class Database:
                     comment TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-            """)
-
-            cursor.execute("""
-                ALTER TABLE daily_hours
-                    ADD COLUMN IF NOT EXISTS fine_amount FLOAT NOT NULL DEFAULT 0,
-                    ADD COLUMN IF NOT EXISTS fine_reason VARCHAR(64),
-                    ADD COLUMN IF NOT EXISTS fine_comment TEXT;           
-            """)
-
-            # Processed sheets table
-            cursor.execute("""
-                DROP TABLE IF EXISTS processed_sheets CASCADE;
             """)
 
             cursor.execute("""
