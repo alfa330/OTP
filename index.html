@@ -3547,32 +3547,78 @@
                         </div>
                     )}
 
-                    <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {/* Multiple fines UI */}
-                        <div className="col-span-1 md:col-span-2">
-                        <div className="flex items-center justify-between mb-2">
-                            <div className="text-sm font-semibold text-gray-800">Штрафы</div>
-                            <button type="button" onClick={addFine} className="px-3 py-1 rounded-md border text-sm">Добавить штраф</button>
+                    <div className="mt-6 grid grid-cols-1 gap-4">
+                    {/* Header */}
+                    <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-lg font-semibold text-gray-800">Штрафы</h3>
+                        <button
+                        type="button"
+                        onClick={addFine}
+                        className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border bg-white hover:shadow-sm text-sm font-medium"
+                        aria-label="Добавить штраф"
+                        >
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" aria-hidden>
+                            <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>
+                        Добавить
+                        </button>
+                    </div>
+
+                    {/* Empty state */}
+                    {(!cellModel.fines || cellModel.fines.length === 0) && (
+                        <div className="rounded-md p-3 bg-gray-50 border border-dashed border-gray-200 text-sm text-gray-600">
+                        Штрафы не добавлены.
                         </div>
+                    )}
 
-                        {(!cellModel.fines || cellModel.fines.length === 0) && (
-                            <div className="text-sm text-gray-500 mb-3">Штрафы не добавлены.</div>
-                        )}
+                    {/* Fines list */}
+                    <div className="space-y-3">
+                        {(cellModel.fines || []).map((f, idx) => {
+                        const reason = String(f.reason || "");
+                        const isAuto = reason === "Опоздание";
+                        const isFixedNeVykhod = reason === "Не выход";
+                        const isFixedProxy = reason === "Прокси карта";
+                        const minutes = Number(f.minutes ?? 0);
+                        const computedAmount = isAuto ? minutes * 50 : isFixedNeVykhod ? 10000 : isFixedProxy ? 5000 : f.amount;
 
-                        <div className="space-y-3">
-                            {(cellModel.fines || []).map((f, idx) => (
-                            <div key={idx} className="p-3 rounded-lg border bg-white flex flex-col gap-3">
-                                <div className="flex gap-3 items-center">
-                                <div className="flex-1">
-                                    <label className="text-xs text-gray-700">Сумма</label>
-                                    <input type="number" step="0.01" className="w-full p-2 rounded-md border" value={f.amount} onChange={e => updateFineField(idx, 'amount', e.target.value)} disabled={[ 'Опоздание', 'Не выход', 'Прокси карта' ].includes(String(f.reason))} />
-                                    {String(f.reason) === 'Опоздание' && <div className="text-xs text-gray-500 mt-1">Сумма рассчитывается автоматически: минуты × 50</div>}
-                                    {String(f.reason) === 'Не выход' && <div className="text-xs text-gray-500 mt-1">Фиксированная сумма: 10000</div>}
-                                    {String(f.reason) === 'Прокси карта' && <div className="text-xs text-gray-500 mt-1">Фиксированная сумма: 5000</div>}
+                        return (
+                            <div key={idx} className="p-4 rounded-lg border bg-white shadow-sm">
+                            <div className="flex items-start gap-4">
+                                {/* Left column: amount & reason */}
+                                <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div className="md:col-span-1">
+                                    <label className="text-xs text-gray-700 block mb-1">Сумма</label>
+                                    <div className="flex items-center gap-2">
+                                    <input
+                                        type="number"
+                                        step="0.01"
+                                        className={`w-full p-2 rounded-md border ${isAuto || isFixedNeVykhod || isFixedProxy ? "bg-gray-50 text-gray-600" : ""}`}
+                                        value={f.amount ?? ""}
+                                        onChange={(e) => updateFineField(idx, "amount", e.target.value)}
+                                        disabled={isAuto || isFixedNeVykhod || isFixedProxy}
+                                        aria-label={`Сумма штрафа ${idx}`}
+                                    />
+                                    {/* Badge for fixed or computed */}
+                                    {isAuto && (
+                                        <span className="text-xs px-2 py-1 rounded-md bg-yellow-50 border text-yellow-700">Минуты × 50 = {computedAmount}</span>
+                                    )}
+                                    {isFixedNeVykhod && (
+                                        <span className="text-xs px-2 py-1 rounded-md bg-red-50 border text-red-700">Фикс: 10000</span>
+                                    )}
+                                    {isFixedProxy && (
+                                        <span className="text-xs px-2 py-1 rounded-md bg-red-50 border text-red-700">Фикс: 5000</span>
+                                    )}
+                                    </div>
                                 </div>
-                                <div className="flex-1">
-                                    <label className="text-xs text-gray-700">Причина</label>
-                                    <select className="w-full p-2 rounded-md border" value={f.reason} onChange={e => updateFineField(idx, 'reason', e.target.value)}>
+
+                                <div className="md:col-span-1">
+                                    <label className="text-xs text-gray-700 block mb-1">Причина</label>
+                                    <select
+                                    className="w-full p-2 rounded-md border bg-white"
+                                    value={f.reason ?? ""}
+                                    onChange={(e) => updateFineField(idx, "reason", e.target.value)}
+                                    aria-label={`Причина штрафа ${idx}`}
+                                    >
                                     <option value="">—</option>
                                     <option>Корп такси</option>
                                     <option>Опоздание</option>
@@ -3581,29 +3627,63 @@
                                     <option>Другое</option>
                                     </select>
                                 </div>
-                                <div className="w-12 flex items-end">
-                                    <button type="button" onClick={() => removeFine(idx)} className="text-red-600 text-sm">Удалить</button>
-                                </div>
-                                </div>
 
-                                {/* minutes input shown only for Опоздание */}
-                                {String(f.reason) === 'Опоздание' ? (
-                                <div>
-                                    <label className="text-xs text-gray-700">Минут опоздания</label>
-                                    <input type="number" min="0" className="w-full p-2 rounded-md border" value={f.minutes ?? 0} onChange={e => updateFineField(idx, 'minutes', e.target.value)} />
+                                <div className="md:col-span-1 flex items-end justify-end">
+                                    <button
+                                    type="button"
+                                    onClick={() => removeFine(idx)}
+                                    className="text-red-600 text-sm hover:underline"
+                                    aria-label={`Удалить штраф ${idx}`}
+                                    >
+                                    Удалить
+                                    </button>
                                 </div>
-                                ) : null}
-
-                                <div>
-                                <label className="text-xs text-gray-700">Комментарий</label>
-                                <input type="text" className="w-full p-2 rounded-md border" value={f.comment} onChange={e => updateFineField(idx, 'comment', e.target.value)} />
                                 </div>
                             </div>
-                            ))}
-                        </div>
-                        </div>
+
+                            {/* Minutes input when reason is "Опоздание" */}
+                            {isAuto && (
+                                <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 items-center">
+                                <div className="md:col-span-2">
+                                    <label className="text-xs text-gray-700 block mb-1">Минут опоздания</label>
+                                    <div className="flex gap-2">
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        className="w-full p-2 rounded-md border"
+                                        value={f.minutes ?? 0}
+                                        onChange={(e) => updateFineField(idx, "minutes", e.target.value)}
+                                        aria-label={`Минуты опоздания ${idx}`}
+                                    />
+                                    <div className="flex-shrink-0 self-end text-sm text-gray-600">× 50 = <span className="font-medium">{computedAmount}</span></div>
+                                    </div>
+                                </div>
+
+                                <div className="md:col-span-1 text-sm text-gray-500">
+                                    <div>Сумма автоматически вычисляется и отправляется в бекенд как сумма (минуты × 50). В интерфейсе показывается как минуты.</div>
+                                </div>
+                                </div>
+                            )}
+
+                            {/* Comment */}
+                            <div className="mt-3">
+                                <label className="text-xs text-gray-700 block mb-1">Комментарий</label>
+                                <input
+                                type="text"
+                                className="w-full p-2 rounded-md border"
+                                value={f.comment ?? ""}
+                                onChange={(e) => updateFineField(idx, "comment", e.target.value)}
+                                aria-label={`Комментарий к штрафу ${idx}`}
+                                />
+                            </div>
+                            </div>
+                        );
+                        })}
                     </div>
                     </div>
+                    </div>
+
+
 
                     {/* Footer actions */}
                     <div className="flex items-center justify-end gap-3 p-4 border-t">
