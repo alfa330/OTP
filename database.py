@@ -2540,46 +2540,89 @@ class Database:
         build_calls_sheet()
         build_efficiency_sheet()
 
-        ws_t = wb.create_sheet(title='Тренинги'[:31])
+        ws_t_counted = wb.create_sheet(title='Тренинги (Зачет)'[:31])
+        ws_t_not = wb.create_sheet(title='Тренинги (Не зачет)'[:31])
+
         headers = ["Оператор"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Всего (ч)", "Засчитано (ч)", "Не засчитано (ч)"]
-        _make_header(ws_t, headers)
-        row = 2
+        _make_header(ws_t_counted, headers)
+        _make_header(ws_t_not, headers)
+
+        def fmt_num(n):
+            """Форматируем число с одной цифрой после запятой, заменяем точку на запятую."""
+            return f"{n:.1f}".replace('.', ',')
+
+        # Заполняем строки — для каждой вкладки идём по операторам и считаем итоги,
+        # но по дням в counted показываем только зачётные часы, а в not — только незачётные.
+        row_counted = 2
+        row_not = 2
+
         for op in operators:
             name = op.get('name') or f"op_{op.get('operator_id')}"
-            set_cell(ws_t, row, 1, name, align_center=False)
+            op_id = op.get('operator_id')
+
+            # Берём все тренинги оператора (словарь day -> list)
+            op_trainings = trainings_map.get(op_id) or {}
+
+            # Инициализация итогов (общие для обеих вкладок)
             total_all = 0.0
             total_counted = 0.0
             total_not = 0.0
-            op_trainings = trainings_map.get(op.get('operator_id')) or {}
-            for c_idx, day in enumerate(days, start=2):
+
+            # Сначала пройдем все дни, чтобы посчитать общие итоги
+            for day in days:
                 arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
-                counted = 0.0
-                not_counted = 0.0
                 for t in arr:
                     dur = compute_training_duration_hours(t)
                     total_all += dur
                     if t.get('count_in_hours'):
-                        counted += dur
                         total_counted += dur
                     else:
-                        not_counted += dur
                         total_not += dur
-                if counted == 0 and not_counted == 0:
-                    set_cell(ws_t, row, c_idx, "")
+
+            # --- Заполнение вкладки "Тренинги (Зачет)" ---
+            set_cell(ws_t_counted, row_counted, 1, name, align_center=False)
+            for c_idx, day in enumerate(days, start=2):
+                arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
+                counted = 0.0
+                for t in arr:
+                    if t.get('count_in_hours'):
+                        counted += compute_training_duration_hours(t)
+                if counted == 0:
+                    set_cell(ws_t_counted, row_counted, c_idx, "")
                 else:
-                    c_val = round(counted, 1)
-                    n_val = round(not_counted, 1)
-                    set_cell(ws_t, row, c_idx, f"{c_val} / {n_val}", fill=FILL_POS)
+                    set_cell(ws_t_counted, row_counted, c_idx, fmt_num(counted), fill=FILL_POS)
 
-            set_cell(ws_t, row, 2 + len(days), round(total_all, 1))
-            set_cell(ws_t, row, 3 + len(days), round(total_counted, 1))
-            set_cell(ws_t, row, 4 + len(days), round(total_not, 1))
-            row += 1
+            # Итоги по строке (все 3 колонки оставляем, как в оригинале)
+            set_cell(ws_t_counted, row_counted, 2 + len(days), fmt_num(total_all))
+            set_cell(ws_t_counted, row_counted, 3 + len(days), fmt_num(total_counted))
+            set_cell(ws_t_counted, row_counted, 4 + len(days), fmt_num(total_not))
+            row_counted += 1
 
-        ws_t.column_dimensions['A'].width = 24
-        for i in range(2, 5 + len(days)):
-            col = ws_t.cell(1, i).column_letter
-            ws_t.column_dimensions[col].width = 14
+            # --- Заполнение вкладки "Тренинги (Не зачет)" ---
+            set_cell(ws_t_not, row_not, 1, name, align_center=False)
+            for c_idx, day in enumerate(days, start=2):
+                arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
+                not_counted = 0.0
+                for t in arr:
+                    if not t.get('count_in_hours'):
+                        not_counted += compute_training_duration_hours(t)
+                if not_counted == 0:
+                    set_cell(ws_t_not, row_not, c_idx, "")
+                else:
+                    set_cell(ws_t_not, row_not, c_idx, fmt_num(not_counted), fill=FILL_POS)
+
+            # Итоги по строке
+            set_cell(ws_t_not, row_not, 2 + len(days), fmt_num(total_all))
+            set_cell(ws_t_not, row_not, 3 + len(days), fmt_num(total_counted))
+            set_cell(ws_t_not, row_not, 4 + len(days), fmt_num(total_not))
+            row_not += 1
+
+        # Настройка ширины колонок для обеих вкладок
+        for ws in (ws_t_counted, ws_t_not):
+            ws.column_dimensions['A'].width = 24
+            for i in range(2, 5 + len(days)):
+                col = ws.cell(1, i).column_letter
+                ws.column_dimensions[col].width = 14
 
         out = BytesIO()
         wb.save(out)
