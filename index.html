@@ -5920,34 +5920,61 @@
                     }
                 }, [operators]);
 
-                // Функция для обновления списка тренингов
-                const fetchTrainings = useCallback(async () => {
-                    if (!operatorsLoaded || !month || !user?.apiKey || !user?.id) return;
-                    
-                    try {
-                        const res = await axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
-                            headers: {
-                                'X-API-Key': user.apiKey,
-                                'X-User-Id': user.id
-                            }
-                        });
-                        const grouped = {};
-                        (res.data.trainings || []).forEach(t => {
-                            if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
-                            grouped[t.operator_id].push(t);
-                        });
-                        setTrainings(grouped);
-                    } catch (error) {
-                        console.error('Error fetching trainings:', error);
-                    }
-                }, []); // Пустой массив зависимостей
+                // Состояние для отслеживания необходимости обновления
+                const [shouldUpdate, setShouldUpdate] = useState(true);
+                
+                // Используем ref для хранения актуальных значений без пересоздания эффекта
+                const valuesRef = useRef({
+                    month,
+                    operatorsLoaded,
+                    apiKey: user.apiKey,
+                    userId: user.id
+                });
 
-                // Обновляем список только при изменении месяца или после загрузки операторов
+                // Обновляем ref при изменении значений
                 useEffect(() => {
-                    if (operatorsLoaded) {
-                        fetchTrainings();
-                    }
-                }, [month, operatorsLoaded]);
+                    valuesRef.current = {
+                        month,
+                        operatorsLoaded,
+                        apiKey: user.apiKey,
+                        userId: user.id
+                    };
+                }, [month, operatorsLoaded, user.apiKey, user.id]);
+
+                // Объединяем всю логику обновления в один эффект
+                useEffect(() => {
+                    if (!shouldUpdate) return;
+                    if (!valuesRef.current.operatorsLoaded) return;
+
+                    const fetchTrainings = async () => {
+                        try {
+                            const res = await axios.get(`${API_BASE_URL}/api/trainings?month=${valuesRef.current.month}`, {
+                                headers: {
+                                    'X-API-Key': valuesRef.current.apiKey,
+                                    'X-User-Id': valuesRef.current.userId
+                                }
+                            });
+                            
+                            const grouped = {};
+                            (res.data.trainings || []).forEach(t => {
+                                if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                                grouped[t.operator_id].push(t);
+                            });
+                            setTrainings(grouped);
+                            setShouldUpdate(false);
+                        } catch (error) {
+                            console.error('Error fetching trainings:', error);
+                            setShouldUpdate(false);
+                        }
+                    };
+
+                    fetchTrainings();
+                }, [shouldUpdate]);
+
+                // Устанавливаем shouldUpdate в true при изменении месяца
+                useEffect(() => {
+                    setShouldUpdate(true);
+                }, [month]);
 
                 useEffect(() => {
                     // Группируем операторов по SV (supervisor)
@@ -5972,48 +5999,56 @@
                     setShowModal(true);
                 };
 
-                const handleDelete = async (trainingId) => {
-                    try {
-                        await axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
+                const handleDelete = (trainingId) => {
+                    axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
+                        headers: {
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
+                    })
+                        .then(() => {
+                            setShouldUpdate(true);
+                            showToast('Тренинг успешно удален', 'success');
+                        })
+                        .catch(err => {
+                            console.error('Error deleting training:', err);
+                            showToast('Ошибка при удалении тренинга', 'error');
+                        });
+                };
+
+                const handleSave = (data) => {
+                    if (editingTraining) {
+                        axios.put(`${API_BASE_URL}/api/trainings/${editingTraining.id}`, data, {
                             headers: {
                                 'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
                             }
-                        });
-                        await fetchTrainings();
-                        showToast('Тренинг успешно удален', 'success');
-                    } catch (err) {
-                        console.error('Error deleting training:', err);
-                        showToast('Ошибка при удалении тренинга', 'error');
-                    }
-                };
-
-                const handleSave = async (data) => {
-                    try {
-                        if (editingTraining) {
-                            await axios.put(`${API_BASE_URL}/api/trainings/${editingTraining.id}`, data, {
-                                headers: {
-                                    'X-API-Key': user.apiKey,
-                                    'X-User-Id': user.id
-                                }
+                        })
+                            .then(() => {
+                                setShouldUpdate(true);
+                                setShowModal(false);
+                                showToast('Тренинг успешно обновлен','success');
+                            })
+                            .catch(err => {
+                                console.error('Error updating training:', err);
+                                showToast('Ошибка при обновлении тренинга','error');
                             });
-                            setShowModal(false);
-                            await fetchTrainings();
-                            showToast('Тренинг успешно обновлен','success');
-                        } else {
-                            await axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: currentOperator }, {
-                                headers: {
-                                    'X-API-Key': user.apiKey,
-                                    'X-User-Id': user.id
-                                }
+                    } else {
+                        axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: currentOperator }, {
+                            headers: {
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        })
+                            .then(() => {
+                                setShouldUpdate(true);
+                                setShowModal(false);
+                                showToast('Тренинг успешно добавлен','success');
+                            })
+                            .catch(err => {
+                                console.error('Error adding training:', err);
+                                showToast('Ошибка при добавлении тренинга','error');
                             });
-                            setShowModal(false);
-                            await fetchTrainings();
-                            showToast('Тренинг успешно добавлен','success');
-                        }
-                    } catch (err) {
-                        console.error('Error saving training:', err);
-                        showToast(editingTraining ? 'Ошибка при обновлении тренинга' : 'Ошибка при добавлении тренинга','error');
                     }
                 };
 
