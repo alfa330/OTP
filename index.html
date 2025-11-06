@@ -63,7 +63,7 @@
 <body class="bg-gray-50 font-sans antialiased text-gray-900">
     <div id="root"></div>
     <script type="text/babel">
-        const { useState, useEffect, useCallback, useRef, useMemo } = React;
+        const { useState, useEffect, useCallback, useRef, useMemo, memo } = React;
         const ToastContainer = ({ toasts, removeToast }) => {
             const handleClose = (id) => {
                 setToasts(prev => prev.map(toast => 
@@ -5920,61 +5920,55 @@
                     }
                 }, [operators]);
 
-                // Состояние для отслеживания необходимости обновления
-                const [shouldUpdate, setShouldUpdate] = useState(true);
-                
-                // Используем ref для хранения актуальных значений без пересоздания эффекта
-                const valuesRef = useRef({
-                    month,
-                    operatorsLoaded,
-                    apiKey: user.apiKey,
-                    userId: user.id
-                });
-
-                // Обновляем ref при изменении значений
-                useEffect(() => {
-                    valuesRef.current = {
-                        month,
-                        operatorsLoaded,
-                        apiKey: user.apiKey,
-                        userId: user.id
-                    };
-                }, [month, operatorsLoaded, user.apiKey, user.id]);
-
-                // Объединяем всю логику обновления в один эффект
-                useEffect(() => {
-                    if (!shouldUpdate) return;
-                    if (!valuesRef.current.operatorsLoaded) return;
-
-                    const fetchTrainings = async () => {
-                        try {
-                            const res = await axios.get(`${API_BASE_URL}/api/trainings?month=${valuesRef.current.month}`, {
-                                headers: {
-                                    'X-API-Key': valuesRef.current.apiKey,
-                                    'X-User-Id': valuesRef.current.userId
-                                }
-                            });
-                            
-                            const grouped = {};
-                            (res.data.trainings || []).forEach(t => {
-                                if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
-                                grouped[t.operator_id].push(t);
-                            });
-                            setTrainings(grouped);
-                            setShouldUpdate(false);
-                        } catch (error) {
-                            console.error('Error fetching trainings:', error);
-                            setShouldUpdate(false);
+                // Функция для обновления списка тренингов с мемоизированными значениями
+                const updateTrainingsList = useCallback(() => {
+                    if (!operatorsLoaded) return;
+                    
+                    const controller = new AbortController();
+                    axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                        headers: {
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        },
+                        signal: controller.signal
+                    }).then(res => {
+                        const grouped = {};
+                        (res.data.trainings || []).forEach(t => {
+                            if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                            grouped[t.operator_id].push(t);
+                        });
+                        setTrainings(grouped);
+                    }).catch(err => {
+                        if (!axios.isCancel(err)) {
+                            console.error('Error fetching trainings:', err);
                         }
-                    };
+                    });
 
-                    fetchTrainings();
-                }, [shouldUpdate]);
+                    return () => controller.abort();
+                }, []); // Убираем все зависимости
 
-                // Устанавливаем shouldUpdate в true при изменении месяца
+                // Храним month и operatorsLoaded в ref для предотвращения лишних ререндеров
+                const monthRef = useRef(month);
+                const operatorsLoadedRef = useRef(operatorsLoaded);
+                const userRef = useRef(user);
+
+                // Обновляем ref'ы при изменении соответствующих значений
                 useEffect(() => {
-                    setShouldUpdate(true);
+                    monthRef.current = month;
                 }, [month]);
+
+                useEffect(() => {
+                    operatorsLoadedRef.current = operatorsLoaded;
+                }, [operatorsLoaded]);
+
+                useEffect(() => {
+                    userRef.current = user;
+                }, [user]);
+
+                // Обновляем список только при изменении месяца или после загрузки операторов
+                useEffect(() => {
+                    updateTrainingsList();
+                }, [month, operatorsLoaded]);
 
                 useEffect(() => {
                     // Группируем операторов по SV (supervisor)
@@ -5986,20 +5980,20 @@
                     setSvGroups(Object.entries(svMap)); // [[svName, [operators]]]
                 }, [operators]);
 
-                const handleAdd = (opId) => {
+                const handleAdd = useCallback((opId) => {
                     setCurrentOperator(opId);
                     setEditingTraining(null);
                     setShowModal(true);
-                };
+                }, []);
 
-                const handleEdit = (opId, training) => {
+                const handleEdit = useCallback((opId, training) => {
                     setCurrentOperator(opId);
                     // Передаём копию объекта, чтобы не было мутаций
                     setEditingTraining({ ...training });
                     setShowModal(true);
-                };
+                }, []);
 
-                const handleDelete = (trainingId) => {
+                const handleDelete = useCallback((trainingId) => {
                     axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
@@ -6007,14 +6001,14 @@
                         }
                     })
                         .then(() => {
-                            setShouldUpdate(true);
+                            updateTrainingsList();
                             showToast('Тренинг успешно удален', 'success');
                         })
                         .catch(err => {
                             console.error('Error deleting training:', err);
                             showToast('Ошибка при удалении тренинга', 'error');
                         });
-                };
+                }, [updateTrainingsList]);
 
                 const handleSave = (data) => {
                     if (editingTraining) {
@@ -6025,7 +6019,7 @@
                             }
                         })
                             .then(() => {
-                                setShouldUpdate(true);
+                                updateTrainingsList();
                                 setShowModal(false);
                                 showToast('Тренинг успешно обновлен','success');
                             })
@@ -6041,7 +6035,7 @@
                             }
                         })
                             .then(() => {
-                                setShouldUpdate(true);
+                                updateTrainingsList();
                                 setShowModal(false);
                                 showToast('Тренинг успешно добавлен','success');
                             })
@@ -6053,8 +6047,8 @@
                 };
 
                 // ...existing code...
-            // Компонент тренинга с useState
-            const TrainingBox = ({ training, onEdit, onDelete }) => {
+            // Мемоизированный компонент тренинга
+            const TrainingBox = memo(({ training, onEdit, onDelete }) => {
                 const [showDetails, setShowDetails] = useState(false);
                 const [confirmDelete, setConfirmDelete] = useState(false);
                 const maxCommentLength = 50;
@@ -6261,7 +6255,9 @@
                     )}
                     </>
                 );
-                };
+                }, (prevProps, nextProps) => {
+                    return JSON.stringify(prevProps.training) === JSON.stringify(nextProps.training);
+                });
 
                 return (
                     <div className="mt-6">
