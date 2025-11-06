@@ -63,7 +63,7 @@
 <body class="bg-gray-50 font-sans antialiased text-gray-900">
     <div id="root"></div>
     <script type="text/babel">
-        const { useState, useEffect, useCallback, useRef, useMemo, memo } = React;
+        const { useState, useEffect, useCallback, useRef, useMemo } = React;
         const ToastContainer = ({ toasts, removeToast }) => {
             const handleClose = (id) => {
                 setToasts(prev => prev.map(toast => 
@@ -5920,17 +5920,17 @@
                     }
                 }, [operators]);
 
-                // Функция для обновления списка тренингов с мемоизированными значениями
-                const updateTrainingsList = useCallback(() => {
+                // ref to ensure we only auto-fetch trainings once on initial operators load
+                const trainingsFetchedRef = React.useRef(false);
+
+                // Fetch trainings helper — call explicitly when we need fresh data
+                const fetchTrainings = (monthParam = month) => {
                     if (!operatorsLoaded) return;
-                    
-                    const controller = new AbortController();
-                    axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                    axios.get(`${API_BASE_URL}/api/trainings?month=${monthParam}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
-                        },
-                        signal: controller.signal
+                        }
                     }).then(res => {
                         const grouped = {};
                         (res.data.trainings || []).forEach(t => {
@@ -5939,36 +5939,18 @@
                         });
                         setTrainings(grouped);
                     }).catch(err => {
-                        if (!axios.isCancel(err)) {
-                            console.error('Error fetching trainings:', err);
-                        }
+                        console.error('Error fetching trainings:', err);
+                        // If showToast is available in this scope, show an error toast
+                        if (typeof showToast === 'function') showToast('Ошибка при загрузке тренингов','error');
                     });
+                    trainingsFetchedRef.current = true;
+                };
 
-                    return () => controller.abort();
-                }, []); // Убираем все зависимости
-
-                // Храним month и operatorsLoaded в ref для предотвращения лишних ререндеров
-                const monthRef = useRef(month);
-                const operatorsLoadedRef = useRef(operatorsLoaded);
-                const userRef = useRef(user);
-
-                // Обновляем ref'ы при изменении соответствующих значений
+                // Only auto-fetch once when operators become available.
                 useEffect(() => {
-                    monthRef.current = month;
-                }, [month]);
-
-                useEffect(() => {
-                    operatorsLoadedRef.current = operatorsLoaded;
+                    if (!operatorsLoaded) return;
+                    if (!trainingsFetchedRef.current) fetchTrainings(month);
                 }, [operatorsLoaded]);
-
-                useEffect(() => {
-                    userRef.current = user;
-                }, [user]);
-
-                // Обновляем список только при изменении месяца или после загрузки операторов
-                useEffect(() => {
-                    updateTrainingsList();
-                }, [month, operatorsLoaded]);
 
                 useEffect(() => {
                     // Группируем операторов по SV (supervisor)
@@ -5980,20 +5962,20 @@
                     setSvGroups(Object.entries(svMap)); // [[svName, [operators]]]
                 }, [operators]);
 
-                const handleAdd = useCallback((opId) => {
+                const handleAdd = (opId) => {
                     setCurrentOperator(opId);
                     setEditingTraining(null);
                     setShowModal(true);
-                }, []);
+                };
 
-                const handleEdit = useCallback((opId, training) => {
+                const handleEdit = (opId, training) => {
                     setCurrentOperator(opId);
                     // Передаём копию объекта, чтобы не было мутаций
                     setEditingTraining({ ...training });
                     setShowModal(true);
-                }, []);
+                };
 
-                const handleDelete = useCallback((trainingId) => {
+                const handleDelete = (trainingId) => {
                     axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
@@ -6001,14 +5983,15 @@
                         }
                     })
                         .then(() => {
-                            updateTrainingsList();
-                            showToast('Тренинг успешно удален', 'success');
+                            // Refresh trainings explicitly after successful delete
+                            fetchTrainings(month);
+                            if (typeof showToast === 'function') showToast('Тренинг успешно удален', 'success');
                         })
                         .catch(err => {
                             console.error('Error deleting training:', err);
-                            showToast('Ошибка при удалении тренинга', 'error');
+                            if (typeof showToast === 'function') showToast('Ошибка при удалении тренинга', 'error');
                         });
-                }, [updateTrainingsList]);
+                };
 
                 const handleSave = (data) => {
                     if (editingTraining) {
@@ -6019,13 +6002,13 @@
                             }
                         })
                             .then(() => {
-                                updateTrainingsList();
-                                setShowModal(false);
-                                showToast('Тренинг успешно обновлен','success');
+                                // refresh trainings explicitly
+                                fetchTrainings(month);
+                                if (typeof showToast === 'function') showToast('Тренинг успешно обновлен','success');
                             })
                             .catch(err => {
                                 console.error('Error updating training:', err);
-                                showToast('Ошибка при обновлении тренинга','error');
+                                if (typeof showToast === 'function') showToast('Ошибка при обновлении тренинга','error');
                             });
                     } else {
                         axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: currentOperator }, {
@@ -6035,20 +6018,21 @@
                             }
                         })
                             .then(() => {
-                                updateTrainingsList();
-                                setShowModal(false);
-                                showToast('Тренинг успешно добавлен','success');
+                                fetchTrainings(month);
+                                if (typeof showToast === 'function') showToast('Тренинг успешно добавлен','success');
                             })
                             .catch(err => {
                                 console.error('Error adding training:', err);
-                                showToast('Ошибка при добавлении тренинга','error');
+                                if (typeof showToast === 'function') showToast('Ошибка при добавлении тренинга','error');
                             });
                     }
+                    // close modal in any case (the modal caller also handles close on success in some flows)
+                    setShowModal(false);
                 };
 
                 // ...existing code...
-            // Мемоизированный компонент тренинга
-            const TrainingBox = memo(({ training, onEdit, onDelete }) => {
+            // Компонент тренинга с useState
+            const TrainingBox = ({ training, onEdit, onDelete }) => {
                 const [showDetails, setShowDetails] = useState(false);
                 const [confirmDelete, setConfirmDelete] = useState(false);
                 const maxCommentLength = 50;
@@ -6255,16 +6239,14 @@
                     )}
                     </>
                 );
-                }, (prevProps, nextProps) => {
-                    return JSON.stringify(prevProps.training) === JSON.stringify(nextProps.training);
-                });
+                };
 
                 return (
                     <div className="mt-6">
                         <div className="sticky top-0 z-10 bg-blue-50 py-2 px-4 rounded-xl shadow mb-4 flex flex-col md:flex-row md:items-center gap-4 border border-blue-200">
                             <div>
                                 <label className="block text-xs font-medium text-gray-700 mb-1">Месяц:</label>
-                                <input type="month" value={month} onChange={e => setMonth(e.target.value)} className="p-1 border rounded text-xs" />
+                                <input type="month" value={month} onChange={e => { const newM = e.target.value; setMonth(newM); fetchTrainings(newM); }} className="p-1 border rounded text-xs" />
                             </div>
                             <div className="flex-1">
                                 <label className="block text-xs font-medium text-gray-700 mb-1">Поиск:</label>
