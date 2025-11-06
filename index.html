@@ -5943,28 +5943,50 @@
                 // ref to ensure we only auto-fetch trainings once on initial operators load
                 const trainingsFetchedRef = React.useRef(false);
 
+                // guard to avoid duplicate/concurrent fetches for the same month
+                const fetchTrainingsStateRef = React.useRef({ month: null, inFlight: false });
+
                 // Fetch trainings helper — call explicitly when we need fresh data
-                const fetchTrainings = (monthParam = month) => {
+                const fetchTrainings = async (monthParam = month) => {
                     if (!operatorsLoaded) return;
-                    console.log('[DEBUG] TrainingsView.fetchTrainings', { monthParam, operatorsLoaded, userId: user?.id, stack: (new Error()).stack });
-                    axios.get(`${API_BASE_URL}/api/trainings?month=${monthParam}`, {
-                        headers: {
-                            'X-API-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        }
-                    }).then(res => {
+                    const state = fetchTrainingsStateRef.current;
+                    // If already fetching same month, skip
+                    if (state.inFlight && state.month === monthParam) {
+                        console.log('[DEBUG] TrainingsView.fetchTrainings - skip duplicate (inFlight)', { monthParam, userId: user?.id });
+                        return;
+                    }
+                    // If we've already fetched this month and no force requested, skip
+                    if (!state.inFlight && state.month === monthParam) {
+                        console.log('[DEBUG] TrainingsView.fetchTrainings - already fetched', { monthParam, userId: user?.id });
+                        return;
+                    }
+
+                    state.inFlight = true;
+                    state.month = monthParam;
+                    console.log('[DEBUG] TrainingsView.fetchTrainings - start', { monthParam, userId: user?.id });
+                    try {
+                        const res = await axios.get(`${API_BASE_URL}/api/trainings?month=${monthParam}`, {
+                            headers: {
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        });
                         const grouped = {};
                         (res.data.trainings || []).forEach(t => {
                             if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
                             grouped[t.operator_id].push(t);
                         });
                         setTrainings(grouped);
-                    }).catch(err => {
+                        console.log('[DEBUG] TrainingsView.fetchTrainings - done', { monthParam, count: (res.data.trainings || []).length });
+                    } catch (err) {
                         console.error('Error fetching trainings:', err);
-                        // If showToast is available in this scope, show an error toast
                         if (typeof showToast === 'function') showToast('Ошибка при загрузке тренингов','error');
-                    });
-                    trainingsFetchedRef.current = true;
+                        // On error, clear month so subsequent attempts can retry
+                        state.month = null;
+                    } finally {
+                        state.inFlight = false;
+                        trainingsFetchedRef.current = true;
+                    }
                 };
 
                 // Only auto-fetch once when operators become available.
