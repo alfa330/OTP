@@ -2426,7 +2426,7 @@
             const url = `${API_BASE_URL}/api/sv/daily_hours?${hoursParams.toString()}`;
             const trainingsUrl = `${API_BASE_URL}/api/trainings?${trainingsParams.toString()}`;
 
-            console.debug('[DEBUG] fetchDailyHoursAndTrainings - calling trainings endpoint', { trainingsUrl, userId: user?.id, selectedSvId, month, stack: (new Error()).stack });
+            console.log('[DEBUG] fetchDailyHoursAndTrainings - calling trainings endpoint', { trainingsUrl, userId: user?.id, selectedSvId, month, stack: (new Error()).stack });
             const [hoursResp, trainingsResp] = await Promise.all([
                 axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
                 axios.get(trainingsUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
@@ -5946,7 +5946,7 @@
                 // Fetch trainings helper — call explicitly when we need fresh data
                 const fetchTrainings = (monthParam = month) => {
                     if (!operatorsLoaded) return;
-                    console.debug('[DEBUG] TrainingsView.fetchTrainings', { monthParam, operatorsLoaded, userId: user?.id, stack: (new Error()).stack });
+                    console.log('[DEBUG] TrainingsView.fetchTrainings', { monthParam, operatorsLoaded, userId: user?.id, stack: (new Error()).stack });
                     axios.get(`${API_BASE_URL}/api/trainings?month=${monthParam}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
@@ -5997,7 +5997,7 @@
                 };
 
                 const handleDelete = (trainingId) => {
-                    console.debug('[DEBUG] TrainingsView.handleDelete - calling delete', { trainingId, month, userId: user?.id, stack: (new Error()).stack });
+                    console.log('[DEBUG] TrainingsView.handleDelete - calling delete', { trainingId, month, userId: user?.id, stack: (new Error()).stack });
                     axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
@@ -6017,7 +6017,7 @@
 
                 const handleSave = (data) => {
                     if (editingTraining) {
-                        console.debug('[DEBUG] TrainingsView.handleSave - calling put', { editingId: editingTraining.id, month, userId: user?.id, stack: (new Error()).stack });
+                        console.log('[DEBUG] TrainingsView.handleSave - calling put', { editingId: editingTraining.id, month, userId: user?.id, stack: (new Error()).stack });
                         axios.put(`${API_BASE_URL}/api/trainings/${editingTraining.id}`, data, {
                             headers: {
                                 'X-API-Key': user.apiKey,
@@ -6034,7 +6034,7 @@
                                 if (typeof showToast === 'function') showToast('Ошибка при обновлении тренинга','error');
                             });
                     } else {
-                        console.debug('[DEBUG] TrainingsView.handleSave - calling post', { currentOperator, month, userId: user?.id, stack: (new Error()).stack });
+                        console.log('[DEBUG] TrainingsView.handleSave - calling post', { currentOperator, month, userId: user?.id, stack: (new Error()).stack });
                         axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: currentOperator }, {
                             headers: {
                                 'X-API-Key': user.apiKey,
@@ -8067,7 +8067,7 @@
                 if (!fetchTrainings._fetchedMonthRef) fetchTrainings._fetchedMonthRef = { month: null };
                 if (fetchTrainings._fetchedMonthRef.month === selectedMonth) return;
                 try{
-                    console.debug('[DEBUG] operator.fetchTrainings - calling operator trainings', { selectedMonth, userId: user?.id, stack: (new Error()).stack });
+                    console.log('[DEBUG] operator.fetchTrainings - calling operator trainings', { selectedMonth, userId: user?.id, stack: (new Error()).stack });
                     const response = await axios.get(`${API_BASE_URL}/api/trainings?month=${selectedMonth}`,{
                         headers: {'X-API-Key': user.apiKey, 
                                   'X-User-Id': user.id}
