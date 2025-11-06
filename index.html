@@ -5946,6 +5946,9 @@
                 // guard to avoid duplicate/concurrent fetches for the same month
                 const fetchTrainingsStateRef = React.useRef({ month: null, inFlight: false });
 
+                // remember last grouped result to avoid setting state when nothing changed
+                const lastGroupedRef = React.useRef(null);
+
                 // Fetch trainings helper — call explicitly when we need fresh data
                 const fetchTrainings = async (monthParam = month) => {
                     if (!operatorsLoaded) return;
@@ -5964,7 +5967,19 @@
                                 if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
                                 grouped[t.operator_id].push(t);
                             });
-                            setTrainings(grouped);
+                            try {
+                                const groupedStr = JSON.stringify(grouped);
+                                if (lastGroupedRef.current !== groupedStr) {
+                                    setTrainings(grouped);
+                                    lastGroupedRef.current = groupedStr;
+                                } else {
+                                    console.log('[DEBUG] TrainingsView.fetchTrainings - grouped unchanged (await), skipping setTrainings', { url, monthParam });
+                                }
+                            } catch (e) {
+                                // fallback: if stringify fails for any reason, set anyway
+                                setTrainings(grouped);
+                                lastGroupedRef.current = null;
+                            }
                             return;
                         }
 
@@ -5972,8 +5987,19 @@
                         const now = Date.now();
                         if (cache[url] && cache[url].data && (now - cache[url].ts) < 5000) {
                             console.log('[DEBUG] TrainingsView.fetchTrainings - using cached data', { url, monthParam });
-                            const grouped = cache[url].grouped;
-                            setTrainings(grouped || {});
+                            const grouped = cache[url].grouped || {};
+                            try {
+                                const groupedStr = JSON.stringify(grouped);
+                                if (lastGroupedRef.current !== groupedStr) {
+                                    setTrainings(grouped);
+                                    lastGroupedRef.current = groupedStr;
+                                } else {
+                                    console.log('[DEBUG] TrainingsView.fetchTrainings - grouped unchanged (cache), skipping setTrainings', { url, monthParam });
+                                }
+                            } catch (e) {
+                                setTrainings(grouped);
+                                lastGroupedRef.current = null;
+                            }
                             return;
                         }
 
@@ -5999,7 +6025,18 @@
                             cache[url].data = res.data;
                             cache[url].grouped = grouped;
                             cache[url].ts = Date.now();
-                            setTrainings(grouped);
+                            try {
+                                const groupedStr = JSON.stringify(grouped);
+                                if (lastGroupedRef.current !== groupedStr) {
+                                    setTrainings(grouped);
+                                    lastGroupedRef.current = groupedStr;
+                                } else {
+                                    console.log('[DEBUG] TrainingsView.fetchTrainings - grouped unchanged (network), skipping setTrainings', { url, monthParam });
+                                }
+                            } catch (e) {
+                                setTrainings(grouped);
+                                lastGroupedRef.current = null;
+                            }
                             console.log('[DEBUG] TrainingsView.fetchTrainings - done (global)', { url, monthParam, count: (res.data.trainings || []).length });
                         } catch (err) {
                             // clear promise so future attempts can retry
