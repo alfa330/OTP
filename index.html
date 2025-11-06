@@ -6399,32 +6399,76 @@
                                 return displaySvGroups.map(([svName, ops]) => {
                                     const searchLower = search.trim().toLowerCase();
                                     const filteredOps = ops.filter(op => op.name.toLowerCase().includes(searchLower) || searchLower === "");
-                                    const showGroup = svName && svName.toLowerCase().includes(searchLower) || filteredOps.length > 0 || searchLower === "";
+                                    const showGroup = (svName && svName.toLowerCase().includes(searchLower)) || filteredOps.length > 0 || searchLower === "";
                                     if (!showGroup) return null;
+
+                                    const isMyGroup = svName === user.name;
+                                    const isSvUser = user?.role === 'sv';
+                                    const isExpanded = !!expandedSv[svName];
+
                                     return (
                                         <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
-                                            <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Супервайзер: {svName === user.name ? 'Вы' : svName}</h2>
-                                            <div className="space-y-4">
-                                                {filteredOps.map(op => (
-                                                    <div key={op.id} className="flex items-center bg-white rounded-lg shadow p-2 mb-2 border border-gray-200">
-                                                        <span className="font-semibold text-gray-900 w-36 min-w-[140px] text-sm truncate">{op.name}</span>
-                                                        <div className="flex flex-row flex-wrap items-center ml-2">
-                                                            {(trainings[op.id] || []).map(t => (
-                                                                <TrainingBox
-                                                                    key={t.id}
-                                                                    training={t}
-                                                                    onEdit={() => handleEdit(op.id, t)}
-                                                                    onDelete={() => handleDelete(t.id)}
-                                                                />
-                                                            ))}
-                                                            <button onClick={() => handleAdd(op.id)} className="ml-2 px-2 py-1 rounded-lg border border-dashed border-green-400 text-green-600 bg-white hover:bg-green-50 transition text-xs">+</button>
-                                                        </div>
-                                                    </div>
-                                                ))}
+                                        {/* Header: имя СВ + тулбар (кнопка разворачивания) */}
+                                        <div className="flex items-center justify-between mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">
+                                            <h2 className="text-xl font-bold text-blue-800">
+                                            Супервайзер: {isMyGroup ? 'Вы' : svName}
+                                            </h2>
+
+                                            {/* Кнопка для св — у админа тоже есть (разворачивать/сворачивать) */}
+                                            <div className="flex items-center gap-2">
+                                            {/* Покажем количество операторов */}
+                                            <span className="text-sm text-gray-600 mr-2">{filteredOps.length} оператор(ов)</span>
+
+                                            <button
+                                                onClick={() => setExpandedSv(prev => ({ ...prev, [svName]: !prev[svName] }))}
+                                                className="flex items-center gap-2 px-3 py-1 rounded-lg text-xs font-semibold border hover:bg-white transition"
+                                                aria-expanded={isExpanded}
+                                                aria-controls={`sv-group-${svName}`}
+                                                title={isExpanded ? 'Свернуть группу' : 'Показать группу'}
+                                            >
+                                                {isExpanded ? (
+                                                <>
+                                                    <i className="fas fa-chevron-up" aria-hidden="true" /> Свернуть
+                                                </>
+                                                ) : (
+                                                <>
+                                                    <i className="fas fa-chevron-down" aria-hidden="true" /> Показать
+                                                </>
+                                                )}
+                                            </button>
                                             </div>
                                         </div>
+
+                                        {/* Контент — показываем только если группа развернута */}
+                                        {isExpanded ? (
+                                            <div id={`sv-group-${svName}`} className="space-y-4">
+                                            {filteredOps.map(op => (
+                                                <div key={op.id} className="flex items-center bg-white rounded-lg shadow p-2 mb-2 border border-gray-200">
+                                                <span className="font-semibold text-gray-900 w-36 min-w-[140px] text-sm truncate">{op.name}</span>
+                                                <div className="flex flex-row flex-wrap items-center ml-2">
+                                                    {(trainings[op.id] || []).map(t => (
+                                                    <TrainingBox
+                                                        key={t.id}
+                                                        training={t}
+                                                        onEdit={() => handleEdit(op.id, t)}
+                                                        onDelete={() => handleDelete(t.id)}
+                                                    />
+                                                    ))}
+                                                    <button onClick={() => handleAdd(op.id)} className="ml-2 px-2 py-1 rounded-lg border border-dashed border-green-400 text-green-600 bg-white hover:bg-green-50 transition text-xs">+</button>
+                                                </div>
+                                                </div>
+                                            ))}
+                                            </div>
+                                        ) : (
+                                            /* Если св вошёл под своим аккаунтом — другие группы скрыты по умолчанию,
+                                            но виден заголовок с кнопкой (чтобы св мог раскрыть) */
+                                            <div className="p-3 text-sm text-gray-500 italic">
+                                            Операторы скрыты. Нажмите «Показать», чтобы раскрыть группу.
+                                            </div>
+                                        )}
+                                        </div>
                                     );
-                                });
+                                    });
                             })()
                         )}
                         <TrainingModal isOpen={showModal} onClose={() => setShowModal(false)} onSave={handleSave} initialData={editingTraining || {}} />
