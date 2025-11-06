@@ -2376,9 +2376,6 @@
             // eslint-disable-next-line
         }, [user, selectedSvId, month]);
 
-        // Ref to avoid refetching daily hours/trainings on unrelated renders
-        const lastFetchedDailyRef = React.useRef({ userId: null, selectedSvId: null, month: null });
-
         function fallbackToast(msg, type = 'success') {
             try {
             if (showToast) showToast(msg, type);
@@ -2392,15 +2389,6 @@
         // ---- fetch daily hours + trainings ----
         async function fetchDailyHoursAndTrainings() {
             if (!user || !selectedSvId) return;
-            // Skip if already fetched for these params
-            try {
-                const last = lastFetchedDailyRef.current || {};
-                if (last.userId === user.id && last.selectedSvId === selectedSvId && last.month === month) {
-                    return;
-                }
-            } catch (e) {
-                // continue to fetch on any error
-            }
             setIsLoading(true);
             try {
             const hoursParams = new URLSearchParams();
@@ -2426,7 +2414,6 @@
             const url = `${API_BASE_URL}/api/sv/daily_hours?${hoursParams.toString()}`;
             const trainingsUrl = `${API_BASE_URL}/api/trainings?${trainingsParams.toString()}`;
 
-            console.log('[DEBUG] fetchDailyHoursAndTrainings - calling trainings endpoint', { trainingsUrl, userId: user?.id, selectedSvId, month, stack: (new Error()).stack });
             const [hoursResp, trainingsResp] = await Promise.all([
                 axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
                 axios.get(trainingsUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
@@ -2452,13 +2439,6 @@
                 if (!tmap[op]) tmap[op] = {};
                 if (!tmap[op][dayNum]) tmap[op][dayNum] = [];
                 tmap[op][dayNum].push(t);
-            }
-
-            // mark as fetched for these params
-            try {
-                lastFetchedDailyRef.current = { userId: user.id, selectedSvId, month };
-            } catch (e) {
-                // ignore
             }
             setTrainingsMap(tmap);
 
@@ -5909,13 +5889,30 @@
                 };
 
             const TrainingsView = ({ user, operators }) => {  // operators - список операторов (все для админа, свои для св)
-                const [month, setMonth] = useState(new Date().toISOString().slice(0,7));
+                // Preserve selected month across remounts — read/write from localStorage
+                const [month, setMonth] = useState(() => {
+                    try {
+                        return localStorage.getItem('trainings_month') || new Date().toISOString().slice(0,7);
+                    } catch (e) {
+                        return new Date().toISOString().slice(0,7);
+                    }
+                });
+
+                useEffect(() => {
+                    try {
+                        localStorage.setItem('trainings_month', month);
+                    } catch (e) {
+                        // ignore storage errors
+                    }
+                }, [month]);
                 const [trainings, setTrainings] = useState({}); // {operator_id: [trainings]}
                 const [showModal, setShowModal] = useState(false);
                 const [currentOperator, setCurrentOperator] = useState(null);
                 const [editingTraining, setEditingTraining] = useState(null);
                 // Группировка операторов по SV
                 const [svGroups, setSvGroups] = useState([]);
+                // Which SV groups are expanded (visible). For SV users only their own group is expanded by default.
+                const [expandedSv, setExpandedSv] = useState({});
                 const [search, setSearch] = useState("");
                 const [operatorsLoaded, setOperatorsLoaded] = useState(false);
                 const [calendarView, setCalendarView] = useState(false);
@@ -5940,124 +5937,23 @@
                     }
                 }, [operators]);
 
-                // ref to ensure we only auto-fetch trainings once on initial operators load
-                const trainingsFetchedRef = React.useRef(false);
-
-                // guard to avoid duplicate/concurrent fetches for the same month
-                const fetchTrainingsStateRef = React.useRef({ month: null, inFlight: false });
-
-                // remember last grouped result to avoid setting state when nothing changed
-                const lastGroupedRef = React.useRef(null);
-
-                // Fetch trainings helper — call explicitly when we need fresh data
-                const fetchTrainings = async (monthParam = month) => {
-                    if (!operatorsLoaded) return;
-                    // Use a global URL-keyed cache to dedupe across multiple component instances
-                    try {
-                        const url = `${API_BASE_URL}/api/trainings?month=${monthParam}`;
-                        if (!window.__trainingsFetchCache) window.__trainingsFetchCache = {};
-                        const cache = window.__trainingsFetchCache;
-
-                        // If a request is already in-flight for this URL, await it
-                        if (cache[url] && cache[url].promise) {
-                            console.log('[DEBUG] TrainingsView.fetchTrainings - awaiting existing promise', { url, monthParam });
-                            const res = await cache[url].promise;
-                            const grouped = {};
-                            (res.data.trainings || []).forEach(t => {
-                                if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
-                                grouped[t.operator_id].push(t);
-                            });
-                            try {
-                                const groupedStr = JSON.stringify(grouped);
-                                if (lastGroupedRef.current !== groupedStr) {
-                                    setTrainings(grouped);
-                                    lastGroupedRef.current = groupedStr;
-                                } else {
-                                    console.log('[DEBUG] TrainingsView.fetchTrainings - grouped unchanged (await), skipping setTrainings', { url, monthParam });
-                                }
-                            } catch (e) {
-                                // fallback: if stringify fails for any reason, set anyway
-                                setTrainings(grouped);
-                                lastGroupedRef.current = null;
-                            }
-                            return;
-                        }
-
-                        // If we have recent cached data (5s), use it
-                        const now = Date.now();
-                        if (cache[url] && cache[url].data && (now - cache[url].ts) < 5000) {
-                            console.log('[DEBUG] TrainingsView.fetchTrainings - using cached data', { url, monthParam });
-                            const grouped = cache[url].grouped || {};
-                            try {
-                                const groupedStr = JSON.stringify(grouped);
-                                if (lastGroupedRef.current !== groupedStr) {
-                                    setTrainings(grouped);
-                                    lastGroupedRef.current = groupedStr;
-                                } else {
-                                    console.log('[DEBUG] TrainingsView.fetchTrainings - grouped unchanged (cache), skipping setTrainings', { url, monthParam });
-                                }
-                            } catch (e) {
-                                setTrainings(grouped);
-                                lastGroupedRef.current = null;
-                            }
-                            return;
-                        }
-
-                        // Start a new request and store its promise
-                        console.log('[DEBUG] TrainingsView.fetchTrainings - start (global)', { url, monthParam, userId: user?.id });
-                        const promise = axios.get(url, {
-                            headers: {
-                                'X-API-Key': user.apiKey,
-                                'X-User-Id': user.id
-                            }
-                        });
-                        cache[url] = cache[url] || {};
-                        cache[url].promise = promise;
-
-                        try {
-                            const res = await promise;
-                            const grouped = {};
-                            (res.data.trainings || []).forEach(t => {
-                                if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
-                                grouped[t.operator_id].push(t);
-                            });
-                            // store in cache
-                            cache[url].data = res.data;
-                            cache[url].grouped = grouped;
-                            cache[url].ts = Date.now();
-                            try {
-                                const groupedStr = JSON.stringify(grouped);
-                                if (lastGroupedRef.current !== groupedStr) {
-                                    setTrainings(grouped);
-                                    lastGroupedRef.current = groupedStr;
-                                } else {
-                                    console.log('[DEBUG] TrainingsView.fetchTrainings - grouped unchanged (network), skipping setTrainings', { url, monthParam });
-                                }
-                            } catch (e) {
-                                setTrainings(grouped);
-                                lastGroupedRef.current = null;
-                            }
-                            console.log('[DEBUG] TrainingsView.fetchTrainings - done (global)', { url, monthParam, count: (res.data.trainings || []).length });
-                        } catch (err) {
-                            // clear promise so future attempts can retry
-                            delete cache[url].promise;
-                            console.error('Error fetching trainings:', err);
-                            if (typeof showToast === 'function') showToast('Ошибка при загрузке тренингов','error');
-                        } finally {
-                            // ensure promise cleared after completion
-                            delete cache[url].promise;
-                            trainingsFetchedRef.current = true;
-                        }
-                    } catch (err) {
-                        console.error('fetchTrainings helper error:', err);
-                    }
-                };
-
-                // Only auto-fetch once when operators become available.
                 useEffect(() => {
+                    // Получаем тренинги только если операторы загружены
                     if (!operatorsLoaded) return;
-                    if (!trainingsFetchedRef.current) fetchTrainings(month);
-                }, [operatorsLoaded]);
+                    axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                        headers: {
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
+                    }).then(res => {
+                        const grouped = {};
+                        (res.data.trainings || []).forEach(t => {
+                            if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                            grouped[t.operator_id].push(t);
+                        });
+                        setTrainings(grouped);
+                    });
+                }, [month, operatorsLoaded]);
 
                 useEffect(() => {
                     // Группируем операторов по SV (supervisor)
@@ -6068,6 +5964,19 @@
                     });
                     setSvGroups(Object.entries(svMap)); // [[svName, [operators]]]
                 }, [operators]);
+
+                // Initialize which groups are expanded when svGroups or user changes.
+                useEffect(() => {
+                    const map = {};
+                    svGroups.forEach(([svName]) => {
+                        if (user?.role === 'sv') {
+                            map[svName] = (svName === user.name);
+                        } else {
+                            map[svName] = true; // non-SV users (admins) see all groups expanded by default
+                        }
+                    });
+                    setExpandedSv(map);
+                }, [svGroups, user && user.role, user && user.name]);
 
                 const handleAdd = (opId) => {
                     setCurrentOperator(opId);
@@ -6083,7 +5992,6 @@
                 };
 
                 const handleDelete = (trainingId) => {
-                    console.log('[DEBUG] TrainingsView.handleDelete - calling delete', { trainingId, month, userId: user?.id, stack: (new Error()).stack });
                     axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
@@ -6091,19 +5999,56 @@
                         }
                     })
                         .then(() => {
-                            // Refresh trainings explicitly after successful delete
-                            fetchTrainings(month);
-                            if (typeof showToast === 'function') showToast('Тренинг успешно удален', 'success');
+                            // Обновляем только тренинги
+                            axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                                headers: {
+                                    'X-API-Key': user.apiKey,
+                                    'X-User-Id': user.id
+                                }
+                            })
+                                .then(res => {
+                                    const grouped = {};
+                                    (res.data.trainings || []).forEach(t => {
+                                        if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                                        grouped[t.operator_id].push(t);
+                                    });
+                                    setTrainings(grouped);
+                                    showToast('Тренинг успешно удален', 'success');
+                                })
+                                .catch(err => {
+                                    console.error('Error updating trainings after delete:', err);
+                                    showToast('Ошибка при обновлении списка тренингов', 'error');
+                                });
                         })
                         .catch(err => {
                             console.error('Error deleting training:', err);
-                            if (typeof showToast === 'function') showToast('Ошибка при удалении тренинга', 'error');
+                            showToast('Ошибка при удалении тренинга', 'error');
                         });
                 };
 
                 const handleSave = (data) => {
+                    const updateTrainings = () => {
+                        axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                            headers: {
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        })
+                            .then(res => {
+                                const grouped = {};
+                                (res.data.trainings || []).forEach(t => {
+                                    if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                                    grouped[t.operator_id].push(t);
+                                });
+                                setTrainings(grouped);
+                                setShowModal(false);
+                            })
+                            .catch(err => {
+                                console.error('Error updating trainings:', err);
+                                showToast('Ошибка при обновлении списка тренингов','error')
+                            });
+                    };
                     if (editingTraining) {
-                        console.log('[DEBUG] TrainingsView.handleSave - calling put', { editingId: editingTraining.id, month, userId: user?.id, stack: (new Error()).stack });
                         axios.put(`${API_BASE_URL}/api/trainings/${editingTraining.id}`, data, {
                             headers: {
                                 'X-API-Key': user.apiKey,
@@ -6111,16 +6056,14 @@
                             }
                         })
                             .then(() => {
-                                // refresh trainings explicitly
-                                fetchTrainings(month);
-                                if (typeof showToast === 'function') showToast('Тренинг успешно обновлен','success');
+                                updateTrainings();
+                                showToast('Тренинг успешно обновлен','success');
                             })
                             .catch(err => {
                                 console.error('Error updating training:', err);
-                                if (typeof showToast === 'function') showToast('Ошибка при обновлении тренинга','error');
+                                showToast('Ошибка при обновлении тренинга','error');
                             });
                     } else {
-                        console.log('[DEBUG] TrainingsView.handleSave - calling post', { currentOperator, month, userId: user?.id, stack: (new Error()).stack });
                         axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: currentOperator }, {
                             headers: {
                                 'X-API-Key': user.apiKey,
@@ -6128,16 +6071,14 @@
                             }
                         })
                             .then(() => {
-                                fetchTrainings(month);
-                                if (typeof showToast === 'function') showToast('Тренинг успешно добавлен','success');
+                                updateTrainings();
+                                showToast('Тренинг успешно добавлен','success');
                             })
                             .catch(err => {
                                 console.error('Error adding training:', err);
-                                if (typeof showToast === 'function') showToast('Ошибка при добавлении тренинга','error');
+                                showToast('Ошибка при добавлении тренинга','error');
                             });
                     }
-                    // close modal in any case (the modal caller also handles close on success in some flows)
-                    setShowModal(false);
                 };
 
                 // ...existing code...
@@ -6356,7 +6297,7 @@
                         <div className="sticky top-0 z-10 bg-blue-50 py-2 px-4 rounded-xl shadow mb-4 flex flex-col md:flex-row md:items-center gap-4 border border-blue-200">
                             <div>
                                 <label className="block text-xs font-medium text-gray-700 mb-1">Месяц:</label>
-                                <input type="month" value={month} onChange={e => { const newM = e.target.value; setMonth(newM); fetchTrainings(newM); }} className="p-1 border rounded text-xs" />
+                                <input type="month" value={month} onChange={e => setMonth(e.target.value)} className="p-1 border rounded text-xs" />
                             </div>
                             <div className="flex-1">
                                 <label className="block text-xs font-medium text-gray-700 mb-1">Поиск:</label>
@@ -8149,11 +8090,7 @@
             };
 
             const fetchTrainings = async () =>{
-                // avoid duplicate fetches for the same selectedMonth
-                if (!fetchTrainings._fetchedMonthRef) fetchTrainings._fetchedMonthRef = { month: null };
-                if (fetchTrainings._fetchedMonthRef.month === selectedMonth) return;
                 try{
-                    console.log('[DEBUG] operator.fetchTrainings - calling operator trainings', { selectedMonth, userId: user?.id, stack: (new Error()).stack });
                     const response = await axios.get(`${API_BASE_URL}/api/trainings?month=${selectedMonth}`,{
                         headers: {'X-API-Key': user.apiKey, 
                                   'X-User-Id': user.id}
@@ -8161,7 +8098,6 @@
                     const data = response.data;
                     if (data.status === 'success' ){
                         setOperatorTrainings(data.trainings);
-                        fetchTrainings._fetchedMonthRef.month = selectedMonth;
                     } 
                 }
                 catch (err) {
