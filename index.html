@@ -5917,12 +5917,20 @@
                     // Флаг, что операторы загружены (не пустой массив)
                     if (operators && operators.length > 0) {
                         setOperatorsLoaded(true);
+                        // Загружаем тренинги один раз при загрузке операторов
+                        fetchTrainings();
                     }
                 }, [operators]);
 
                 useEffect(() => {
-                    // Получаем тренинги только если операторы загружены
-                    if (!operatorsLoaded) return;
+                    // Обновляем тренинги только при смене месяца
+                    if (operatorsLoaded) {
+                        fetchTrainings();
+                    }
+                }, [month]);
+
+                // Выносим логику получения тренингов в отдельную функцию
+                const fetchTrainings = () => {
                     axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
@@ -5936,7 +5944,7 @@
                         });
                         setTrainings(grouped);
                     });
-                }, [month, operatorsLoaded]);
+                };
 
                 useEffect(() => {
                     // Группируем операторов по SV (supervisor)
@@ -5969,26 +5977,8 @@
                         }
                     })
                         .then(() => {
-                            // Обновляем только тренинги
-                            axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
-                                headers: {
-                                    'X-API-Key': user.apiKey,
-                                    'X-User-Id': user.id
-                                }
-                            })
-                                .then(res => {
-                                    const grouped = {};
-                                    (res.data.trainings || []).forEach(t => {
-                                        if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
-                                        grouped[t.operator_id].push(t);
-                                    });
-                                    setTrainings(grouped);
-                                    showToast('Тренинг успешно удален', 'success');
-                                })
-                                .catch(err => {
-                                    console.error('Error updating trainings after delete:', err);
-                                    showToast('Ошибка при обновлении списка тренингов', 'error');
-                                });
+                            fetchTrainings();
+                            showToast('Тренинг успешно удален', 'success');
                         })
                         .catch(err => {
                             console.error('Error deleting training:', err);
@@ -5997,27 +5987,6 @@
                 };
 
                 const handleSave = (data) => {
-                    const updateTrainings = () => {
-                        axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
-                            headers: {
-                                'X-API-Key': user.apiKey,
-                                'X-User-Id': user.id
-                            }
-                        })
-                            .then(res => {
-                                const grouped = {};
-                                (res.data.trainings || []).forEach(t => {
-                                    if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
-                                    grouped[t.operator_id].push(t);
-                                });
-                                setTrainings(grouped);
-                                setShowModal(false);
-                            })
-                            .catch(err => {
-                                console.error('Error updating trainings:', err);
-                                showToast('Ошибка при обновлении списка тренингов','error')
-                            });
-                    };
                     if (editingTraining) {
                         axios.put(`${API_BASE_URL}/api/trainings/${editingTraining.id}`, data, {
                             headers: {
@@ -6026,7 +5995,8 @@
                             }
                         })
                             .then(() => {
-                                updateTrainings();
+                                fetchTrainings();
+                                setShowModal(false);
                                 showToast('Тренинг успешно обновлен','success');
                             })
                             .catch(err => {
@@ -6041,7 +6011,8 @@
                             }
                         })
                             .then(() => {
-                                updateTrainings();
+                                fetchTrainings();
+                                setShowModal(false);
                                 showToast('Тренинг успешно добавлен','success');
                             })
                             .catch(err => {
