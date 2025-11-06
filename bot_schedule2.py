@@ -64,7 +64,7 @@ executor_pool = ThreadPoolExecutor(max_workers=4)
 app = Flask(__name__)
 CORS(app, resources={
     r"/api/*": {
-        "origins": ["https://alfa330.github.io", "http://localhost:*", "https://call-evalution.pages.dev", "https://szov.pages.dev", "https://moders.pages.dev", "https://table-7kx.pages.dev"],
+        "origins": ["https://alfa330.github.io", "http://localhost:*", "https://call-evalution.pages.dev", "https://szov.pages.dev", "https://moders.pages.dev", "https://table-7kx.pages.dev", "https://base-pmy9.onrender.com"],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "X-API-Key", "X-User-Id"],
         "supports_credentials": False,
