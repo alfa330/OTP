@@ -5920,9 +5920,13 @@
                     }
                 }, [operators]);
 
+                // Состояние для отслеживания необходимости обновления
+                const [shouldUpdate, setShouldUpdate] = useState(true);
+
                 // Функция для обновления списка тренингов
                 const updateTrainingsList = useCallback(() => {
                     if (!operatorsLoaded) return;
+                    
                     axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
@@ -5935,13 +5939,21 @@
                             grouped[t.operator_id].push(t);
                         });
                         setTrainings(grouped);
+                        setShouldUpdate(false);
                     });
                 }, [month, operatorsLoaded, user.apiKey, user.id]);
 
-                // Обновляем список только при изменении месяца или после загрузки операторов
+                // Обновляем список только когда shouldUpdate = true
                 useEffect(() => {
-                    updateTrainingsList();
-                }, [month, operatorsLoaded]);
+                    if (shouldUpdate) {
+                        updateTrainingsList();
+                    }
+                }, [shouldUpdate, updateTrainingsList]);
+
+                // Устанавливаем shouldUpdate в true при изменении месяца
+                useEffect(() => {
+                    setShouldUpdate(true);
+                }, [month]);
 
                 useEffect(() => {
                     // Группируем операторов по SV (supervisor)
@@ -5974,7 +5986,7 @@
                         }
                     })
                         .then(() => {
-                            updateTrainingsList();
+                            setShouldUpdate(true);
                             showToast('Тренинг успешно удален', 'success');
                         })
                         .catch(err => {
@@ -5992,7 +6004,7 @@
                             }
                         })
                             .then(() => {
-                                updateTrainingsList();
+                                setShouldUpdate(true);
                                 setShowModal(false);
                                 showToast('Тренинг успешно обновлен','success');
                             })
@@ -6008,7 +6020,7 @@
                             }
                         })
                             .then(() => {
-                                updateTrainingsList();
+                                setShouldUpdate(true);
                                 setShowModal(false);
                                 showToast('Тренинг успешно добавлен','success');
                             })
