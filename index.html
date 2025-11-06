@@ -2376,6 +2376,9 @@
             // eslint-disable-next-line
         }, [user, selectedSvId, month]);
 
+        // Ref to avoid refetching daily hours/trainings on unrelated renders
+        const lastFetchedDailyRef = React.useRef({ userId: null, selectedSvId: null, month: null });
+
         function fallbackToast(msg, type = 'success') {
             try {
             if (showToast) showToast(msg, type);
@@ -2389,6 +2392,15 @@
         // ---- fetch daily hours + trainings ----
         async function fetchDailyHoursAndTrainings() {
             if (!user || !selectedSvId) return;
+            // Skip if already fetched for these params
+            try {
+                const last = lastFetchedDailyRef.current || {};
+                if (last.userId === user.id && last.selectedSvId === selectedSvId && last.month === month) {
+                    return;
+                }
+            } catch (e) {
+                // continue to fetch on any error
+            }
             setIsLoading(true);
             try {
             const hoursParams = new URLSearchParams();
@@ -2439,6 +2451,13 @@
                 if (!tmap[op]) tmap[op] = {};
                 if (!tmap[op][dayNum]) tmap[op][dayNum] = [];
                 tmap[op][dayNum].push(t);
+            }
+
+            // mark as fetched for these params
+            try {
+                lastFetchedDailyRef.current = { userId: user.id, selectedSvId, month };
+            } catch (e) {
+                // ignore
             }
             setTrainingsMap(tmap);
 
@@ -8039,6 +8058,9 @@
             };
 
             const fetchTrainings = async () =>{
+                // avoid duplicate fetches for the same selectedMonth
+                if (!fetchTrainings._fetchedMonthRef) fetchTrainings._fetchedMonthRef = { month: null };
+                if (fetchTrainings._fetchedMonthRef.month === selectedMonth) return;
                 try{
                     const response = await axios.get(`${API_BASE_URL}/api/trainings?month=${selectedMonth}`,{
                         headers: {'X-API-Key': user.apiKey, 
@@ -8047,6 +8069,7 @@
                     const data = response.data;
                     if (data.status === 'success' ){
                         setOperatorTrainings(data.trainings);
+                        fetchTrainings._fetchedMonthRef.month = selectedMonth;
                     } 
                 }
                 catch (err) {
