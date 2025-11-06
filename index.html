@@ -5917,20 +5917,12 @@
                     // Флаг, что операторы загружены (не пустой массив)
                     if (operators && operators.length > 0) {
                         setOperatorsLoaded(true);
-                        // Загружаем тренинги один раз при загрузке операторов
-                        fetchTrainings();
                     }
                 }, [operators]);
 
-                useEffect(() => {
-                    // Обновляем тренинги только при смене месяца
-                    if (operatorsLoaded) {
-                        fetchTrainings();
-                    }
-                }, [month]);
-
-                // Выносим логику получения тренингов в отдельную функцию
-                const fetchTrainings = () => {
+                // Функция для обновления списка тренингов
+                const updateTrainingsList = useCallback(() => {
+                    if (!operatorsLoaded) return;
                     axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
                         headers: {
                             'X-API-Key': user.apiKey,
@@ -5944,7 +5936,12 @@
                         });
                         setTrainings(grouped);
                     });
-                };
+                }, [month, operatorsLoaded, user.apiKey, user.id]);
+
+                // Обновляем список только при изменении месяца или после загрузки операторов
+                useEffect(() => {
+                    updateTrainingsList();
+                }, [month, operatorsLoaded]);
 
                 useEffect(() => {
                     // Группируем операторов по SV (supervisor)
@@ -5977,7 +5974,7 @@
                         }
                     })
                         .then(() => {
-                            fetchTrainings();
+                            updateTrainingsList();
                             showToast('Тренинг успешно удален', 'success');
                         })
                         .catch(err => {
@@ -5995,7 +5992,7 @@
                             }
                         })
                             .then(() => {
-                                fetchTrainings();
+                                updateTrainingsList();
                                 setShowModal(false);
                                 showToast('Тренинг успешно обновлен','success');
                             })
@@ -6011,7 +6008,7 @@
                             }
                         })
                             .then(() => {
-                                fetchTrainings();
+                                updateTrainingsList();
                                 setShowModal(false);
                                 showToast('Тренинг успешно добавлен','success');
                             })
