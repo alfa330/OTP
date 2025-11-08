@@ -1447,7 +1447,6 @@ def get_sv_data():
 
         # optional month YYYY-MM
         month = request.args.get('month')
-        from datetime import datetime
         if month:
             try:
                 datetime.strptime(month, "%Y-%m")
@@ -1481,6 +1480,44 @@ def get_sv_data():
         except Exception:
             operators = []
 
+        def _extract_score_and_imported(ev):
+            """
+            Возвращает (score_or_None, is_imported_bool).
+            Поддерживает dict, sequence (tuple/list) и objects with attributes.
+            For tuple/list we assume score index 4, is_imported last index (if present).
+            """
+            # dict-like
+            try:
+                if isinstance(ev, dict):
+                    score = ev.get("score")
+                    is_imported = bool(ev.get("is_imported")) if "is_imported" in ev else False
+                    return (None if score is None else float(score), is_imported)
+                # object with attributes
+                if hasattr(ev, "__dict__") and not isinstance(ev, (list, tuple)):
+                    score = getattr(ev, "score", None)
+                    is_imported = bool(getattr(ev, "is_imported", False))
+                    return (None if score is None else float(score), is_imported)
+                # sequence-like
+                if isinstance(ev, (list, tuple)):
+                    # common positions from get_call_evaluations: score at index 4; is_imported at index 27 (if exists)
+                    score = None
+                    is_imported = False
+                    if len(ev) > 4:
+                        score = ev[4]
+                    # try last position for is_imported
+                    if len(ev) > 27:
+                        is_imported = bool(ev[27])
+                    else:
+                        # fallback: if last element is bool, consider it
+                        last = ev[-1]
+                        if isinstance(last, bool):
+                            is_imported = bool(last)
+                    return (None if score is None else float(score), is_imported)
+            except Exception:
+                pass
+            # cannot parse
+            return (None, False)
+
         for op in operators:
             # flexible unpacking: support dict or sequence rows
             if isinstance(op, dict):
@@ -1512,44 +1549,40 @@ def get_sv_data():
             except Exception:
                 evaluations = []
 
-            call_count = len(evaluations)
+            # compute count and average only for реально оценённых записей
             scores = []
+            eval_count = 0
             for ev in evaluations:
-                try:
-                    if isinstance(ev, dict):
-                        raw = ev.get("score",0)
-                    else:
-                        # if sequence-like, try common positions
-                        raw = None
-                        if hasattr(ev, "score"):
-                            raw = getattr(ev, "score")
-                        elif len(ev) > 0:
-                            raw = ev[0]
-                    if raw is None:
-                        continue
-                    scores.append(float(raw))
-                except Exception:
-                    # ignore malformed score entries
-                    continue
+                score_val, is_imported = _extract_score_and_imported(ev)
+                # count only non-imported and with a numeric score
+                if not is_imported and score_val is not None:
+                    scores.append(score_val)
+                    eval_count += 1
 
             avg_score = round(sum(scores) / len(scores), 2) if len(scores) > 0 else None
+
+            # ensure rate is numeric and reasonable
+            try:
+                rate_val = float(rate) if rate is not None else 1.0
+            except Exception:
+                rate_val = 1.0
 
             response_data["operators"].append({
                 "id": operator_id,
                 "name": operator_name,
                 "hire_date": hire_date,
                 "direction_id": direction_id,
-                "call_count": call_count,
+                # number of actual evaluated calls (with scores)
+                "call_count": eval_count,
                 "avg_score": avg_score,
                 "scores_table_url": scores_table_url,
                 "status": status,
-                "rate": float(rate) if rate is not None else 1.0
+                "rate": rate_val
             })
 
         return jsonify(response_data), 200
 
     except Exception:
-        # log full traceback on server, but return a simple message to client
         logging.exception("Error fetching SV data")
         return jsonify({"error": "Internal server error"}), 500
 
