@@ -1574,159 +1574,199 @@ class Database:
                 return pbkdf2_sha256.verify(password, result[0])
             return False
 
-    def get_call_evaluations(self, operator_id, month=None):
-        """
-        Возвращает оценки звонков + неоценённые звонки (из imported_calls).
-        """
-        query = """
-            WITH latest_versions AS (
-                SELECT 
-                    phone_number,
-                    month,
-                    MAX(created_at) as latest_date
-                FROM calls
-                WHERE operator_id = %s
-                GROUP BY phone_number, month
-            ),
-            latest_calls AS (
-                SELECT 
-                    c.id,
-                    c.phone_number,
-                    c.month,
-                    c.created_at
-                FROM calls c
-                JOIN latest_versions lv ON 
-                    c.phone_number = lv.phone_number AND 
-                    c.month = lv.month AND 
-                    c.created_at = lv.latest_date
-                WHERE c.operator_id = %s
-            )
+def get_call_evaluations(self, operator_id, month=None):
+    """
+    Возвращает оценки звонков + неоценённые звонки (из imported_calls).
+    Теперь также возвращает поле `duration` (в секундах) для каждого звонка.
+    """
+    query = """
+        WITH latest_versions AS (
             SELECT 
-                c.id,
-                c.month, 
-                c.phone_number, 
-                c.appeal_date,
-                c.score, 
-                c.comment,
-                c.audio_path,
-                c.is_draft,
-                c.is_correction,
-                TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI') AS evaluation_date,
-                c.scores,
-                c.criterion_comments,
-                d.id as direction_id,
-                d.name as direction_name,
-                d.criteria as direction_criteria,
-                d.has_file_upload as direction_has_file_upload,
-                u.name as evaluator_name,
-                c.created_at,
-                c.sv_request,
-                c.sv_request_comment,
-                c.sv_request_by,
-                su.name as sv_request_by_name,
-                TO_CHAR(c.sv_request_at, 'YYYY-MM-DD HH24:MI') as sv_request_at,
-                c.sv_request_approved,
-                c.sv_request_approved_by,
-                apu.name as sv_request_approved_by_name,
-                TO_CHAR(c.sv_request_approved_at, 'YYYY-MM-DD HH24:MI') as sv_request_approved_at,
-                FALSE AS is_imported -- флаг для различия
+                phone_number,
+                month,
+                MAX(created_at) as latest_date
+            FROM calls
+            WHERE operator_id = %s
+            GROUP BY phone_number, month
+        ),
+        latest_calls AS (
+            SELECT 
+                c.id::text AS id_text,
+                c.phone_number,
+                c.month,
+                c.created_at
             FROM calls c
-            JOIN latest_calls lc ON c.id = lc.id
-            LEFT JOIN directions d ON c.direction_id = d.id  
-            LEFT JOIN users u ON c.evaluator_id = u.id
-            LEFT JOIN users su ON c.sv_request_by = su.id
-            LEFT JOIN users apu ON c.sv_request_approved_by = apu.id
+            JOIN latest_versions lv ON 
+                c.phone_number = lv.phone_number AND 
+                c.month = lv.month AND 
+                c.created_at = lv.latest_date
             WHERE c.operator_id = %s
-        """
-        params = [operator_id, operator_id, operator_id]
-        if month:
-            query += " AND c.month = %s"
-            params.append(month)
+        )
+        SELECT 
+            c.id::text AS id,
+            c.month,
+            c.phone_number,
+            c.duration_sec AS duration,
+            c.appeal_date,
+            c.score,
+            c.comment,
+            c.audio_path,
+            c.is_draft,
+            c.is_correction,
+            TO_CHAR(c.created_at, 'YYYY-MM-DD HH24:MI') AS evaluation_date,
+            c.scores,
+            c.criterion_comments,
+            d.id as direction_id,
+            d.name as direction_name,
+            d.criteria as direction_criteria,
+            d.has_file_upload as direction_has_file_upload,
+            u.name as evaluator_name,
+            c.created_at,
+            c.sv_request,
+            c.sv_request_comment,
+            c.sv_request_by,
+            su.name as sv_request_by_name,
+            TO_CHAR(c.sv_request_at, 'YYYY-MM-DD HH24:MI') as sv_request_at,
+            c.sv_request_approved,
+            c.sv_request_approved_by,
+            apu.name as sv_request_approved_by_name,
+            TO_CHAR(c.sv_request_approved_at, 'YYYY-MM-DD HH24:MI') as sv_request_approved_at,
+            FALSE AS is_imported
+        FROM calls c
+        JOIN latest_calls lc ON c.id::text = lc.id_text
+        LEFT JOIN directions d ON c.direction_id = d.id  
+        LEFT JOIN users u ON c.evaluator_id = u.id
+        LEFT JOIN users su ON c.sv_request_by = su.id
+        LEFT JOIN users apu ON c.sv_request_approved_by = apu.id
+        WHERE c.operator_id = %s
+    """
+    params = [operator_id, operator_id, operator_id]
+    if month:
+        query += " AND c.month = %s"
+        params.append(month)
 
-        # Добавляем блок для неоценённых imported_calls
-        query += """
-            UNION ALL
-            SELECT 
-                ic.id,
-                ic.month,
-                ic.phone_number,
-                ic.datetime_raw AS appeal_date,
-                NULL AS score,
-                NULL AS comment,
-                NULL AS audio_path,
-                FALSE AS is_draft,
-                FALSE AS is_correction,
-                NULL AS evaluation_date,
-                NULL AS scores,
-                NULL AS criterion_comments,
-                NULL AS direction_id,
-                NULL AS direction_name,
-                NULL AS direction_criteria,
-                NULL AS direction_has_file_upload,
-                NULL AS evaluator_name,
-                ic.imported_at AS created_at,
-                FALSE AS sv_request,
-                NULL AS sv_request_comment,
-                NULL AS sv_request_by,
-                NULL AS sv_request_by_name,
-                NULL AS sv_request_at,
-                FALSE AS sv_request_approved,
-                NULL AS sv_request_approved_by,
-                NULL AS sv_request_approved_by_name,
-                NULL AS sv_request_approved_at,
-                TRUE AS is_imported
-            FROM imported_calls ic
-            WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
-        """
-        params.append(operator_id)
+    # Добавляем блок для неоценённых imported_calls (все типы согласованы с первой частью)
+    query += """
+        UNION ALL
+        SELECT 
+            ic.id::text AS id,
+            ic.month,
+            ic.phone_number,
+            ic.duration_sec AS duration,
+            ic.datetime_raw AS appeal_date,
+            NULL::numeric AS score,
+            NULL::text AS comment,
+            NULL::text AS audio_path,
+            FALSE AS is_draft,
+            FALSE AS is_correction,
+            NULL::text AS evaluation_date,
+            NULL::jsonb AS scores,
+            NULL::jsonb AS criterion_comments,
+            NULL::integer AS direction_id,
+            NULL::text AS direction_name,
+            NULL::jsonb AS direction_criteria,
+            NULL::boolean AS direction_has_file_upload,
+            NULL::text AS evaluator_name,
+            ic.imported_at AS created_at,
+            FALSE::boolean AS sv_request,
+            NULL::text AS sv_request_comment,
+            NULL::integer AS sv_request_by,
+            NULL::text AS sv_request_by_name,
+            NULL::text AS sv_request_at,
+            FALSE::boolean AS sv_request_approved,
+            NULL::integer AS sv_request_approved_by,
+            NULL::text AS sv_request_approved_by_name,
+            NULL::text AS sv_request_approved_at,
+            TRUE AS is_imported
+        FROM imported_calls ic
+        WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
+    """
+    params.append(operator_id)
 
-        if month:
-            query += " AND ic.month = %s"
-            params.append(month)
+    if month:
+        query += " AND ic.month = %s"
+        params.append(month)
 
-        query += " ORDER BY created_at DESC"
+    query += " ORDER BY created_at DESC"
 
-        with self._get_cursor() as cursor:
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
+    with self._get_cursor() as cursor:
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
 
-            return [
-                {
-                    "id": row[0],
-                    "month": row[1],
-                    "phone_number": row[2],
-                    "appeal_date": row[3].strftime('%Y-%m-%d %H:%M:%S') if row[3] else None,
-                    "score": float(row[4]) if row[4] is not None else None,
-                    "comment": row[5],
-                    "audio_path": row[6],
-                    "is_draft": row[7],
-                    "is_correction": row[8],
-                    "evaluation_date": row[9],
-                    "scores": row[10] if row[10] else [],
-                    "criterion_comments": row[11] if row[11] else [],
-                    "direction": {
-                        "id": row[12],
-                        "name": row[13],
-                        "criteria": row[14] if row[14] else [],
-                        "hasFileUpload": row[15] if row[15] is not None else True
-                    } if row[12] else None,
-                    "evaluator": row[16] if row[16] else None,
-                    "created_at": row[17],
-                    # sv_request block
-                    "sv_request": bool(row[18]),
-                    "sv_request_comment": row[19],
-                    "sv_request_by": row[20],
-                    "sv_request_by_name": row[21],
-                    "sv_request_at": row[22],
-                    "sv_request_approved": bool(row[23]),
-                    "sv_request_approved_by": row[24],
-                    "sv_request_approved_by_name": row[25],
-                    "sv_request_approved_at": row[26],
-                    # Новый флаг для различения
-                    "is_imported": bool(row[27])
-                }
-                for row in rows
-            ]
+        results = []
+        for row in rows:
+            # Распаковываем по порядку SELECT'а
+            (
+                _id,
+                _month,
+                _phone_number,
+                _duration,
+                _appeal_date,
+                _score,
+                _comment,
+                _audio_path,
+                _is_draft,
+                _is_correction,
+                _evaluation_date,
+                _scores,
+                _criterion_comments,
+                _dir_id,
+                _dir_name,
+                _dir_criteria,
+                _dir_has_file_upload,
+                _evaluator_name,
+                _created_at,
+                _sv_request,
+                _sv_request_comment,
+                _sv_request_by,
+                _sv_request_by_name,
+                _sv_request_at,
+                _sv_request_approved,
+                _sv_request_approved_by,
+                _sv_request_approved_by_name,
+                _sv_request_approved_at,
+                _is_imported
+            ) = row
+
+            # Сформируем запись
+            results.append({
+                "id": _id,
+                "month": _month,
+                "phone_number": _phone_number,
+                # duration — в секундах, приводим к float если есть
+                "duration": float(_duration) if _duration is not None else None,
+                "appeal_date": _appeal_date.strftime('%Y-%m-%d %H:%M:%S') if _appeal_date and hasattr(_appeal_date, "strftime") else (_appeal_date if _appeal_date else None),
+                "score": float(_score) if _score is not None else None,
+                "comment": _comment,
+                "audio_path": _audio_path,
+                "is_draft": bool(_is_draft),
+                "is_correction": bool(_is_correction),
+                "evaluation_date": _evaluation_date,
+                "scores": _scores if _scores else [],
+                "criterion_comments": _criterion_comments if _criterion_comments else [],
+                "direction": {
+                    "id": _dir_id,
+                    "name": _dir_name,
+                    "criteria": _dir_criteria if _dir_criteria else [],
+                    "hasFileUpload": _dir_has_file_upload if _dir_has_file_upload is not None else True
+                } if _dir_id else None,
+                "evaluator": _evaluator_name if _evaluator_name else None,
+                "created_at": _created_at,
+                # sv_request block
+                "sv_request": bool(_sv_request),
+                "sv_request_comment": _sv_request_comment,
+                "sv_request_by": _sv_request_by,
+                "sv_request_by_name": _sv_request_by_name,
+                "sv_request_at": _sv_request_at,
+                "sv_request_approved": bool(_sv_request_approved),
+                "sv_request_approved_by": _sv_request_approved_by,
+                "sv_request_approved_by_name": _sv_request_approved_by_name,
+                "sv_request_approved_at": _sv_request_approved_at,
+                # Новый флаг для различения
+                "is_imported": bool(_is_imported)
+            })
+
+        return results
         
     def get_operators_summary_for_month(self, month, supervisor_id=None):
         """
