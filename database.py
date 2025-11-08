@@ -25,7 +25,7 @@ from openpyxl.cell.text import InlineFont
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from collections import defaultdict
 import pandas as pd
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 logging.basicConfig(level=logging.INFO)
 
@@ -36,6 +36,29 @@ time.tzset()
 MIN_CONN = 1
 MAX_CONN = 20  # Adjust based on expected load
 POOL = None
+
+# Вставьте/адаптируйте этот helper в ваш модуль
+def _normalize_phone(phone: Optional[str]) -> Optional[str]:
+    if not phone:
+        return None
+    digits = re.sub(r'\D', '', str(phone))
+    if not digits:
+        return None
+    # Оставим, например, последние 10-11 цифр (зависит от вашей логики)
+    return digits[-11:] if len(digits) > 11 else digits
+
+def _parse_datetime_raw(dt_str: Optional[str]) -> Optional[datetime]:
+    if not dt_str:
+        return None
+    # ожидаемый формат 'dd.mm.yyyy hh:mm:ss'
+    formats = ['%d.%m.%Y %H:%M:%S', '%d.%m.%Y %H:%M']  # запасные форматы
+    for fmt in formats:
+        try:
+            # возвращаем timezone-naive datetime; при вставке используем AT TIME ZONE 'Asia/Almaty' или локаль
+            return datetime.strptime(dt_str, fmt)
+        except Exception:
+            continue
+    return None
 
 def get_pool():
     global POOL
@@ -163,6 +186,35 @@ class Database:
                     ADD COLUMN IF NOT EXISTS sv_request_approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     ADD COLUMN IF NOT EXISTS sv_request_approved_at TIMESTAMP;
             """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS imported_calls (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    external_id TEXT,                      -- id из JSON (можно UUID или любой string)
+                    operator_name TEXT NOT NULL,           -- ФИО из JSON
+                    operator_id INTEGER,                   -- resolved users.id (NULL допустим)
+                    month VARCHAR(7) NOT NULL,             -- format 'YYYY-MM'
+                    datetime_raw TIMESTAMP WITH TIME ZONE, -- parsed datetime (store with timezone)
+                    phone_number TEXT,
+                    phone_normalized TEXT,
+                    duration_sec DOUBLE PRECISION,
+                    desired INTEGER,
+                    available INTEGER,
+                    status VARCHAR(20) NOT NULL DEFAULT 'not_evaluated', -- not_evaluated / evaluated / skipped
+                    imported_at TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    evaluated_at TIMESTAMP WITH TIME ZONE,
+                    evaluated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    notes TEXT
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_imported_calls_external_id_month ON imported_calls (external_id, month);
+                CREATE INDEX IF NOT EXISTS idx_imported_calls_month ON imported_calls(month);
+                CREATE INDEX IF NOT EXISTS idx_imported_calls_operator_id ON imported_calls(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_imported_calls_status ON imported_calls(status);
+                CREATE INDEX IF NOT EXISTS idx_imported_calls_phone_normalized ON imported_calls(phone_normalized);
+            """)
+
+
             #Trainings table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trainings (
@@ -996,28 +1048,43 @@ class Database:
                 WHERE id = %s
             """, (hours_table_url, scores_table_url, user_id))
 
-    def add_call_evaluation(self, evaluator_id, operator_id, phone_number, score, 
-                            comment=None, month=None, audio_path=None, is_draft=False, 
-                            scores=None, criterion_comments=None, direction_id=None, 
-                            is_correction=False, previous_version_id=None, appeal_date=None):
+    def add_call_evaluation(self,
+                            evaluator_id,
+                            operator_id,
+                            phone_number,
+                            score,
+                            comment=None,
+                            month=None,
+                            audio_path=None,
+                            is_draft=False,
+                            scores=None,
+                            criterion_comments=None,
+                            direction_id=None,
+                            is_correction=False,
+                            previous_version_id=None,
+                            appeal_date=None,
+                            external_id=None):   # <-- NEW optional param
+        """
+        Создаёт/обновляет запись в calls и, если возможно, помечает связанную запись в imported_calls как evaluated.
+        """
         month = month or datetime.now().strftime('%Y-%m')
-        
+
         # Подготовка JSON данных один раз
         scores_json = json.dumps(scores) if scores else None
         criterion_comments_json = json.dumps(criterion_comments) if criterion_comments else None
-        
+
         with self._get_cursor() as cursor:
             # Проверка существования direction_id одним запросом
             if direction_id:
-                cursor.execute("SELECT 1 FROM directions WHERE id = %s AND is_active = TRUE", (direction_id,))  # Added is_active filter
+                cursor.execute("SELECT 1 FROM directions WHERE id = %s AND is_active = TRUE", (direction_id,))
                 if not cursor.fetchone():
                     direction_id = None
 
             if is_correction and previous_version_id and not audio_path:
-                        cursor.execute("SELECT audio_path FROM calls WHERE id = %s", (previous_version_id,))
-                        result = cursor.fetchone()
-                        if result and result[0]:
-                            audio_path = result[0]
+                cursor.execute("SELECT audio_path FROM calls WHERE id = %s", (previous_version_id,))
+                result = cursor.fetchone()
+                if result and result[0]:
+                    audio_path = result[0]
 
             # Объединенная проверка черновика и существующей оценки
             cursor.execute("""
@@ -1045,14 +1112,14 @@ class Database:
                 ORDER BY created_at DESC
                 LIMIT 1
             """, (evaluator_id, operator_id, month, operator_id, month, phone_number))
-            
+
             existing_record = cursor.fetchone()
             old_audio_path = None
             call_id = None
-            
+
             if existing_record and not is_correction:
                 call_id, old_audio_path, is_existing_eval = existing_record
-                
+
                 # Обновление существующей записи
                 if is_draft:
                     # Для черновика обновляем все поля
@@ -1077,7 +1144,7 @@ class Database:
                         call_id
                     ))
                     call_id = cursor.fetchone()[0]
-                    
+
                     # Удаляем старый аудиофайл если он был заменен
                     if old_audio_path and audio_path and old_audio_path != audio_path:
                         try:
@@ -1088,9 +1155,33 @@ class Database:
                             blob.delete()
                         except Exception as e:
                             logging.error(f"Error removing old audio file: {str(e)}")
-                    
+
+                    # Перед возвратом — пометить imported_calls (если найдено)
+                    try:
+                        if external_id:
+                            cursor.execute("""
+                                UPDATE imported_calls
+                                SET status = 'evaluated',
+                                    evaluated_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',
+                                    evaluated_by = %s
+                                WHERE external_id = %s AND month = %s AND status != 'evaluated'
+                            """, (evaluator_id, external_id, month))
+                        else:
+                            # попытаться найти по телефону + дате (точное совпадение)
+                            if phone_number and appeal_date:
+                                phone_norm = _normalize_phone(phone_number)
+                                cursor.execute("""
+                                    UPDATE imported_calls
+                                    SET status = 'evaluated',
+                                        evaluated_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',
+                                        evaluated_by = %s
+                                    WHERE phone_normalized = %s AND month = %s AND datetime_raw = %s AND status != 'evaluated'
+                                """, (evaluator_id, phone_norm, month, appeal_date))
+                    except Exception as e:
+                        logging.exception("Error marking imported_call as evaluated: %s", e)
+
                     return call_id
-            
+
             # Создаем новую запись (для новой оценки, переоценки или если нет черновика)
             cursor.execute("""
                 INSERT INTO calls (
@@ -1106,7 +1197,7 @@ class Database:
                 scores_json, criterion_comments_json, direction_id, appeal_date
             ))
             call_id = cursor.fetchone()[0]
-            
+
             # Удаляем старый аудиофайл, если он был заменен
             if old_audio_path and audio_path and old_audio_path != audio_path:
                 try:
@@ -1117,8 +1208,123 @@ class Database:
                     blob.delete()
                 except Exception as e:
                     logging.error(f"Error removing old audio file: {str(e)}")
-            
+
+            # После успешного создания — помечаем imported_calls как evaluated (если можем сопоставить)
+            try:
+                if external_id:
+                    cursor.execute("""
+                        UPDATE imported_calls
+                        SET status = 'evaluated',
+                            evaluated_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',
+                            evaluated_by = %s
+                        WHERE external_id = %s AND month = %s AND status != 'evaluated'
+                    """, (evaluator_id, external_id, month))
+                else:
+                    if phone_number and appeal_date:
+                        phone_norm = _normalize_phone(phone_number)
+                        cursor.execute("""
+                            UPDATE imported_calls
+                            SET status = 'evaluated',
+                                evaluated_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty',
+                                evaluated_by = %s
+                            WHERE phone_normalized = %s AND month = %s AND datetime_raw = %s AND status != 'evaluated'
+                        """, (evaluator_id, phone_norm, month, appeal_date))
+            except Exception as e:
+                logging.exception("Error marking imported_call as evaluated: %s", e)
+
             return call_id
+    
+    def import_calls_from_distribution(self, payload: dict, importer_id: Optional[int] = None) -> dict:
+        """
+        Импортирует JSON payload в imported_calls.
+        Возвращает отчёт: {'imported': n, 'updated': m, 'skipped': k, 'errors': [...], 'missing_operators': [...]}
+        """
+        month = payload.get('month')
+        if not month:
+            raise ValueError("Payload must include 'month' (YYYY-MM)")
+
+        imported = 0
+        updated = 0
+        skipped = 0
+        errors = []
+        missing_operators = set()
+
+        with self._get_cursor() as cur:
+            for op in payload.get('distribution', []):
+                op_name = op.get('operator')
+                desired = op.get('desired')
+                available = op.get('available')
+
+                cur.execute("SELECT id FROM users WHERE name = %s LIMIT 1", (op_name,))
+                r = cur.fetchone()
+                operator_id = r[0] if r else None
+                if not operator_id:
+                    missing_operators.add(op_name)
+
+                for c in op.get('calls', []):
+                    external_id = c.get('id')
+                    dt_raw_str = c.get('datetimeRaw')
+                    parsed_dt = _parse_datetime_raw(dt_raw_str)
+                    phone = c.get('phone')
+                    phone_norm = _normalize_phone(phone)
+                    duration = c.get('durationSec')
+
+                    try:
+                        cur.execute("""
+                            INSERT INTO imported_calls
+                            (external_id, operator_name, operator_id, month, datetime_raw,
+                            phone_number, phone_normalized, duration_sec, desired, available, status, imported_at)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'not_evaluated', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                            ON CONFLICT (external_id, month) DO UPDATE
+                            SET operator_name = EXCLUDED.operator_name,
+                                operator_id = COALESCE(EXCLUDED.operator_id, imported_calls.operator_id),
+                                datetime_raw = COALESCE(EXCLUDED.datetime_raw, imported_calls.datetime_raw),
+                                phone_number = COALESCE(EXCLUDED.phone_number, imported_calls.phone_number),
+                                phone_normalized = COALESCE(EXCLUDED.phone_normalized, imported_calls.phone_normalized),
+                                duration_sec = COALESCE(EXCLUDED.duration_sec, imported_calls.duration_sec),
+                                desired = COALESCE(EXCLUDED.desired, imported_calls.desired),
+                                available = COALESCE(EXCLUDED.available, imported_calls.available),
+                                status = COALESCE(imported_calls.status, 'not_evaluated'),
+                                imported_at = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'
+                            """,
+                            (external_id, op_name, operator_id, month, parsed_dt, phone, phone_norm, duration, desired, available)
+                        )
+                        # cur.rowcount может быть ненадёжен для ON CONFLICT; просто учитываем как imported/updated логически
+                        imported += 1
+                    except Exception as exc:
+                        errors.append({"external_id": external_id, "error": str(exc)})
+                        skipped += 1
+
+        return {
+            "imported": imported,
+            "updated": updated,
+            "skipped": skipped,
+            "errors": errors,
+            "missing_operators": list(missing_operators)
+        }
+
+    def list_imported_calls(self, month: str, status: Optional[str] = None, operator_name: Optional[str] = None, limit: int = 200):
+        q = "SELECT id, external_id, operator_name, operator_id, datetime_raw, phone_number, phone_normalized, duration_sec, desired, available, status, evaluated_at, evaluated_by, notes FROM imported_calls WHERE month = %s"
+        params = [month]
+        if status:
+            q += " AND status = %s"
+            params.append(status)
+        if operator_name:
+            q += " AND operator_name = %s"
+            params.append(operator_name)
+        q += " ORDER BY datetime_raw NULLS LAST LIMIT %s"
+        params.append(limit)
+        with self._get_cursor() as cur:
+            cur.execute(q, tuple(params))
+            rows = cur.fetchall()
+        keys = ["id","external_id","operator_name","operator_id","datetime_raw","phone_number","phone_normalized","duration_sec","desired","available","status","evaluated_at","evaluated_by","notes"]
+        return [dict(zip(keys, r)) for r in rows]
+
+    def mark_imported_call_skipped(self, imported_call_id: str, reason: Optional[str] = None):
+        with self._get_cursor() as cur:
+            cur.execute("UPDATE imported_calls SET status = 'skipped', notes = COALESCE(notes,'') || %s WHERE id = %s",
+                        (f"\nskipped: {reason}" if reason else "\nskipped", imported_call_id))
+            return cur.rowcount == 1
 
     def parse_calls_file(self, file):
         try:
