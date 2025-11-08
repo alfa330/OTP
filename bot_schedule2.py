@@ -1996,6 +1996,64 @@ def get_audio_file(evaluation_id):
         logging.error(f"Error generating signed audio URL: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+@app.route('/api/admin/shuffle', methods=['POST'])
+@require_api_key
+def shuffle_imported_calls():
+    """
+    Импорт звонков для распределения по операторам (admin shuffle).
+    Формат входных данных:
+    {
+        "month": "2025-11",
+        "distribution": [
+            {
+                "operator": "ФИО",
+                "desired": 3,
+                "available": 17,
+                "calls": [
+                    {
+                        "id": "uuid",
+                        "datetimeRaw": "22.10.2025 13:56:59",
+                        "phone": "77084919987",
+                        "durationSec": 136.28
+                    },
+                    ...
+                ]
+            },
+            ...
+        ]
+    }
+    """
+    try:
+        payload = request.get_json(force=True)
+    except Exception:
+        return jsonify({"error": "Invalid or missing JSON body"}), 400
+
+    if not payload or "month" not in payload or "distribution" not in payload:
+        return jsonify({"error": "Missing required fields: month and distribution"}), 400
+
+    try:
+        # ID импортирующего администратора / супервизора
+        importer_id = getattr(request, "user_id", None)
+        result = db.import_calls_from_distribution(payload, importer_id=importer_id)
+
+        return jsonify({
+            "status": "ok",
+            "month": payload.get("month"),
+            "imported": result.get("imported"),
+            "updated": result.get("updated"),
+            "skipped": result.get("skipped"),
+            "missing_operators": result.get("missing_operators"),
+            "errors": result.get("errors"),
+            "timestamp": datetime.now().isoformat()
+        }), 200
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 @app.route('/api/call_evaluation', methods=['POST'])
 def receive_call_evaluation():
