@@ -1570,9 +1570,11 @@ class Database:
             return False
 
     def get_call_evaluations(self, operator_id, month=None):
+        """
+        Возвращает оценки звонков + неоценённые звонки (из imported_calls).
+        """
         query = """
             WITH latest_versions AS (
-                -- Находим последние версии для каждого уникального вызова (по номеру и месяцу)
                 SELECT 
                     phone_number,
                     month,
@@ -1582,7 +1584,6 @@ class Database:
                 GROUP BY phone_number, month
             ),
             latest_calls AS (
-                -- Получаем полные данные последних версий
                 SELECT 
                     c.id,
                     c.phone_number,
@@ -1614,7 +1615,6 @@ class Database:
                 d.has_file_upload as direction_has_file_upload,
                 u.name as evaluator_name,
                 c.created_at,
-                -- sv_request fields
                 c.sv_request,
                 c.sv_request_comment,
                 c.sv_request_by,
@@ -1623,7 +1623,8 @@ class Database:
                 c.sv_request_approved,
                 c.sv_request_approved_by,
                 apu.name as sv_request_approved_by_name,
-                TO_CHAR(c.sv_request_approved_at, 'YYYY-MM-DD HH24:MI') as sv_request_approved_at
+                TO_CHAR(c.sv_request_approved_at, 'YYYY-MM-DD HH24:MI') as sv_request_approved_at,
+                FALSE AS is_imported -- флаг для различия
             FROM calls c
             JOIN latest_calls lc ON c.id = lc.id
             LEFT JOIN directions d ON c.direction_id = d.id  
@@ -1636,7 +1637,49 @@ class Database:
         if month:
             query += " AND c.month = %s"
             params.append(month)
-        query += " ORDER BY c.created_at DESC"
+
+        # Добавляем блок для неоценённых imported_calls
+        query += """
+            UNION ALL
+            SELECT 
+                ic.id,
+                ic.month,
+                ic.phone_number,
+                ic.datetime_raw AS appeal_date,
+                NULL AS score,
+                NULL AS comment,
+                NULL AS audio_path,
+                FALSE AS is_draft,
+                FALSE AS is_correction,
+                NULL AS evaluation_date,
+                NULL AS scores,
+                NULL AS criterion_comments,
+                NULL AS direction_id,
+                NULL AS direction_name,
+                NULL AS direction_criteria,
+                NULL AS direction_has_file_upload,
+                NULL AS evaluator_name,
+                ic.imported_at AS created_at,
+                FALSE AS sv_request,
+                NULL AS sv_request_comment,
+                NULL AS sv_request_by,
+                NULL AS sv_request_by_name,
+                NULL AS sv_request_at,
+                FALSE AS sv_request_approved,
+                NULL AS sv_request_approved_by,
+                NULL AS sv_request_approved_by_name,
+                NULL AS sv_request_approved_at,
+                TRUE AS is_imported
+            FROM imported_calls ic
+            WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
+        """
+        params.append(operator_id)
+
+        if month:
+            query += " AND ic.month = %s"
+            params.append(month)
+
+        query += " ORDER BY created_at DESC"
 
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
@@ -1673,8 +1716,11 @@ class Database:
                     "sv_request_approved": bool(row[23]),
                     "sv_request_approved_by": row[24],
                     "sv_request_approved_by_name": row[25],
-                    "sv_request_approved_at": row[26]
-                } for row in rows
+                    "sv_request_approved_at": row[26],
+                    # Новый флаг для различения
+                    "is_imported": bool(row[27])
+                }
+                for row in rows
             ]
         
     def get_operators_summary_for_month(self, month, supervisor_id=None):
