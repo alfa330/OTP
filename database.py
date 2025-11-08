@@ -45,7 +45,7 @@ def _normalize_phone(phone: Optional[str]) -> Optional[str]:
     if not digits:
         return None
     # Оставим, например, последние 10-11 цифр (зависит от вашей логики)
-    return digits[-11:] if len(digits) > 11 else digits
+    return digits
 
 def _parse_datetime_raw(dt_str: Optional[str]) -> Optional[datetime]:
     if not dt_str:
@@ -189,7 +189,7 @@ class Database:
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS imported_calls (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    id SERIAL PRIMARY KEY,
                     external_id TEXT,                      -- id из JSON (можно UUID или любой string)
                     operator_name TEXT NOT NULL,           -- ФИО из JSON
                     operator_id INTEGER,                   -- resolved users.id (NULL допустим)
@@ -207,6 +207,11 @@ class Database:
                     notes TEXT
                 );
 
+                ALTER TABLE imported_calls ADD COLUMN id_int SERIAL;
+                ALTER TABLE imported_calls DROP CONSTRAINT imported_calls_pkey;
+                ALTER TABLE imported_calls DROP COLUMN id;
+                ALTER TABLE imported_calls RENAME COLUMN id_int TO id;
+                ALTER TABLE imported_calls ADD PRIMARY KEY (id);
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_imported_calls_external_id_month ON imported_calls (external_id, month);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_month ON imported_calls(month);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_operator_id ON imported_calls(operator_id);
