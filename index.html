@@ -10512,7 +10512,7 @@
                                                     <p className={`mt-2 text-lg font-medium ${evaluationCount >= 20 ? 'text-green-600' : 'text-yellow-600'}`}>
                                                     {Math.max(0, 20 - evaluationCount)} оценок из 20
                                                     </p>
-                                                    <p className="mt-1 text-xs text-gray-500">Всего оценок (включая импортированные): {allEvals.length}</p>
+                                                    <p className="mt-1 text-xs text-gray-500">Всего оценок (включая не оцененные): {allEvals.length}</p>
                                                 </div>
                                                 </div>
 
@@ -10566,7 +10566,7 @@
                                                             <td className="px-6 py-4 whitespace-nowrap flex items-center gap-2">
                                                             <span>{ev.phone_number || '-'}</span>
                                                             {isImported && (
-                                                                <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">Импорт</span>
+                                                                <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">Не оценено</span>
                                                             )}
                                                             </td>
                                                             <td className="px-6 py-4 whitespace-nowrap">{formatDate(ev.appeal_date || ev.created_at)}</td>
