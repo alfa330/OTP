@@ -5223,7 +5223,7 @@
                         </div>
                         <div className="min-w-0">
                             <h3 className="text-lg font-semibold leading-tight truncate">Предпросмотр распределения</h3>
-                            <p className="text-xs text-gray-500 truncate">Проверьте результат и подтвердите отправку — после отправки здесь будет только итог.</p>
+                            <p className="text-xs text-gray-500 truncate">Проверка результата перед отправкой. Списки выбранных звонков скрыты в целях приватности.</p>
                         </div>
                         </div>
 
@@ -5255,33 +5255,43 @@
                         </div>
                         </div>
 
-                        {/* Distribution grid */}
+                        {/* Distribution — без перечисления конкретных звонков */}
                         <div>
                         <div className="flex items-center justify-between mb-3">
                             <h4 className="text-sm font-medium">Детали по операторам</h4>
-                            <div className="text-xs text-gray-500">Показаны первые 6 звонков для каждого</div>
+                            <div className="text-xs text-gray-500">Скрыты конкретные звонки — отображаются только агрегаты</div>
                         </div>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            {shuffleSummary.distribution.map((d, idx) => (
-                            <div key={d.operator + idx} className="p-3 bg-white border rounded-2xl shadow-sm hover:shadow-md transition-shadow">
+                            {shuffleSummary.distribution.map((d, idx) => {
+                            const picked = d.picked || [];
+                            const pickedCount = picked.length;
+                            const totalSec = picked.reduce((s, p) => s + (p.durationSec || 0), 0);
+                            const avgSec = pickedCount ? Math.round(totalSec / pickedCount) : 0;
+                            return (
+                                <div key={d.operator + idx} className="p-3 bg-white border rounded-2xl shadow-sm hover:shadow-md transition-shadow">
                                 <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
+                                    <div className="min-w-0">
                                     <div className="flex items-center gap-2">
-                                    <div className="text-sm font-medium truncate">{d.operator}</div>
-                                    {d.available < d.desired && <span className="ml-1 text-xs bg-red-50 text-red-700 px-2 py-0.5 rounded-full">Нехватка</span>}
-                                    {d.available >= d.desired && <span className="ml-1 text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded-full">ОК</span>}
+                                        <div className="text-sm font-medium truncate">{d.operator}</div>
+                                        {d.available < d.desired ? (
+                                        <span className="ml-1 text-xs bg-red-50 text-red-700 px-2 py-0.5 rounded-full">Нехватка</span>
+                                        ) : (
+                                        <span className="ml-1 text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded-full">ОК</span>
+                                        )}
                                     </div>
-                                    <div className="text-xs text-gray-500 mt-1">подано: <strong>{d.picked.length}</strong> / требовалось: <strong>{d.desired}</strong> / доступно: <strong>{d.available}</strong></div>
-                                </div>
+                                    <div className="text-xs text-gray-500 mt-1">подано: <strong>{pickedCount}</strong> / требовалось: <strong>{d.desired}</strong> / доступно: <strong>{d.available}</strong></div>
+                                    </div>
 
-                                <div className="text-xs text-gray-600 text-right min-w-[160px] max-w-[40%]">
-                                    {(d.picked || []).slice(0, 6).map(p => `${p.id} (${p.phone || '—'}, ${secondsToHms(p.durationSec)})`).join('; ')}
-                                    {(d.picked || []).length > 6 && <div className="mt-1 text-xs text-gray-400">... и ещё {(d.picked||[]).length - 6}</div>}
+                                    <div className="min-w-[160px] text-right">
+                                    <div className="text-xs text-gray-600">Общая длительность</div>
+                                    <div className="mt-1 text-sm font-medium text-gray-800">{pickedCount ? secondsToHms(totalSec) : '—'}</div>
+                                    <div className="text-xs text-gray-400 mt-1">Средняя: {pickedCount ? secondsToHms(avgSec) : '—'}</div>
+                                    </div>
                                 </div>
                                 </div>
-                            </div>
-                            ))}
+                            );
+                            })}
                         </div>
                         </div>
 
@@ -5310,7 +5320,6 @@
                                     </div>
                                 </div>
 
-                                {/* Краткая статистика */}
                                 <div className="text-right text-xs text-gray-600">
                                     {shuffleResult.payload && (
                                     <>
@@ -5322,7 +5331,6 @@
                                 </div>
                                 </div>
 
-                                {/* Подробности / ошибки */}
                                 {shuffleResult.payload && (
                                 <div className="mt-3 text-xs text-gray-700 space-y-2">
                                     {Array.isArray(shuffleResult.payload.missing_operators) && shuffleResult.payload.missing_operators.length > 0 && (
@@ -5362,7 +5370,6 @@
                             Закрыть
                         </button>
 
-                        {/* Пока не отправлено — показываем кнопку отправки. После отправки её нет. */}
                         {!shuffleResult && (
                             <button
                             onClick={handleConfirmShuffle}
