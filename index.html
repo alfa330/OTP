@@ -10474,93 +10474,123 @@
                                     </div>
                                     )}
                                     {view === 'evaluation' && (
-                                        <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                            <h2 className="text-3xl font-bold mb-8 text-gray-900 flex items-center gap-2">
-                                            <i className="fas fa-chart-bar text-blue-600"></i>
-                                            <span className="text-blue-600">Ваши оценки</span>
-                                            </h2>
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <h2 className="text-3xl font-bold mb-8 text-gray-900 flex items-center gap-2">
+                                        <i className="fas fa-chart-bar text-blue-600"></i>
+                                        <span className="text-blue-600">Ваши оценки</span>
+                                        </h2>
 
-                                            {isLoading ? (
+                                        {(() => {
+                                        // prepare filtered lists: exclude evaluations whose call is imported
+                                        const allEvals = operatorData?.evaluations ?? [];
+                                        const evalsForCalc = allEvals.filter(ev => {
+                                            // if ev.call?.is_imported === true -> should be excluded from calculations
+                                            return !(ev?.call?.is_imported === true || ev?.is_imported === true);
+                                        });
+
+                                        const evaluationCount = evalsForCalc.length;
+                                        const averageScore =
+                                            evaluationCount > 0
+                                            ? evalsForCalc.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evaluationCount
+                                            : 0;
+
+                                        return isLoading ? (
                                             <p className="text-center text-gray-600 flex items-center justify-center">
-                                                <i className="fas fa-spinner fa-spin mr-2 text-gray-500"></i>
-                                                <span className="italic">Загрузка оценок...</span>
+                                            <i className="fas fa-spinner fa-spin mr-2 text-gray-500"></i>
+                                            <span className="italic">Загрузка оценок...</span>
                                             </p>
-                                            ) : operatorData && Array.isArray(operatorData.evaluations) && operatorData.evaluations.length > 0 ? (
+                                        ) : allEvals.length > 0 ? (
                                             <div>
-                                                {/* KPI cards */}
-                                                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                                            {/* KPI cards */}
+                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                                                 <div className="col-span-1 md:col-span-2">
-                                                    <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                                <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-2 flex items-center gap-1">
-                                                        <i className="fas fa-list-ol text-gray-400"></i> Количество оценок
+                                                    <i className="fas fa-list-ol text-gray-400"></i> Количество оценок (в расчёте)
                                                     </p>
-                                                    <p className="text-4xl font-bold text-gray-900">{operatorData.evaluations.length}</p>
-                                                    <p className={`mt-2 text-lg font-medium ${operatorData.evaluations.length >= 20 ? 'text-green-600' : 'text-yellow-600'}`}>
-                                                        {Math.max(0, 20 - operatorData.evaluations.length)} оценок из 20
+                                                    <p className="text-4xl font-bold text-gray-900">{evaluationCount}</p>
+                                                    <p className={`mt-2 text-lg font-medium ${evaluationCount >= 20 ? 'text-green-600' : 'text-yellow-600'}`}>
+                                                    {Math.max(0, 20 - evaluationCount)} оценок из 20
                                                     </p>
-                                                    </div>
+                                                    <p className="mt-1 text-xs text-gray-500">Всего оценок (включая импортированные): {allEvals.length}</p>
+                                                </div>
                                                 </div>
 
                                                 <div className="col-span-1 flex justify-center items-center">
-                                                    <SemiCircleProgress
+                                                <SemiCircleProgress
                                                     percentage={Math.min(averageScore || 0, 100)}
                                                     label="Средний балл"
                                                     width={200}
                                                     height={120}
-                                                    />
+                                                />
                                                 </div>
-                                                </div>
+                                            </div>
 
-                                                {/* Evaluations table */}
-                                                <div className="overflow-x-auto rounded-xl shadow border border-gray-200">
+                                            {/* Evaluations table */}
+                                            <div className="overflow-x-auto rounded-xl shadow border border-gray-200">
                                                 <table className="min-w-full divide-y divide-gray-200 text-sm">
-                                                    <thead className="bg-blue-50">
+                                                <thead className="bg-blue-50">
                                                     <tr>
-                                                        {['No.', 'Номер телефона', 'Дата обращения', 'Балл', 'Краткая сводка', 'Месяц', 'Дата оценки', 'Действия'].map(
+                                                    {['No.', 'Номер телефона', 'Дата обращения', 'Балл', 'Краткая сводка', 'Месяц', 'Дата оценки', 'Действия'].map(
                                                         (head, idx) => (
-                                                            <th
+                                                        <th
                                                             key={idx}
                                                             className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide"
-                                                            >
+                                                        >
                                                             {head}
-                                                            </th>
+                                                        </th>
                                                         )
-                                                        )}
+                                                    )}
                                                     </tr>
-                                                    </thead>
-                                                    <tbody className="bg-white divide-y divide-gray-100">
-                                                    {operatorData.evaluations.map((ev, index) => {
-                                                        const id = ev.id ?? index;
-                                                        const isExpanded = expandedEvalId === id;
-                                                        return (
+                                                </thead>
+                                                <tbody className="bg-white divide-y divide-gray-100">
+                                                    {allEvals.map((ev, index) => {
+                                                    const id = ev.id ?? index;
+                                                    const isExpanded = expandedEvalId === id;
+                                                    const isImported = ev?.call?.is_imported === true || ev?.is_imported === true;
+
+                                                    // row click handler — disabled for imported evaluations
+                                                    const handleRowClick = () => {
+                                                        if (isImported) return;
+                                                        setExpandedEvalId(isExpanded ? null : id);
+                                                        handleEvaluationClick(ev);
+                                                    };
+
+                                                    return (
                                                         <React.Fragment key={id}>
-                                                            <tr
-                                                            className={`hover:bg-gray-50 transition-colors duration-200 cursor-pointer ${isExpanded ? 'bg-blue-50' : ''}`}
-                                                            onClick={() => {setExpandedEvalId(isExpanded ? null : id); handleEvaluationClick(ev) }}
-                                                            >
+                                                        <tr
+                                                            className={`transition-colors duration-200 ${isImported ? 'opacity-60 cursor-not-allowed' : 'hover:bg-gray-50 cursor-pointer'} ${isExpanded ? 'bg-blue-50' : ''}`}
+                                                            onClick={handleRowClick}
+                                                        >
                                                             <td className="px-6 py-4 whitespace-nowrap">{index + 1}</td>
-                                                            <td className="px-6 py-4 whitespace-nowrap">{ev.phone_number || '-'}</td>
+                                                            <td className="px-6 py-4 whitespace-nowrap flex items-center gap-2">
+                                                            <span>{ev.phone_number || '-'}</span>
+                                                            {isImported && (
+                                                                <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">Импорт</span>
+                                                            )}
+                                                            </td>
                                                             <td className="px-6 py-4 whitespace-nowrap">{formatDate(ev.appeal_date || ev.created_at)}</td>
                                                             <td className={`px-6 py-4 whitespace-nowrap font-semibold ${getScoreColor?.(ev.score) || ''}`}>
-                                                                {ev.score != null ? Number(ev.score).toFixed(0) : '-'}
+                                                            {ev.score != null ? Number(ev.score).toFixed(0) : '-'}
                                                             </td>
                                                             <td className="px-6 py-4 max-w-xs">
-                                                                <div className="text-sm text-gray-700">{summarizeScores(ev.scores)}</div>
-                                                                {Array.isArray(ev.criterion_comments) && ev.criterion_comments.filter(Boolean).length > 0 ? (
+                                                            <div className="text-sm text-gray-700">{summarizeScores(ev.scores)}</div>
+                                                            {Array.isArray(ev.criterion_comments) && ev.criterion_comments.filter(Boolean).length > 0 ? (
                                                                 <div className="mt-1 text-xs text-gray-500">
-                                                                    {ev.criterion_comments.filter(Boolean).slice(0,2).map((c,i)=>(
+                                                                {ev.criterion_comments.filter(Boolean).slice(0,2).map((c,i)=>(
                                                                     <div key={i} className="truncate">{c}</div>
-                                                                    ))}
-                                                                    {ev.criterion_comments.filter(Boolean).length > 2 && <div className="text-xs text-gray-400">и ещё {ev.criterion_comments.filter(Boolean).length - 2}...</div>}
+                                                                ))}
+                                                                {ev.criterion_comments.filter(Boolean).length > 2 && <div className="text-xs text-gray-400">и ещё {ev.criterion_comments.filter(Boolean).length - 2}...</div>}
                                                                 </div>
-                                                                ) : ev.comment ? (
+                                                            ) : ev.comment ? (
                                                                 <div className="mt-1 text-xs text-gray-500 truncate">{String(ev.comment).slice(0,160)}</div>
-                                                                ) : null}
+                                                            ) : null}
                                                             </td>
                                                             <td className="px-6 py-4 whitespace-nowrap">{ev.month || '-'}</td>
                                                             <td className="px-6 py-4 whitespace-nowrap">{formatDate(ev.evaluation_date)}</td>
                                                             <td className="px-6 py-4 whitespace-nowrap">
-                                                            {ev.score < 100 && (
+                                                            {/* Oспорить: only for non-imported and score < 100 */}
+                                                            {!isImported && ev.score < 100 && (
                                                                 <button
                                                                 onClick={(e) => {
                                                                     e.stopPropagation();
@@ -10574,96 +10604,96 @@
                                                                 </button>
                                                             )}
                                                             </td>
-                                                            </tr>
+                                                        </tr>
 
-                                                            {/* expanded details */}
-                                                            {isExpanded && (
+                                                        {/* expanded details — only visible when opened (click won't open for imported rows) */}
+                                                        {isExpanded && (
                                                             <tr>
-                                                                <td colSpan={8} className="p-4 bg-gray-50 border-t text-sm">
+                                                            <td colSpan={8} className="p-4 bg-gray-50 border-t text-sm">
                                                                 <div className="space-y-4">
-                                                                    <div>
+                                                                <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Общий комментарий</h4>
                                                                     {ev.comment ? (
-                                                                        String(ev.comment).split(/\r?\n/).map((line, i) => (
+                                                                    String(ev.comment).split(/\r?\n/).map((line, i) => (
                                                                         <p key={i} className="text-sm text-gray-700 whitespace-pre-wrap">{line}</p>
-                                                                        ))
+                                                                    ))
                                                                     ) : (
-                                                                        <div className="text-sm text-gray-500">Комментариев нет.</div>
+                                                                    <div className="text-sm text-gray-500">Комментариев нет.</div>
                                                                     )}
-                                                                    </div>
+                                                                </div>
 
-                                                                    <div>
+                                                                <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Критерии и статусы</h4>
                                                                     <div className="overflow-x-auto rounded-md border bg-white">
-                                                                        <table className="min-w-full text-sm">
+                                                                    <table className="min-w-full text-sm">
                                                                         <thead className="bg-blue-50">
-                                                                            <tr>
+                                                                        <tr>
                                                                             <th className="p-3 text-left text-xs font-semibold text-gray-600">#</th>
                                                                             <th className="p-3 text-left text-xs font-semibold text-gray-600">Критерий</th>
                                                                             <th className="p-3 text-left text-xs font-semibold text-gray-600">Вес</th>
                                                                             <th className="p-3 text-left text-xs font-semibold text-gray-600">Критичность</th>
                                                                             <th className="p-3 text-left text-xs font-semibold text-gray-600">Статус</th>
                                                                             <th className="p-3 text-left text-xs font-semibold text-gray-600">Комментарий</th>
-                                                                            </tr>
+                                                                        </tr>
                                                                         </thead>
                                                                         <tbody>
-                                                                            {Array.isArray(ev.direction?.criteria) && ev.direction.criteria.length > 0 ? (
+                                                                        {Array.isArray(ev.direction?.criteria) && ev.direction.criteria.length > 0 ? (
                                                                             ev.direction.criteria.map((crit, cidx) => {
-                                                                                const status = Array.isArray(ev.scores) ? ev.scores[cidx] : null;
-                                                                                const critComment = Array.isArray(ev.criterion_comments) ? ev.criterion_comments[cidx] : '';
-                                                                                const shortValue = crit?.value ? String(crit.value).split('\n')[0].slice(0,120) : '';
-                                                                                return (
+                                                                            const status = Array.isArray(ev.scores) ? ev.scores[cidx] : null;
+                                                                            const critComment = Array.isArray(ev.criterion_comments) ? ev.criterion_comments[cidx] : '';
+                                                                            const shortValue = crit?.value ? String(crit.value).split('\n')[0].slice(0,120) : '';
+                                                                            return (
                                                                                 <tr key={cidx} className="even:bg-gray-50">
-                                                                                    <td className="p-3 align-top">{cidx + 1}</td>
-                                                                                    <td className="p-3 align-top">
+                                                                                <td className="p-3 align-top">{cidx + 1}</td>
+                                                                                <td className="p-3 align-top">
                                                                                     <div className="font-medium text-gray-800">{crit.name}</div>
                                                                                     {shortValue && <div className="text-xs text-gray-500 mt-1">{shortValue}</div>}
-                                                                                    </td>
-                                                                                    <td className="p-3 align-top">{crit.weight ?? '-'}</td>
-                                                                                    <td className="p-3 align-top">{crit.isCritical ? 'Да' : 'Нет'}</td>
-                                                                                    <td className="p-3 align-top">
+                                                                                </td>
+                                                                                <td className="p-3 align-top">{crit.weight ?? '-'}</td>
+                                                                                <td className="p-3 align-top">{crit.isCritical ? 'Да' : 'Нет'}</td>
+                                                                                <td className="p-3 align-top">
                                                                                     <span className={`inline-block text-xs px-2 py-0.5 rounded-full font-medium ${
-                                                                                        status === 'Correct' ? 'bg-green-100 text-green-700' :
-                                                                                        status === 'Incorrect' ? 'bg-red-100 text-red-700' :
-                                                                                        status === 'N/A' ? 'bg-gray-100 text-gray-700' : 'bg-yellow-100 text-yellow-700'
+                                                                                    status === 'Correct' ? 'bg-green-100 text-green-700' :
+                                                                                    status === 'Incorrect' ? 'bg-red-100 text-red-700' :
+                                                                                    status === 'N/A' ? 'bg-gray-100 text-gray-700' : 'bg-yellow-100 text-yellow-700'
                                                                                     }`}>{status || '-'}</span>
-                                                                                    </td>
-                                                                                    <td className="p-3 align-top text-gray-700">{critComment || '-'}</td>
+                                                                                </td>
+                                                                                <td className="p-3 align-top text-gray-700">{critComment || '-'}</td>
                                                                                 </tr>
-                                                                                );
+                                                                            );
                                                                             })
-                                                                            ) : Array.isArray(ev.scores) && ev.scores.length > 0 ? (
+                                                                        ) : Array.isArray(ev.scores) && ev.scores.length > 0 ? (
                                                                             ev.scores.map((status, cidx) => {
-                                                                                const critComment = Array.isArray(ev.criterion_comments) ? ev.criterion_comments[cidx] : '';
-                                                                                const name = (ev.criterion_names && ev.criterion_names[cidx]) || `Критерий ${cidx+1}`;
-                                                                                return (
+                                                                            const critComment = Array.isArray(ev.criterion_comments) ? ev.criterion_comments[cidx] : '';
+                                                                            const name = (ev.criterion_names && ev.criterion_names[cidx]) || `Критерий ${cidx+1}`;
+                                                                            return (
                                                                                 <tr key={cidx} className="even:bg-gray-50">
-                                                                                    <td className="p-3 align-top">{cidx + 1}</td>
-                                                                                    <td className="p-3 align-top"><div className="font-medium text-gray-800">{name}</div></td>
-                                                                                    <td className="p-3 align-top">-</td>
-                                                                                    <td className="p-3 align-top">-</td>
-                                                                                    <td className="p-3 align-top">
+                                                                                <td className="p-3 align-top">{cidx + 1}</td>
+                                                                                <td className="p-3 align-top"><div className="font-medium text-gray-800">{name}</div></td>
+                                                                                <td className="p-3 align-top">-</td>
+                                                                                <td className="p-3 align-top">-</td>
+                                                                                <td className="p-3 align-top">
                                                                                     <span className={`inline-block text-xs px-2 py-0.5 rounded-full font-medium ${
-                                                                                        status === 'Correct' ? 'bg-green-100 text-green-700' :
-                                                                                        status === 'Incorrect' ? 'bg-red-100 text-red-700' :
-                                                                                        status === 'N/A' ? 'bg-gray-100 text-gray-700' : 'bg-yellow-100 text-yellow-700'
+                                                                                    status === 'Correct' ? 'bg-green-100 text-green-700' :
+                                                                                    status === 'Incorrect' ? 'bg-red-100 text-red-700' :
+                                                                                    status === 'N/A' ? 'bg-gray-100 text-gray-700' : 'bg-yellow-100 text-yellow-700'
                                                                                     }`}>{status || '-'}</span>
-                                                                                    </td>
-                                                                                    <td className="p-3 align-top text-gray-700">{critComment || '-'}</td>
+                                                                                </td>
+                                                                                <td className="p-3 align-top text-gray-700">{critComment || '-'}</td>
                                                                                 </tr>
-                                                                                );
+                                                                            );
                                                                             })
-                                                                            ) : (
+                                                                        ) : (
                                                                             <tr>
-                                                                                <td colSpan={6} className="p-3 text-gray-500">Критерии не найдены.</td>
+                                                                            <td colSpan={6} className="p-3 text-gray-500">Критерии не найдены.</td>
                                                                             </tr>
-                                                                            )}
+                                                                        )}
                                                                         </tbody>
-                                                                        </table>
+                                                                    </table>
                                                                     </div>
-                                                                    </div>
+                                                                </div>
 
-                                                                    <div>
+                                                                <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Аудио</h4>
                                                                     {audioUrl ? (
                                                                     <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} />
@@ -10672,44 +10702,45 @@
                                                                         <i className="fas fa-times-circle"></i> Файлов не имеется
                                                                     </div>
                                                                     )}
-                                                                    </div>
+                                                                </div>
 
-                                                                    <div className="text-xs text-gray-500">
+                                                                <div className="text-xs text-gray-500">
                                                                     <div>Оценщик: {ev.evaluator || '-'}</div>
                                                                     <div>Дата создания: {formatDate(ev.created_at)}</div>
                                                                     <div>ID: {ev.id ?? '-'}</div>
-                                                                    </div>
                                                                 </div>
-                                                                </td>
+                                                                </div>
+                                                            </td>
                                                             </tr>
-                                                            )}
+                                                        )}
                                                         </React.Fragment>
-                                                        );
+                                                    );
                                                     })}
-                                                    </tbody>
+                                                </tbody>
                                                 </table>
-                                                </div>
                                             </div>
-                                            ) : (
-                                            <p className="text-center text-gray-600 flex items-center justify-center">
-                                                <i className="fas fa-times-circle mr-2 text-red-500"></i>
-                                                Нет оценок за выбранный период.
-                                            </p>
-                                            )}
 
                                             {/* Dispute modal (использует локальный state выше) */}
                                             {showDisputeModal && (
-                                            <DisputeModal
+                                                <DisputeModal
                                                 selectedEvaluation={selectedEvaluation}
                                                 disputeText={disputeText}
                                                 setDisputeText={setDisputeText}
                                                 handleSubmitDispute={handleSubmitDispute}
                                                 isLoading={disputeLoading}
                                                 setShowDisputeModal={setShowDisputeModal}
-                                            />
+                                                />
                                             )}
-                                        </div>
-                                        )}
+                                            </div>
+                                        ) : (
+                                            <p className="text-center text-gray-600 flex items-center justify-center">
+                                            <i className="fas fa-times-circle mr-2 text-red-500"></i>
+                                            Нет оценок за выбранный период.
+                                            </p>
+                                        );
+                                        })()}
+                                    </div>
+                                    )}
                             </>
                         )}
                                         {view === 'salary' && (
