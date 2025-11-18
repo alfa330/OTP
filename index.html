@@ -5987,6 +5987,7 @@
                                 />
                             </div>
 
+                            {/* 
                             <div className="flex items-center gap-2">
                             <input
                                 id="count-in-hours"
@@ -6000,7 +6001,8 @@
                                 Засчитывать в часы
                             </label>
                             </div>
-
+                            */}
+                            
                             {error && <div className="text-sm text-red-600">{error}</div>}
 
                             <div className="flex justify-end gap-3 pt-2">
@@ -6390,7 +6392,7 @@
                                 <input value={training?.count_in_hours ? 'Да' : 'Нет'} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
                                 </div>
                                 */}
-                                
+
                                 <div>
                                 <label className="block text-sm text-gray-600">Создал</label>
                                 <input value={training?.created_by_name || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700 font-semibold" />
