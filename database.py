@@ -103,8 +103,7 @@ class Database:
         with self._get_cursor() as cursor:
             # Users table (без direction_id на этом этапе)
             cursor.execute("""
-                UPDATE users SET name = 'Алибек Аружан Мухтаркызы' WHERE id = 133;
-                UPDATE users SET name = 'Исмаилов Отабек Абрашидулы' WHERE id = 134;
+                UPDATE users SET name = 'Бактыгул Чингиз Бакытжанулы' WHERE id = 120;
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
                     telegram_id BIGINT UNIQUE,
