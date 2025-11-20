@@ -9262,16 +9262,14 @@
                                                         onClick={() => handleViewScoresSort('listened')}
                                                         className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
                                                     >
-                                                        Прослушано {getViewScoresSortIcon('listened')}
+                                                        Оценено {getViewScoresSortIcon('listened')}
                                                     </th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ожидаемые</th>
                                                     <th
                                                         onClick={() => handleViewScoresSort('avg_score')}
                                                         className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
                                                     >
                                                         Средний балл {getViewScoresSortIcon('avg_score')}
                                                     </th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ссылка</th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Действия</th>
                                                     </tr>
                                                 </thead>
@@ -9296,16 +9294,10 @@
                                                             <tr key={op.id ?? `${dirName}-${index}`} className="hover:bg-gray-50 transition-colors duration-200">
                                                             <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
                                                             <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, expectedCalls)}`}>{callCount}</td>
-                                                            <td className="px-6 py-4 whitespace-nowrap">{expectedCalls}</td>
                                                             <td className="px-6 py-4 whitespace-nowrap">
                                                                 <span className={getScoreColor(op.avg_score)}>
                                                                 {op.avg_score ? Number(op.avg_score).toFixed(2) : '-'}
                                                                 </span>
-                                                            </td>
-                                                            <td className="px-6 py-4 whitespace-nowrap">
-                                                                {op.link ? (
-                                                                <a href={op.link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">Просмотр</a>
-                                                                ) : '-'}
                                                             </td>
                                                             <td className="px-6 py-4 whitespace-nowrap space-x-2">
                                                                 {hasIssue && (
