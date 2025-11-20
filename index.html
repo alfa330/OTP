@@ -5480,6 +5480,7 @@
             const [activeTab, setActiveTab] = useState("active");
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
+            const [activeSvTab, setActiveSvTab] = useState("all");
             //SORTING
             const [sortField, setSortField] = useState('name'); // primary sort field
             const [sortDirection, setSortDirection] = useState('asc'); // 'asc' | 'desc'
@@ -8951,6 +8952,30 @@
                                     </button>
                                 </div>
                                 </div>
+                                {/* Tabs: Активные / Уволенные */}
+                                <div className="flex items-center space-x-3 mb-4">
+                                    {(() => {
+                                        const all = svList ?? [];
+                                        const activeCount = all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status).length;
+                                        const firedCount = all.filter(sv => sv.status === 'fired').length;
+                                        return (
+                                        <>
+                                            <button
+                                            onClick={() => setActiveSvTab('active')}
+                                            className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeSvTab === 'active' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                                            >
+                                            Активные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{activeCount}</span>
+                                            </button>
+                                            <button
+                                            onClick={() => setActiveSvTab('fired')}
+                                            className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeSvTab === 'fired' ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+                                            >
+                                            Уволенные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{firedCount}</span>
+                                            </button>
+                                        </>
+                                        );
+                                    })()}
+                                </div>
 
                                 {/* Таблица */}
                                 {isAdminDataLoading ? (
@@ -8961,17 +8986,17 @@
                                 <div className="overflow-visible rounded-lg border border-gray-200">
                                     <table className="min-w-full table-fixed border rounded-lg">
                                     <colgroup>
-                                        <col style={{ width: "30%" }} /> {/* Name */}
-                                        <col style={{ width: "25%" }} /> {/* Table URL */}
+                                        <col style={{ width: "5%" }} />  {/* # */}
+                                        <col style={{ width: "35%" }} /> {/* Name */}
                                         <col style={{ width: "20%" }} /> {/* Status */}
-                                        <col style={{ width: "20%" }} /> {/* Hire Date */}
-                                        <col style={{ width: "5%" }} />  {/* Menu */}
+                                        <col style={{ width: "30%" }} /> {/* Hire Date */}
+                                        <col style={{ width: "10%" }} />  {/* Menu */}
                                     </colgroup>
 
                                     <thead className="bg-gray-50">
                                         <tr>
+                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">#</th>
                                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Имя</th>
-                                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Таблица часов</th>
                                         <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Статус</th>
                                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Дата принятия</th>
                                         <th className="px-6 py-3"></th>
@@ -8979,26 +9004,27 @@
                                     </thead>
 
                                     <tbody className="bg-white divide-y divide-gray-200">
-                                        {svList.map((sv) => (
+                                        {(() => {
+                                        const all = svList ?? [];
+                                        const filtered = activeSvTab === 'fired'
+                                            ? all.filter(sv => sv.status === 'fired')
+                                            : all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
+
+                                        if (filtered.length === 0) {
+                                            return (
+                                                <tr>
+                                                    <td colSpan={5} className="px-6 py-4 text-center text-gray-600">Соответствующие супервайзеры не найдены.</td>
+                                                </tr>
+                                            );
+                                        }
+
+                                        return filtered.map((sv, idx) => (
                                         <tr key={sv.id} className="hover:bg-gray-50 transition-colors duration-200 group">
+                                            {/* Number */}
+                                            <td className="px-6 py-4">{idx + 1}</td>
+
                                             {/* Name */}
                                             <td className="px-6 py-4 truncate">{sv.name}</td>
-
-                                            {/* Table URL */}
-                                            <td className="px-6 py-4">
-                                            {sv.table ? (
-                                                <a
-                                                href={sv.table}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="text-blue-600 hover:text-blue-800"
-                                                >
-                                                Просмотр
-                                                </a>
-                                            ) : (
-                                                "Нет таблицы"
-                                            )}
-                                            </td>
 
                                             {/* Status */}
                                             <td className="px-6 py-4 text-center">
@@ -9076,7 +9102,8 @@
                                             </div>
                                             </td>
                                         </tr>
-                                        ))}
+                                        ));
+                                        })()}
                                     </tbody>
                                     </table>
                                 </div>
