@@ -920,7 +920,7 @@ def get_sv_list():
     try:
         supervisors = db.get_supervisors()
         logging.info(f"Fetched {len(supervisors)} supervisors")
-        sv_data = [{"id": sv[0], "name": sv[1], "table": sv[2],"role": sv[3], "hire_date": sv[4], "status": sv[5]} for sv in supervisors]
+        sv_data = [{"id": sv[0], "name": sv[1], "table": sv[2],"role": sv[3], "hire_date": sv[4].strftime('%d-%m-%Y') if sv[4] else None, "status": sv[5]} for sv in supervisors]
         return jsonify({"status": "success", "sv_list": sv_data})
     except Exception as e:
         logging.error(f"Error fetching SV list: {e}", exc_info=True)
