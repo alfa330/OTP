@@ -1104,7 +1104,7 @@ def dispute_call_evaluation():
             f"👤 Оператор: <b>{operator[2]}</b>\n"
             f"📞 Звонок ID: {call['id']}\n"
             f"📱 Номер: {call['phone_number']}\n"
-            f"📅 Дата обращения: {call['appeal_date']}\n"
+            f"📅 Дата обращения: {' '.join(call['appeal_date'].split('T'))}\n"
             f"📅 Дата оценки: {call['created_at']}\n"
             f"💯 Оценка: {call['score']}\n"
             f"📅 За месяц: {call['month']}\n\n"
@@ -1118,7 +1118,7 @@ def dispute_call_evaluation():
             f"💬 Супервайзер: <b>{supervisor[2]}</b>\n"
             f"👤 Оператор: <b>{operator[2]}</b>\n"
             f"📞 Звонок ID: {call['id']}\n"
-            f"📅 Дата обращения: {call['appeal_date']}\n"
+            f"📅 Дата обращения: {' '.join(call['appeal_date'].split('T'))}\n"
             f"📅 Дата оценки: {call['created_at']}\n"
             f"📱 Номер: {call['phone_number']}\n"
             f"💯 Оценка: {call['score']}\n"
@@ -2263,7 +2263,7 @@ def send_telegram_notification(evaluator_name, operator_name, month, phone_numbe
             f"📋 Оператор: <b>{operator_name}</b>\n"
             f"📄 За месяц: <b>{month}</b>\n"
             f"📱 Номер телефона: <b>{phone_number}</b>\n"
-            f"📅 Дата обращения: <b>{appeal_date}</b>\n"
+            f"📅 Дата обращения: <b>{' '.join(appeal_date.split('T'))}</b>\n"
             f"💯 Оценка: <b>{score}</b>\n"
         )
         if is_correction:
