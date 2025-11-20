@@ -5480,7 +5480,7 @@
             const [activeTab, setActiveTab] = useState("active");
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
-            const [activeSvTab, setActiveSvTab] = useState("all");
+            const [activeSvTab, setActiveSvTab] = useState("active");
             //SORTING
             const [sortField, setSortField] = useState('name'); // primary sort field
             const [sortDirection, setSortDirection] = useState('asc'); // 'asc' | 'desc'
@@ -9581,7 +9581,7 @@
                                                             <RateCircle rate={u.rate || 1.0} />
                                                             </div>
                                                         </td>
-                                                        <td className="px-2 py-4 text-right opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                                                        <td className={`px-2 py-4 text-right transition-opacity duration-200 ${openMenuId === u.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
                                                             <div className="relative inline-block text-left">
                                                             <button
                                                                 onClick={() => setOpenMenuId(openMenuId === u.id ? null : u.id)}
