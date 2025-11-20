@@ -6083,14 +6083,22 @@
                 const [operatorsTab, setOperatorsTab] = useState('active');
                 const [calendarModal, setCalendarModal] = useState({ open: false, date: '', trainings: [] });
                 const [selectedCalendarTraining, setSelectedCalendarTraining] = useState(null);
-                // Цвета для SV
-                // Более контрастные цвета для SV
-                const svColors = ["#FF5722", "#4CAF50", "#2196F3", "#FFC107", "#9C27B0"];
+                // Цвета для SV — гарантированно уникальные в текущей сессии
+                // Используем кэширование: при первом запросе для нового имени
+                // назначаем цвет по схеме HSL с равномерным шагом (golden angle)
+                const _svColorMap = {};
+                const _goldenAngle = 137.508; // degrees — хорошо распределяет цвета
                 function getSvColor(svName) {
-                    // Детерминированно по имени SV
-                    let hash = 0;
-                    for (let i = 0; i < svName.length; i++) hash = svName.charCodeAt(i) + ((hash << 5) - hash);
-                    return svColors[Math.abs(hash) % svColors.length];
+                    if (!svName) return '#999999';
+                    if (_svColorMap[svName]) return _svColorMap[svName];
+                    // индекс = количество уже назначенных цветов
+                    const idx = Object.keys(_svColorMap).length;
+                    // hue shifts by golden angle * idx to avoid clustering
+                    const hue = (idx * _goldenAngle) % 360;
+                    // pick comfortable saturation/lightness for visibility
+                    const color = `hsl(${Math.round(hue)}, 65%, 45%)`;
+                    _svColorMap[svName] = color;
+                    return color;
                 }
 
                 useEffect(() => {
@@ -6645,7 +6653,7 @@
                                         <i className="fas fa-times fa-lg"></i>
                                     </button>
                                     <h3 className="text-2xl font-bold mb-2 text-center text-blue-800">Тренинги за {(() => { const [y,m,d]=calendarModal.date.split('-'); return `${d}.${m}.${y}`; })()}</h3>
-                                    <div className="space-y-6">
+                                    <div className="space-y-6 overflow-y-auto" style={{maxHeight: '60vh', paddingRight: '8px'}}>
                                         {(() => {
                                             // calendarModal.trainings: {svName: [trainings]}
                                             return Object.entries(calendarModal.trainings).map(([svName, list]) => (
