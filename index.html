@@ -6499,21 +6499,24 @@
                         </div>
                         {calendarView ? (
                             (() => {
-                                // Общий календарь по всем SV
+                                // Общий календарь по всем SV (с учётом фильтра Active/ Fired)
                                 const searchLower = search.trim().toLowerCase();
-                                // Собираем SV по id
+                                // Фильтруем операторов по выбранной вкладке (активные/уволенные)
+                                const filteredOperatorsForCalendar = operators.filter(op => operatorsTab === 'active' ? (op.status !== 'fired') : (op.status === 'fired'));
+                                // Собираем SV по id только для отфильтрованных операторов
                                 const svById = {};
-                                operators.forEach(op => {
-                                    svById[op.id] = op.supervisor_name;
+                                filteredOperatorsForCalendar.forEach(op => {
+                                    svById[String(op.id)] = op.supervisor_name;
                                 });
-                                // Собираем тренинги по датам и SV
+                                // Собираем тренинги по датам и SV (только для отфильтрованных операторов)
                                 const calendarData = {}; // {date: {svName: [trainings]}}
                                 Object.entries(trainings).forEach(([opId, list]) => {
+                                    if (!svById[opId]) return; // пропускаем операторы вне выбранного статуса
                                     const svName = svById[opId] || "";
                                     list.forEach(t => {
                                         if (!calendarData[t.date]) calendarData[t.date] = {};
                                         if (!calendarData[t.date][svName]) calendarData[t.date][svName] = [];
-                                        calendarData[t.date][svName].push({ ...t, operator: operators.find(o => o.id == opId)?.name || "" });
+                                        calendarData[t.date][svName].push({ ...t, operator: filteredOperatorsForCalendar.find(o => String(o.id) == opId)?.name || "" });
                                     });
                                 });
                                 // Календарь месяца
@@ -6521,8 +6524,8 @@
                                 const daysInMonth = new Date(year, monthNum, 0).getDate();
                                 const daysArr = Array.from({ length: daysInMonth }, (_, i) => i + 1);
                                 const monthLabel = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"][monthNum-1];
-                                // Собираем все SV, которые есть в этом месяце
-                                const svNames = Array.from(new Set(operators.map(op => op.supervisor_name)));
+                                // Собираем все SV, которые есть в этом месяце (только из отфильтрованных операторов)
+                                const svNames = Array.from(new Set(filteredOperatorsForCalendar.map(op => op.supervisor_name)));
                                 return (
                                     <div className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
                                         <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Календарь тренингов по всем супервайзерам</h2>
