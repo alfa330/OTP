@@ -9251,28 +9251,28 @@
 
                                             return (
                                             <div className="overflow-x-auto rounded-lg border border-gray-200">
-                                                <table className="min-w-full divide-y divide-gray-200">
+                                                <table className="min-w-full w-full table-fixed divide-y divide-gray-200">
                                                 <thead className="bg-gray-50">
                                                     <tr>
                                                     <th
                                                         onClick={() => handleViewScoresSort('name')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/4"
                                                     >
                                                         Имя {getViewScoresSortIcon('name')}
                                                     </th>
                                                     <th
                                                         onClick={() => handleViewScoresSort('listened')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/4"
                                                     >
                                                         Оценено {getViewScoresSortIcon('listened')}
                                                     </th>
                                                     <th
                                                         onClick={() => handleViewScoresSort('avg_score')}
-                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer"
+                                                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase cursor-pointer w-1/4"
                                                     >
                                                         Средний балл {getViewScoresSortIcon('avg_score')}
                                                     </th>
-                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Действия</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase w-1/4">Действия</th>
                                                     </tr>
                                                 </thead>
 
@@ -9281,7 +9281,7 @@
                                                     <React.Fragment key={dirName}>
                                                         {/* Заголовок группы направления */}
                                                         <tr className="bg-gray-100">
-                                                        <td colSpan={6} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                                                        <td colSpan={4} className="px-6 py-3 text-sm font-semibold text-gray-700">
                                                             {dirName} <span className="ml-2 text-xs text-gray-500">({grouped[dirName].length})</span>
                                                         </td>
                                                         </tr>
@@ -9343,9 +9343,7 @@
                                                     <tr>
                                                     <td className="px-6 py-3 font-medium">Итого</td>
                                                     <td className="px-6 py-3 font-medium">{totalCalls}</td>
-                                                    <td className="px-6 py-3" />
                                                     <td className="px-6 py-3 font-medium">{avgByScored == null ? '-' : avgByScored.toFixed(2)}</td>
-                                                    <td className="px-6 py-3" />
                                                     <td className="px-6 py-3" />
                                                     </tr>
                                                 </tfoot>
