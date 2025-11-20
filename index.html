@@ -3174,9 +3174,11 @@
                     )}
                     {selectedTab === 'trainings' && (
                     <>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Часы (всего)</div>
+                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Итого (ч)</div>
+                        {/*
                         <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Засчитано (ч)</div>
                         <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Не засчитано (ч)</div>
+                        */}
                     </>
                     )}
                 </div>
@@ -3283,8 +3285,10 @@
                         {selectedTab === 'trainings' && (
                             <>
                             <div className="w-36 p-2 text-sm text-center border-l">{totalHoursAll.toFixed(2)}</div>
+                            {/*
                             <div className="w-32 p-2 text-sm text-center border-l">{totalHoursCounted.toFixed(2)}</div>
                             <div className="w-36 p-2 text-sm text-center border-l">{totalHoursNotCounted.toFixed(2)}</div>
+                            */}
                             </>
                         )}
                         </div>
