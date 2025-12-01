@@ -2393,22 +2393,20 @@
             try {
             const hoursParams = new URLSearchParams();
             hoursParams.append('month', month);
-            if (user.role === 'admin' && selectedSvId) {
+            // If a supervisor is selected, request data for that supervisor by id
+            // (allow 'sv' users to request other supervisors the same as admin)
+            if (selectedSvId) {
                 hoursParams.append('id', selectedSvId);
-            } else if (selectedSvId) {
-                hoursParams.append('sv_id', selectedSvId);
             } else if (user.role === 'sv') {
-                hoursParams.append('sv_id', String(user.id));
+                hoursParams.append('id', String(user.id));
             }
 
             const trainingsParams = new URLSearchParams();
             trainingsParams.append('month', month);
-            if (user.role === 'admin' && selectedSvId) {
+            if (selectedSvId) {
                 trainingsParams.append('id', selectedSvId);
-            } else if (selectedSvId) {
-                trainingsParams.append('sv_id', selectedSvId);
             } else if (user.role === 'sv') {
-                trainingsParams.append('sv_id', String(user.id));
+                trainingsParams.append('id', String(user.id));
             }
 
             const url = `${API_BASE_URL}/api/sv/daily_hours?${hoursParams.toString()}`;
@@ -3062,7 +3060,7 @@
                 </div>
 
                 <div className="flex items-center gap-3">
-                {user?.role === 'admin' && (
+                {(user?.role === 'admin' || user?.role === 'sv') && (
                     <select
                     value={selectedSvId || ''}
                     onChange={e => setSelectedSvId(e.target.value)}
