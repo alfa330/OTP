@@ -503,8 +503,17 @@ def sv_daily_hours():
         # Behavior for supervisors
         # -----------------------
         if role == 'sv':
+            # Allow optional ?id=<supervisor_id> to view another supervisor's data
+            # (frontend may pass `id` when a supervisor selects another supervisor).
+            # If no id param provided, fall back to requester_id (own team).
+            user_param = request.args.get('id')
+            if user_param and str(user_param).isdigit():
+                supervisor_id = int(user_param)
+            else:
+                supervisor_id = requester_id
+
             try:
-                result = db.get_daily_hours_by_supervisor_month(requester_id, month)
+                result = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
             except ValueError as e:
                 return jsonify({"error": str(e)}), 400
             # result expected to contain "operators" list
@@ -2574,8 +2583,16 @@ def get_trainings():
         if role not in ['admin', 'sv', 'operator']:
             logging.warning(f"Unauthorized role: {role}")
             return jsonify({"error": "Unauthorized"}), 403
-        
-        trainings = db.get_trainings(requester_id, month)
+
+        # Allow optional ?id=<supervisor_id> to fetch trainings for a specific supervisor
+        # If id is absent, default to requester_id (own data)
+        user_param = request.args.get('id')
+        if user_param and str(user_param).isdigit():
+            target_id = int(user_param)
+        else:
+            target_id = requester_id
+
+        trainings = db.get_trainings(target_id, month)
 
         logging.info(f"Trainings fetched for role {role}, month: {month}, by user {requester_id}")
         return jsonify({"status": "success", "trainings": trainings}), 200
