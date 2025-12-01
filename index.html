@@ -8645,6 +8645,7 @@
                 } else if (user.role === 'sv') {
                     // передаём выбранный месяц прямо, чтобы использовать selectedReportMonth если он задан
                     fetchSvData(selectedReportMonth || selectedMonth);
+                    fetchSvList();
                     fetchUsers();
                     fetchDirections();
                 } else if (user.role === 'operator') {
