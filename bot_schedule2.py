@@ -619,8 +619,6 @@ def upload_group_day():
         # Если запрос делает супервайзер — разрешаем только для его id (или если payload sv_id указан, он должен совпадать)
         if requester_role == 'sv':
             sv_id = requester_id
-            if sv_id_payload and int(sv_id_payload) != sv_id:
-                return jsonify({"error": "Supervisors can only upload for their own team"}), 403
         else:
             # admin or others
             sv_id = int(sv_id_payload) if sv_id_payload else None
