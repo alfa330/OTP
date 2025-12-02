@@ -749,6 +749,118 @@ class Database:
 
         return {"month": month, "days_in_month": days, "operators": operators}
 
+    def get_daily_hours_for_all_month(self, month):
+        """
+        Возвращает все daily_hours и агрегаты work_hours для всех операторов за месяц YYYY-MM.
+        Аналогично get_daily_hours_by_supervisor_month, но без фильтра по супервайзеру.
+        """
+        import calendar as _py_calendar
+        from datetime import date as _date
+
+        try:
+            year, mon = map(int, month.split('-'))
+            days = _py_calendar.monthrange(year, mon)[1]
+            start = _date(year, mon, 1)
+            end = _date(year, mon, days)
+        except Exception as e:
+            raise ValueError("Invalid month format, expected YYYY-MM") from e
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.name, u.rate, u.status,
+                    COALESCE(w.norm_hours, 0) as norm_hours,
+                    COALESCE(w.regular_hours, 0) as regular_hours,
+                    COALESCE(w.total_break_time, 0) as total_break_time,
+                    COALESCE(w.total_talk_time, 0) as total_talk_time,
+                    COALESCE(w.total_calls, 0) as total_calls,
+                    COALESCE(w.total_efficiency_hours, 0) as total_efficiency_hours,
+                    COALESCE(w.calls_per_hour, 0) as calls_per_hour,
+                    COALESCE(w.fines, 0) as fines
+                FROM users u
+                LEFT JOIN work_hours w
+                ON w.operator_id = u.id AND w.month = %s
+                WHERE u.role = 'operator'
+                ORDER BY u.name
+            """, (month,))
+            operator_rows = cursor.fetchall()
+
+            if not operator_rows:
+                return {"month": month, "days_in_month": days, "operators": []}
+
+            op_ids = [row[0] for row in operator_rows]
+
+            cursor.execute("""
+                SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency,
+                    d.fine_amount, d.fine_reason, d.fine_comment
+                FROM daily_hours d
+                WHERE d.operator_id = ANY(%s)
+                AND d.day >= %s AND d.day <= %s
+                ORDER BY d.operator_id, d.day
+            """, (op_ids, start, end))
+            daily_rows = cursor.fetchall()
+
+            daily_map = {}
+            for (op_id, day, work_time, break_time, talk_time, calls, eff,
+                fine_amount, fine_reason, fine_comment) in daily_rows:
+                day_num = str(int(day.day))
+                d = {
+                    "work_time": float(work_time) if work_time is not None else 0.0,
+                    "break_time": float(break_time) if break_time is not None else 0.0,
+                    "talk_time": float(talk_time) if talk_time is not None else 0.0,
+                    "calls": int(calls) if calls is not None else 0,
+                    "efficiency": float(eff) if eff is not None else 0.0,
+                    "fine_amount": float(fine_amount) if fine_amount is not None else 0.0,
+                    "fine_reason": fine_reason,
+                    "fine_comment": fine_comment,
+                    "fines": []
+                }
+                daily_map.setdefault(op_id, {})[day_num] = d
+
+            cursor.execute("""
+                SELECT df.operator_id, df.amount, df.reason, df.comment, df.day
+                FROM daily_fines df
+                WHERE df.operator_id = ANY(%s)
+                AND df.day >= %s AND df.day <= %s
+                ORDER BY df.operator_id, df.day, df.id
+            """, (op_ids, start, end))
+            fines_rows = cursor.fetchall()
+            for op_id, amt, reason, comment, day_obj in fines_rows:
+                day_num = str(int(day_obj.day))
+                fine_obj = {"amount": float(amt) if amt is not None else 0.0, "reason": reason, "comment": comment}
+                try:
+                    if str(reason) == 'Опоздание':
+                        fine_obj['minutes'] = int(round(float(amt) / 50)) if amt else 0
+                except Exception:
+                    pass
+                if op_id in daily_map and day_num in daily_map[op_id]:
+                    daily_map[op_id][day_num].setdefault('fines', []).append(fine_obj)
+
+            operators = []
+            for row in operator_rows:
+                (op_id, op_name, rate, status, norm_hours,
+                regular_hours, total_break_time, total_talk_time,
+                total_calls, total_efficiency_hours, calls_per_hour, fines) = row
+
+                operators.append({
+                    "operator_id": op_id,
+                    "name": op_name,
+                    "rate": float(rate) if rate is not None else 0.0,
+                    "status": status,
+                    "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
+                    "daily": daily_map.get(op_id, {}),
+                    "aggregates": {
+                        "regular_hours": float(regular_hours),
+                        "total_break_time": float(total_break_time),
+                        "total_talk_time": float(total_talk_time),
+                        "total_calls": int(total_calls),
+                        "total_efficiency_hours": float(total_efficiency_hours),
+                        "calls_per_hour": float(calls_per_hour),
+                        "fines": float(fines)
+                    }
+                })
+
+        return {"month": month, "days_in_month": days, "operators": operators}
+
     def aggregate_month_from_daily(self, operator_id, month):
         """
         Суммирует daily_hours за месяц и обновляет work_hours:
@@ -2577,20 +2689,33 @@ class Database:
             # собираем кандидатов со статусом 'fired'
             fired_candidates = [op.get('operator_id') for op in operators if (op.get('status') or '').lower() == 'fired']
             if fired_candidates:
+                # Берём все записи об увольнении для кандидатов и затем проверяем дату увольнения
+                # — включаем оператора в отчёт для месяца, если дата увольнения >= начала выбранного месяца.
                 with self._get_cursor() as cursor:
                     cursor.execute(
                         """
-                        SELECT DISTINCT user_id
+                        SELECT user_id, changed_at
                         FROM user_history
                         WHERE user_id = ANY(%s)
                           AND field_changed = 'status'
                           AND lower(new_value) = 'fired'
-                          AND changed_at >= %s AND changed_at < %s
                         """,
-                        (fired_candidates, month_start, next_month_start)
+                        (fired_candidates,)
                     )
                     rows = cursor.fetchall()
-                allowed_fired_ids = {r[0] for r in rows}
+                allowed_fired_ids = set()
+                for r in rows:
+                    try:
+                        uid = r[0]
+                        changed_at = r[1]
+                        if changed_at is None:
+                            continue
+                        # приведение к date
+                        ch_date = changed_at.date() if hasattr(changed_at, 'date') else changed_at
+                        if ch_date >= month_start:
+                            allowed_fired_ids.add(uid)
+                    except Exception:
+                        continue
             else:
                 allowed_fired_ids = set()
 
@@ -2906,6 +3031,86 @@ class Database:
         if filename is None:
             filename = f"report_{month}.xlsx"
         return filename, content
+
+    def generate_excel_report_all_operators_from_view(self,
+        operators: List[Dict[str, Any]],
+        trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
+        month: str,  # 'YYYY-MM'
+        filename: str = None
+    ) -> Tuple[str, bytes]:
+        """
+        Сгенерировать тот же набор листов, что и `generate_excel_report_from_view`,
+        но для всех операторов в одном файле. В конце каждой строки добавляется
+        колонка с именем супервайзера.
+        """
+        # operators ожидается в том же формате: {"operators": [...]} или список
+        ops = operators["operators"] if isinstance(operators, dict) and "operators" in operators else operators
+
+        # Получим мапу supervisor_id -> name для всех операторов, чтобы добавить колонку
+        sup_ids = [op.get('supervisor_id') for op in ops if op.get('supervisor_id')]
+        sup_map = {}
+        if sup_ids:
+            try:
+                with self._get_cursor() as cursor:
+                    cursor.execute("SELECT id, name FROM users WHERE id = ANY(%s)", (sup_ids,))
+                    for r in cursor.fetchall():
+                        sup_map[r[0]] = r[1]
+            except Exception:
+                logging.exception("Error fetching supervisors for all-operators report")
+
+        # Augment each operator object with supervisor name for downstream formatting
+        for op in ops:
+            sid = op.get('supervisor_id')
+            op['supervisor_name'] = sup_map.get(sid) if sid else None
+
+        # Reuse existing generator by delegating to generate_excel_report_from_view,
+        # but we need to ensure that the sheets include the Supervisor column.
+        # The simplest approach is to call the same code but with modified headers.
+        # We'll copy the essential parts from generate_excel_report_from_view and
+        # add Supervisor as an extra column in each sheet's row end.
+
+        # For brevity and to avoid duplicating too much, we'll call generate_excel_report_from_view
+        # to build a workbook, then post-process each sheet to append the Supervisor column.
+
+        # Generate base report bytes
+        base_filename, content = self.generate_excel_report_from_view({"operators": ops}, trainings_map, month, filename=None)
+        if not content:
+            return None, None
+
+        # Load workbook and append supervisor column to each relevant sheet
+        from openpyxl import load_workbook
+        wb = load_workbook(filename=BytesIO(content))
+
+        # For each sheet except 'Тренинги' (where we also add supervisor at end),
+        # add a header 'Супервайзер' at the last column and fill per-row values.
+        for ws in wb.worksheets:
+            # find last column index with header in row 1
+            max_col = ws.max_column
+            header_cell = ws.cell(1, max_col + 1)
+            header_cell.value = 'Супервайзер'
+            header_cell.font = Font(bold=True)
+            header_cell.alignment = Alignment(horizontal='center', vertical='center')
+            header_cell.border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+            # Fill supervisor per row by matching operator name in column A
+            for r in range(2, ws.max_row + 1):
+                name = ws.cell(r, 1).value
+                sup_name = None
+                if name:
+                    # try to find operator by name in ops
+                    for op in ops:
+                        if op.get('name') == name or f"op_{op.get('operator_id')}" == name:
+                            sup_name = op.get('supervisor_name')
+                            break
+                ws.cell(r, max_col + 1).value = sup_name or ''
+
+        out = BytesIO()
+        wb.save(out)
+        out.seek(0)
+        final_content = out.getvalue()
+        if filename is None:
+            filename = f"report_all_{month}.xlsx"
+        return filename, final_content
 
 # Initialize database
 db = Database()

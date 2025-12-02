@@ -2328,6 +2328,7 @@
         const [operators, setOperators] = useState([]);
         const [trainingsMap, setTrainingsMap] = useState({}); // { operatorId: { dayNum: [trainings...] } }
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
+        const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' (admin only)
         const [isLoading, setIsLoading] = useState(false);
 
         // NEW: filter active/fired + counters
@@ -2986,11 +2987,20 @@
             return;
             }
 
+            // If admin requested per-SV report, ensure a supervisor is selected
+            if (user.role === 'admin' && reportScope === 'by_sv' && !selectedSvId) {
+            fallbackToast('Выберите супервайзера для отчёта', 'error');
+            return;
+            }
+
             const params = new URLSearchParams();
             params.append('month', month);
 
-            if (user.role === 'admin' && selectedSvId) {
-            params.append('supervisor_id', selectedSvId);
+            if (user.role === 'admin') {
+            // admin can choose overall report (no supervisor_id) or per-SV
+            if (reportScope === 'by_sv' && selectedSvId) {
+                params.append('supervisor_id', selectedSvId);
+            }
             } else if (selectedSvId) {
             params.append('supervisor_id', selectedSvId);
             } else if (user.role === 'sv') {
@@ -3060,18 +3070,46 @@
                 </div>
 
                 <div className="flex items-center gap-3">
-                {(user?.role === 'admin' || user?.role === 'sv') && (
+                {user?.role === 'admin' && (
+                    <div className="flex items-center gap-2">
                     <select
-                    value={selectedSvId || ''}
-                    onChange={e => setSelectedSvId(e.target.value)}
-                    className="px-3 py-2 border rounded-md"
+                        value={reportScope}
+                        onChange={e => setReportScope(e.target.value)}
+                        className="px-3 py-2 border rounded-md"
+                        title="Выберите тип отчёта"
                     >
-                    <option value="">Выберите супервайзера</option>
-                    {svList?.map(sv => (
+                        <option value="by_sv">По СВ</option>
+                        <option value="all">Общий</option>
+                    </select>
+                    <select
+                        value={selectedSvId || ''}
+                        onChange={e => setSelectedSvId(e.target.value)}
+                        className="px-3 py-2 border rounded-md"
+                        disabled={reportScope === 'all'}
+                        title="Выберите супервайзера"
+                    >
+                        <option value="">Выберите супервайзера</option>
+                        {svList?.map(sv => (
                         <option key={sv.id} value={sv.id}>
-                        {sv.name}
+                            {sv.name}
                         </option>
-                    ))}
+                        ))}
+                    </select>
+                    </div>
+                )}
+
+                {user?.role === 'sv' && (
+                    <select
+                        value={selectedSvId || ''}
+                        onChange={e => setSelectedSvId(e.target.value)}
+                        className="px-3 py-2 border rounded-md"
+                    >
+                        <option value="">Выберите супервайзера</option>
+                        {svList?.map(sv => (
+                        <option key={sv.id} value={sv.id}>
+                            {sv.name}
+                        </option>
+                        ))}
                     </select>
                 )}
 
