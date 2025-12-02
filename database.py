@@ -3103,9 +3103,10 @@ class Database:
         """
         # operators может быть {"operators": [...]} или список
         ops = operators["operators"] if isinstance(operators, dict) and "operators" in operators else operators
-
+        logging.info("First operator for all-operators report: %s", ops[0])
         # Deduplicate ids и получить map одним запросом
         sup_ids = list({int(op.get('supervisor_id')) for op in ops if op.get('supervisor_id')})
+        logging.info("Fetching supervisors for all-operators report: %s", sup_ids)
         sup_map = {}
         if sup_ids:
             try:
