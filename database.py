@@ -3037,80 +3037,33 @@ class Database:
         trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
         month: str,  # 'YYYY-MM'
         filename: str = None
-    ) -> Tuple[str, bytes]:
+        ) -> Tuple[str, bytes]:
         """
-        Сгенерировать тот же набор листов, что и `generate_excel_report_from_view`,
-        но для всех операторов в одном файле. В конце каждой строки добавляется
-        колонка с именем супервайзера.
+        Быстрая версия: дополняет операторов supervisor_name и вызывает
+        generate_excel_report_from_view(include_supervisor=True).
         """
-        # operators ожидается в том же формате: {"operators": [...]} или список
+        # operators может быть {"operators": [...]} или список
         ops = operators["operators"] if isinstance(operators, dict) and "operators" in operators else operators
 
-        # Получим мапу supervisor_id -> name для всех операторов, чтобы добавить колонку
-        sup_ids = [op.get('supervisor_id') for op in ops if op.get('supervisor_id')]
+        # Deduplicate ids и получить map одним запросом
+        sup_ids = list({int(op.get('supervisor_id')) for op in ops if op.get('supervisor_id')})
         sup_map = {}
         if sup_ids:
             try:
                 with self._get_cursor() as cursor:
                     cursor.execute("SELECT id, name FROM users WHERE id = ANY(%s)", (sup_ids,))
-                    for r in cursor.fetchall():
-                        sup_map[r[0]] = r[1]
+                    sup_map = {r[0]: r[1] for r in cursor.fetchall()}
             except Exception:
                 logging.exception("Error fetching supervisors for all-operators report")
 
-        # Augment each operator object with supervisor name for downstream formatting
+        # Добавляем supervisor_name к каждому оператору (O(N))
         for op in ops:
             sid = op.get('supervisor_id')
-            op['supervisor_name'] = sup_map.get(sid) if sid else None
+            op['supervisor_name'] = sup_map.get(int(sid)) if sid else None
 
-        # Reuse existing generator by delegating to generate_excel_report_from_view,
-        # but we need to ensure that the sheets include the Supervisor column.
-        # The simplest approach is to call the same code but with modified headers.
-        # We'll copy the essential parts from generate_excel_report_from_view and
-        # add Supervisor as an extra column in each sheet's row end.
+        # Вызов генератора — один проход, файл формируется сразу с колонкой "Супервайзер"
+        return self.generate_excel_report_from_view({"operators": ops}, trainings_map, month, filename=filename, include_supervisor=True)
 
-        # For brevity and to avoid duplicating too much, we'll call generate_excel_report_from_view
-        # to build a workbook, then post-process each sheet to append the Supervisor column.
-
-        # Generate base report bytes
-        base_filename, content = self.generate_excel_report_from_view({"operators": ops}, trainings_map, month, filename=None)
-        if not content:
-            return None, None
-
-        # Load workbook and append supervisor column to each relevant sheet
-        from openpyxl import load_workbook
-        wb = load_workbook(filename=BytesIO(content))
-
-        # For each sheet except 'Тренинги' (where we also add supervisor at end),
-        # add a header 'Супервайзер' at the last column and fill per-row values.
-        for ws in wb.worksheets:
-            # find last column index with header in row 1
-            max_col = ws.max_column
-            header_cell = ws.cell(1, max_col + 1)
-            header_cell.value = 'Супервайзер'
-            header_cell.font = Font(bold=True)
-            header_cell.alignment = Alignment(horizontal='center', vertical='center')
-            header_cell.border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-
-            # Fill supervisor per row by matching operator name in column A
-            for r in range(2, ws.max_row + 1):
-                name = ws.cell(r, 1).value
-                sup_name = None
-                if name:
-                    # try to find operator by name in ops
-                    for op in ops:
-                        if op.get('name') == name or f"op_{op.get('operator_id')}" == name:
-                            sup_name = op.get('supervisor_name')
-                            break
-                ws.cell(r, max_col + 1).value = sup_name or ''
-
-        out = BytesIO()
-        wb.save(out)
-        out.seek(0)
-        final_content = out.getvalue()
-        if filename is None:
-            filename = f"report_all_{month}.xlsx"
-        return filename, final_content
 
 # Initialize database
 db = Database()
