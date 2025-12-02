@@ -1386,11 +1386,11 @@ class Database:
 
                     operators.append({
                         "name": name,
-                        "work_time": round(work_time_h, 1),
-                        "break_time": round(break_time_h, 1),
-                        "talk_time": round(talk_time_h, 1),
+                        "work_time": round(work_time_h, 2),
+                        "break_time": round(break_time_h, 2),
+                        "talk_time": round(talk_time_h, 2),
                         "calls": int(calls),
-                        "efficiency": round(efficiency_h, 1),
+                        "efficiency": round(efficiency_h, 2),
                         "month": month
                     })
                 except Exception as e:
@@ -2624,7 +2624,7 @@ class Database:
             # represent exactly zero as int 0
             if abs(num) < 1e-9:
                 return 0
-            return round(num, 1)
+            return round(num, 2)
 
         def fmt_total_value(metric_key: str, value: Any):
             """Формат для итоговых/доп. колонок (итого, проценты и т.п.).
@@ -2642,7 +2642,7 @@ class Database:
                 num = float(value)
             except Exception:
                 return None
-            return round(num, 1)
+            return round(num, 2)
 
         logging.info(month)
         year, mon = map(int, month.split('-'))
@@ -2761,12 +2761,12 @@ class Database:
                 set_cell(ws, row, 4 + len(days), fmt_total_value('work_time', itogo_chasov))
                 set_cell(ws, row, 5 + len(days), fmt_total_value('work_time', total_work))
                 if norm and norm != 0:
-                    percent = round((itogo_chasov / norm) * 100, 1)
+                    percent = round((itogo_chasov / norm) * 100, 2)
                     percent_display = f"{percent}%"
                 else:
                     percent_display = None
                 set_cell(ws, row, 6 + len(days), percent_display)
-                set_cell(ws, row, 7 + len(days), fmt_total_value('work_time', round(norm - itogo_chasov, 1) if norm is not None else None))
+                set_cell(ws, row, 7 + len(days), fmt_total_value('work_time', round(norm - itogo_chasov, 2) if norm is not None else None))
 
                 row += 1
 
