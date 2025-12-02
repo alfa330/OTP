@@ -2504,7 +2504,7 @@ def get_monthly_report_hours():
             return jsonify({"error": "Requester not found"}), 404
 
         # роль в requester ожидается в requester[3] как в вашем примере
-        role = requester[3] if len(requester) > 3 else None
+        role = requester[3] 
 
         # разрешаем sv без supervisor_id - тогда смотрим на себя
         if not supervisor_id:
