@@ -2506,9 +2506,13 @@ def get_monthly_report_hours():
         # роль в requester ожидается в requester[3] как в вашем примере
         role = requester[3] 
 
-        # разрешаем sv без supervisor_id - тогда смотрим на себя
+        # Если supervisor_id не указан — формируем общий отчёт для всех операторов (только для admin).
+        # Если supervisor_id указан или requester — sv без param, формируем отчёт по конкретному СВ.
+        generate_all = False
         if not supervisor_id:
-            if role == 'sv':
+            if role == 'admin':
+                generate_all = True
+            elif role == 'sv':
                 supervisor_id = requester_id
             else:
                 return jsonify({"error": "supervisor_id required"}), 400
@@ -2518,29 +2522,37 @@ def get_monthly_report_hours():
             except ValueError:
                 return jsonify({"error": "supervisor_id must be integer"}), 400
 
-        # проверка прав: admin или тот же sv
-        if role != 'admin' and role != 'sv':
-            return jsonify({"error": "Unauthorized to access this report"}), 403
+        # проверка прав для случая конкретного SV: admin или сам SV
+        if not generate_all:
+            if role != 'admin' and not (role == 'sv' and supervisor_id == requester_id):
+                return jsonify({"error": "Unauthorized to access this report"}), 403
 
-        logging.info("Начало генерации отчета: supervisor_id=%s month=%s", supervisor_id, month)
+        logging.info("Начало генерации отчета: supervisor_id=%s month=%s generate_all=%s", supervisor_id, month, generate_all)
 
-        # Иначе собираем данные вручную и используем функцию-генератор (если есть)
-        # Ожидаемые методы: get_daily_hours_by_supervisor_month / get_daily_hours_for_all_month и get_trainings_for_month / get_trainings_by_sv_month
         try:
-            operators = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
+            if generate_all:
+                operators = db.get_daily_hours_for_all_month(month)
+            else:
+                operators = db.get_daily_hours_by_supervisor_month(supervisor_id, month)
         except Exception as e:
             logging.exception("Ошибка получения operators из db")
             return jsonify({"error": f"Ошибка получения операторов: {str(e)}"}), 500
 
         try:
-            trainings_list = db.get_trainings(supervisor_id, month)
+            if generate_all:
+                trainings_list = db.get_trainings(None, month)
+            else:
+                trainings_list = db.get_trainings(supervisor_id, month)
         except Exception as e:
             logging.exception("Ошибка получения trainings из db")
             trainings_list = []
 
         trainings_map = build_trainings_map(trainings_list)
-        
-        filename, content = db.generate_excel_report_from_view(operators, trainings_map, month)
+
+        if generate_all:
+            filename, content = db.generate_excel_report_all_operators_from_view(operators, trainings_map, month)
+        else:
+            filename, content = db.generate_excel_report_from_view(operators, trainings_map, month)
             
         if not filename or not content:
             logging.error("Генерация отчёта вернула пустой результат")
