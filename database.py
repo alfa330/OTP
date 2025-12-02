@@ -3020,10 +3020,109 @@ class Database:
 
             build_generic_sheet('efficiency', 'Эффективность', 'efficiency', is_hour=True, extra_cols=[('Отн.', otn_fn)])
 
+        def build_fines_sheet():
+            ws_f = wb.create_sheet(title='Штрафы'[:31])
+            headers = ["ФИО"]
+            if include_supervisor:
+                headers.append("Супервайзер")
+            headers += [
+                "Ставка",
+                "Кол-во Опозданий",
+                "Минуты",
+                "Сумма Опозданий",
+                "Корп такси",
+                "Кол-во Не выход",
+                "Сумма Не выход",
+                "Прокси Карта",
+                "Другое"
+            ]
+            _make_header(ws_f, headers)
+
+            row = 2
+            def fmt_amt(x):
+                try:
+                    return round(float(x or 0.0), 1)
+                except Exception:
+                    return 0.0
+
+            for op in operators:
+                name = op.get('name') or f"op_{op.get('operator_id')}"
+                set_cell(ws_f, row, 1, name, align_center=False)
+
+                col_idx = 2
+                if include_supervisor:
+                    sup_name = op.get('supervisor_name') or ""
+                    set_cell(ws_f, row, col_idx, sup_name, align_center=False)
+                    col_idx += 1
+
+                # Ставка (rate) оставляем как есть (не округляем по правилам)
+                rate = op.get('rate') or 0
+                set_cell(ws_f, row, col_idx, float(rate), align_center=False)
+                col_idx += 1
+
+                # сбор штрафов по дням
+                fines_map = op.get('daily', {})  # dict day->entry, each entry may have 'fines': [..]
+                count_late = 0
+                minutes_late = 0
+                sum_late = 0.0
+                sum_korp = 0.0
+                count_no_show = 0
+                sum_no_show = 0.0
+                sum_proxy = 0.0
+                sum_other = 0.0
+
+                for day_entry in fines_map.values():
+                    fines_list = day_entry.get('fines', []) if isinstance(day_entry, dict) else []
+                    for f in fines_list:
+                        try:
+                            reason = (f.get('reason') or '').strip()
+                            amt = float(f.get('amount') or 0.0)
+                        except Exception:
+                            reason = str(f.get('reason') or '')
+                            amt = 0.0
+
+                        rl = reason.lower()
+                        if rl == 'опоздание':
+                            count_late += 1
+                            # minutes: если есть в объекте — используем, иначе вычисляем как amount/50
+                            minutes = int(f.get('minutes')) if f.get('minutes') is not None else int(round(amt / 50)) if amt else 0
+                            minutes_late += minutes
+                            sum_late += amt
+                        elif 'корп' in rl and 'такси' in rl or rl == 'корп такси':
+                            sum_korp += amt
+                        elif rl == 'не выход' or 'не выход' in rl:
+                            count_no_show += 1
+                            sum_no_show += amt
+                        elif 'прокси' in rl or 'прокси карта' in rl or rl == 'прокси карта':
+                            sum_proxy += amt
+                        else:
+                            # если reason пустой — тоже считаем в "Другое"
+                            sum_other += amt
+
+                # Записываем колонки в порядке заголовков
+                set_cell(ws_f, row, col_idx, int(count_late) if count_late else 0); col_idx += 1
+                set_cell(ws_f, row, col_idx, int(minutes_late) if minutes_late else 0); col_idx += 1
+                set_cell(ws_f, row, col_idx, fmt_amt(sum_late) if sum_late else 0.0); col_idx += 1
+                set_cell(ws_f, row, col_idx, fmt_amt(sum_korp) if sum_korp else 0.0); col_idx += 1
+                set_cell(ws_f, row, col_idx, int(count_no_show) if count_no_show else 0); col_idx += 1
+                set_cell(ws_f, row, col_idx, fmt_amt(sum_no_show) if sum_no_show else 0.0); col_idx += 1
+                set_cell(ws_f, row, col_idx, fmt_amt(sum_proxy) if sum_proxy else 0.0); col_idx += 1
+                set_cell(ws_f, row, col_idx, fmt_amt(sum_other) if sum_other else 0.0); col_idx += 1
+
+                row += 1
+
+            # ширина колонок
+            ws_f.column_dimensions['A'].width = 28
+            start_idx = 2 if not include_supervisor else 3
+            for i in range(start_idx, len(headers) + 1):
+                col = ws_f.cell(1, i).column_letter
+                ws_f.column_dimensions[col].width = 14
+
         build_work_time_sheet()
         build_generic_sheet('break_time', 'Перерыв', 'break_time', is_hour=True)
         build_calls_sheet()
         build_efficiency_sheet()
+        build_fines_sheet()
 
         ws_t = wb.create_sheet(title='Тренинги'[:31])
 
