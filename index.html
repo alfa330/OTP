@@ -2791,6 +2791,7 @@
             const r = String(reason || '').toLowerCase();
             if (r.includes('опоз') || r.includes('опоздание')) return 'fas fa-clock';
             if (r.includes('не выход') || r.includes('невыход') || r.includes('не выш')) return 'fas fa-user-times';
+            if (r.includes('корп такси')) return 'fas fa-taxi';
             if (r.includes('прокси') || r.includes('прокси карта')) return 'fas fa-id-card';
             return 'fas fa-exclamation-circle';
         }
