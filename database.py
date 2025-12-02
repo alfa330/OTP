@@ -2564,6 +2564,42 @@ class Database:
 
         operators = operators["operators"]
 
+        # Фильтруем уволенных операторов — оставляем только тех, у кого запись об
+        # увольнении (field_changed='status', new_value='fired') попадает в выбранный месяц.
+        try:
+            # month уже распаршен ниже, но нам нужны year/mon для границ месяца — вычислим их сейчас
+            year, mon = map(int, month.split('-'))
+            month_start = date(year, mon, 1)
+            days_in_month = calendar.monthrange(year, mon)[1]
+            month_end = date(year, mon, days_in_month)
+            next_month_start = month_end + timedelta(days=1)
+
+            # собираем кандидатов со статусом 'fired'
+            fired_candidates = [op.get('operator_id') for op in operators if (op.get('status') or '').lower() == 'fired']
+            if fired_candidates:
+                with self._get_cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT DISTINCT user_id
+                        FROM user_history
+                        WHERE user_id = ANY(%s)
+                          AND field_changed = 'status'
+                          AND lower(new_value) = 'fired'
+                          AND changed_at >= %s AND changed_at < %s
+                        """,
+                        (fired_candidates, month_start, next_month_start)
+                    )
+                    rows = cursor.fetchall()
+                allowed_fired_ids = {r[0] for r in rows}
+            else:
+                allowed_fired_ids = set()
+
+            # окончательный фильтр: включаем всех не-уволенных и только отфильтрованных уволенных
+            operators = [op for op in operators if (op.get('status') or '').lower() != 'fired' or op.get('operator_id') in allowed_fired_ids]
+        except Exception:
+            # в случае ошибки фильтрации — не ломаем генерацию отчёта, оставляем исходный список
+            logging.exception("Error filtering fired operators by dismissal date; proceeding without filter")
+
         FILL_POS = PatternFill(fill_type='solid', start_color='b3b3b3')  # чуть темнее серый
         THIN = Side(style='thin')
         BORDER_ALL = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
