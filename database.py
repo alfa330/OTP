@@ -2660,7 +2660,8 @@ class Database:
         operators: List[Dict[str, Any]],
         trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
         month: str,  # 'YYYY-MM'
-        filename: str = None
+        filename: str = None,
+        include_supervisor: bool = False
     ) -> Tuple[str, bytes]:
         """
         Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность, Тренинги.
@@ -2675,6 +2676,33 @@ class Database:
         """
 
         operators = operators["operators"]
+
+        # If requested, ensure each operator has `supervisor_name` populated.
+        if include_supervisor:
+            # collect supervisor ids that don't already have a name
+            sup_ids = []
+            for op in operators:
+                if not op.get('supervisor_name') and op.get('supervisor_id'):
+                    try:
+                        sup_ids.append(int(op.get('supervisor_id')))
+                    except Exception:
+                        continue
+            sup_ids = list(set(sup_ids))
+            sup_map = {}
+            if sup_ids:
+                try:
+                    with self._get_cursor() as cursor:
+                        cursor.execute("SELECT id, name FROM users WHERE id = ANY(%s)", (sup_ids,))
+                        sup_map = {r[0]: r[1] for r in cursor.fetchall()}
+                except Exception:
+                    logging.exception("Error fetching supervisors for report")
+            # fill supervisor_name where missing
+            for op in operators:
+                if not op.get('supervisor_name') and op.get('supervisor_id'):
+                    try:
+                        op['supervisor_name'] = sup_map.get(int(op.get('supervisor_id')))
+                    except Exception:
+                        op['supervisor_name'] = None
 
         # Фильтруем уволенных операторов — оставляем только тех, у кого запись об
         # увольнении (field_changed='status', new_value='fired') попадает в выбранный месяц.
@@ -2826,21 +2854,34 @@ class Database:
 
         def build_generic_sheet(key: str, label: str, metric_key: str, is_hour=True, format_fn=None, extra_cols=None):
             ws = wb.create_sheet(title=label[:31])
-            headers = ["Оператор", "Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого"]
+            # Build headers with optional supervisor column
+            headers = ["Оператор"]
+            if include_supervisor:
+                headers.append("Супервайзер")
+            headers += ["Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого"]
             if extra_cols:
                 headers += [c[0] for c in extra_cols]
             _make_header(ws, headers)
+
+            # column indexes depending on presence of supervisor column
+            rate_col = 2 + (1 if include_supervisor else 0)
+            norm_col = rate_col + 1
+            day_start_col = norm_col + 1
+
             row = 2
             for op in operators:
                 daily = op.get('daily', {})
                 name = op.get('name') or f"op_{op.get('operator_id')}"
                 set_cell(ws, row, 1, name, align_center=False)
+                if include_supervisor:
+                    sup_name = op.get('supervisor_name') or ""
+                    set_cell(ws, row, 2, sup_name, align_center=False)
                 # Ставка и Норма оставляем без изменения/округления
-                set_cell(ws, row, 2, float(op.get('rate') or 0), align_center=False)
-                set_cell(ws, row, 3, float(op.get('norm_hours') or 0), align_center=False)
+                set_cell(ws, row, rate_col, float(op.get('rate') or 0), align_center=False)
+                set_cell(ws, row, norm_col, float(op.get('norm_hours') or 0), align_center=False)
                 total = 0.0
                 totals = { 'work_time': 0.0, 'calls': 0, 'efficiency': 0.0 }
-                for c_idx, day in enumerate(days, start=4):
+                for c_idx, day in enumerate(days, start=day_start_col):
                     dkey = str(day)
                     if metric_key == 'trainings':
                         set_cell(ws, row, c_idx, "")
@@ -2864,7 +2905,7 @@ class Database:
                             if metric_key == 'efficiency':
                                 totals['efficiency'] += num_for_tot
                 # total cell
-                total_col = 4 + len(days)
+                total_col = day_start_col + len(days)
                 set_cell(ws, row, total_col, fmt_total_value(metric_key, total))
 
                 # extra cols
@@ -2880,27 +2921,36 @@ class Database:
                 row += 1
 
             ws.column_dimensions['A'].width = 24
-            for i in range(2, 5 + len(days) + (len(extra_cols) if extra_cols else 0)):
+            for i in range(2, len(headers) + 1):
                 col = ws.cell(1, i).column_letter
                 ws.column_dimensions[col].width = 12
 
         def build_work_time_sheet():
             ws = wb.create_sheet(title='Отработанные часы'[:31])
-            headers = ["Оператор", "Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого часов", "С выч. тренинга", "Вып нормы (%)", "Выработка"]
+            headers = ["Оператор"]
+            if include_supervisor:
+                headers.append("Супервайзер")
+            headers += ["Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого часов", "С выч. тренинга", "Вып нормы (%)", "Выработка"]
             _make_header(ws, headers)
             row = 2
             for op in operators:
                 daily = op.get('daily', {})
                 name = op.get('name') or f"op_{op.get('operator_id')}"
                 set_cell(ws, row, 1, name, align_center=False)
-                set_cell(ws, row, 2, float(op.get('rate') or 0), align_center=False)
+                if include_supervisor:
+                    sup_name = op.get('supervisor_name') or ""
+                    set_cell(ws, row, 2, sup_name, align_center=False)
+                rate_col = 2 + (1 if include_supervisor else 0)
+                norm_col = rate_col + 1
+                set_cell(ws, row, rate_col, float(op.get('rate') or 0), align_center=False)
                 norm = float(op.get('norm_hours') or 0)
-                set_cell(ws, row, 3, norm, align_center=False)
+                set_cell(ws, row, norm_col, norm, align_center=False)
 
                 total_work = 0.0
                 total_counted_trainings = 0.0
 
-                for c_idx, day in enumerate(days, start=4):
+                day_start = norm_col + 1
+                for c_idx, day in enumerate(days, start=day_start):
                     dkey = str(day)
                     work_val = 0.0
                     d = daily.get(dkey)
@@ -2923,20 +2973,21 @@ class Database:
                     set_cell(ws, row, c_idx, cell_val, fill=fill)
 
                 itogo_chasov = total_work + total_counted_trainings
-                set_cell(ws, row, 4 + len(days), fmt_total_value('work_time', itogo_chasov))
-                set_cell(ws, row, 5 + len(days), fmt_total_value('work_time', total_work))
+                base_total_col = day_start + len(days)
+                set_cell(ws, row, base_total_col, fmt_total_value('work_time', itogo_chasov))
+                set_cell(ws, row, base_total_col + 1, fmt_total_value('work_time', total_work))
                 if norm and norm != 0:
                     percent = round((itogo_chasov / norm) * 100, 2)
                     percent_display = f"{percent}%"
                 else:
                     percent_display = None
-                set_cell(ws, row, 6 + len(days), percent_display)
-                set_cell(ws, row, 7 + len(days), fmt_total_value('work_time', round(norm - itogo_chasov, 2) if norm is not None else None))
+                set_cell(ws, row, base_total_col + 2, percent_display)
+                set_cell(ws, row, base_total_col + 3, fmt_total_value('work_time', round(norm - itogo_chasov, 2) if norm is not None else None))
 
                 row += 1
 
             ws.column_dimensions['A'].width = 24
-            for i in range(2, 8 + len(days)):
+            for i in range(2, len(headers) + 1):
                 col = ws.cell(1, i).column_letter
                 ws.column_dimensions[col].width = 14
 
@@ -2974,7 +3025,10 @@ class Database:
 
         ws_t = wb.create_sheet(title='Тренинги'[:31])
 
-        headers = ["Оператор"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Всего (ч)"]
+        headers = ["Оператор"]
+        if include_supervisor:
+            headers.append("Супервайзер")
+        headers += [f"{d:02d}.{mon:02d}" for d in days] + ["Всего (ч)"]
         _make_header(ws_t, headers)
 
         def fmt_num(n):
@@ -3003,7 +3057,11 @@ class Database:
 
             # --- Заполнение вкладки "Тренинги" ---
             set_cell(ws_t, row_counted, 1, name, align_center=False)
-            for c_idx, day in enumerate(days, start=2):
+            if include_supervisor:
+                sup_name = op.get('supervisor_name') or ""
+                set_cell(ws_t, row_counted, 2, sup_name, align_center=False)
+            day_start = 2 + (1 if include_supervisor else 0)
+            for c_idx, day in enumerate(days, start=day_start):
                 arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
                 counted = 0.0
                 for t in arr:
@@ -3015,7 +3073,8 @@ class Database:
                     set_cell(ws_t, row_counted, c_idx, fmt_num(counted), fill=FILL_POS)
 
             # Итоги по строке — только Всего (ч)
-            set_cell(ws_t, row_counted, 2 + len(days), fmt_num(total_all))
+            total_col = len(headers)
+            set_cell(ws_t, row_counted, total_col, fmt_num(total_all))
             row_counted += 1
 
         # Настройка ширины колонок для вкладки Тренинги
