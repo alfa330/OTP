@@ -25,7 +25,7 @@ from openpyxl.cell.text import InlineFont
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from collections import defaultdict
 import pandas as pd
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Callable, Union
 
 logging.basicConfig(level=logging.INFO)
 
@@ -2660,85 +2660,98 @@ class Database:
         operators: List[Dict[str, Any]],
         trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
         month: str,  # 'YYYY-MM'
-        filename: str = None
+        filename: str = None,
+        extra_columns: Optional[List[Tuple[str, Union[str, Callable[[Dict[str, Any], Dict[str, Any]], Any]]]]] = None
     ) -> Tuple[str, bytes]:
         """
         Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность, Тренинги.
 
-        Правила форматирования (по заданию пользователя):
-        - Округлять все числа до 1 знака после запятой, КРОМЕ полей "Ставка" (rate) и "Норма часов" (norm_hours) — они оставляются как есть.
-        - Внутри таблицы по дням значение 0 отображается как целое 0 (не 0.0).
-        - Ячейки по дням, где значение > 0, закрашивать светло-серым (теперь чуть темнее).
-        - Calls (количество звонков) остаются целыми числами.
-        - Везде, где значение должно быть процентом, добавлять знак "%".
-        - Добавить границы ко всем ячейкам таблиц.
+        Параметры:
+        - operators: либо {"operators": [...]} либо список операторов.
+        Каждый оператор — словарь, ожидаются ключи: operator_id, name, rate, norm_hours, status, daily (dict day->metrics)
+        - trainings_map: { operator_id: { day_int: [training_dict, ...], ... }, ... }
+        - month: 'YYYY-MM'
+        - extra_columns: Optional list [(Header, key_or_fn), ...]
+            key_or_fn может быть:
+            - строка: тогда берётся op[key]
+            - функция (op, totals) -> значение (как раньше для КВЗ/Отн.)
+        Возвращает: (filename, bytes)
+        Форматирование/правила:
+        - Округляем числа до 1 знака (кроме rate и norm_hours — они оставляются как есть)
+        - В дневных ячейках 0 отображается как целое 0
+        - Дневные ячейки >0 закрашиваются светло-серым (слегка темнее)
+        - calls — целые
+        - Проценты отображаются с символом '%'
+        - Границы ко всем ячейкам
         """
 
-        operators = operators["operators"]
+        # Поддержка формата входа {"operators": [...]} или просто [...]
+        ops_list = operators["operators"] if isinstance(operators, dict) and "operators" in operators else operators
 
-        # Фильтруем уволенных операторов — оставляем только тех, у кого запись об
-        # увольнении (field_changed='status', new_value='fired') попадает в выбранный месяц.
+        # Защитное поведение: если пусто — вернуть пустой файл (или можно вернуть None)
+        if not ops_list:
+            wb_empty = Workbook()
+            out_e = BytesIO()
+            wb_empty.save(out_e)
+            out_e.seek(0)
+            return (filename or f"report_{month}.xlsx"), out_e.getvalue()
+
+        # Фильтрация уволенных операторов с учётом дат (как в исходном коде)
         try:
-            # month уже распаршен ниже, но нам нужны year/mon для границ месяца — вычислим их сейчас
             year, mon = map(int, month.split('-'))
             month_start = date(year, mon, 1)
             days_in_month = calendar.monthrange(year, mon)[1]
             month_end = date(year, mon, days_in_month)
-            next_month_start = month_end + timedelta(days=1)
 
-            # собираем кандидатов со статусом 'fired'
-            fired_candidates = [op.get('operator_id') for op in operators if (op.get('status') or '').lower() == 'fired']
+            fired_candidates = [op.get('operator_id') for op in ops_list if (op.get('status') or '').lower() == 'fired']
+            allowed_fired_ids = set()
             if fired_candidates:
-                # Берём все записи об увольнении для кандидатов и затем проверяем дату увольнения
-                # — включаем оператора в отчёт для месяца, если дата увольнения >= начала выбранного месяца.
-                with self._get_cursor() as cursor:
-                    cursor.execute(
-                        """
-                        SELECT user_id, changed_at
-                        FROM user_history
-                        WHERE user_id = ANY(%s)
-                          AND field_changed = 'status'
-                          AND lower(new_value) = 'fired'
-                        """,
-                        (fired_candidates,)
-                    )
-                    rows = cursor.fetchall()
-                allowed_fired_ids = set()
-                for r in rows:
-                    try:
-                        uid = r[0]
-                        changed_at = r[1]
-                        if changed_at is None:
+                try:
+                    with self._get_cursor() as cursor:
+                        cursor.execute(
+                            """
+                            SELECT user_id, changed_at
+                            FROM user_history
+                            WHERE user_id = ANY(%s)
+                            AND field_changed = 'status'
+                            AND lower(new_value) = 'fired'
+                            """,
+                            (list(set(fired_candidates)),)
+                        )
+                        rows = cursor.fetchall()
+                    for r in rows:
+                        try:
+                            uid = r[0]
+                            changed_at = r[1]
+                            if changed_at is None:
+                                continue
+                            ch_date = changed_at.date() if hasattr(changed_at, 'date') else changed_at
+                            if ch_date >= month_start:
+                                allowed_fired_ids.add(uid)
+                        except Exception:
                             continue
-                        # приведение к date
-                        ch_date = changed_at.date() if hasattr(changed_at, 'date') else changed_at
-                        if ch_date >= month_start:
-                            allowed_fired_ids.add(uid)
-                    except Exception:
-                        continue
-            else:
-                allowed_fired_ids = set()
-
-            # окончательный фильтр: включаем всех не-уволенных и только отфильтрованных уволенных
-            operators = [op for op in operators if (op.get('status') or '').lower() != 'fired' or op.get('operator_id') in allowed_fired_ids]
+                except Exception:
+                    logging.exception("Error fetching fired user history; continuing without extra filter")
+            # окончательный фильтр
+            ops_list = [op for op in ops_list if (op.get('status') or '').lower() != 'fired' or op.get('operator_id') in allowed_fired_ids]
         except Exception:
-            # в случае ошибки фильтрации — не ломаем генерацию отчёта, оставляем исходный список
-            logging.exception("Error filtering fired operators by dismissal date; proceeding without filter")
+            logging.exception("Error filtering fired operators; proceeding without filter")
+            # оставить ops_list как есть
 
+        # Стили
         FILL_POS = PatternFill(fill_type='solid', start_color='b3b3b3')  # чуть темнее серый
         THIN = Side(style='thin')
         BORDER_ALL = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+        BOLD_FONT = Font(bold=True)
 
+        # Вспомогательные функции
         def _make_header(ws, headers: List[str]):
-            thin = Side(style='thin')
-            border = Border(left=thin, right=thin, top=thin, bottom=thin)
-            bold = Font(bold=True)
             for i, h in enumerate(headers, start=1):
                 cell = ws.cell(1, i)
                 cell.value = h
-                cell.font = bold
+                cell.font = BOLD_FONT
                 cell.alignment = Alignment(horizontal='center', vertical='center')
-                cell.border = border
+                cell.border = BORDER_ALL
 
         def parse_time_to_minutes(t: str):
             if not t:
@@ -2768,10 +2781,11 @@ class Database:
             except Exception:
                 return 0.0
 
+        # Форматирование значений в дневных ячейках
         def fmt_day_value(metric_key: str, value: Any):
-            """Формат для значений в столбцах по дням.
+            """
             - calls -> int
-            - for hours/perc/eff -> round to 1 decimal; show 0 as integer 0
+            - hours/eff/perc -> rounded to 1 decimal (but 0 displayed as int 0)
             """
             if metric_key == 'calls':
                 try:
@@ -2782,16 +2796,14 @@ class Database:
                 num = float(value or 0)
             except Exception:
                 return 0
-            # represent exactly zero as int 0
+            # represent exactly zero as int 0 (для дневной ячейки)
             if abs(num) < 1e-9:
                 return 0
-            return round(num, 2)
+            # округляем до 1 знака в дневных ячейках
+            return round(num, 1)
 
+        # Формат для итоговых/доп. колонок
         def fmt_total_value(metric_key: str, value: Any):
-            """Формат для итоговых/доп. колонок (итого, проценты и т.п.).
-            - для calls оставляем int
-            - для остальных округляем до 1 знака (кроме rate и norm handled separately)
-            """
             if value is None:
                 return None
             if metric_key == 'calls':
@@ -2803,98 +2815,145 @@ class Database:
                 num = float(value)
             except Exception:
                 return None
-            return round(num, 2)
+            # итоговые — округляем до 1 знака
+            return round(num, 1)
 
-        logging.info(month)
-        year, mon = map(int, month.split('-'))
-        days_in_month = calendar.monthrange(year, mon)[1]
-        days = list(range(1, days_in_month + 1))
+        # Формат числа для отображения в тренингах (1 знак, запятая как разделитель)
+        def fmt_num_for_training(n: float) -> str:
+            return f"{n:.1f}".replace('.', ',')
 
-        wb = Workbook()
-        default = wb.active
-        wb.remove(default)
-
+        # Короткие утилиты
         def set_cell(ws, r, c, value, align_center=True, fill=None):
             cell = ws.cell(r, c)
             cell.value = value
             if align_center:
                 cell.alignment = Alignment(horizontal='center', vertical='center')
+            else:
+                cell.alignment = Alignment(horizontal='left', vertical='center')
             cell.border = BORDER_ALL
             if fill:
                 cell.fill = fill
             return cell
 
-        def build_generic_sheet(key: str, label: str, metric_key: str, is_hour=True, format_fn=None, extra_cols=None):
+        # Расчётные данные
+        year, mon = map(int, month.split('-'))
+        days_in_month = calendar.monthrange(year, mon)[1]
+        days = list(range(1, days_in_month + 1))
+
+        wb = Workbook()
+        # удалим активный лист по умолчанию
+        default = wb.active
+        wb.remove(default)
+
+        # Вспомогательная общая функция генерации таблиц с одинаковой логикой
+        def build_generic_sheet(key: str, label: str, metric_key: str, is_hour=True, extra_cols: Optional[List[Tuple[str, Union[str, Callable]]]] = None):
             ws = wb.create_sheet(title=label[:31])
             headers = ["Оператор", "Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого"]
+            # Принимаем extra_columns (входной параметр функции) и локальные extra_cols
+            all_extra = []
             if extra_cols:
-                headers += [c[0] for c in extra_cols]
+                all_extra.extend(extra_cols)
+            if extra_columns:
+                all_extra.extend(extra_columns)
+            if all_extra:
+                headers += [h for h, _ in all_extra]
             _make_header(ws, headers)
+
             row = 2
-            for op in operators:
-                daily = op.get('daily', {})
+            for op in ops_list:
+                daily = op.get('daily', {}) or {}
                 name = op.get('name') or f"op_{op.get('operator_id')}"
                 set_cell(ws, row, 1, name, align_center=False)
-                # Ставка и Норма оставляем без изменения/округления
-                set_cell(ws, row, 2, float(op.get('rate') or 0), align_center=False)
-                set_cell(ws, row, 3, float(op.get('norm_hours') or 0), align_center=False)
+                # Ставка и норма оставляем как есть (не округляем)
+                try:
+                    set_cell(ws, row, 2, float(op.get('rate') or 0), align_center=False)
+                except Exception:
+                    set_cell(ws, row, 2, op.get('rate') or 0, align_center=False)
+                try:
+                    set_cell(ws, row, 3, float(op.get('norm_hours') or 0), align_center=False)
+                except Exception:
+                    set_cell(ws, row, 3, op.get('norm_hours') or 0, align_center=False)
+
                 total = 0.0
-                totals = { 'work_time': 0.0, 'calls': 0, 'efficiency': 0.0 }
+                totals_accumulator = {'work_time': 0.0, 'calls': 0, 'efficiency': 0.0}
                 for c_idx, day in enumerate(days, start=4):
                     dkey = str(day)
                     if metric_key == 'trainings':
+                        # здесь generic не используется для тренировок — оставим пустые ячейки
                         set_cell(ws, row, c_idx, "")
                     else:
-                        d = daily.get(dkey)
-                        raw_v = None
-                        if d:
-                            raw_v = d.get(metric_key, 0)
+                        d = daily.get(dkey) or {}
+                        raw_v = d.get(metric_key) if isinstance(d, dict) else None
                         cell_val = fmt_day_value(metric_key, raw_v)
-                        # apply fill if >0
+                        # apply fill if >0 (только если числово >0)
                         fill = FILL_POS if (isinstance(cell_val, (int, float)) and cell_val > 0) else None
                         set_cell(ws, row, c_idx, cell_val, fill=fill)
+
                         if metric_key == 'calls':
-                            totals['calls'] += int(cell_val or 0)
+                            totals_accumulator['calls'] += int(cell_val or 0)
                             total += int(cell_val or 0)
                         else:
+                            # raw_v может быть None, поэтому приводим
                             num_for_tot = float(raw_v or 0)
                             total += num_for_tot
                             if metric_key == 'work_time':
-                                totals['work_time'] += num_for_tot
+                                totals_accumulator['work_time'] += num_for_tot
                             if metric_key == 'efficiency':
-                                totals['efficiency'] += num_for_tot
+                                totals_accumulator['efficiency'] += num_for_tot
+
                 # total cell
                 total_col = 4 + len(days)
                 set_cell(ws, row, total_col, fmt_total_value(metric_key, total))
 
-                # extra cols
-                if extra_cols:
-                    for i, (_, fn) in enumerate(extra_cols, start=1):
-                        val = fn(op, totals)
-                        # if fn returns percent-string already, keep
+                # extra cols: сначала локальные extra_cols, затем глобальные extra_columns (мы объединили их в all_extra)
+                if all_extra:
+                    for i, (_, key_or_fn) in enumerate(all_extra, start=1):
+                        try:
+                            if callable(key_or_fn):
+                                val = key_or_fn(op, totals_accumulator)
+                            elif isinstance(key_or_fn, str):
+                                val = op.get(key_or_fn)
+                            else:
+                                val = None
+                        except Exception:
+                            val = None
+
+                        # Если функция вернула строку (например процент с %), пишем как есть
                         if isinstance(val, str):
                             set_cell(ws, row, total_col + i, val)
                         else:
                             set_cell(ws, row, total_col + i, fmt_total_value(metric_key, val))
 
+                # следующий оператор
                 row += 1
 
+            # ширина колонок
             ws.column_dimensions['A'].width = 24
-            for i in range(2, 5 + len(days) + (len(extra_cols) if extra_cols else 0)):
-                col = ws.cell(1, i).column_letter
-                ws.column_dimensions[col].width = 12
+            last_col = 3 + len(days) + 1 + (len(all_extra) if all_extra else 0)  # A..позиция "Итого" и далее extras
+            # Устанавливаем ширину для остальных колонок (B..last_col)
+            for i in range(2, last_col + 1):
+                col_letter = ws.cell(1, i).column_letter
+                ws.column_dimensions[col_letter].width = 12
 
+        # --- Отработанные часы ---
         def build_work_time_sheet():
             ws = wb.create_sheet(title='Отработанные часы'[:31])
             headers = ["Оператор", "Ставка", "Норма часов (ч)"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого часов", "С выч. тренинга", "Вып нормы (%)", "Выработка"]
             _make_header(ws, headers)
+
             row = 2
-            for op in operators:
-                daily = op.get('daily', {})
+            for op in ops_list:
+                daily = op.get('daily', {}) or {}
                 name = op.get('name') or f"op_{op.get('operator_id')}"
                 set_cell(ws, row, 1, name, align_center=False)
-                set_cell(ws, row, 2, float(op.get('rate') or 0), align_center=False)
-                norm = float(op.get('norm_hours') or 0)
+                try:
+                    set_cell(ws, row, 2, float(op.get('rate') or 0), align_center=False)
+                except Exception:
+                    set_cell(ws, row, 2, op.get('rate') or 0, align_center=False)
+                try:
+                    norm = float(op.get('norm_hours') or 0)
+                except Exception:
+                    norm = 0.0
                 set_cell(ws, row, 3, norm, align_center=False)
 
                 total_work = 0.0
@@ -2903,10 +2962,13 @@ class Database:
                 for c_idx, day in enumerate(days, start=4):
                     dkey = str(day)
                     work_val = 0.0
-                    d = daily.get(dkey)
-                    if d:
+                    d = daily.get(dkey) or {}
+                    try:
                         work_val = float(d.get('work_time') or 0.0)
-                    # Рассчитываем зачётные часы тренинга для дня и добавляем их к дневному показателю
+                    except Exception:
+                        work_val = 0.0
+
+                    # Добавляем зачётные часы тренинга
                     trainings_for_day = trainings_map.get(op.get('operator_id'), {}).get(day, []) if trainings_map else []
                     counted_for_day = 0.0
                     for t in trainings_for_day:
@@ -2914,7 +2976,6 @@ class Database:
                         if t.get('count_in_hours'):
                             counted_for_day += dur
 
-                    # Сохраняем в суммарные показатели отдельно, итоговая ячейка по дню — work + trainings
                     total_work += work_val
                     total_counted_trainings += counted_for_day
                     combined = work_val + counted_for_day
@@ -2925,13 +2986,16 @@ class Database:
                 itogo_chasov = total_work + total_counted_trainings
                 set_cell(ws, row, 4 + len(days), fmt_total_value('work_time', itogo_chasov))
                 set_cell(ws, row, 5 + len(days), fmt_total_value('work_time', total_work))
+
                 if norm and norm != 0:
-                    percent = round((itogo_chasov / norm) * 100, 2)
+                    percent = round((itogo_chasov / norm) * 100, 1)
                     percent_display = f"{percent}%"
                 else:
                     percent_display = None
                 set_cell(ws, row, 6 + len(days), percent_display)
-                set_cell(ws, row, 7 + len(days), fmt_total_value('work_time', round(norm - itogo_chasov, 2) if norm is not None else None))
+                # Выработка: разница norm - итого (оставляем число)
+                diff_val = round(norm - itogo_chasov, 1) if norm is not None else None
+                set_cell(ws, row, 7 + len(days), fmt_total_value('work_time', diff_val))
 
                 row += 1
 
@@ -2940,69 +3004,72 @@ class Database:
                 col = ws.cell(1, i).column_letter
                 ws.column_dimensions[col].width = 14
 
+        # --- Calls sheet ---
         def build_calls_sheet():
-            def kvz_fn(op, totals):
+            def kvz_fn_local(op, totals):
+                # КВЗ = calls / work_hours (округление до 1)
                 work_hours = 0.0
-                daily = op.get('daily', {})
-                for dnum in daily.values():
-                    work_hours += float(dnum.get('work_time') or 0.0)
+                daily = op.get('daily') or {}
+                for d in daily.values():
+                    try:
+                        work_hours += float(d.get('work_time') or 0.0)
+                    except Exception:
+                        pass
                 calls = totals.get('calls', 0)
                 if work_hours and work_hours != 0:
                     return round(calls / work_hours, 1)
                 return None
 
-            build_generic_sheet('calls', 'Звонки', 'calls', is_hour=False, extra_cols=[('КВЗ', kvz_fn)])
+            build_generic_sheet('calls', 'Звонки', 'calls', is_hour=False, extra_cols=[('КВЗ', kvz_fn_local)])
 
+        # --- Efficiency sheet ---
         def build_efficiency_sheet():
-            def otn_fn(op, totals):
+            def otn_fn_local(op, totals):
                 sum_work = 0.0
                 sum_eff = totals.get('efficiency', 0.0)
-                daily = op.get('daily', {})
-                for dnum in daily.values():
-                    sum_work += float(dnum.get('work_time') or 0.0)
+                daily = op.get('daily') or {}
+                for d in daily.values():
+                    try:
+                        sum_work += float(d.get('work_time') or 0.0)
+                    except Exception:
+                        pass
                 if sum_work and sum_work != 0:
                     val = round((sum_eff / sum_work) * 100, 1)
                     return f"{val}%"
                 return None
 
-            build_generic_sheet('efficiency', 'Эффективность', 'efficiency', is_hour=True, extra_cols=[('Отн.', otn_fn)])
+            build_generic_sheet('efficiency', 'Эффективность', 'efficiency', is_hour=True, extra_cols=[('Отн.', otn_fn_local)])
 
+        # --- Build sheets ---
         build_work_time_sheet()
         build_generic_sheet('break_time', 'Перерыв', 'break_time', is_hour=True)
         build_calls_sheet()
         build_efficiency_sheet()
 
+        # --- Trainings sheet ---
         ws_t = wb.create_sheet(title='Тренинги'[:31])
-
         headers = ["Оператор"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Всего (ч)"]
+        # extra_columns не добавляем в тренинги (в исходном коде их там не было), но можно — при желании добавим:
+        if extra_columns:
+            headers += [h for h, _ in extra_columns]
         _make_header(ws_t, headers)
 
-        def fmt_num(n):
-            """Форматируем число с одной цифрой после запятой, заменяем точку на запятую."""
-            return f"{n:.1f}".replace('.', ',')
-
-        # Заполняем строки — показываем по дням только зачётные часы и одну итоговую колонку "Всего (ч)".
         row_counted = 2
-
-        for op in operators:
+        for op in ops_list:
             name = op.get('name') or f"op_{op.get('operator_id')}"
             op_id = op.get('operator_id')
 
-            # Берём все тренинги оператора (словарь day -> list)
             op_trainings = trainings_map.get(op_id) or {}
-
-            # Инициализация итогов
             total_all = 0.0
 
-            # Сначала пройдем все дни, чтобы посчитать общие итоги
+            # считаем общий итог по всем тренингам оператора
             for day in days:
                 arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
                 for t in arr:
-                    dur = compute_training_duration_hours(t)
-                    total_all += dur
+                    total_all += compute_training_duration_hours(t)
 
-            # --- Заполнение вкладки "Тренинги" ---
             set_cell(ws_t, row_counted, 1, name, align_center=False)
+
             for c_idx, day in enumerate(days, start=2):
                 arr = op_trainings.get(day, []) if isinstance(op_trainings, dict) else []
                 counted = 0.0
@@ -3012,58 +3079,79 @@ class Database:
                 if counted == 0:
                     set_cell(ws_t, row_counted, c_idx, "")
                 else:
-                    set_cell(ws_t, row_counted, c_idx, fmt_num(counted), fill=FILL_POS)
+                    set_cell(ws_t, row_counted, c_idx, fmt_num_for_training(counted), fill=FILL_POS)
 
-            # Итоги по строке — только Всего (ч)
-            set_cell(ws_t, row_counted, 2 + len(days), fmt_num(total_all))
+            # итоговая колонка "Всего (ч)"
+            set_cell(ws_t, row_counted, 2 + len(days), fmt_num_for_training(total_all))
+
+            # дополнительные колонки (если переданы)
+            if extra_columns:
+                for i, (_, key_or_fn) in enumerate(extra_columns, start=1):
+                    try:
+                        if callable(key_or_fn):
+                            v = key_or_fn(op, {'total_trainings': total_all})
+                        elif isinstance(key_or_fn, str):
+                            v = op.get(key_or_fn)
+                        else:
+                            v = None
+                    except Exception:
+                        v = None
+                    set_cell(ws_t, row_counted, 2 + len(days) + i, v)
+
             row_counted += 1
 
-        # Настройка ширины колонок для вкладки Тренинги
+        # ширина колонок Тренинги
         ws_t.column_dimensions['A'].width = 24
         for i in range(2, 3 + len(days)):
             col = ws_t.cell(1, i).column_letter
             ws_t.column_dimensions[col].width = 14
 
+        # Сохраняем в BytesIO
         out = BytesIO()
         wb.save(out)
         out.seek(0)
         content = out.getvalue()
+
         if filename is None:
             filename = f"report_{month}.xlsx"
         return filename, content
+
 
     def generate_excel_report_all_operators_from_view(self,
         operators: List[Dict[str, Any]],
         trainings_map: Dict[int, Dict[int, List[Dict[str, Any]]]],
         month: str,  # 'YYYY-MM'
         filename: str = None
-        ) -> Tuple[str, bytes]:
+    ) -> Tuple[str, bytes]:
         """
-        Быстрая версия: дополняет операторов supervisor_name и вызывает
-        generate_excel_report_from_view(include_supervisor=True).
+        Быстрая версия: не делаем второй проход через load_workbook.
+        Просто добаляем supervisor_name в объекты операторов и
+        просим generate_excel_report_from_view сразу включить колонку.
         """
-        # operators может быть {"operators": [...]} или список
         ops = operators["operators"] if isinstance(operators, dict) and "operators" in operators else operators
 
-        # Deduplicate ids и получить map одним запросом
-        sup_ids = list({int(op.get('supervisor_id')) for op in ops if op.get('supervisor_id')})
+        # dedupe supervisor ids
+        sup_ids = list({op.get('supervisor_id') for op in ops if op.get('supervisor_id')})
         sup_map = {}
         if sup_ids:
             try:
                 with self._get_cursor() as cursor:
+                    # psycopg2 корректно подставит list/tuple
                     cursor.execute("SELECT id, name FROM users WHERE id = ANY(%s)", (sup_ids,))
-                    sup_map = {r[0]: r[1] for r in cursor.fetchall()}
+                    for r in cursor.fetchall():
+                        sup_map[r[0]] = r[1]
             except Exception:
                 logging.exception("Error fetching supervisors for all-operators report")
 
-        # Добавляем supervisor_name к каждому оператору (O(N))
+        # attach supervisor_name directly
         for op in ops:
             sid = op.get('supervisor_id')
-            op['supervisor_name'] = sup_map.get(int(sid)) if sid else None
+            op['supervisor_name'] = sup_map.get(sid) if sid else ''
 
-        # Вызов генератора — один проход, файл формируется сразу с колонкой "Супервайзер"
-        return self.generate_excel_report_from_view({"operators": ops}, trainings_map, month, filename=filename, include_supervisor=True)
-
+        # теперь попросим генератор сразу добавить колонку. Без промежуточной загрузки.
+        extra_columns = [('Супервайзер', 'supervisor_name')]
+        final_filename, content = self.generate_excel_report_from_view({"operators": ops}, trainings_map, month, filename=filename, extra_columns=extra_columns)
+        return final_filename, content
 
 # Initialize database
 db = Database()
