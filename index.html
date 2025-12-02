@@ -2996,15 +2996,8 @@
             const params = new URLSearchParams();
             params.append('month', month);
 
-            if (user.role === 'admin') {
-            // admin can choose overall report (no supervisor_id) or per-SV
             if (reportScope === 'by_sv' && selectedSvId) {
                 params.append('supervisor_id', selectedSvId);
-            }
-            } else if (selectedSvId) {
-            params.append('supervisor_id', selectedSvId);
-            } else if (user.role === 'sv') {
-            params.append('supervisor_id', String(user.id));
             }
 
             const url = `${API_BASE_URL}/api/report/monthly_hours?${params.toString()}`;
@@ -3070,48 +3063,31 @@
                 </div>
 
                 <div className="flex items-center gap-3">
-                {user?.role === 'admin' && (
-                    <div className="flex items-center gap-2">
-                    <select
-                        value={reportScope}
-                        onChange={e => setReportScope(e.target.value)}
-                        className="px-3 py-2 border rounded-md"
-                        title="Выберите тип отчёта"
-                    >
-                        <option value="by_sv">По СВ</option>
-                        <option value="all">Общий</option>
-                    </select>
-                    <select
-                        value={selectedSvId || ''}
-                        onChange={e => setSelectedSvId(e.target.value)}
-                        className="px-3 py-2 border rounded-md"
-                        disabled={reportScope === 'all'}
-                        title="Выберите супервайзера"
-                    >
-                        <option value="">Выберите супервайзера</option>
-                        {svList?.map(sv => (
-                        <option key={sv.id} value={sv.id}>
-                            {sv.name}
-                        </option>
-                        ))}
-                    </select>
-                    </div>
-                )}
-
-                {user?.role === 'sv' && (
-                    <select
-                        value={selectedSvId || ''}
-                        onChange={e => setSelectedSvId(e.target.value)}
-                        className="px-3 py-2 border rounded-md"
-                    >
-                        <option value="">Выберите супервайзера</option>
-                        {svList?.map(sv => (
-                        <option key={sv.id} value={sv.id}>
-                            {sv.name}
-                        </option>
-                        ))}
-                    </select>
-                )}
+                <div className="flex items-center gap-2">
+                <select
+                    value={reportScope}
+                    onChange={e => setReportScope(e.target.value)}
+                    className="px-3 py-2 border rounded-md"
+                    title="Выберите тип отчёта"
+                >
+                    <option value="by_sv">По СВ</option>
+                    <option value="all">Общий</option>
+                </select>
+                <select
+                    value={selectedSvId || ''}
+                    onChange={e => setSelectedSvId(e.target.value)}
+                    className="px-3 py-2 border rounded-md"
+                    disabled={reportScope === 'all'}
+                    title="Выберите супервайзера"
+                >
+                    <option value="">Выберите супервайзера</option>
+                    {svList?.map(sv => (
+                    <option key={sv.id} value={sv.id}>
+                        {sv.name}
+                    </option>
+                    ))}
+                </select>
+                </div>
 
                 <button
                     onClick={fetchDailyHoursAndTrainings}
