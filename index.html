@@ -2902,7 +2902,7 @@
             const fines = (op.daily && op.daily[dayKey] && Array.isArray(op.daily[dayKey].fines)) ? op.daily[dayKey].fines : [];
 
             const fineIcons = (fines && fines.length > 0) ? (
-            <div className="absolute top-4 right-[-8px] flex gap-1 text-xs">
+            <div className="absolute top-[1.1rem] right-[-8px] flex gap-1 text-xs">
                 {Array.from(new Set(fines.map(f => String(f.reason || f.fine_reason || '').trim()))).slice(0,3).map((r, i) => (
                 r ? <i key={i} className={`${getFineIcon(r)} text-red-600`} title={r} style={{fontSize: '12px'}} /> : null
                 ))}
@@ -2916,7 +2916,6 @@
             if (!hasData && isPast) {
                 return (
                 <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-400 text-white">
-                    {fineIcons}
                     <span>—</span>
                     {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
@@ -2926,7 +2925,6 @@
             if (!hasData && isFuture) {
                 return (
                 <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-200 text-gray-600">
-                    {fineIcons}
                     <span>—</span>
                     {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
@@ -2936,7 +2934,6 @@
             if (!hasData && !isPast && !isFuture) {
                 return (
                 <div className="relative w-full h-8 rounded-md flex items-center justify-center bg-gray-100 text-gray-600">
-                    {fineIcons}
                     <span>—</span>
                     {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                     {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
@@ -2952,7 +2949,6 @@
 
                 return (
                 <div className={`relative w-full h-8 rounded-md flex items-center justify-center ${textClass}`} style={{ backgroundColor: bg }}>
-                {fineIcons}
                 <span className="text-xs font-medium truncate" style={{maxWidth: '110px', display: 'inline-block'}} title={display}>{display}</span>
                 {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
                 {fines.length > 0 && <div className="absolute top-4 right-1 w-2 h-2 rounded-full bg-red-400 ring-1 ring-red-500" title={`Штрафы: ${fines.length}`}></div>}
@@ -2990,7 +2986,7 @@
                 );
             }
 
-            return <div className="relative flex items-center justify-center gap-1">{fineIcons}{parts}</div>;
+            return <div className="relative flex items-center justify-center gap-1">{parts}</div>;
             }
 
             if (selectedTab === 'fines') {
