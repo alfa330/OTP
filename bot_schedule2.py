@@ -2506,16 +2506,11 @@ def get_monthly_report_hours():
         # роль в requester ожидается в requester[3] как в вашем примере
         role = requester[3] 
 
-        # Если supervisor_id не указан — формируем общий отчёт для всех операторов (только для admin).
+        # Если supervisor_id не указан — формируем общий отчёт для всех операторов .
         # Если supervisor_id указан или requester — sv без param, формируем отчёт по конкретному СВ.
         generate_all = False
         if not supervisor_id:
-            if role == 'admin':
                 generate_all = True
-            elif role == 'sv':
-                supervisor_id = requester_id
-            else:
-                return jsonify({"error": "supervisor_id required"}), 400
         else:
             try:
                 supervisor_id = int(supervisor_id)
