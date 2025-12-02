@@ -2902,9 +2902,9 @@
             const fines = (op.daily && op.daily[dayKey] && Array.isArray(op.daily[dayKey].fines)) ? op.daily[dayKey].fines : [];
 
             const fineIcons = (fines && fines.length > 0) ? (
-            <div className="absolute top-1 left-1 flex gap-1 text-xs z-30">
+            <div className="absolute bottom-1 right-1 flex gap-1 text-xs z-30">
                 {Array.from(new Set(fines.map(f => String(f.reason || f.fine_reason || '').trim()))).slice(0,3).map((r, i) => (
-                r ? <i key={i} className={`${getFineIcon(r)} text-red-600`} title={r} /> : null
+                r ? <i key={i} className={`${getFineIcon(r)} text-red-600`} title={r} style={{fontSize: '12px'}} /> : null
                 ))}
             </div>
             ) : null;
@@ -3001,8 +3001,7 @@
             return (
                 <div className="relative flex items-center justify-center gap-2">
                 {fineIcons}
-                <div className="text-xs font-medium truncate" title={formatted} style={{maxWidth: '96px', display: 'inline-block'}}>{formatted}</div>
-                <div className="text-[10px] text-gray-500">{fines.length} шт.</div>
+                <div className="text-xs font-medium truncate" title={formatted} style={{maxWidth: '110px', display: 'inline-block'}}>{formatted}</div>
                 </div>
             );
             }
@@ -3383,9 +3382,8 @@
                         {selectedTab === 'fines' && (
                             <div className="w-44 p-2 text-sm text-center border-l">
                             {finesTotal ? (
-                                <div className="flex items-center justify-center gap-2">
-                                <span className="text-sm font-medium truncate" title={String(finesTotal ? formatMoney(finesTotal) : '')} style={{maxWidth: '120px', display: 'inline-block'}}>{formatMoney(finesTotal)}</span>
-                                <span className="text-xs text-gray-500">{finesTotal ? 'в мес.' : ''}</span>
+                                <div className="flex items-center justify-center">
+                                <span className="text-sm font-medium truncate" title={String(finesTotal ? formatMoney(finesTotal) : '')} style={{maxWidth: '140px', display: 'inline-block'}}>{formatMoney(finesTotal)}</span>
                                 </div>
                             ) : '—'}
                             </div>
