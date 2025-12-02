@@ -2524,7 +2524,7 @@ def get_monthly_report_hours():
 
         # проверка прав для случая конкретного SV: admin или сам SV
         if not generate_all:
-            if role != 'admin' and not (role == 'sv' and supervisor_id == requester_id):
+            if role != 'admin' and role != 'sv':
                 return jsonify({"error": "Unauthorized to access this report"}), 403
 
         logging.info("Начало генерации отчета: supervisor_id=%s month=%s generate_all=%s", supervisor_id, month, generate_all)
