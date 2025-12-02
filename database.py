@@ -2745,15 +2745,19 @@ class Database:
                     d = daily.get(dkey)
                     if d:
                         work_val = float(d.get('work_time') or 0.0)
+                    # Рассчитываем зачётные часы тренинга для дня и добавляем их к дневному показателю
                     trainings_for_day = trainings_map.get(op.get('operator_id'), {}).get(day, []) if trainings_map else []
                     counted_for_day = 0.0
                     for t in trainings_for_day:
                         dur = compute_training_duration_hours(t)
                         if t.get('count_in_hours'):
                             counted_for_day += dur
+
+                    # Сохраняем в суммарные показатели отдельно, итоговая ячейка по дню — work + trainings
                     total_work += work_val
                     total_counted_trainings += counted_for_day
-                    cell_val = fmt_day_value('work_time', work_val)
+                    combined = work_val + counted_for_day
+                    cell_val = fmt_day_value('work_time', combined)
                     fill = FILL_POS if (isinstance(cell_val, (int, float)) and cell_val > 0) else None
                     set_cell(ws, row, c_idx, cell_val, fill=fill)
 
