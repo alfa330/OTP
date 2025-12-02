@@ -651,7 +651,7 @@ class Database:
         with self._get_cursor() as cursor:
             # Получаем операторов + ставка + norm_hours + агрегаты work_hours (включая fines)
             cursor.execute("""
-                SELECT u.id, u.name, u.rate, u.status,
+                SELECT u.id, u.name, u.rate, u.status, u.supervisor_id,
                     COALESCE(w.norm_hours, 0) as norm_hours,
                     COALESCE(w.regular_hours, 0) as regular_hours,
                     COALESCE(w.total_break_time, 0) as total_break_time,
@@ -725,13 +725,14 @@ class Database:
             # Сбор финального списка операторов
             operators = []
             for row in operator_rows:
-                (op_id, op_name, rate, status, norm_hours, 
+                (op_id, op_name, rate, status, sup_id, norm_hours, 
                 regular_hours, total_break_time, total_talk_time,
                 total_calls, total_efficiency_hours, calls_per_hour, fines) = row
 
                 operators.append({
                     "operator_id": op_id,
                     "name": op_name,
+                    "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
@@ -767,7 +768,7 @@ class Database:
 
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.name, u.rate, u.status,
+                SELECT u.id, u.name, u.rate, u.status, u.supervisor_id,
                     COALESCE(w.norm_hours, 0) as norm_hours,
                     COALESCE(w.regular_hours, 0) as regular_hours,
                     COALESCE(w.total_break_time, 0) as total_break_time,
@@ -837,13 +838,14 @@ class Database:
 
             operators = []
             for row in operator_rows:
-                (op_id, op_name, rate, status, norm_hours,
+                (op_id, op_name, rate, status, sup_id, norm_hours,
                 regular_hours, total_break_time, total_talk_time,
                 total_calls, total_efficiency_hours, calls_per_hour, fines) = row
 
                 operators.append({
                     "operator_id": op_id,
                     "name": op_name,
+                    "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
