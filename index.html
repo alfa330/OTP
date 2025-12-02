@@ -2291,13 +2291,20 @@
 
         // ==================== Hours Accounting View ====================
 
+// NOTE: This file is the original HoursAccountingView component with
+// an enhanced "fines" tab. It adds per-type breakdown in rows and
+// per-type totals in the footer. Keep API_BASE_URL and other external
+// variables provided by your app environment.
+
+        const FINE_TYPES = ['Опоздание', 'Не выход', 'Прокси карта', 'Корп такси', 'Другое'];
+
         const TABS = [
-        { key: "work_time", label: "Отработанные часы", unit: "ч" },
-        { key: "break_time", label: "Перерыв", unit: "ч" },
-        { key: "calls", label: "Звонки", unit: "" },
-        { key: "efficiency", label: "Эффективность", unit: "ч" },
-        { key: "trainings", label: "Тренинги", unit: "" }, // новый таб
-        { key: "fines", label: "Штрафы", unit: "₽" }
+        { key: 'work_time', label: 'Отработанные часы', unit: 'ч' },
+        { key: 'break_time', label: 'Перерыв', unit: 'ч' },
+        { key: 'calls', label: 'Звонки', unit: '' },
+        { key: 'efficiency', label: 'Эффективность', unit: 'ч' },
+        { key: 'trainings', label: 'Тренинги', unit: '' }, // новый таб
+        { key: 'fines', label: 'Штрафы', unit: '₽' }
         ];
 
         function parseTimeToMinutes(t) {
@@ -2320,7 +2327,7 @@
         return Number((diff / 60).toFixed(2));
         }
 
-        const HoursAccountingView = ({ user, svList, onUploaded, showToast }) => {
+        function HoursAccountingView({ user, svList, onUploaded, showToast }) {
         const [month, setMonth] = useState(() => {
             const d = new Date();
             return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -2395,8 +2402,6 @@
             try {
             const hoursParams = new URLSearchParams();
             hoursParams.append('month', month);
-            // If a supervisor is selected, request data for that supervisor by id
-            // (allow 'sv' users to request other supervisors the same as admin)
             if (selectedSvId) {
                 hoursParams.append('id', selectedSvId);
             } else if (user.role === 'sv') {
@@ -2566,7 +2571,6 @@
             talk_time: Number(dayData.talk_time || 0),
             calls: Number(dayData.calls || 0),
             efficiency: Number(dayData.efficiency || 0),
-            // support multiple fines per day: prefer dayData.fines (array), fallback to single fine fields
             fines: Array.isArray(dayData.fines) && dayData.fines.length > 0 ? dayData.fines.map(f => {
                 const amt = Number(f.amount || f.fine_amount || 0);
                 const reason = f.reason || f.fine_reason || '';
@@ -2603,7 +2607,7 @@
             });
         }
 
-        // Fines: support multiple fines per day in the UI
+        // Fines helpers (multiple fines support)
         function addFine() {
             setCellModel(prev => {
             if (!prev) return prev;
@@ -2622,12 +2626,10 @@
                 const updated = { ...f };
                 if (field === 'amount') {
                 updated.amount = (value === '' ? '' : Number(value));
-                // if reason is Опоздание keep minutes in sync
                 if (String(updated.reason) === 'Опоздание') {
                     updated.minutes = updated.amount ? Math.round(Number(updated.amount) / 50) : 0;
                 }
                 } else if (field === 'minutes') {
-                // minutes -> compute amount (backend wants amount = minutes * 50)
                 const mins = value === '' ? 0 : Number(value);
                 updated.minutes = mins;
                 updated.amount = Number(mins) * 50;
@@ -2635,19 +2637,16 @@
                 updated.reason = value;
                 const rv = String(value);
                 if (rv === 'Опоздание') {
-                    // derive minutes from existing amount if present
                     const amt = Number(updated.amount || 0);
                     updated.minutes = amt ? Math.round(amt / 50) : 0;
                     updated.amount = Number(updated.minutes) * 50;
                 } else if (rv === 'Не выход') {
-                    // fixed fine
                     updated.minutes = null;
                     updated.amount = 10000;
                 } else if (rv === 'Прокси карта') {
                     updated.minutes = null;
                     updated.amount = 5000;
                 } else {
-                    // clear minutes when not Опоздание and keep amount editable
                     updated.minutes = null;
                 }
                 } else {
@@ -2683,14 +2682,11 @@
                 talk_time: Number(cellModel.talk_time) || 0,
                 calls: parseInt(cellModel.calls, 10) || 0,
                 efficiency: Number(cellModel.efficiency) || 0,
-                // include fines array (new) for backend that supports multiple fines
                 fines: Array.isArray(cellModel.fines) ? cellModel.fines.map(f => ({
-                // if reason is Опоздание, backend expects amount = minutes * 50 (minutes are NOT sent)
-                amount: String(f.reason) === 'Опоздание' ? Number((Number(f.minutes || 0) * 50)) : Number(f.amount || 0),
-                reason: f.reason || null,
-                comment: f.comment || null
+                    amount: String(f.reason) === 'Опоздание' ? Number((Number(f.minutes || 0) * 50)) : Number(f.amount || 0),
+                    reason: f.reason || null,
+                    comment: f.comment || null
                 })) : [],
-                // backward-compatible single fields: total fine amount, first reason, concatenated comments
                 fine_amount: (Array.isArray(cellModel.fines) ? cellModel.fines.reduce((s, f) => s + Number(f.amount || 0), 0) : Number(cellModel.fine_amount || 0)) || 0,
                 fine_reason: (Array.isArray(cellModel.fines) && cellModel.fines.length > 0) ? (cellModel.fines[0].reason || null) : (cellModel.fine_reason || null),
                 fine_comment: (Array.isArray(cellModel.fines) && cellModel.fines.length > 0) ? cellModel.fines.map(f => f.comment || '').filter(Boolean).join('; ') : (cellModel.fine_comment || null),
@@ -2802,7 +2798,46 @@
             };
         }, [operators, operatorsViewTab]);
 
-        // ====== FOOTER AGGREGATES ======
+        // ====== Fines summary helpers ======
+        function normalizeFineReason(r) {
+            if (!r) return 'Другое';
+            const s = String(r).trim();
+            if (FINE_TYPES.includes(s)) return s;
+            // normalize close matches
+            if (/опоз/i.test(s)) return 'Опоздание';
+            if (/выход/i.test(s)) return 'Не выход';
+            if (/прокси/i.test(s)) return 'Прокси карта';
+            if (/такси/i.test(s)) return 'Корп такси';
+            return 'Другое';
+        }
+
+        function getFinesSummaryForOp(op) {
+            const byType = {};
+            for (const t of FINE_TYPES) byType[t] = { sum: 0, count: 0 };
+            if (!op.daily) return { byType, total: 0 };
+            for (const dKey of Object.keys(op.daily)) {
+            const dd = op.daily[dKey] || {};
+            if (Array.isArray(dd.fines)) {
+                for (const f of dd.fines) {
+                const reason = normalizeFineReason(f.reason || f.fine_reason || '');
+                const amount = Number(f.amount || f.fine_amount || 0) || 0;
+                byType[reason] = byType[reason] || { sum: 0, count: 0 };
+                byType[reason].sum += amount;
+                byType[reason].count += 1;
+                }
+            } else if (dd.fine_amount) {
+                const reason = normalizeFineReason(dd.fine_reason || '');
+                const amount = Number(dd.fine_amount || 0) || 0;
+                byType[reason] = byType[reason] || { sum: 0, count: 0 };
+                byType[reason].sum += amount;
+                byType[reason].count += 1;
+            }
+            }
+            const total = Object.values(byType).reduce((s, x) => s + (x.sum || 0), 0);
+            return { byType, total };
+        }
+
+        // ====== FOOTER AGGREGATES (extended for fines by type) ======
         const footerTotals = useMemo(() => {
             let sumDisplayedTotal = 0; // regular + counted training
             let sumRegular = 0; // без тренинга
@@ -2812,7 +2847,8 @@
             let occValues = [];
             let trainingsTotal = 0;
             let trainingsCounted = 0;
-            let sumFines = 0;
+            const finesByTypeTotals = {};
+            for (const t of FINE_TYPES) finesByTypeTotals[t] = { sum: 0, count: 0 };
 
             for (const op of filteredOperators) {
             const aggr = op.aggregates || {};
@@ -2843,18 +2879,11 @@
             trainingsTotal += totalHoursAll;
             trainingsCounted += totalHoursCounted;
 
-            // compute fines per operator (support both array of fines and legacy fine_amount)
-            if (op.daily) {
-                for (const dKey of Object.keys(op.daily)) {
-                const dd = op.daily[dKey] || {};
-                if (Array.isArray(dd.fines)) {
-                    for (const f of dd.fines) {
-                    sumFines += Number(f.amount || f.fine_amount || 0) || 0;
-                    }
-                } else if (dd.fine_amount) {
-                    sumFines += Number(dd.fine_amount || 0) || 0;
-                }
-                }
+            // fines per operator by type
+            const fsum = getFinesSummaryForOp(op);
+            for (const t of FINE_TYPES) {
+                finesByTypeTotals[t].sum += fsum.byType[t].sum || 0;
+                finesByTypeTotals[t].count += fsum.byType[t].count || 0;
             }
 
             if (regular > 0) occValues.push((effTotal / regular) * 100);
@@ -2868,14 +2897,14 @@
             sumProd,
             sumNorm,
             sumEff,
-            sumFines,
+            finesByTypeTotals,
             avgOcc,
             trainingsTotal,
             trainingsCounted
             };
         }, [filteredOperators, trainingsMap]);
 
-        // render cell with trainings marker and trainings-tab rendering
+        // render cell with trainings marker and trainings-tab rendering (unchanged)
         function renderCellByMetricWithStyleAndMarker(op, day, metricKey) {
             const dayKey = String(day);
             const d = op.daily && op.daily[dayKey];
@@ -2931,7 +2960,7 @@
             const textClass = ratio > 0.5 ? 'text-white' : 'text-gray-900';
             const display = work ? work.toFixed(2) : '0.00';
 
-                return (
+            return (
                 <div className={`relative w-full h-8 rounded-md flex items-center justify-center ${textClass}`} style={{ backgroundColor: bg }}>
                 <span className="text-sm font-medium">{display}</span>
                 {trainings.length > 0 && <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 ring-1 ring-yellow-500" title="Тренинг"></div>}
@@ -2974,14 +3003,28 @@
             }
 
             if (selectedTab === 'fines') {
+            // render compact per-type badges for this operator/day
             if (!fines || fines.length === 0) return <div className="text-sm text-gray-400">—</div>;
-            let total = 0;
-            for (const f of fines) total += Number(f.amount || f.fine_amount || 0) || 0;
-            const formatted = formatMoney(total);
+            const perType = {};
+            for (const f of fines) {
+                const r = normalizeFineReason(f.reason || f.fine_reason || '');
+                const amt = Number(f.amount || f.fine_amount || 0) || 0;
+                if (!perType[r]) perType[r] = { sum: 0, count: 0 };
+                perType[r].sum += amt;
+                perType[r].count += 1;
+            }
+
             return (
-                <div className="flex items-center justify-center gap-2">
-                <div className="text-sm font-medium truncate" title={formatted} style={{maxWidth: '96px', display: 'inline-block'}}>{formatted}</div>
-                <div className="text-xs text-gray-500">{fines.length} шт.</div>
+                <div className="flex items-center gap-1 justify-center">
+                {FINE_TYPES.map(t => {
+                    if (!perType[t]) return null;
+                    const badge = perType[t];
+                    return (
+                    <div key={t} className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border" title={`${t}: ${badge.count} шт., ${formatMoney(badge.sum)}`}>
+                        <span className="truncate" style={{ maxWidth: 72 }}>{t[0]}: {badge.sum ? Math.round(badge.sum) : 0}</span>
+                    </div>
+                    );
+                })}
                 </div>
             );
             }
@@ -3023,7 +3066,6 @@
             return;
             }
 
-            // If admin requested per-SV report, ensure a supervisor is selected
             if (user.role === 'admin' && reportScope === 'by_sv' && !selectedSvId) {
             fallbackToast('Выберите супервайзера для отчёта', 'error');
             return;
@@ -3033,7 +3075,7 @@
             params.append('month', month);
 
             if (reportScope === 'by_sv' && selectedSvId) {
-                params.append('supervisor_id', selectedSvId);
+            params.append('supervisor_id', selectedSvId);
             }
 
             const url = `${API_BASE_URL}/api/report/monthly_hours?${params.toString()}`;
@@ -3100,29 +3142,29 @@
 
                 <div className="flex items-center gap-3">
                 <div className="flex items-center gap-2">
-                <select
+                    <select
                     value={reportScope}
                     onChange={e => setReportScope(e.target.value)}
                     className="px-3 py-2 border rounded-md"
                     title="Выберите тип отчёта"
-                >
+                    >
                     <option value="by_sv">По СВ</option>
                     <option value="all">Общий</option>
-                </select>
-                <select
+                    </select>
+                    <select
                     value={selectedSvId || ''}
                     onChange={e => setSelectedSvId(e.target.value)}
                     className="px-3 py-2 border rounded-md"
                     disabled={reportScope === 'all'}
                     title="Выберите супервайзера"
-                >
+                    >
                     <option value="">Выберите супервайзера</option>
                     {svList?.map(sv => (
-                    <option key={sv.id} value={sv.id}>
+                        <option key={sv.id} value={sv.id}>
                         {sv.name}
-                    </option>
+                        </option>
                     ))}
-                </select>
+                    </select>
                 </div>
 
                 <button
@@ -3223,17 +3265,19 @@
                     {selectedTab === 'trainings' && (
                     <>
                         <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Итого (ч)</div>
-                        {/*
-                        <div className="w-32 p-2 text-center border-l bg-gray-50 text-sm font-medium">Засчитано (ч)</div>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Не засчитано (ч)</div>
-                        */}
                     </>
                     )}
+
+                    {/* ENHANCED: fines tab shows per-type small columns for visibility */}
                     {selectedTab === 'fines' && (
                     <>
-                        <div className="w-44 p-2 text-center border-l bg-gray-50 text-sm font-medium">Штрафы (₽)</div>
+                        {FINE_TYPES.map(t => (
+                        <div key={`ht-${t}`} className="w-28 p-2 text-center border-l bg-gray-50 text-sm font-medium">{t}</div>
+                        ))}
+                        <div className="w-44 p-2 text-center border-l bg-gray-50 text-sm font-medium">Всего (₽)</div>
                     </>
                     )}
+
                 </div>
 
                 {/* Rows */}
@@ -3270,20 +3314,10 @@
                     const callsTotal = Number(aggr.total_calls || 0);
                     const effTotal = Number(aggr.total_efficiency_hours || 0);
 
-                    // compute total fines for the operator across days
-                    let finesTotal = 0;
-                    if (op.daily) {
-                    for (const dKey of Object.keys(op.daily)) {
-                        const dd = op.daily[dKey] || {};
-                        if (Array.isArray(dd.fines)) {
-                        for (const f of dd.fines) {
-                            finesTotal += Number(f.amount || f.fine_amount || 0) || 0;
-                        }
-                        } else if (dd.fine_amount) {
-                        finesTotal += Number(dd.fine_amount || 0) || 0;
-                        }
-                    }
-                    }
+                    // fines per operator (detailed by type)
+                    const finesSummary = getFinesSummaryForOp(op);
+
+                    const finesTotal = finesSummary.total || 0;
 
                     return (
                         <div key={op.operator_id} className="flex items-center border-b hover:bg-gray-50 relative">
@@ -3353,21 +3387,31 @@
                         {selectedTab === 'trainings' && (
                             <>
                             <div className="w-36 p-2 text-sm text-center border-l">{totalHoursAll.toFixed(2)}</div>
-                            {/*
-                            <div className="w-32 p-2 text-sm text-center border-l">{totalHoursCounted.toFixed(2)}</div>
-                            <div className="w-36 p-2 text-sm text-center border-l">{totalHoursNotCounted.toFixed(2)}</div>
-                            */}
                             </>
                         )}
+
                         {selectedTab === 'fines' && (
-                            <div className="w-44 p-2 text-sm text-center border-l">
-                            {finesTotal ? (
-                                <div className="flex items-center justify-center gap-2">
-                                <span className="text-sm font-medium truncate" title={String(finesTotal ? formatMoney(finesTotal) : '')} style={{maxWidth: '120px', display: 'inline-block'}}>{formatMoney(finesTotal)}</span>
-                                <span className="text-xs text-gray-500">{finesTotal ? 'в мес.' : ''}</span>
+                            <>
+                            {FINE_TYPES.map(t => (
+                                <div key={`v-${t}-${op.operator_id}`} className="w-28 p-2 text-sm text-center border-l">
+                                {finesSummary.byType[t].sum ? (
+                                    <div className="flex flex-col items-center">
+                                    <div className="text-sm font-medium truncate" title={`${finesSummary.byType[t].count} шт.`} style={{maxWidth: '90px'}}>{Math.round(finesSummary.byType[t].sum).toLocaleString('ru-RU')}</div>
+                                    <div className="text-xs text-gray-500">{finesSummary.byType[t].count} шт.</div>
+                                    </div>
+                                ) : '—'}
                                 </div>
-                            ) : '—'}
+                            ))}
+
+                            <div className="w-44 p-2 text-sm text-center border-l">
+                                {finesTotal ? (
+                                <div className="flex items-center justify-center gap-2">
+                                    <span className="text-sm font-medium truncate" title={String(finesTotal ? formatMoney(finesTotal) : '')} style={{maxWidth: '120px', display: 'inline-block'}}>{formatMoney(finesTotal)}</span>
+                                    <span className="text-xs text-gray-500">в мес.</span>
+                                </div>
+                                ) : '—'}
                             </div>
+                            </>
                         )}
                         </div>
                     );
@@ -3407,15 +3451,15 @@
                         {selectedTab === 'trainings' && (
                         <>
                             <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.trainingsTotal.toFixed(2)}</div>
-                            {/*
-                            <div className="w-32 p-2 text-sm text-center border-l">{footerTotals.trainingsCounted.toFixed(2)}</div>
-                            <div className="w-36 p-2 text-sm text-center border-l">{(footerTotals.trainingsTotal - footerTotals.trainingsCounted).toFixed(2)}</div>
-                            */}
                         </>
                         )}
+
                         {selectedTab === 'fines' && (
                         <>
-                            <div className="w-44 p-2 text-sm text-center border-l"><span className="truncate" title={footerTotals ? formatMoney(footerTotals.sumFines) : ''} style={{display:'inline-block', maxWidth: '140px'}}>{formatMoney(footerTotals.sumFines)}</span></div>
+                            {FINE_TYPES.map(t => (
+                            <div key={`ft-${t}`} className="w-28 p-2 text-sm text-center border-l">{footerTotals.finesByTypeTotals[t].sum ? Math.round(footerTotals.finesByTypeTotals[t].sum).toLocaleString('ru-RU') : '—'}</div>
+                            ))}
+                            <div className="w-44 p-2 text-sm text-center border-l"><span className="truncate" title={footerTotals ? formatMoney(Object.values(footerTotals.finesByTypeTotals).reduce((s,x)=>s+(x.sum||0),0)) : ''} style={{display:'inline-block', maxWidth: '140px'}}>{formatMoney(Object.values(footerTotals.finesByTypeTotals).reduce((s,x)=>s+(x.sum||0),0))}</span></div>
                         </>
                         )}
                     </div>
@@ -3637,152 +3681,149 @@
                     )}
 
                     <div className="mt-6">
-                    {/* Header */}
-                    <div className="flex items-center justify-between mb-4">
+                        {/* Header */}
+                        <div className="flex items-center justify-between mb-4">
                         <h3 className="text-base font-semibold text-gray-900">Штрафы</h3>
 
                         {/* Add button — компактно и заметно, справа */}
                         <button
-                        type="button"
-                        onClick={addFine}
-                        className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border bg-white text-sm font-medium shadow-sm hover:shadow focus:outline-none focus:ring-2 focus:ring-offset-1"
-                        aria-label="Добавить штраф"
+                            type="button"
+                            onClick={addFine}
+                            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border bg-white text-sm font-medium shadow-sm hover:shadow focus:outline-none focus:ring-2 focus:ring-offset-1"
+                            aria-label="Добавить штраф"
                         >
-                        {/* plus icon */}
-                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                             <path d="M12 5v14M5 12h14" />
-                        </svg>
-                        Добавить
+                            </svg>
+                            Добавить
                         </button>
-                    </div>
+                        </div>
 
-                    {/* Empty state */}
-                    {(!cellModel.fines || cellModel.fines.length === 0) ? (
+                        {/* Empty state */}
+                        {(!cellModel.fines || cellModel.fines.length === 0) ? (
                         <div className="rounded-md border border-dashed p-4 text-sm text-gray-500">Штрафы не добавлены.</div>
-                    ) : (
+                        ) : (
                         <div className="space-y-3">
-                        {(cellModel.fines || []).map((f, idx) => {
+                            {(cellModel.fines || []).map((f, idx) => {
                             const reason = String(f.reason ?? '');
                             const isAutoAmount = ['Опоздание', 'Не выход', 'Прокси карта'].includes(reason);
                             const minutes = Number(f.minutes ?? 0);
                             const computedAmount = reason === 'Опоздание' ? (minutes * 50) : reason === 'Не выход' ? 10000 : reason === 'Прокси карта' ? 5000 : f.amount;
 
                             return (
-                            <div
+                                <div
                                 key={f.id ?? idx}
                                 className="p-3 rounded-lg border bg-white shadow-sm flex flex-col gap-3"
                                 role="group"
                                 aria-label={`Штраф ${idx + 1}`}
-                            >
+                                >
                                 {/* top row: amount | reason | actions */}
                                 <div className="grid grid-cols-1 md:grid-cols-6 gap-3 items-end" style={{ alignItems: 'start' }}>
-                                {/* Amount (read-only for auto types, shows computed value) */}
-                                <div className="col-span-2">
+                                    {/* Amount (read-only for auto types, shows computed value) */}
+                                    <div className="col-span-2">
                                     <label className="text-xs text-gray-700 mb-1 block">Сумма</label>
                                     <input
-                                    type="text"
-                                    readOnly={isAutoAmount}
-                                    className={`w-full p-2 rounded-md border ${isAutoAmount ? 'bg-gray-50 text-gray-700 cursor-not-allowed' : 'bg-white'}`}
-                                    value={Number(computedAmount).toLocaleString('ru-RU')}
-                                    onChange={e => updateFineField(idx, 'amount', e.target.value)}
-                                    aria-label="amount"
+                                        type="text"
+                                        readOnly={isAutoAmount}
+                                        className={`w-full p-2 rounded-md border ${isAutoAmount ? 'bg-gray-50 text-gray-700 cursor-not-allowed' : 'bg-white'}`}
+                                        value={Number(computedAmount).toLocaleString('ru-RU')}
+                                        onChange={e => updateFineField(idx, 'amount', e.target.value)}
+                                        aria-label="amount"
                                     />
-                                    {/* helper text for fixed/auto */}
                                     {reason === 'Опоздание' && (
-                                    <div className="text-xs text-gray-500 mt-1">Вычисляется: минуты × 50. Изменять нельзя.</div>
+                                        <div className="text-xs text-gray-500 mt-1">Вычисляется: минуты × 50. Изменять нельзя.</div>
                                     )}
                                     {reason === 'Не выход' && (
-                                    <div className="text-xs text-gray-500 mt-1">Фиксированная сумма: 10 000.</div>
+                                        <div className="text-xs text-gray-500 mt-1">Фиксированная сумма: 10 000.</div>
                                     )}
                                     {reason === 'Прокси карта' && (
-                                    <div className="text-xs text-gray-500 mt-1">Фиксированная сумма: 5 000.</div>
+                                        <div className="text-xs text-gray-500 mt-1">Фиксированная сумма: 5 000.</div>
                                     )}
-                                </div>
+                                    </div>
 
-                                {/* Reason select */}
-                                <div className="col-span-2 md:col-span-2">
+                                    {/* Reason select */}
+                                    <div className="col-span-2 md:col-span-2">
                                     <label className="text-xs text-gray-700 mb-1 block">Причина</label>
                                     <select
-                                    className="w-full p-2 rounded-md border bg-white"
-                                    value={f.reason ?? ''}
-                                    onChange={e => updateFineField(idx, 'reason', e.target.value)}
-                                    aria-label="reason"
+                                        className="w-full p-2 rounded-md border bg-white"
+                                        value={f.reason ?? ''}
+                                        onChange={e => updateFineField(idx, 'reason', e.target.value)}
+                                        aria-label="reason"
                                     >
-                                    <option value="">—</option>
-                                    <option>Корп такси</option>
-                                    <option>Опоздание</option>
-                                    <option>Прокси карта</option>
-                                    <option>Не выход</option>
-                                    <option>Другое</option>
+                                        <option value="">—</option>
+                                        <option>Корп такси</option>
+                                        <option>Опоздание</option>
+                                        <option>Прокси карта</option>
+                                        <option>Не выход</option>
+                                        <option>Другое</option>
                                     </select>
-                                </div>
+                                    </div>
 
-                                {/* Computed minutes/amount preview (compact) */}
-                                <div className="col-span-1 md:col-span-1">
+                                    {/* Computed minutes/amount preview (compact) */}
+                                    <div className="col-span-1 md:col-span-1">
                                     <label className="text-xs text-gray-700 mb-1 block">Превью</label>
                                     <div className="p-2 rounded-md border bg-gray-50 text-gray-700">
-                                    {reason === 'Опоздание' ? `${minutes} мин → ${Number(minutes * 50).toLocaleString('ru-RU')}` :
+                                        {reason === 'Опоздание' ? `${minutes} мин → ${Number(minutes * 50).toLocaleString('ru-RU')}` :
                                         reason === 'Не выход' ? '10 000' :
                                         reason === 'Прокси карта' ? '5 000' :
                                         f.amount ?? '-'}
                                     </div>
-                                </div>
+                                    </div>
 
-                                {/* Actions: delete (aligned right) */}
-                                <div className="col-span-1 flex items-center justify-end md:justify-end">
+                                    {/* Actions: delete (aligned right) */}
+                                    <div className="col-span-1 flex items-center justify-end md:justify-end">
                                     <button
-                                    type="button"
-                                    onClick={() => removeFine(idx)}
-                                    className="inline-flex items-center gap-2 text-sm text-red-600 px-2 py-1 rounded hover:bg-red-50 focus:outline-none"
-                                    aria-label={`Удалить штраф ${idx + 1}`}
+                                        type="button"
+                                        onClick={() => removeFine(idx)}
+                                        className="inline-flex items-center gap-2 text-sm text-red-600 px-2 py-1 rounded hover:bg-red-50 focus:outline-none"
+                                        aria-label={`Удалить штраф ${idx + 1}`}
                                     >
-                                    {/* trash icon */}
-                                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                                         <polyline points="3 6 5 6 21 6" />
                                         <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
                                         <path d="M10 11v6M14 11v6" />
                                         <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                                    </svg>
+                                        </svg>
                                     </button>
-                                </div>
+                                    </div>
                                 </div>
 
                                 {/* Minutes input + Comment */}
                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                {/* Minutes (only for Опоздание) */}
-                                {reason === 'Опоздание' && (
+                                    {/* Minutes (only for Опоздание) */}
+                                    {reason === 'Опоздание' && (
                                     <div>
-                                    <label className="text-xs text-gray-700 mb-1 block">Минут опоздания</label>
-                                    <input
+                                        <label className="text-xs text-gray-700 mb-1 block">Минут опоздания</label>
+                                        <input
                                         type="number"
                                         min="0"
                                         className="w-full p-2 rounded-md border"
                                         value={f.minutes ?? 0}
                                         onChange={e => updateFineField(idx, 'minutes', e.target.value)}
                                         aria-label="minutes"
-                                    />
-                                    <div className="text-xs text-gray-500 mt-1">Минуты сохраняются — сумма формируется автоматически.</div>
+                                        />
+                                        <div className="text-xs text-gray-500 mt-1">Минуты сохраняются — сумма формируется автоматически.</div>
                                     </div>
-                                )}
+                                    )}
 
-                                {/* Comment — occupies remaining space */}
-                                <div className={reason === 'Опоздание' ? 'md:col-span-2' : 'md:col-span-3'}>
+                                    {/* Comment — occupies remaining space */}
+                                    <div className={reason === 'Опоздание' ? 'md:col-span-2' : 'md:col-span-3'}>
                                     <label className="text-xs text-gray-700 mb-1 block">Комментарий</label>
                                     <input
-                                    type="text"
-                                    className="w-full p-2 rounded-md border"
-                                    value={f.comment ?? ''}
-                                    onChange={e => updateFineField(idx, 'comment', e.target.value)}
-                                    placeholder="Кратко опишите обстоятельства (необязательно)"
-                                    aria-label="comment"
+                                        type="text"
+                                        className="w-full p-2 rounded-md border"
+                                        value={f.comment ?? ''}
+                                        onChange={e => updateFineField(idx, 'comment', e.target.value)}
+                                        placeholder="Кратко опишите обстоятельства (необязательно)"
+                                        aria-label="comment"
                                     />
+                                    </div>
                                 </div>
                                 </div>
-                            </div>
                             );
-                        })}
+                            })}
                         </div>
-                    )}
+                        )}
                     </div>
                     </div>
 
@@ -3816,7 +3857,8 @@
             )}
             </div>
         );
-        };
+        }
+
 
         function AudioPlayer({ audioSrc, uniqueKey }) {
             const [duration, setDuration] = React.useState(0);
