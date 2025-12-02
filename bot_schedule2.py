@@ -2519,7 +2519,7 @@ def get_monthly_report_hours():
                 return jsonify({"error": "supervisor_id must be integer"}), 400
 
         # проверка прав: admin или тот же sv
-        if role != 'admin' or role != 'sv':
+        if role != 'admin' and role != 'sv':
             return jsonify({"error": "Unauthorized to access this report"}), 403
 
         logging.info("Начало генерации отчета: supervisor_id=%s month=%s", supervisor_id, month)
