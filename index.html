@@ -2990,16 +2990,37 @@
             }
 
             if (selectedTab === 'fines') {
-            if (!fines || fines.length === 0) return <div className="text-sm text-gray-400">—</div>;
-            let total = 0;
-            for (const f of fines) total += Number(f.amount || f.fine_amount || 0) || 0;
-            const formatted = formatMoney(total);
-            return (
-                <div className="relative flex items-center justify-center gap-2">
-                {fineIcons}
-                <div className="text-xs font-medium truncate" title={formatted} style={{maxWidth: '110px', display: 'inline-block'}}>{formatted}</div>
-                </div>
-            );
+                if (!fines || fines.length === 0) 
+                    return <div className="text-sm text-gray-400">—</div>;
+
+                let total = 0;
+                for (const f of fines) total += Number(f.amount || f.fine_amount || 0) || 0;
+
+                const formatted = formatMoney(total);
+
+                const maxFines = 10000;
+
+                // Фон по аналогии с work_time/trainings
+                const ratio = Math.min(1, total / maxFines);
+                const alpha = 0.18 + 0.77 * ratio;
+                const bg = `rgba(250,204,21, ${alpha})`; // yellow-400 цвет
+                const textClass = ratio > 0.5 ? 'text-white' : 'text-gray-900';
+
+                return (
+                    <div 
+                        className={`relative w-full h-8 rounded-md flex items-center justify-center ${textClass}`}
+                        style={{ backgroundColor: bg }}
+                    >
+                        {fineIcons}
+                        <span 
+                            className="text-xs font-medium truncate" 
+                            title={formatted}
+                            style={{ maxWidth: '110px', display: 'inline-block' }}
+                        >
+                            {formatted}
+                        </span>
+                    </div>
+                );
             }
 
             if (!d) return <div className="text-sm text-gray-400">—</div>;
