@@ -3034,7 +3034,8 @@ class Database:
                 "Кол-во Не выход",
                 "Сумма Не выход",
                 "Прокси Карта",
-                "Другое"
+                "Другое",
+                "Итого"   # <--- НОВАЯ КОЛОНКА
             ]
             _make_header(ws_f, headers)
 
@@ -3055,13 +3056,12 @@ class Database:
                     set_cell(ws_f, row, col_idx, sup_name, align_center=False)
                     col_idx += 1
 
-                # Ставка (rate) оставляем как есть (не округляем по правилам)
                 rate = op.get('rate') or 0
                 set_cell(ws_f, row, col_idx, float(rate), align_center=False)
                 col_idx += 1
 
-                # сбор штрафов по дням
-                fines_map = op.get('daily', {})  # dict day->entry, each entry may have 'fines': [..]
+                fines_map = op.get('daily', {})
+
                 count_late = 0
                 minutes_late = 0
                 sum_late = 0.0
@@ -3074,47 +3074,45 @@ class Database:
                 for day_entry in fines_map.values():
                     fines_list = day_entry.get('fines', []) if isinstance(day_entry, dict) else []
                     for f in fines_list:
-                        try:
-                            reason = (f.get('reason') or '').strip()
-                            amt = float(f.get('amount') or 0.0)
-                        except Exception:
-                            reason = str(f.get('reason') or '')
-                            amt = 0.0
-
+                        reason = (f.get('reason') or '').strip()
+                        amt = float(f.get('amount') or 0.0)
                         rl = reason.lower()
+
                         if rl == 'опоздание':
                             count_late += 1
-                            # minutes: если есть в объекте — используем, иначе вычисляем как amount/50
                             minutes = int(f.get('minutes')) if f.get('minutes') is not None else int(round(amt / 50)) if amt else 0
                             minutes_late += minutes
                             sum_late += amt
-                        elif 'корп' in rl and 'такси' in rl or rl == 'корп такси':
+                        elif 'корп' in rl and 'такси' in rl:
                             sum_korp += amt
                         elif rl == 'не выход' or 'не выход' in rl:
                             count_no_show += 1
                             sum_no_show += amt
-                        elif 'прокси' in rl or 'прокси карта' in rl or rl == 'прокси карта':
+                        elif 'прокси' in rl:
                             sum_proxy += amt
                         else:
-                            # если reason пустой — тоже считаем в "Другое"
                             sum_other += amt
 
-                # Записываем колонки в порядке заголовков
-                set_cell(ws_f, row, col_idx, int(count_late) if count_late else 0); col_idx += 1
-                set_cell(ws_f, row, col_idx, int(minutes_late) if minutes_late else 0); col_idx += 1
-                set_cell(ws_f, row, col_idx, fmt_amt(sum_late) if sum_late else 0.0); col_idx += 1
-                set_cell(ws_f, row, col_idx, fmt_amt(sum_korp) if sum_korp else 0.0); col_idx += 1
-                set_cell(ws_f, row, col_idx, int(count_no_show) if count_no_show else 0); col_idx += 1
-                set_cell(ws_f, row, col_idx, fmt_amt(sum_no_show) if sum_no_show else 0.0); col_idx += 1
-                set_cell(ws_f, row, col_idx, fmt_amt(sum_proxy) if sum_proxy else 0.0); col_idx += 1
-                set_cell(ws_f, row, col_idx, fmt_amt(sum_other) if sum_other else 0.0); col_idx += 1
+                # Итоговая сумма штрафов
+                total_fines = sum_late + sum_korp + sum_no_show + sum_proxy + sum_other
+
+                # Записываем данные
+                set_cell(ws_f, row, col_idx, int(count_late)); col_idx += 1
+                set_cell(ws_f, row, col_idx, int(minutes_late)); col_idx += 1
+                set_cell(ws_f, row, col_idx, fmt_amt(sum_late)); col_idx += 1
+                set_cell(ws_f, row, col_idx, fmt_amt(sum_korp)); col_idx += 1
+                set_cell(ws_f, row, col_idx, int(count_no_show)); col_idx += 1
+                set_cell(ws_f, row, col_idx, fmt_amt(sum_no_show)); col_idx += 1
+                set_cell(ws_f, row, col_idx, fmt_amt(sum_proxy)); col_idx += 1
+                set_cell(ws_f, row, col_idx, fmt_amt(sum_other)); col_idx += 1
+
+                # Новая колонка — ИТОГО
+                set_cell(ws_f, row, col_idx, fmt_amt(total_fines)); col_idx += 1
 
                 row += 1
 
-            # ширина колонок
             ws_f.column_dimensions['A'].width = 28
-            start_idx = 2 if not include_supervisor else 3
-            for i in range(start_idx, len(headers) + 1):
+            for i in range(2, len(headers) + 1):
                 col = ws_f.cell(1, i).column_letter
                 ws_f.column_dimensions[col].width = 14
 
