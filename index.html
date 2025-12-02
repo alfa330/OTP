@@ -2902,7 +2902,7 @@
             const fines = (op.daily && op.daily[dayKey] && Array.isArray(op.daily[dayKey].fines)) ? op.daily[dayKey].fines : [];
 
             const fineIcons = (fines && fines.length > 0) ? (
-            <div className="absolute top-[1.1rem] right-[-8px] flex gap-1 text-xs">
+            <div className="absolute top-[1.58rem] right-[-8px] flex gap-1 text-xs">
                 {Array.from(new Set(fines.map(f => String(f.reason || f.fine_reason || '').trim()))).slice(0,3).map((r, i) => (
                 r ? <i key={i} className={`${getFineIcon(r)} text-red-600`} title={r} style={{fontSize: '12px'}} /> : null
                 ))}
@@ -3004,11 +3004,10 @@
                 const ratio = Math.min(1, total / maxFines);
                 const alpha = 0.18 + 0.77 * ratio;
                 const bg = `rgba(250,204,21, ${alpha})`; // yellow-400 цвет
-                const textClass = ratio > 0.5 ? 'text-white' : 'text-gray-900';
 
                 return (
                     <div 
-                        className={`relative w-full h-8 rounded-md flex items-center justify-center ${textClass}`}
+                        className={`relative w-full h-8 rounded-md flex items-center justify-center text-gray-900`}
                         style={{ backgroundColor: bg }}
                     >
                         {fineIcons}
