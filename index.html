@@ -2296,7 +2296,8 @@
         { key: "break_time", label: "Перерыв", unit: "ч" },
         { key: "calls", label: "Звонки", unit: "" },
         { key: "efficiency", label: "Эффективность", unit: "ч" },
-        { key: "trainings", label: "Тренинги", unit: "" } // новый таб
+        { key: "trainings", label: "Тренинги", unit: "" }, // новый таб
+        { key: "fines", label: "Штрафы", unit: "₸" }
         ];
 
         function parseTimeToMinutes(t) {
@@ -2805,6 +2806,7 @@
             let occValues = [];
             let trainingsTotal = 0;
             let trainingsCounted = 0;
+            let sumFines = 0;
 
             for (const op of filteredOperators) {
             const aggr = op.aggregates || {};
@@ -2835,6 +2837,20 @@
             trainingsTotal += totalHoursAll;
             trainingsCounted += totalHoursCounted;
 
+            // compute fines per operator (support both array of fines and legacy fine_amount)
+            if (op.daily) {
+                for (const dKey of Object.keys(op.daily)) {
+                const dd = op.daily[dKey] || {};
+                if (Array.isArray(dd.fines)) {
+                    for (const f of dd.fines) {
+                    sumFines += Number(f.amount || f.fine_amount || 0) || 0;
+                    }
+                } else if (dd.fine_amount) {
+                    sumFines += Number(dd.fine_amount || 0) || 0;
+                }
+                }
+            }
+
             if (regular > 0) occValues.push((effTotal / regular) * 100);
             }
 
@@ -2846,6 +2862,7 @@
             sumProd,
             sumNorm,
             sumEff,
+            sumFines,
             avgOcc,
             trainingsTotal,
             trainingsCounted
@@ -2948,6 +2965,18 @@
             }
 
             return <div className="flex items-center justify-center gap-1">{parts}</div>;
+            }
+
+            if (selectedTab === 'fines') {
+            if (!fines || fines.length === 0) return <div className="text-sm text-gray-400">—</div>;
+            let total = 0;
+            for (const f of fines) total += Number(f.amount || f.fine_amount || 0) || 0;
+            return (
+                <div className="flex items-center justify-center gap-2">
+                <div className="text-sm font-medium">{total.toFixed(2)} ₽</div>
+                <div className="text-xs text-gray-500">{fines.length} шт.</div>
+                </div>
+            );
             }
 
             if (!d) return <div className="text-sm text-gray-400">—</div>;
@@ -3193,6 +3222,11 @@
                         */}
                     </>
                     )}
+                    {selectedTab === 'fines' && (
+                    <>
+                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Штрафы (₽)</div>
+                    </>
+                    )}
                 </div>
 
                 {/* Rows */}
@@ -3228,6 +3262,21 @@
 
                     const callsTotal = Number(aggr.total_calls || 0);
                     const effTotal = Number(aggr.total_efficiency_hours || 0);
+
+                    // compute total fines for the operator across days
+                    let finesTotal = 0;
+                    if (op.daily) {
+                    for (const dKey of Object.keys(op.daily)) {
+                        const dd = op.daily[dKey] || {};
+                        if (Array.isArray(dd.fines)) {
+                        for (const f of dd.fines) {
+                            finesTotal += Number(f.amount || f.fine_amount || 0) || 0;
+                        }
+                        } else if (dd.fine_amount) {
+                        finesTotal += Number(dd.fine_amount || 0) || 0;
+                        }
+                    }
+                    }
 
                     return (
                         <div key={op.operator_id} className="flex items-center border-b hover:bg-gray-50 relative">
@@ -3303,6 +3352,9 @@
                             */}
                             </>
                         )}
+                        {selectedTab === 'fines' && (
+                            <div className="w-36 p-2 text-sm text-center border-l">{finesTotal ? `${finesTotal.toFixed(2)} ₽` : '—'}</div>
+                        )}
                         </div>
                     );
                     })}
@@ -3345,6 +3397,11 @@
                             <div className="w-32 p-2 text-sm text-center border-l">{footerTotals.trainingsCounted.toFixed(2)}</div>
                             <div className="w-36 p-2 text-sm text-center border-l">{(footerTotals.trainingsTotal - footerTotals.trainingsCounted).toFixed(2)}</div>
                             */}
+                        </>
+                        )}
+                        {selectedTab === 'fines' && (
+                        <>
+                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumFines.toFixed(2)}</div>
                         </>
                         )}
                     </div>
