@@ -3254,13 +3254,13 @@
                         {selectedTab === 'work_time' && (
                             <>
                             <div className="w-36 p-2 text-sm text-center border-l">{displayedTotal.toFixed(2)}</div>
-                            <div className="w-36 p-2 text-sm text-center border-l">{formatNumber(regular, 1)}</div>
+                            <div className="w-36 p-2 text-sm text-center border-l">{formatNumber(regular, 2)}</div>
                             <div className="w-32 p-2 text-sm text-center border-l">
-                                {norm > 0 ? `${((displayedTotal.toFixed(2) / norm) * 100).toFixed(1)}%` : '—'}
+                                {norm > 0 ? `${((displayedTotal.toFixed(2) / norm) * 100).toFixed(2)}%` : '—'}
                             </div>
                             <div className="w-36 p-2 text-sm text-center border-l">
                                 <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-md ${productionColorClass(prodDiff, norm)}`}>
-                                <span className="font-medium">{formatNumber(prodDiff, 1)}</span>
+                                <span className="font-medium">{formatNumber(prodDiff, 2)}</span>
                                 <span className="text-xs text-gray-500">ч</span>
                                 </div>
                             </div>
