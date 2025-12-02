@@ -2297,7 +2297,7 @@
         { key: "calls", label: "Звонки", unit: "" },
         { key: "efficiency", label: "Эффективность", unit: "ч" },
         { key: "trainings", label: "Тренинги", unit: "" }, // новый таб
-        { key: "fines", label: "Штрафы", unit: "₸" }
+        { key: "fines", label: "Штрафы", unit: "₽" }
         ];
 
         function parseTimeToMinutes(t) {
@@ -2781,6 +2781,12 @@
             return num.toFixed(decimals);
         }
 
+        function formatMoney(n) {
+            const num = Number(n || 0);
+            if (!Number.isFinite(num)) return '0.00 ₽';
+            return num.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ₽';
+        }
+
         // FILTERED OPERATORS + COUNTERS (NEW)
         const { filteredOperators, activeCount, firedCount } = useMemo(() => {
             const activeList = [];
@@ -2971,9 +2977,10 @@
             if (!fines || fines.length === 0) return <div className="text-sm text-gray-400">—</div>;
             let total = 0;
             for (const f of fines) total += Number(f.amount || f.fine_amount || 0) || 0;
+            const formatted = formatMoney(total);
             return (
                 <div className="flex items-center justify-center gap-2">
-                <div className="max-w-[56px] truncate text-sm font-medium text-right">{total.toFixed(2)}{`\u00A0`}₸</div>
+                <div className="text-sm font-medium truncate" title={formatted} style={{maxWidth: '96px', display: 'inline-block'}}>{formatted}</div>
                 <div className="text-xs text-gray-500">{fines.length} шт.</div>
                 </div>
             );
@@ -3224,7 +3231,7 @@
                     )}
                     {selectedTab === 'fines' && (
                     <>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Штрафы (₸)</div>
+                        <div className="w-44 p-2 text-center border-l bg-gray-50 text-sm font-medium">Штрафы (₽)</div>
                     </>
                     )}
                 </div>
@@ -3353,8 +3360,13 @@
                             </>
                         )}
                         {selectedTab === 'fines' && (
-                            <div className="w-36 p-2 text-sm text-center border-l">
-                            <div className="mx-auto max-w-[80px] truncate">{finesTotal ? `${finesTotal.toFixed(2)}\u00A0₸` : '—'}</div>
+                            <div className="w-44 p-2 text-sm text-center border-l">
+                            {finesTotal ? (
+                                <div className="flex items-center justify-center gap-2">
+                                <span className="text-sm font-medium truncate" title={String(finesTotal ? formatMoney(finesTotal) : '')} style={{maxWidth: '120px', display: 'inline-block'}}>{formatMoney(finesTotal)}</span>
+                                <span className="text-xs text-gray-500">{finesTotal ? 'в мес.' : ''}</span>
+                                </div>
+                            ) : '—'}
                             </div>
                         )}
                         </div>
@@ -3403,7 +3415,7 @@
                         )}
                         {selectedTab === 'fines' && (
                         <>
-                            <div className="w-36 p-2 text-sm text-center border-l"><div className="mx-auto max-w-[100px] truncate">{footerTotals.sumFines ? `${footerTotals.sumFines.toFixed(2)}\u00A0₸` : '—'}</div></div>
+                            <div className="w-44 p-2 text-sm text-center border-l"><span className="truncate" title={footerTotals ? formatMoney(footerTotals.sumFines) : ''} style={{display:'inline-block', maxWidth: '140px'}}>{formatMoney(footerTotals.sumFines)}</span></div>
                         </>
                         )}
                     </div>
