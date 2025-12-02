@@ -3111,6 +3111,7 @@ class Database:
             try:
                 with self._get_cursor() as cursor:
                     cursor.execute("SELECT id, name FROM users WHERE id = ANY(%s)", (sup_ids,))
+                    logging.info("Fetching supervisors for all-operators report: %s", sup_ids)
                     sup_map = {r[0]: r[1] for r in cursor.fetchall()}
             except Exception:
                 logging.exception("Error fetching supervisors for all-operators report")
