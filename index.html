@@ -2973,7 +2973,7 @@
             for (const f of fines) total += Number(f.amount || f.fine_amount || 0) || 0;
             return (
                 <div className="flex items-center justify-center gap-2">
-                <div className="text-sm font-medium">{total.toFixed(2)} ₽</div>
+                <div className="max-w-[56px] truncate text-sm font-medium text-right">{total.toFixed(2)}{`\u00A0`}₸</div>
                 <div className="text-xs text-gray-500">{fines.length} шт.</div>
                 </div>
             );
@@ -3224,7 +3224,7 @@
                     )}
                     {selectedTab === 'fines' && (
                     <>
-                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Штрафы (₽)</div>
+                        <div className="w-36 p-2 text-center border-l bg-gray-50 text-sm font-medium">Штрафы (₸)</div>
                     </>
                     )}
                 </div>
@@ -3353,7 +3353,9 @@
                             </>
                         )}
                         {selectedTab === 'fines' && (
-                            <div className="w-36 p-2 text-sm text-center border-l">{finesTotal ? `${finesTotal.toFixed(2)} ₽` : '—'}</div>
+                            <div className="w-36 p-2 text-sm text-center border-l">
+                            <div className="mx-auto max-w-[80px] truncate">{finesTotal ? `${finesTotal.toFixed(2)}\u00A0₸` : '—'}</div>
+                            </div>
                         )}
                         </div>
                     );
@@ -3401,7 +3403,7 @@
                         )}
                         {selectedTab === 'fines' && (
                         <>
-                            <div className="w-36 p-2 text-sm text-center border-l">{footerTotals.sumFines.toFixed(2)}</div>
+                            <div className="w-36 p-2 text-sm text-center border-l"><div className="mx-auto max-w-[100px] truncate">{footerTotals.sumFines ? `${footerTotals.sumFines.toFixed(2)}\u00A0₸` : '—'}</div></div>
                         </>
                         )}
                     </div>
