@@ -58,14 +58,12 @@
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/framer-motion@10.16.4/dist/cjs/index.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 </head>
 <body class="bg-gray-50 font-sans antialiased text-gray-900">
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef, useMemo } = React;
-        //const { motion, AnimatePresence } = window.framerMotion;
         const ToastContainer = ({ toasts, removeToast }) => {
             const handleClose = (id) => {
                 setToasts(prev => prev.map(toast => 
@@ -5714,9 +5712,9 @@
             return (
                 <div className="bg-white rounded shadow-sm p-3 w-[260px] flex-shrink-0">
                 <div className="flex items-center justify-between mb-2">
-                    <button className="px-2 py-1 bg-slate-100 rounded" onClick={() => setCalendarMonth(m => new Date(m.getFullYear(), m.getMonth() - 1, 1))}>◀</button>
+                    <button className="px-2 py-1 bg-slate-100 rounded" onClick={() => setCalendarMonth(m => new Date(m.getFullYear(), m.getMonth() - 1, 1))}><i className="fas fa-angle-left"></i></button>
                     <div className="text-sm font-medium">{calendarMonth.toLocaleString(undefined, { month: 'long', year: 'numeric' })}</div>
-                    <button className="px-2 py-1 bg-slate-100 rounded" onClick={() => setCalendarMonth(m => new Date(m.getFullYear(), m.getMonth() + 1, 1))}>▶</button>
+                    <button className="px-2 py-1 bg-slate-100 rounded" onClick={() => setCalendarMonth(m => new Date(m.getFullYear(), m.getMonth() + 1, 1))}><i className="fas fa-angle-right"></i></button>
                 </div>
                 <div className="grid grid-cols-7 gap-1 text-[12px] text-center text-slate-600 mb-2">
                     {['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(d => <div key={d} className="text-xs">{d}</div>)}
