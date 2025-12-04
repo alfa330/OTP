@@ -5788,7 +5788,7 @@
             const [viewMode, setViewMode] = useState('day');
             const [currentDate, setCurrentDate] = useState(() => new Date());
             const [selectedSupervisors, setSelectedSupervisors] = useState([]);
-            const [statusFilter, setStatusFilter] = useState('all'); // 'all', 'active', 'fired'
+            const [statusFilter, setStatusFilter] = useState('all'); // 'all', 'working', 'unpaid_leave', 'fired'
             const [operators, setOperators] = useState(() => {
                 const today = todayDateStr();
                 const copy = (initialOperators || []).map(op => ({
@@ -5833,9 +5833,23 @@
                 // Фильтр по статусу
                 if (statusFilter === 'fired') {
                     filtered = filtered.filter(op => op.status === 'fired');
-                } else if (statusFilter === 'active') {
-                    filtered = filtered.filter(op => op.status !== 'fired');
+                } else if (statusFilter === 'working') {
+                    filtered = filtered.filter(op => op.status === 'working');
+                } else if (statusFilter === 'unpaid_leave') {
+                    filtered = filtered.filter(op => op.status === 'unpaid_leave');
                 }
+                
+                // Сортировка: сначала по направлению (direction), потом по ФИО (name)
+                filtered.sort((a, b) => {
+                    const dirA = (a.direction || '').toLowerCase();
+                    const dirB = (b.direction || '').toLowerCase();
+                    if (dirA !== dirB) {
+                        return dirA.localeCompare(dirB);
+                    }
+                    const nameA = (a.name || '').toLowerCase();
+                    const nameB = (b.name || '').toLowerCase();
+                    return nameA.localeCompare(nameB);
+                });
                 
                 return filtered;
             }, [operators, selectedSupervisors, statusFilter]);
@@ -6032,12 +6046,23 @@
                                     <input
                                         type="radio"
                                         name="statusFilter"
-                                        value="active"
-                                        checked={statusFilter === 'active'}
+                                        value="working"
+                                        checked={statusFilter === 'working'}
                                         onChange={(e) => setStatusFilter(e.target.value)}
                                         className="rounded"
                                     />
-                                    <span className="text-xs">Активные</span>
+                                    <span className="text-xs">Активный</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer hover:bg-slate-50 rounded px-2 py-1">
+                                    <input
+                                        type="radio"
+                                        name="statusFilter"
+                                        value="unpaid_leave"
+                                        checked={statusFilter === 'unpaid_leave'}
+                                        onChange={(e) => setStatusFilter(e.target.value)}
+                                        className="rounded"
+                                    />
+                                    <span className="text-xs">БС</span>
                                 </label>
                                 <label className="flex items-center gap-2 cursor-pointer hover:bg-slate-50 rounded px-2 py-1">
                                     <input
