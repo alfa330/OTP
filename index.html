@@ -6064,7 +6064,7 @@
                                                         color: "white",
                                                         }}
                                                     >
-                                                        <div className="px-1 truncate text-[11px] border border-white/30 bg-white/10 rounded-sm" style={{ paddingLeft: 6, paddingRight: 6 }}>{minutesToTime(p.start)} — {minutesToTime(p.end)}</div>
+                                                        <div className="px-1 truncate text-[11px] border border-white/30 bg-white/10 rounded-sm z-40" style={{ paddingLeft: 6, paddingRight: 6 }}>{minutesToTime(p.start)} — {minutesToTime(p.end)}</div>
                                                         <button
                                                         onClick={(e) => { e.stopPropagation(); openEditModal(op.id, p.sourceDate, p.sourceIndex); }}
                                                         className="text-[10px] px-1 py-0.5 mr-1 rounded bg-white/20"
@@ -6073,7 +6073,7 @@
                                                         </button>
                                                         {getBreakPartsForPart(op, p, d).map((b, bi) => (
                                                         <div key={bi}
-                                                            className="absolute top-0 h-full text-[10px] flex items-center justify-center"
+                                                            className="absolute top-0 h-full text-[10px] flex items-center justify-center z-30"
                                                             style={{
                                                             left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
                                                                 width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`,
