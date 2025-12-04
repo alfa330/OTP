@@ -5944,7 +5944,7 @@
                 <div className="p-4 min-h-screen bg-slate-50">
                 <div className="flex items-start gap-4 mb-4">
                     <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
-                    <div className="flex-1">
+                    <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-3">
                         <div className="flex gap-2 items-center">
                         <h2 className="text-2xl font-semibold">Планировщик смен</h2>
@@ -5961,8 +5961,8 @@
                         </div>
                     </div>
 
-                    <div className="flex gap-4">
-                        <div className="flex-1 bg-white rounded shadow-sm p-2 overflow-hidden">
+                    <div className="flex gap-4 w-full">
+                        <div className="flex-1 bg-white rounded shadow-sm p-2 overflow-hidden w-full">
                         <div className="flex items-center border-b pb-2 mb-2">
                             <div className="w-64 sticky left-0 z-20 bg-white pr-2" />
                             <div className="flex-1">
@@ -6014,8 +6014,8 @@
                             </div>
                         </div>
 
-                        <div className="table-scroll overflow-auto" style={{ maxHeight: '65vh' }}>
-                            <div className="min-w-full">
+                        <div className="table-scroll overflow-auto w-full" style={{ maxHeight: '65vh' }}>
+                            <div className="min-w-full w-full">
                             {operators.map(op => (
                                 <div key={op.id} className="flex items-start py-3 border-b">
                                 <div className="w-64 pr-2 sticky left-0 z-20 bg-white border-r">
