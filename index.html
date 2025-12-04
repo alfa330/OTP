@@ -5515,6 +5515,810 @@
             );
             }
 
+            // ------------ Утилиты ---------------
+            const pad = (n) => String(n).padStart(2, "0");
+            const timeToMinutes = (t) => {
+            if (!t) return 0;
+            const [hh = 0, mm = 0] = String(t).split(":").map(Number);
+            return (Number.isFinite(hh) ? hh : 0) * 60 + (Number.isFinite(mm) ? mm : 0);
+            };
+            const minutesToTime = (m) => {
+            // m in minutes — normalize to 0..1439 for display
+            m = ((Math.round(m) % (24 * 60)) + (24 * 60)) % (24 * 60);
+            const hh = Math.floor(m / 60);
+            const mm = m % 60;
+            return `${pad(hh)}:${pad(mm)}`;
+            };
+            const todayDateStr = (d = new Date()) => {
+            // produce local YYYY-MM-DD (avoid timezone shifts from toISOString)
+            const yyyy = d.getFullYear();
+            const mm = String(d.getMonth() + 1).padStart(2, '0');
+            const dd = String(d.getDate()).padStart(2, '0');
+            return `${yyyy}-${mm}-${dd}`;
+            };
+            // parse YYYY-MM-DD into local Date (avoid timezone shift when using Date(string))
+            const parseDateStr = (s) => { const [y, m, day] = String(s).split('-').map(Number); return new Date(y, m - 1, day); };
+            const addDays = (d, n) => { const r = new Date(d); r.setDate(r.getDate() + n); return r; };
+            const isSameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+
+            // compute auto breaks for a shift given startMin, endMin (endMin may be >1440 if crossing day)
+            function computeBreaksForShiftMinutes(startMin, endMin) {
+            const dur = endMin - startMin;
+            const breaks = [];
+            const snap5 = (x) => Math.round(x / 5) * 5;
+
+            // helper to push a break centered at c with given size, snapped to 5 minutes
+            const pushCentered = (c, size) => {
+                const center = snap5(c);
+                const s = snap5(center - size / 2);
+                breaks.push({ start: s, end: s + size });
+            };
+
+            // 6..8 hours -> two 15min breaks at ~1/3 and ~2/3
+            if (dur >= 6 * 60 && dur < 8 * 60) {
+                const centers = [startMin + dur / 3, startMin + 2 * dur / 3];
+                centers.forEach(c => pushCentered(c, 15));
+            }
+            // 8..9.5 hours -> 15,30,15 (two 15 and one 30 in middle)
+            else if (dur >= 8 * 60 && dur < 9.5 * 60) {
+                const centers = [startMin + dur * 0.25, startMin + dur * 0.5, startMin + dur * 0.75];
+                const sizes = [15, 30, 15];
+                centers.forEach((c, i) => pushCentered(c, sizes[i]));
+            }
+            // 9.5..12 hours -> 30,15,30 (two 30 with 15 in middle)
+            else if (dur >= 9.5 * 60 && dur < 12 * 60) {
+                const centers = [startMin + dur * 0.25, startMin + dur * 0.5, startMin + dur * 0.75];
+                const sizes = [30, 15, 30];
+                centers.forEach((c, i) => pushCentered(c, sizes[i]));
+            }
+            // fallback: no automatic breaks
+
+            // ensure breaks within [startMin, endMin] and snapped to 5
+            return breaks.map(b => ({ start: Math.max(startMin, Math.min(endMin, snap5(b.start))), end: Math.max(startMin, Math.min(endMin, snap5(b.end))) }));
+            }
+
+            // ----------------- Helpers to avoid overlapping breaks across operators -----------------
+            const intervalsOverlap = (a, b) => a.start < b.end && b.start < a.end;
+            const mergeIntervals = (arr) => {
+            if (!arr.length) return [];
+            const sorted = arr.slice().sort((x,y) => x.start - y.start);
+            const res = [ { ...sorted[0] } ];
+            for (let i = 1; i < sorted.length; i++) {
+                const cur = sorted[i];
+                const last = res[res.length -1];
+                if (cur.start <= last.end) last.end = Math.max(last.end, cur.end); else res.push({ ...cur });
+            }
+            return res;
+            };
+
+            // Build occupied intervals (in minutes 0..1440) for given date from all other operators' breaks
+            function buildOccupiedIntervalsForDate(allOperators, dateStr, excludeOpId) {
+            const occupied = [];
+            const dateObj = parseDateStr(dateStr);
+            const prevStr = todayDateStr(addDays(dateObj, -1));
+
+            allOperators.forEach(op => {
+                if (op.id === excludeOpId) return;
+                // shifts that start on date
+                const segs = op.shifts?.[dateStr] ?? [];
+                segs.forEach(seg => {
+                (seg.breaks ?? []).forEach(b => {
+                    const s = Math.max(0, Math.min(1440, b.start));
+                    const e = Math.max(0, Math.min(1440, b.end));
+                    if (e > s) occupied.push({ start: s, end: e });
+                });
+                });
+                // shifts from previous day that continue into this date
+                const prevSegs = op.shifts?.[prevStr] ?? [];
+                prevSegs.forEach(seg => {
+                (seg.breaks ?? []).forEach(b => {
+                    // map break to current date by subtracting 1440
+                    const s = b.start - 1440;
+                    const e = b.end - 1440;
+                    const ns = Math.max(0, Math.min(1440, s));
+                    const ne = Math.max(0, Math.min(1440, e));
+                    if (ne > ns) occupied.push({ start: ns, end: ne });
+                });
+                });
+            });
+            return mergeIntervals(occupied);
+            }
+
+            // Try to find a non-overlapping start for a break of given length within [segStart, segEnd]
+            function findNonOverlappingStart(desiredStart, length, segStart, segEnd, occupiedIntervals) {
+            const step = 5; // minutes
+            const snap = (x) => Math.round(x/step)*step;
+            desiredStart = snap(desiredStart);
+            const candidates = [0];
+            // search deltas: 0, ±5, ±10, ±15 ... up to seg bounds
+            const maxShift = Math.max(segEnd - segStart, 60);
+            for (let d = step; d <= maxShift; d += step) { candidates.push(d); candidates.push(-d); }
+
+            for (const delta of candidates) {
+                const s = desiredStart + delta;
+                const start = Math.max(segStart, Math.min(segEnd - length, s));
+                const end = start + length;
+                if (start < segStart || end > segEnd) continue;
+                // check overlap
+                let ok = true;
+                for (const occ of occupiedIntervals) {
+                if (intervalsOverlap({start,end}, occ)) { ok = false; break; }
+                }
+                if (ok) return start;
+            }
+            return null;
+            }
+
+            // Adjust breaks for a given operator on a given date to avoid overlaps with others
+            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators) {
+            const segs = op.shifts?.[dateStr];
+            if (!segs || segs.length === 0) return;
+            // occupied from other ops
+            let occupied = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id);
+            // we'll fill occupied as we assign breaks for this operator
+            for (const seg of segs) {
+                seg.breaks = seg.breaks ?? computeBreaksForShiftMinutes(seg.__startMin ?? timeToMinutes(seg.start), seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0)));
+                const segStart = Math.max(0, seg.__startMin ?? timeToMinutes(seg.start));
+                const segEnd = Math.min(1440, seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0)));
+                const newBreaks = [];
+                for (const b of seg.breaks) {
+                const length = b.end - b.start;
+                // desired start: clamp into segStart..segEnd-length
+                let desiredStart = Math.max(segStart, Math.min(segEnd - length, b.start));
+                const found = findNonOverlappingStart(desiredStart, length, segStart, segEnd, occupied);
+                if (found !== null) {
+                    const nb = { start: found, end: found + length };
+                    newBreaks.push(nb);
+                    occupied.push(nb);
+                } else {
+                    // couldn't find free spot - keep original clamped
+                    const clamped = { start: Math.max(segStart, Math.min(segEnd - length, b.start)), end: Math.max(segStart, Math.min(segEnd, b.end)) };
+                    newBreaks.push(clamped);
+                    occupied.push(clamped);
+                }
+                occupied = mergeIntervals(occupied);
+                }
+                seg.breaks = newBreaks;
+            }
+            }
+
+
+
+            // Merge utility: принимает массив сегментов {start:'HH:MM', end:'HH:MM'} и возвращает объединённый массив объектов {start,end,breaks}
+            function mergeSegments(segments) {
+            if (!Array.isArray(segments) || segments.length === 0) return [];
+            // Convert to intervals in minutes, allowing end > 1440 for next-day segments
+            const intervals = segments.map(s => {
+                const start = timeToMinutes(s.start);
+                let end = timeToMinutes(s.end);
+                if (end <= start) end += 1440; // crosses to next day
+                return { start, end };
+            });
+
+            // sort by start
+            intervals.sort((a, b) => a.start - b.start);
+
+            // merge overlapping/adjacent
+            const merged = [];
+            for (const iv of intervals) {
+                if (merged.length === 0) {
+                merged.push({ ...iv });
+                } else {
+                const last = merged[merged.length - 1];
+                if (iv.start <= last.end) {
+                    last.end = Math.max(last.end, iv.end);
+                } else {
+                    merged.push({ ...iv });
+                }
+                }
+            }
+
+            // Convert merged intervals back to objects with breaks
+            return merged.map(m => {
+                const startStr = minutesToTime(m.start);
+                const endStr = minutesToTime(m.end % 1440);
+                // compute auto breaks for merged interval
+                const breaks = computeBreaksForShiftMinutes(m.start, m.end);
+                return { start: startStr, end: endStr, __startMin: m.start, __endMin: m.end, breaks };
+            });
+            }
+
+            // ------------ Sample data ---------------
+            const sampleOperators = [
+            { id: 1, name: "Али", shifts: {} },
+            { id: 2, name: "Бек", shifts: {} },
+            { id: 3, name: "Самира", shifts: {} },
+            { id: 4, name: "Данияр", shifts: {} },
+            ];
+
+            // ------------ Small Calendar ---------------
+            function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
+            function endOfMonth(d) { return new Date(d.getFullYear(), d.getMonth() + 1, 0); }
+            function weekStart(d) { const day = d.getDay() || 7; const s = new Date(d); s.setDate(d.getDate() - (day - 1)); s.setHours(0,0,0,0); return s; }
+            function weekEnd(d) { const s = weekStart(d); const e = addDays(s, 6); e.setHours(23,59,59,999); return e; }
+
+            function SmallCalendar({ currentDate, onChange, viewMode }) {
+            const [calendarMonth, setCalendarMonth] = useState(new Date(currentDate.getFullYear(), currentDate.getMonth(), 1));
+            const first = startOfMonth(calendarMonth);
+            const last = endOfMonth(calendarMonth);
+            const start = addDays(first, -((first.getDay() || 7) - 1)); // monday-first
+
+            const weeks = [];
+            let cur = new Date(start);
+            while (weeks.length < 6) {
+                const week = [];
+                for (let i = 0; i < 7; i++) {
+                week.push(new Date(cur));
+                cur = addDays(cur, 1);
+                }
+                weeks.push(week);
+                if (cur > last && weeks.length >= 6) break;
+            }
+
+            return (
+                <div className="bg-white rounded shadow-sm p-3 w-[260px] flex-shrink-0">
+                <div className="flex items-center justify-between mb-2">
+                    <button className="px-2 py-1 bg-slate-100 rounded" onClick={() => setCalendarMonth(m => new Date(m.getFullYear(), m.getMonth() - 1, 1))}>◀</button>
+                    <div className="text-sm font-medium">{calendarMonth.toLocaleString(undefined, { month: 'long', year: 'numeric' })}</div>
+                    <button className="px-2 py-1 bg-slate-100 rounded" onClick={() => setCalendarMonth(m => new Date(m.getFullYear(), m.getMonth() + 1, 1))}>▶</button>
+                </div>
+
+                <div className="grid grid-cols-7 gap-1 text-[12px] text-center text-slate-600 mb-2">
+                    {['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(d => <div key={d} className="text-xs">{d}</div>)}
+                </div>
+
+                <div className="grid grid-cols-7 gap-1">
+                    {weeks.map((week, wi) => (
+                    <React.Fragment key={wi}>
+                        {week.map((day) => {
+                        const inMonth = day.getMonth() === calendarMonth.getMonth();
+                        const isSelectedDay = isSameDay(day, currentDate);
+                        let isInSelectedWeek = false;
+                        let isInSelectedMonth = false;
+                        if (viewMode === 'week') {
+                            const s = weekStart(currentDate); const e = weekEnd(currentDate);
+                            isInSelectedWeek = day >= s && day <= e;
+                        }
+                        if (viewMode === 'month') {
+                            isInSelectedMonth = day.getMonth() === currentDate.getMonth() && day.getFullYear() === currentDate.getFullYear();
+                        }
+
+                        const base = 'p-2 text-[13px] rounded cursor-pointer';
+                        const cls = ` ${inMonth ? '' : 'text-slate-400'} ${isSelectedDay ? 'bg-sky-600 text-white' : ''} ${isInSelectedWeek && !isSelectedDay ? 'bg-sky-200' : ''} ${isInSelectedMonth && !isInSelectedWeek && !isSelectedDay ? 'bg-slate-100' : ''}`;
+
+                        return (
+                            <div key={day.toISOString()} onClick={() => onChange(new Date(day))} className={base + cls}>
+                            {day.getDate()}
+                            </div>
+                        );
+                        })}
+                    </React.Fragment>
+                    ))}
+                </div>
+
+                <div className="mt-3 text-[12px] text-slate-500">Режим: <strong>{viewMode}</strong>. Клик — выбрать дату.</div>
+                </div>
+            );
+            }
+
+            // ------------ Main component ----------------
+        function ShiftPlannerViewWithCalendar({ initialOperators }) {
+            const [viewMode, setViewMode] = useState('day');
+            const [currentDate, setCurrentDate] = useState(() => new Date());
+
+            const [operators, setOperators] = useState(() => {
+                const copy = JSON.parse(JSON.stringify(initialOperators));
+                const today = todayDateStr();
+                if (copy[0]) copy[0].shifts[today] = mergeSegments([{ start: '09:00', end: '17:30' }]);
+                if (copy[1]) copy[1].shifts[today] = mergeSegments([{ start: '00:00', end: '06:00' }]);
+                if (copy[2]) copy[2].shifts[today] = mergeSegments([{ start: '14:15', end: '23:45' }]);
+                return copy;
+            });
+
+            const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [] });
+            const dragState = useRef(null);
+
+            // ranges
+            const dayRange = useMemo(() => [todayDateStr(new Date(currentDate))], [currentDate]);
+            const weekRange = useMemo(() => {
+                const d = new Date(currentDate);
+                const day = d.getDay() || 7;
+                const monday = new Date(d); monday.setDate(d.getDate() - (day - 1));
+                const res = [];
+                for (let i = 0; i < 7; i++) res.push(todayDateStr(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + i)));
+                return res;
+            }, [currentDate]);
+            const monthRange = useMemo(() => {
+                const d = new Date(currentDate);
+                const year = d.getFullYear(); const month = d.getMonth();
+                const last = new Date(year, month + 1, 0);
+                const res = [];
+                for (let day = 1; day <= last.getDate(); day++) res.push(todayDateStr(new Date(year, month, day)));
+                return res;
+            }, [currentDate]);
+
+            const visibleRange = useMemo(() => (viewMode === 'day' ? dayRange : viewMode === 'week' ? weekRange : monthRange), [viewMode, dayRange, weekRange, monthRange]);
+
+            const minutesInDay = 24 * 60;
+            const computeLeftPercent = (m) => (m / minutesInDay) * 100;
+
+            // cell width logic for different views
+            const cellMinWidth = viewMode === 'month' ? 110 : viewMode === 'week' ? 110 : undefined;
+            const cellFlexStyle = viewMode === 'day' ? { flex: 1 } : { flex: '0 0 auto', minWidth: cellMinWidth };
+
+            const openEditModal = (opId, date, editIndex = null) => {
+                const op = operators.find(o => o.id === opId);
+                const arr = op?.shifts?.[date] ?? [];
+                if (editIndex !== null && arr[editIndex]) {
+                const seg = arr[editIndex];
+                // prepare breaks for modal as array of {startMin,endMin}
+                const breaks = (seg.breaks ?? []).map(b => ({ start: b.start, end: b.end }));
+                setModalState({ open: true, opId, date, start: seg.start, end: seg.end, editIndex, breaks });
+                } else {
+                setModalState({ open: true, opId, date, start: '09:00', end: '17:00', editIndex: null, breaks: [] });
+                }
+            };
+
+            const saveSegment = ({ opId, date, start, end, editIndex = null, breaks = null }) => {
+                setOperators(prev => {
+                const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
+                const op = copy.find(x => x.id === opId);
+                if (!op) return prev;
+                const arr = op.shifts[date] ? [...op.shifts[date]] : [];
+                if (editIndex === null) {
+                    arr.push({ start, end });
+                } else {
+                    arr[editIndex] = { start, end };
+                }
+                // merge overlapping segments before saving
+                const merged = mergeSegments(arr);
+                // if user provided breaks for the edited segment, apply them; otherwise keep auto breaks
+                if (breaks && editIndex !== null) {
+                    // find matching by start/end inside merged segments (best-effort)
+                    const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                    if (seg) {
+                    seg.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
+                    }
+                }
+                op.shifts[date] = merged;
+                // adjust breaks to avoid overlap with other operators on this date
+                try { adjustBreaksForOperatorOnDate(op, date, copy); } catch (e) { /* swallow errors to avoid breaking save */ }
+                return copy;
+                });
+                // keep modal open after saving segment (user can add more)
+                setModalState(m => ({ ...m, editIndex: null }));
+            };
+
+            const removeSegment = ({ opId, date, index }) => {
+                setOperators(prev => {
+                const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
+                const op = copy.find(x => x.id === opId);
+                if (!op) return prev;
+                const arr = (op.shifts[date] ?? []).slice();
+                arr.splice(index, 1);
+                if (arr.length === 0) delete op.shifts[date]; else op.shifts[date] = mergeSegments(arr);
+                return copy;
+                });
+                // do not automatically close modal here
+            };
+
+            // Helper: get shift segments that belong to a specific date (0..1440 minutes)
+            // Returns array of parts: { start, end, sourceDate, sourceIndex }
+            const getShiftPartsForDate = (op, dateStr) => {
+                const parts = [];
+                // parts from shifts starting on this date
+                const arr = op.shifts?.[dateStr] ?? [];
+                arr.forEach((sh, idx) => {
+                const s = timeToMinutes(sh.start);
+                let e = timeToMinutes(sh.end);
+                if (e <= s) e += 1440; // end next day
+                const segStart = Math.max(0, s);
+                const segEnd = Math.min(1440, e);
+                if (segEnd > segStart) parts.push({ start: segStart, end: segEnd, sourceDate: dateStr, sourceIndex: idx });
+                });
+
+                // parts that come from previous day's crossing shifts
+                const date = parseDateStr(dateStr);
+                const prev = addDays(date, -1);
+                const prevStr = todayDateStr(prev);
+                const prevArr = op.shifts?.[prevStr] ?? [];
+                prevArr.forEach((sh, idx) => {
+                const ps = timeToMinutes(sh.start);
+                let pe = timeToMinutes(sh.end);
+                if (pe <= ps) {
+                    // crosses into this date
+                    pe += 1440;
+                    const partStart = 0;
+                    const partEnd = Math.min(1440, pe - 1440);
+                    if (partEnd > partStart) parts.push({ start: partStart, end: partEnd, sourceDate: prevStr, sourceIndex: idx });
+                }
+                });
+
+                return parts;
+            };
+
+            // totals per hour for a given date: consider parts from shifts starting on date + parts from previous day's crossing
+            const totalsPerHourForDate = (dateStr) => {
+                const totals = Array.from({ length: 24 }).map(() => 0);
+                operators.forEach(op => {
+                const parts = getShiftPartsForDate(op, dateStr);
+                parts.forEach(p => {
+                    for (let hour = 0; hour < 24; hour++) {
+                    const hStart = hour * 60;
+                    const hEnd = hStart + 60;
+                    const overlap = Math.max(0, Math.min(p.end, hEnd) - Math.max(p.start, hStart));
+                    totals[hour] += overlap / 60;
+                    }
+                });
+                });
+                return totals;
+            };
+
+            // helper to compute break display segments inside a day's part
+            const getBreakPartsForPart = (op, p, dateStr) => {
+                const srcSeg = op.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                if (!srcSeg) return [];
+                const brs = srcSeg.breaks ?? computeBreaksForShiftMinutes(srcSeg.__startMin ?? timeToMinutes(srcSeg.start), srcSeg.__endMin ?? (timeToMinutes(srcSeg.end) + (timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start) ? 1440 : 0)));
+                const res = [];
+                brs.forEach(b => {
+                // Map break interval to the current day's 0..1440 coordinate depending on whether
+                // the source segment is from the same day or the previous day
+                let bStartInDay = b.start;
+                let bEndInDay = b.end;
+                if (p.sourceDate !== dateStr) {
+                    // segment belongs to previous day; shift break by -1440 to map into this day
+                    bStartInDay = b.start - 1440;
+                    bEndInDay = b.end - 1440;
+                }
+                const overlapStart = Math.max(p.start, bStartInDay);
+                const overlapEnd = Math.min(p.end, bEndInDay);
+                if (overlapEnd > overlapStart) res.push({ start: overlapStart, end: overlapEnd });
+                });
+                return res;
+            };
+
+            return (
+                <div className="p-4 min-h-screen bg-slate-50">
+                <div className="flex items-start gap-4 mb-4">
+                    <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
+
+                    <div className="flex-1">
+                    <div className="flex items-center justify-between mb-3">
+                        <div className="flex gap-2 items-center">
+                        <h2 className="text-2xl font-semibold">Планировщик смен</h2>
+                        <div className="flex items-center gap-1 ml-4">
+                            <button onClick={() => setViewMode('day')} className={`px-3 py-1 rounded ${viewMode === 'day' ? 'bg-slate-800 text-white' : 'bg-white'}`}>День</button>
+                            <button onClick={() => setViewMode('week')} className={`px-3 py-1 rounded ${viewMode === 'week' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Неделя</button>
+                            <button onClick={() => setViewMode('month')} className={`px-3 py-1 rounded ${viewMode === 'month' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Месяц</button>
+                        </div>
+                        </div>
+
+                        <div className="flex gap-2 items-center">
+                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded">◀</button>
+                        <div className="text-sm">{currentDate.toLocaleDateString()}</div>
+                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded">▶</button>
+                        </div>
+                    </div>
+
+                    <div className="flex gap-4">
+                        <div className="flex-1 bg-white rounded shadow-sm p-2 overflow-hidden">
+                        <div className="flex items-center border-b pb-2 mb-2">
+                            <div className="w-64 sticky left-0 z-20 bg-white pr-2" />
+                            <div className="flex-1">
+                            <div className="flex gap-2">
+                                {visibleRange.map(d => (
+                                <div key={d} className="text-center text-sm font-medium" style={viewMode === 'day' ? {flex:1} : {minWidth: cellMinWidth, flex: '0 0 auto'}}>
+                                    {viewMode === 'day' ? (
+                                    d
+                                    ) : (
+                                    <button
+                                        className="w-full text-left p-1 rounded border border-slate-300 hover:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-400"
+                                        onClick={(e) => { e.stopPropagation(); setViewMode('day'); setCurrentDate(parseDateStr(d)); }}
+                                    >
+                                        {parseDateStr(d).getDate() + ' ' + parseDateStr(d).toLocaleString('ru-RU', { month: 'short' })}
+                                    </button>
+                                    )}
+                                </div>
+                                ))}
+                            </div>
+
+                            {viewMode === 'day' && (
+                                <div className="mt-2">
+                                <div className="relative h-8 px-1">
+                                    <div className="absolute inset-0 flex items-end">
+                                    {Array.from({ length: 24 }).map((_, i) => (
+                                        <div key={i} className="flex-1 text-center text-[11px] leading-[12px]">{pad(i)}</div>
+                                    ))}
+                                    </div>
+                                    <div className="absolute inset-0 flex">
+                                    {Array.from({ length: 24 }).map((_, i) => (
+                                        <div key={i} className="flex-1 border-r last:border-r-0" />
+                                    ))}
+                                    </div>
+                                </div>
+
+                                <div className="relative h-6 mt-1 px-1">
+                                    <div className="absolute inset-0 flex items-start">
+                                    {(() => {
+                                        const totals = totalsPerHourForDate(visibleRange[0]);
+                                        return totals.map((t, hour) => <div key={hour} className="flex-1 text-center text-[10px] text-slate-700">{t > 0 ? t.toFixed(1) : '0'}</div>);
+                                    })()}
+                                    </div>
+                                    <div className="absolute inset-0 flex pointer-events-none">
+                                    {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
+                                    </div>
+                                </div>
+                                </div>
+                            )}
+                            </div>
+                        </div>
+
+                        <div className="table-scroll overflow-auto" style={{ maxHeight: '65vh' }}>
+                            <div className="min-w-full">
+                            {operators.map(op => (
+                                <div key={op.id} className="flex items-start py-3 border-b">
+                                <div className="w-64 pr-2 sticky left-0 z-20 bg-white border-r">
+                                    <div className="font-medium">{op.name}</div>
+                                    <div className="text-xs text-slate-500">Оператор</div>
+                                </div>
+
+                                <div className="flex-1" style={{ overflow: 'visible' }}>
+                                    <div className="flex flex-col gap-2">
+                                    <div className="grid grid-cols-1 gap-2">
+                                        <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
+                                        {visibleRange.map(d => {
+                                            const parts = getShiftPartsForDate(op, d);
+
+                                            const origArr = (op.shifts?.[d] ?? []).map((s, idx) => {
+                                            const sM = timeToMinutes(s.start);
+                                            const eM = timeToMinutes(s.end);
+                                            const crossing = eM <= sM; // crosses to next day
+                                            const text = crossing ? `${s.start} — ${s.end} (+1)` : `${s.start} — ${s.end}`;
+                                            return { text, crossing, idx };
+                                            });
+                                            // also check prev day's continuations
+                                            const prevArr = op.shifts?.[todayDateStr(addDays(parseDateStr(d), -1))] ?? [];
+                                            const prevCont = prevArr
+                                            .map((s, idx) => {
+                                                const sM = timeToMinutes(s.start);
+                                                const eM = timeToMinutes(s.end);
+                                                const crossing = eM <= sM; // if true, this shift continues into current day
+                                                if (!crossing) return null;
+                                                return { text: `${minutesToTime(0)} — ${minutesToTime((timeToMinutes(s.end) + 1440) - 1440)}`, crossing: true, idx };
+                                            })
+                                            .filter(Boolean);
+
+                                            const labelList = [...origArr, ...prevCont];
+                                            const durationHours = parts.reduce((acc, p) => acc + (p.end - p.start) / 60, 0);
+
+                                            return (
+                                            <div key={d} className={"h-[56px] overflow-hidden border rounded p-1 relative bg-white border-slate-300" + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={() => openEditModal(op.id, d)}>
+                                                {viewMode === 'day' ? (
+                                                <div className="relative h-12">
+                                                    {/* hour grid */}
+                                                    <div className="absolute inset-0 flex">
+                                                    {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
+                                                    </div>
+
+                                                    {/* shift parts for this date */}
+                                                    {parts.map((p, idx) => (
+                                                    <div key={idx}
+                                                        className="absolute top-1/4 h-1/2 rounded text-xs overflow-hidden flex items-center justify-between"
+                                                        style={{
+                                                        left: `${computeLeftPercent(p.start)}%`,
+                                                        width: `${((p.end - p.start) / minutesInDay) * 100}%`,
+                                                        background: ((op.shifts?.[p.sourceDate]?.[p.sourceIndex] && timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].end) <= timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].start)) ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)"),
+                                                        color: "white",
+                                                        }}
+                                                    >
+                                                        <div className="px-1 truncate text-[11px] border border-white/30 bg-white/10 rounded-sm" style={{ paddingLeft: 6, paddingRight: 6 }}>{minutesToTime(p.start)} — {minutesToTime(p.end)}</div>
+                                                        {/* edit button for this segment */}
+                                                        <button
+                                                        onClick={(e) => { e.stopPropagation(); openEditModal(op.id, p.sourceDate, p.sourceIndex); }}
+                                                        className="text-[10px] px-1 py-0.5 mr-1 rounded bg-white/20"
+                                                        >
+                                                        ✎
+                                                        </button>
+
+                                                        {/* render breaks inside this part (yellow) */}
+                                                        {getBreakPartsForPart(op, p, d).map((b, bi) => (
+                                                        <div key={bi}
+                                                            className="absolute top-0 h-full text-[10px] flex items-center justify-center"
+                                                            style={{
+                                                            left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
+                                                                width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`,
+                                                            background: "linear-gradient(90deg,#fde68a,#f59e0b)",
+                                                            color: "#5c3a00",
+                                                            fontWeight: 600,
+                                                            }}
+                                                        />
+                                                        ))}
+
+                                                    </div>
+                                                    ))}
+
+                                                    {/* if no parts, show placeholder */}
+                                                    {parts.length === 0 && <div className="text-[11px] text-slate-400">Нет смены</div>}
+                                                </div>
+                                                ) : (
+                                                <div className="flex flex-col text-sm overflow-hidden h-full">
+                                                    {labelList.length > 0 ? (
+                                                    <div className="relative h-full pb-4">
+                                                        {labelList.slice(0,2).map((l, i) => <div key={i} className={"font-medium text-xs truncate " + (l.crossing ? 'text-amber-600' : '')}>{l.text}</div>)}
+                                                        {labelList.length > 2 && (
+                                                        <div className="absolute right-1 bottom-[1px] text-xs text-slate-400">+{labelList.length - 2}</div>
+                                                        )}
+                                                        <div className="absolute left-1 bottom-[1px] text-xs text-slate-500">{durationHours.toFixed(2)} ч</div>
+                                                    </div>
+                                                    ) : (
+                                                    <div className="text-xs text-slate-400">—</div>
+                                                    )}
+                                                </div>
+                                                )}
+
+                                                {/* bottom: duration for this date */}
+                                                {viewMode === 'day' && durationHours > 0 && (
+                                                <div className="absolute left-1 bottom-[1px] text-xs text-slate-500">{durationHours.toFixed(2)} ч</div>
+                                                )}
+                                            </div>
+                                            );
+                                        })}
+                                        </div>
+                                    </div>
+                                    </div>
+                                </div>
+                                </div>
+                            ))}
+                            </div>
+                        </div>
+                        </div>
+                    </div>
+                    </div>
+                </div>
+
+                <AnimatePresence>
+                    {modalState.open && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 flex items-center justify-center">
+                        <div className="absolute inset-0 bg-black/40" onClick={() => setModalState((m) => ({ ...m, open: false }))} />
+                        <motion.div initial={{ y: 20, scale: 0.98 }} animate={{ y: 0, scale: 1 }} exit={{ y: 10, scale: 0.98 }} className="bg-white rounded p-4 z-60 w-[720px] shadow-lg">
+                        <div className="flex justify-between items-center mb-2">
+                            <h3 className="text-lg font-semibold">Редактировать смены — Оператор {modalState.opId} — Дата: {modalState.date}</h3>
+                            <button onClick={() => setModalState(m => ({ ...m, open: false }))} className="text-slate-500 hover:text-slate-700 text-xl leading-none">✖</button>
+                        </div>
+
+                        <div className="mb-3">
+                            <div className="text-xs text-slate-500 mb-2">Существующие отрезки:</div>
+                            {(() => {
+                            const op = operators.find(o => o.id === modalState.opId);
+                            const arr = op?.shifts?.[modalState.date] ?? [];
+                            if (arr.length === 0) return <div className="text-xs text-slate-400">Нет отрезков</div>;
+                            return arr.map((seg, idx) => (
+                                <div key={idx} className="flex items-center gap-2 mb-2 border rounded p-2 bg-slate-50">
+                                <div className="text-sm w-32">{seg.start} — {seg.end}{timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? ' (+1)' : ''}</div>
+                                <div className="text-xs text-slate-500">{(((timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? timeToMinutes(seg.end) + 1440 : timeToMinutes(seg.end)) - timeToMinutes(seg.start)) / 60).toFixed(2)} ч</div>
+                                <div className="ml-auto flex gap-2">
+                                    <button className="px-2 py-1 text-xs bg-slate-100 rounded" onClick={() => {
+                                    // edit this segment
+                                    setModalState(m => ({ ...m, start: seg.start, end: seg.end, editIndex: idx, breaks: (seg.breaks ?? []).map(b => ({ start: b.start, end: b.end })) }));
+                                    }}>Изменить</button>
+                                    <button className="px-2 py-1 text-xs bg-red-100 text-red-700 rounded" onClick={() => removeSegment({ opId: modalState.opId, date: modalState.date, index: idx })}>Удалить</button>
+                                </div>
+                                </div>
+                            ));
+                            })()}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 mb-3">
+                            <label className="flex flex-col text-xs">Начало
+                            <input type="time" value={modalState.start} onChange={(e) => setModalState((m) => ({ ...m, start: e.target.value }))} className="mt-1 p-2 border rounded" />
+                            </label>
+                            <label className="flex flex-col text-xs">Конец
+                            <input type="time" value={modalState.end} onChange={(e) => setModalState((m) => ({ ...m, end: e.target.value }))} className="mt-1 p-2 border rounded" />
+                            </label>
+                        </div>
+
+                        <div className="mb-4">
+                            <div className="text-xs text-slate-500 mb-2">Перерывы (можно редактировать):</div>
+                            <div className="border rounded p-2">
+                            {/* miniature bar with draggable breaks */}
+                            <div className="relative h-8 bg-slate-50 rounded" id="mini-bar">
+                                {/* full shift bar */}
+                                <div className="absolute inset-0 flex items-center">
+                                <div className="h-3 bg-slate-200 mx-2 rounded w-full" />
+                                </div>
+                                {/* draggable breaks */}
+                                {modalState.editIndex !== null && (() => {
+                                const op = operators.find(o => o.id === modalState.opId);
+                                const seg = op?.shifts?.[modalState.date]?.[modalState.editIndex];
+                                const segStartMin = seg ? (seg.__startMin ?? timeToMinutes(seg.start)) : timeToMinutes(modalState.start);
+                                const segEndMin = seg ? (seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0))) : timeToMinutes(modalState.end);
+                                const segDur = segEndMin - segStartMin;
+                                const breaksLocal = modalState.breaks && modalState.breaks.length ? modalState.breaks : (seg ? (seg.breaks ?? computeBreaksForShiftMinutes(segStartMin, segEndMin)) : []);
+
+                                return breaksLocal.map((b, i) => {
+                                    // b.start and b.end are absolute minutes relative to original day; convert to offset within segment
+                                    const bStart = b.start - segStartMin;
+                                    const bEnd = b.end - segStartMin;
+                                    const leftPercent = (bStart / segDur) * 100;
+                                    const widthPercent = ((bEnd - bStart) / segDur) * 100;
+                                    return (
+                                    <div key={i}
+                                        className="absolute top-1/2 transform -translate-y-1/2 h-4 rounded bg-amber-300 border border-amber-500 cursor-grab"
+                                        style={{ left: `calc(${leftPercent}% + 16px)`, width: `calc(${widthPercent}% - 0px)` }}
+                                        draggable
+                                        onDragStart={(e) => {
+                                        dragState.current = { index: i, segStartMin, segEndMin, segDur };
+                                        }}
+                                        onDrag={(e) => {
+                                        // Note: onDrag gives clientX; we'll ignore complex cross-browser details. This is a basic implementation.
+                                        if (!dragState.current || !e.clientX) return;
+                                        const bar = document.getElementById('mini-bar');
+                                        const rect = bar.getBoundingClientRect();
+                                        const rel = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                                        const minutes = Math.round((segStartMin + rel * segDur) / 5) * 5; // snap to 5-minute steps
+                                        const idx = dragState.current.index;
+                                        setModalState(m => {
+                                            const nb = (m.breaks ?? breaksLocal).map(x => ({ ...x }));
+                                            // move by centering the break around 'minutes'
+                                            const size = nb[idx].end - nb[idx].start;
+                                            nb[idx].start = Math.max(segStartMin, Math.min(segEndMin - size, minutes - Math.round(size/2)));
+                                            nb[idx].end = nb[idx].start + size;
+                                            return { ...m, breaks: nb };
+                                        });
+                                        }}
+                                        onDragEnd={() => { dragState.current = null; }}
+                                    />
+                                    );
+                                });
+                                })()}
+                            </div>
+
+                            {/* list of breaks with time inputs */}
+                            <div className="mt-2 flex gap-2">
+                                {(modalState.breaks && modalState.breaks.length ? modalState.breaks : []).map((b, i) => (
+                                <div key={i} className="flex items-center gap-2">
+                                    <input type="time" step="300" value={minutesToTime(b.start % 1440)} onChange={(e) => {
+                                    const raw = timeToMinutes(e.target.value); const val = Math.round(raw/5)*5;
+                                    setModalState(m => { const nb = (m.breaks ?? []).map(x => ({ ...x })); nb[i] = { start: val + Math.floor((b.start/1440))*1440, end: val + Math.floor((b.end/1440))*1440 + (b.end - b.start) }; return { ...m, breaks: nb }; });
+                                    }} className="p-1 border rounded text-sm" />
+                                    <span className="text-xs">—</span>
+                                    <input type="time" step="300" value={minutesToTime(b.end % 1440)} onChange={(e) => {
+                                    const val = timeToMinutes(e.target.value);
+                                    setModalState(m => { const nb = (m.breaks ?? []).map(x => ({ ...x })); nb[i] = { start: nb[i].start, end: val + Math.floor((b.end/1440))*1440 }; return { ...m, breaks: nb }; });
+                                    }} className="p-1 border rounded text-sm" />
+                                </div>
+                                ))}
+
+                                {/* if no breaks in modalState, show a button to auto-generate */}
+                                {(!modalState.breaks || modalState.breaks.length === 0) && modalState.editIndex !== null && (() => {
+                                const op = operators.find(o => o.id === modalState.opId);
+                                const seg = op?.shifts?.[modalState.date]?.[modalState.editIndex];
+                                if (!seg) return null;
+                                const segStartMin = seg.__startMin ?? timeToMinutes(seg.start);
+                                const segEndMin = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
+                                return <button className="px-2 py-1 ml-2 rounded bg-sky-600 text-white text-sm" onClick={() => setModalState(m => ({ ...m, breaks: computeBreaksForShiftMinutes(segStartMin, segEndMin) }))}>Сгенерировать перерывы</button>;
+                                })()}
+                            </div>
+                            </div>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 mb-3">
+                            <div className="text-sm text-slate-500">Длительность сегмента: {' '}{(() => { const s = timeToMinutes(modalState.start); let e = timeToMinutes(modalState.end); if (e <= s) e += 1440; const dur = e - s; return dur > 0 ? `${(dur / 60).toFixed(2)} ч` : '—'; })()}</div>
+                            <div className="flex gap-2">
+                            <button className="px-3 py-1 rounded bg-slate-100" onClick={() => setModalState((m) => ({ ...m, open: false }))}>Готово</button>
+                            <button className="px-3 py-1 rounded bg-sky-600 text-white" onClick={() => saveSegment({ opId: modalState.opId, date: modalState.date, start: modalState.start, end: modalState.end, editIndex: modalState.editIndex, breaks: modalState.breaks && modalState.breaks.length ? modalState.breaks : null })}>Сохранить сегмент</button>
+                            </div>
+                        </div>
+
+                        </motion.div>
+                    </motion.div>
+                    )}
+                </AnimatePresence>
+                </div>
+            );
+            }
+
+
         const App = () => {
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
@@ -8945,6 +9749,14 @@
                                             </button>
                                         </li>
                                         <li>
+                                            <button
+                                                onClick={() => setView('work_schedules')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <i className="fas fa-calendar" /> Графики работы
+                                            </button>
+                                        </li>
+                                        <li>
                                             <button onClick={() => setView('trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-book"></i> Учет тренингов
                                             </button>
@@ -8987,6 +9799,14 @@
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
                                                 <i className="fas fa-clock" /> Учет часов
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button
+                                                onClick={() => setView('work_schedules')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <i className="fas fa-calendar" /> Графики работы
                                             </button>
                                         </li>
                                         <li>
@@ -9816,6 +10636,7 @@
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users}/>))}
                             </>
                         )}
                         {user.role === 'sv' && (
