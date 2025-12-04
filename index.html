@@ -5805,7 +5805,7 @@
         function ShiftPlannerViewWithCalendar({ initialOperators }) {
             const [viewMode, setViewMode] = useState('day');
             const [currentDate, setCurrentDate] = useState(() => new Date());
-
+            console.log('Initial operators:', initialOperators);
             const [operators, setOperators] = useState(() => {
                 const copy = JSON.parse(JSON.stringify(initialOperators));
                 const today = todayDateStr();
