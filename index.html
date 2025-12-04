@@ -9743,6 +9743,9 @@
                                                 <i className="fas fa-user-cog"></i> Операторы
                                             </button>
                                         </li>
+
+                                        <hr className="border-t border-gray-700 my-2 opacity-40" />
+
                                         <li>
                                             <button onClick={() => setView('view_scores')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'view_scores' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-chart-bar"></i> Оценки операторов
@@ -9769,6 +9772,9 @@
                                                 <i className="fas fa-book"></i> Учет тренингов
                                             </button>
                                         </li>
+
+                                        <hr className="border-t border-gray-700 my-2 opacity-40" />
+
                                         <li>
                                             <button
                                                 onClick={() => setView('call_division')}
@@ -9782,6 +9788,8 @@
                                                 <i className="fas fa-sliders-h"></i> Мониторинговая шкала
                                             </button>
                                         </li>
+
+                                        <hr className="border-t border-gray-700 my-2 opacity-40" />
                                     </>
                                 )}
                                 {user.role === 'sv' && (
