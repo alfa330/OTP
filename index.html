@@ -5517,7 +5517,7 @@
             );
             }
 
-            const pad = (n) => String(n).padStart(2, "0");
+            const cpad = (n) => String(n).padStart(2, "0");
             const timeToMinutes = (t) => {
             if (!t) return 0;
             const [hh = 0, mm = 0] = String(t).split(":").map(Number);
@@ -5527,7 +5527,7 @@
             m = ((Math.round(m) % (24 * 60)) + (24 * 60)) % (24 * 60);
             const hh = Math.floor(m / 60);
             const mm = m % 60;
-            return `${pad(hh)}:${pad(mm)}`;
+            return `${cpad(hh)}:${cpad(mm)}`;
             };
             const todayDateStr = (d = new Date()) => {
             const yyyy = d.getFullYear();
