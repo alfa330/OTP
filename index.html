@@ -5787,6 +5787,7 @@
         function ShiftPlannerViewWithCalendar({ initialOperators }) {
             const [viewMode, setViewMode] = useState('day');
             const [currentDate, setCurrentDate] = useState(() => new Date());
+            const [selectedSupervisor, setSelectedSupervisor] = useState('');
             const [operators, setOperators] = useState(() => {
                 const today = todayDateStr();
                 const copy = (initialOperators || []).map(op => ({
@@ -5801,6 +5802,26 @@
 
                 return copy;
             });
+
+            // Получаем уникальных супервайзеров из initialOperators
+            const supervisors = useMemo(() => {
+                const svMap = new Map();
+                (initialOperators || []).forEach(op => {
+                    if (op.supervisor_id && op.supervisor_name) {
+                        svMap.set(op.supervisor_id, {
+                            id: op.supervisor_id,
+                            name: op.supervisor_name
+                        });
+                    }
+                });
+                return Array.from(svMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+            }, [initialOperators]);
+
+            // Фильтруем операторов по выбранному супервайзеру
+            const filteredOperators = useMemo(() => {
+                if (!selectedSupervisor) return operators;
+                return operators.filter(op => op.supervisor_id === parseInt(selectedSupervisor));
+            }, [operators, selectedSupervisor]);
 
             const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [] });
             const dragState = useRef(null);
@@ -5907,7 +5928,7 @@
 
             const totalsPerHourForDate = (dateStr) => {
                 const totals = Array.from({ length: 24 }).map(() => 0);
-                operators.forEach(op => {
+                filteredOperators.forEach(op => {
                 const parts = getShiftPartsForDate(op, dateStr);
                 parts.forEach(p => {
                     for (let hour = 0; hour < 24; hour++) {
@@ -5952,6 +5973,18 @@
                             <button onClick={() => setViewMode('day')} className={`px-3 py-1 rounded ${viewMode === 'day' ? 'bg-slate-800 text-white' : 'bg-white'}`}>День</button>
                             <button onClick={() => setViewMode('week')} className={`px-3 py-1 rounded ${viewMode === 'week' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Неделя</button>
                             <button onClick={() => setViewMode('month')} className={`px-3 py-1 rounded ${viewMode === 'month' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Месяц</button>
+                        </div>
+                        <div className="ml-4">
+                            <select 
+                                value={selectedSupervisor} 
+                                onChange={(e) => setSelectedSupervisor(e.target.value)}
+                                className="px-3 py-1 rounded border border-slate-300 bg-white text-sm"
+                            >
+                                <option value="">Все супервайзеры</option>
+                                {supervisors.map(sv => (
+                                    <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                ))}
+                            </select>
                         </div>
                         </div>
                         <div className="flex gap-2 items-center">
@@ -6016,11 +6049,17 @@
 
                         <div className="table-scroll overflow-auto w-full flex-1 min-h-0">
                             <div className="min-w-full w-full">
-                            {operators.map(op => (
+                            {filteredOperators.map(op => (
                                 <div key={op.id} className="flex items-start py-3 border-b">
                                 <div className="w-64 pr-2 sticky left-0 z-20 bg-white border-r">
                                     <div className="font-medium">{op.name}</div>
                                     <div className="text-xs text-slate-500">Оператор</div>
+                                    {op.direction && (
+                                        <div className="text-xs text-slate-600 mt-1">Направление: {op.direction}</div>
+                                    )}
+                                    {op.rate !== undefined && op.rate !== null && (
+                                        <div className="text-xs text-slate-600">Ставка: {op.rate}</div>
+                                    )}
                                 </div>
                                 <div className="flex-1" style={{ overflow: 'visible' }}>
                                     <div className="flex flex-col gap-2">
