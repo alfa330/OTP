@@ -5788,7 +5788,8 @@
             const [viewMode, setViewMode] = useState('day');
             const [currentDate, setCurrentDate] = useState(() => new Date());
             const [selectedSupervisors, setSelectedSupervisors] = useState([]);
-            const [statusFilter, setStatusFilter] = useState('all'); // 'all', 'working', 'unpaid_leave', 'fired'
+            const [selectedStatuses, setSelectedStatuses] = useState([]);
+            const [selectedDirections, setSelectedDirections] = useState([]);
             const [operators, setOperators] = useState(() => {
                 const today = todayDateStr();
                 const copy = (initialOperators || []).map(op => ({
@@ -5821,7 +5822,18 @@
                 return Array.from(supervisorsMap.values()).sort((a, b) => a.name.localeCompare(b.name));
             }, [initialOperators]);
 
-            // Фильтруем операторов по выбранным супервайзерам и статусу
+            // Получаем уникальные направления
+            const uniqueDirections = useMemo(() => {
+                const directionsMap = new Map();
+                (initialOperators || []).forEach(op => {
+                    if (op.direction) {
+                        directionsMap.set(op.direction, op.direction);
+                    }
+                });
+                return Array.from(directionsMap.values()).sort((a, b) => a.localeCompare(b));
+            }, [initialOperators]);
+
+            // Фильтруем операторов по выбранным супервайзерам, статусам и направлениям
             const filteredOperators = useMemo(() => {
                 let filtered = operators;
                 
@@ -5830,13 +5842,14 @@
                     filtered = filtered.filter(op => selectedSupervisors.includes(op.supervisor_id));
                 }
                 
-                // Фильтр по статусу
-                if (statusFilter === 'fired') {
-                    filtered = filtered.filter(op => op.status === 'fired');
-                } else if (statusFilter === 'working') {
-                    filtered = filtered.filter(op => op.status === 'working');
-                } else if (statusFilter === 'unpaid_leave') {
-                    filtered = filtered.filter(op => op.status === 'unpaid_leave');
+                // Фильтр по статусам
+                if (selectedStatuses.length > 0) {
+                    filtered = filtered.filter(op => selectedStatuses.includes(op.status));
+                }
+                
+                // Фильтр по направлениям
+                if (selectedDirections.length > 0) {
+                    filtered = filtered.filter(op => selectedDirections.includes(op.direction));
                 }
                 
                 // Сортировка: сначала по направлению (direction), потом по ФИО (name)
@@ -5852,7 +5865,7 @@
                 });
                 
                 return filtered;
-            }, [operators, selectedSupervisors, statusFilter]);
+            }, [operators, selectedSupervisors, selectedStatuses, selectedDirections]);
 
             const dayRange = useMemo(() => [todayDateStr(new Date(currentDate))], [currentDate]);
             const weekRange = useMemo(() => {
@@ -6030,52 +6043,95 @@
                         </div>
                         <div className="bg-white rounded shadow-sm p-3 w-[260px] flex-shrink-0">
                             <div className="text-sm font-medium mb-2">Фильтр по статусу</div>
-                            <div className="flex flex-col gap-2">
-                                <label className="flex items-center gap-2 cursor-pointer hover:bg-slate-50 rounded px-2 py-1">
+                            <div className="max-h-64 overflow-y-auto border rounded p-2">
+                                <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
                                     <input
-                                        type="radio"
-                                        name="statusFilter"
-                                        value="all"
-                                        checked={statusFilter === 'all'}
-                                        onChange={(e) => setStatusFilter(e.target.value)}
-                                        className="rounded"
-                                    />
-                                    <span className="text-xs">Все</span>
-                                </label>
-                                <label className="flex items-center gap-2 cursor-pointer hover:bg-slate-50 rounded px-2 py-1">
-                                    <input
-                                        type="radio"
-                                        name="statusFilter"
-                                        value="working"
-                                        checked={statusFilter === 'working'}
-                                        onChange={(e) => setStatusFilter(e.target.value)}
+                                        type="checkbox"
+                                        checked={selectedStatuses.includes('working')}
+                                        onChange={(e) => {
+                                            if (e.target.checked) {
+                                                setSelectedStatuses(prev => [...prev, 'working']);
+                                            } else {
+                                                setSelectedStatuses(prev => prev.filter(s => s !== 'working'));
+                                            }
+                                        }}
                                         className="rounded"
                                     />
                                     <span className="text-xs">Активный</span>
                                 </label>
-                                <label className="flex items-center gap-2 cursor-pointer hover:bg-slate-50 rounded px-2 py-1">
+                                <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
                                     <input
-                                        type="radio"
-                                        name="statusFilter"
-                                        value="unpaid_leave"
-                                        checked={statusFilter === 'unpaid_leave'}
-                                        onChange={(e) => setStatusFilter(e.target.value)}
+                                        type="checkbox"
+                                        checked={selectedStatuses.includes('unpaid_leave')}
+                                        onChange={(e) => {
+                                            if (e.target.checked) {
+                                                setSelectedStatuses(prev => [...prev, 'unpaid_leave']);
+                                            } else {
+                                                setSelectedStatuses(prev => prev.filter(s => s !== 'unpaid_leave'));
+                                            }
+                                        }}
                                         className="rounded"
                                     />
                                     <span className="text-xs">БС</span>
                                 </label>
-                                <label className="flex items-center gap-2 cursor-pointer hover:bg-slate-50 rounded px-2 py-1">
+                                <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
                                     <input
-                                        type="radio"
-                                        name="statusFilter"
-                                        value="fired"
-                                        checked={statusFilter === 'fired'}
-                                        onChange={(e) => setStatusFilter(e.target.value)}
+                                        type="checkbox"
+                                        checked={selectedStatuses.includes('fired')}
+                                        onChange={(e) => {
+                                            if (e.target.checked) {
+                                                setSelectedStatuses(prev => [...prev, 'fired']);
+                                            } else {
+                                                setSelectedStatuses(prev => prev.filter(s => s !== 'fired'));
+                                            }
+                                        }}
                                         className="rounded"
                                     />
                                     <span className="text-xs">Уволенные</span>
                                 </label>
                             </div>
+                            {selectedStatuses.length > 0 && (
+                                <button
+                                    onClick={() => setSelectedStatuses([])}
+                                    className="mt-2 w-full px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
+                                >
+                                    Сбросить фильтр
+                                </button>
+                            )}
+                        </div>
+                        <div className="bg-white rounded shadow-sm p-3 w-[260px] flex-shrink-0">
+                            <div className="text-sm font-medium mb-2">Фильтр по направлениям</div>
+                            <div className="max-h-64 overflow-y-auto border rounded p-2">
+                                {uniqueDirections.length === 0 ? (
+                                    <div className="text-xs text-slate-400">Нет направлений</div>
+                                ) : (
+                                    uniqueDirections.map(dir => (
+                                        <label key={dir} className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
+                                            <input
+                                                type="checkbox"
+                                                checked={selectedDirections.includes(dir)}
+                                                onChange={(e) => {
+                                                    if (e.target.checked) {
+                                                        setSelectedDirections(prev => [...prev, dir]);
+                                                    } else {
+                                                        setSelectedDirections(prev => prev.filter(d => d !== dir));
+                                                    }
+                                                }}
+                                                className="rounded"
+                                            />
+                                            <span className="text-xs">{dir}</span>
+                                        </label>
+                                    ))
+                                )}
+                            </div>
+                            {selectedDirections.length > 0 && (
+                                <button
+                                    onClick={() => setSelectedDirections([])}
+                                    className="mt-2 w-full px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
+                                >
+                                    Сбросить фильтр
+                                </button>
+                            )}
                         </div>
                     </div>
                     <div className="flex-1 min-w-0 flex flex-col h-full">
