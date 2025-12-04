@@ -9744,7 +9744,7 @@
                                             </button>
                                         </li>
 
-                                        <hr className="border-t border-white-700 my-2 opacity-40" />
+                                        <div className="h-px bg-gray-700/40 my-3"></div>
 
                                         <li>
                                             <button onClick={() => setView('view_scores')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'view_scores' ? 'bg-blue-700' : ''}`}>
@@ -9788,8 +9788,6 @@
                                                 <i className="fas fa-sliders-h"></i> Мониторинговая шкала
                                             </button>
                                         </li>
-
-                                        <hr className="border-t border-white-700 my-2 opacity-40" />
                                     </>
                                 )}
                                 {user.role === 'sv' && (
@@ -9859,6 +9857,9 @@
                                         <i className="fas fa-calculator"></i> Калькулятор зарплаты
                                     </button>
                                 </li>
+
+                                <hr className="border-t border-white-700 my-2 opacity-40" />
+
                                <li className="relative" ref={sidebarAccountRef}>
                                 <button
                                     onClick={handleToggleDropdown}
