@@ -65,7 +65,7 @@
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef, useMemo } = React;
-        const { motion, AnimatePresence } = window['framer-motion'];
+        const { motion, AnimatePresence } = window.framerMotion;
         const ToastContainer = ({ toasts, removeToast }) => {
             const handleClose = (id) => {
                 setToasts(prev => prev.map(toast => 
