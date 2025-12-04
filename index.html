@@ -5955,9 +5955,9 @@
                         </div>
                         </div>
                         <div className="flex gap-2 items-center">
-                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded">◀</button>
+                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-left"></i></button>
                         <div className="text-sm">{currentDate.toLocaleDateString()}</div>
-                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded">▶</button>
+                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-right"></i></button>
                         </div>
                     </div>
 
