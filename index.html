@@ -11083,6 +11083,7 @@
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users}/>))}
                             </>
                         )}
                         {user.role === 'operator' && (
