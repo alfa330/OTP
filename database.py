@@ -2077,9 +2077,6 @@ class Database:
         - All active (даты dd.mm.yyyy, ФИО с рамкой, ячейки часов >0 — серый B3B3B3);
         - Листы операторов: дата в формате dd.mm.yyyy в объединённой ячейке на день,
         длительности в числовом формате (часы, 2 знака), длительности окрашены в цвет статуса.
-        В строке "Итого" на листах операторов:
-        - колонка C: "В работе" (зелёный),
-        - колонка D: итог рабочих часов (active + iesigning) в часах, 2 знака.
         """
         def sanitize_table_name(name):
             sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', (name or ""))
@@ -2169,6 +2166,7 @@ class Database:
             dates = [month_start_date + timedelta(days=i) for i in range((end_date - month_start_date).days + 1)]
 
             # Подготовим переводы статусов и заливки
+            # перевод статусов, согласно вашему запросу:
             status_display = {
                 'active': 'Активен',
                 'tech': 'Перерыв',
@@ -2181,7 +2179,7 @@ class Database:
             # стили и заливки
             total_fill = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
             status_fill = PatternFill(start_color="F7F7F7", end_color="F7F7F7", fill_type="solid")
-            green_fill = PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")   # active / "В работе"
+            green_fill = PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")   # active
             orange_fill = PatternFill(start_color="FFE8C0", end_color="FFE8C0", fill_type="solid")  # break/tech
             yellow_fill = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")  # training
             purple_fill = PatternFill(start_color="E8D7F7", end_color="E8D7F7", fill_type="solid")  # tech/alt
@@ -2189,12 +2187,13 @@ class Database:
             inactive_fill = PatternFill(start_color="FFDADA", end_color="FFDADA", fill_type="solid")# inactive
             grey_fill = PatternFill(start_color="B3B3B3", end_color="B3B3B3", fill_type="solid")     # All active >0
 
+            # Соответствие статуса -> заливка (используем явное сопоставление)
             status_fill_map = {
                 'active': green_fill,
                 'iesigning': blue_fill,
                 'break': orange_fill,
                 'training': yellow_fill,
-                'tech': orange_fill,
+                'tech': orange_fill,      # вы просили tech = "Перерыв", поэтому даём тот же цвет что и break
                 'inactive': inactive_fill
             }
 
@@ -2432,40 +2431,48 @@ class Database:
 
                 def write_day_totals_row(r, day_dt, counts_dict, day_status_times_dict):
                     """
-                    Записывает одну строку 'Итого' с колонками:
-                    - C => "В работе" (зелёная заливка)
-                    - D => итог рабочих часов (active + iesigning) в часах 0.00
-                    - E..I => часы по каждому статусу (как раньше)
-                    - J..N => секунды по статусам
+                    Записывает одну строку 'Итого' с:
+                    - A остаётся пустой (дата в объединённой ячейке выше),
+                    - B = "Итого",
+                    - C = "В работе" (зелёная заливка),
+                    - D = суммарные рабочие часы (active + iesigning) — число часов с 2 знаками,
+                    - E..I = по-статусные часы (как раньше),
+                    - J..N = секунды (скрытые).
                     Возвращает следующий свободный row.
-                    (A оставляем пустым — дата будет в объединённой ячейке)
                     """
                     # A остаётся пустой (объединённая ячейка)
                     ws.cell(r, 2).value = "Итого"
 
-                    # C -> "В работе" зелёная
-                    ccell = ws.cell(r, 3)
-                    ccell.value = "В работе"
-                    ccell.fill = green_fill
-                    ccell.font = Font(bold=True)
-                    ccell.alignment = Alignment(horizontal='center', vertical='center')
-                    ccell.border = thin_border
+                    # -------------- Колонка C: "В работе" (зелёный) --------------
+                    work_cell = ws.cell(r, 3)
+                    work_cell.value = "В работе"
+                    work_cell.alignment = Alignment(horizontal='center', vertical='center')
+                    work_cell.font = Font(bold=True)
+                    # используем заливку для active (green_fill) — предполагается, что green_fill определён в скоупе
+                    if 'green_fill' in globals():
+                        work_cell.fill = green_fill
+                    else:
+                        # если у вас локально green_fill в enclosing scope, оно будет использовано;
+                        # иначе можно использовать явную PatternFill здесь.
+                        work_cell.fill = PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")
 
-                    # D -> итог рабочих часов (active + iesigning) в часах (число, 0.00)
+                    work_cell.border = thin_border
+
+                    # -------------- Колонка D: суммарные рабочие часы (active + iesigning) --------------
                     active_td = day_status_times_dict.get('active', timedelta(0))
                     iesigning_td = day_status_times_dict.get('iesigning', timedelta(0))
-                    total_work_sec = int(active_td.total_seconds() + iesigning_td.total_seconds())
+                    total_work_sec = int((active_td + iesigning_td).total_seconds())
                     total_work_hours = round(total_work_sec / 3600.0, 2)
-                    dcell = ws.cell(r, 4)
-                    dcell.value = total_work_hours
-                    dcell.number_format = '0.00'
-                    dcell.alignment = Alignment(horizontal='center', vertical='center')
-                    dcell.border = thin_border
-                    # если >0, окрашиваем в цвет active (зелёный)
-                    if total_work_hours > 0:
-                        dcell.fill = green_fill
 
-                    # стиль для A..B (A пустая объединённая) и остальные
+                    hours_cell = ws.cell(r, 4)
+                    hours_cell.value = total_work_hours
+                    hours_cell.number_format = '0.00'
+                    hours_cell.alignment = Alignment(horizontal='center', vertical='center')
+                    hours_cell.border = thin_border
+                    # окрашивать длительность в цвет статуса - тут суммарный рабочий цвет делаем зелёным
+                    hours_cell.fill = green_fill if 'green_fill' in globals() else PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")
+
+                    # стиль для A..B (как раньше — total_fill)
                     for c in range(1, 3):
                         cell = ws.cell(r, c)
                         cell.fill = total_fill
@@ -2473,7 +2480,7 @@ class Database:
                         cell.alignment = Alignment(horizontal='center', vertical='center')
                         cell.border = thin_border
 
-                    # колонки итогов E..I (часы) и J..N (сек)
+                    # -------------- Колонки E..I и J..N (оставляем прежнюю логику) --------------
                     for idx, (status_key, status_name, fill) in enumerate(status_order):
                         dur = day_status_times_dict.get(status_key, timedelta(0))
                         dur_sec = int(dur.total_seconds())
@@ -2508,7 +2515,7 @@ class Database:
                             merged_cell.value = current_day.strftime("%d.%m.%Y")
                             merged_cell.alignment = Alignment(horizontal='center', vertical='center')
 
-                        # записать строку итогов предыдущего дня (теперь с "В работе" и итогом часов)
+                        # записать строку итогов предыдущего дня
                         counts = counts_per_op[op_id][current_day]
                         current_row = write_day_totals_row(current_row, current_day, counts, day_status_times)
                         # сброс
@@ -2560,6 +2567,7 @@ class Database:
                     if fill_for_cell is not None:
                         cell_stat.fill = fill_for_cell
                     else:
+                        # fallback
                         if status_key == 'inactive':
                             cell_stat.fill = inactive_fill
 
