@@ -2072,11 +2072,11 @@ class Database:
     def generate_monthly_report(self, supervisor_id, month=None, current_date=None):
         """
         Генерация месячного отчёта (xlsx).
-        Summary: даты по столбцам + цветной RichText активаций/деактиваций.
-        Operator sheets: строки событий + одна строка "Итого" на день с колонками-итогами
-        (E..I человеко-читаемые -> теперь ЧАСЫ с 2 знаками, J..N — секунды, скрытые для сортировки).
-        Добавлен лист "All active" — суммы часов активности ("active","iesigning") по дням
-        по каждому оператору и итог (в формате часов с 2 знаками после запятой).
+        Включает:
+        - Summary (как раньше);
+        - All active (даты dd.mm.yyyy, ФИО с рамкой, ячейки часов >0 — серый B3B3B3);
+        - Листы операторов: дата в формате dd.mm.yyyy в объединённой ячейке на день,
+        длительности в числовом формате (часы, 2 знака), длительности окрашены в цвет статуса.
         """
         def sanitize_table_name(name):
             sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', (name or ""))
@@ -2165,6 +2165,47 @@ class Database:
             # Список дат для summary (от 1 числа до end_date)
             dates = [month_start_date + timedelta(days=i) for i in range((end_date - month_start_date).days + 1)]
 
+            # Подготовим переводы статусов и заливки
+            # перевод статусов, согласно вашему запросу:
+            status_display = {
+                'active': 'Активен',
+                'tech': 'Перерыв',
+                'break': 'Перерыв',
+                'training': 'Тренинг',
+                'iesigning': 'Подписание',
+                'inactive': 'Завершил смену'
+            }
+
+            # стили и заливки
+            total_fill = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
+            status_fill = PatternFill(start_color="F7F7F7", end_color="F7F7F7", fill_type="solid")
+            green_fill = PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")   # active
+            orange_fill = PatternFill(start_color="FFE8C0", end_color="FFE8C0", fill_type="solid")  # break/tech
+            yellow_fill = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")  # training
+            purple_fill = PatternFill(start_color="E8D7F7", end_color="E8D7F7", fill_type="solid")  # tech/alt
+            blue_fill = PatternFill(start_color="DCEEFF", end_color="DCEEFF", fill_type="solid")    # iesigning
+            inactive_fill = PatternFill(start_color="FFDADA", end_color="FFDADA", fill_type="solid")# inactive
+            grey_fill = PatternFill(start_color="B3B3B3", end_color="B3B3B3", fill_type="solid")     # All active >0
+
+            # Соответствие статуса -> заливка (используем явное сопоставление)
+            status_fill_map = {
+                'active': green_fill,
+                'iesigning': blue_fill,
+                'break': orange_fill,
+                'training': yellow_fill,
+                'tech': orange_fill,      # вы просили tech = "Перерыв", поэтому даём тот же цвет что и break
+                'inactive': inactive_fill
+            }
+
+            # порядок статусов для колонок итогов E..I (исключаем 'inactive')
+            status_order = [
+                ('active', status_display.get('active', 'active'), status_fill_map.get('active')),
+                ('iesigning', status_display.get('iesigning', 'iesigning'), status_fill_map.get('iesigning')),
+                ('break', status_display.get('break', 'break'), status_fill_map.get('break')),
+                ('training', status_display.get('training', 'training'), status_fill_map.get('training')),
+                ('tech', status_display.get('tech', 'tech'), status_fill_map.get('tech')),
+            ]
+
             # --------- НОВЫЙ БЛОК: подсчёт суммарных секунд активности (active + iesigning) по дням для каждого оператора
             active_seconds_per_op_per_day = defaultdict(lambda: defaultdict(int))
             for op_id, logs in logs_per_op.items():
@@ -2198,7 +2239,7 @@ class Database:
             ws_summary.cell(1, last_date_col + 1).value = "Итого активаций"
             ws_summary.cell(1, last_date_col + 2).value = "Итого деактиваций"
 
-            # шрифты для rich text
+            # шрифты для rich text (если доступны)
             green_font = InlineFont(color="00AA00") if InlineFont else None
             red_font = InlineFont(color="AA0000") if InlineFont else None
             default_font = InlineFont() if InlineFont else None
@@ -2271,9 +2312,6 @@ class Database:
                 cell = ws_all_active.cell(1, c)
                 cell.font = Font(bold=True)
                 cell.border = thin_border
-
-            # подготовим заливки
-            grey_fill = PatternFill(start_color="B3B3B3", end_color="B3B3B3", fill_type="solid")
 
             row = 2
             daily_totals_seconds = defaultdict(int)
@@ -2356,23 +2394,6 @@ class Database:
             # 2) Листы по операторам: события + одна строка итого на день с колонками итогов
             #    (E..I — ЧАСЫ с 2 знаками, J..N — секунды скрытые)
             # -------------------------
-            total_fill = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
-            status_fill = PatternFill(start_color="F7F7F7", end_color="F7F7F7", fill_type="solid")
-            green_fill = PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")
-            orange_fill = PatternFill(start_color="FFE8C0", end_color="FFE8C0", fill_type="solid")
-            yellow_fill = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
-            purple_fill = PatternFill(start_color="E8D7F7", end_color="E8D7F7", fill_type="solid")
-            blue_fill = PatternFill(start_color="DCEEFF", end_color="DCEEFF", fill_type="solid")
-            inactive_fill = PatternFill(start_color="FFDADA", end_color="FFDADA", fill_type="solid")
-
-            status_order = [
-                ('active', 'Активен', green_fill),
-                ('iesigning', 'Подписание', blue_fill),
-                ('break', 'Перерыв', orange_fill),
-                ('training', 'Тренинг', yellow_fill),
-                ('tech', 'Тех. поддержка', purple_fill),
-            ]
-
             for op_id, name in operators_dict.items():
                 ws = wb.create_sheet(title=(name[:31] or f"op_{op_id}"))
 
@@ -2416,6 +2437,7 @@ class Database:
                     """
                     # A остаётся пустой (объединённая ячейка)
                     ws.cell(r, 2).value = "Итого"
+                    # количество активаций/деактиваций — отображаем цветным rich text если есть
                     ws.cell(r, 3).value = CellRichText([TextBlock(green_font, str(counts_dict['act'])), TextBlock(default_font, " | "), TextBlock(red_font, str(counts_dict['deact']))]) if CellRichText and TextBlock and green_font and red_font else f"{counts_dict['act']} | {counts_dict['deact']}"
                     ws.cell(r, 4).value = ""  # оставляем D пустой в строке Итого
 
@@ -2434,14 +2456,14 @@ class Database:
                         dur_hours = round(dur_sec / 3600.0, 2)
                         col_read = 5 + idx   # E..I
                         col_sec = 10 + idx   # J..N
-                        # записываем часы (число)
                         rcell = ws.cell(r, col_read)
                         rcell.value = dur_hours
                         rcell.number_format = '0.00'
-                        rcell.alignment = Alignment(horizontal='center', vertical='center')
+                        rcell.alignment = Alignment(horizontal='center', vertical='Center')
                         rcell.border = thin_border
-                        if dur_hours > 0:
-                            rcell.fill = grey_fill
+                        # заливаем в цвет статуса, если >0
+                        if dur_hours > 0 and fill is not None:
+                            rcell.fill = fill
                         ws.cell(r, col_sec).value = dur_sec
                         ws.cell(r, col_sec).alignment = Alignment(horizontal='center', vertical='center')
                         ws.cell(r, col_sec).border = thin_border
@@ -2491,7 +2513,11 @@ class Database:
                     # пишем событие (A..D)
                     # A оставляем пустой — объединится позже
                     ws.cell(current_row, 2).value = log['change_time'].strftime("%H:%M:%S")
-                    ws.cell(current_row, 3).value = log['is_active'].capitalize()
+                    # статус — русская версия
+                    status_key = log['is_active']
+                    status_rus = status_display.get(status_key, status_key)
+                    ws.cell(current_row, 3).value = status_rus
+
                     # длительность — ЧАСЫ числом с 2 знаками или пусто для дубликата
                     dur_cell = ws.cell(current_row, 4)
                     if dur_hours is None:
@@ -2499,20 +2525,20 @@ class Database:
                     else:
                         dur_cell.value = dur_hours
                         dur_cell.number_format = '0.00'
-                    # заливка статуса
+                        # окрашиваем длительность в цвет статуса (если сопоставление есть)
+                        fill = status_fill_map.get(status_key)
+                        if fill is not None:
+                            dur_cell.fill = fill
+
+                    # заливка статуса в колонке C (сам статус)
                     cell_stat = ws.cell(current_row, 3)
-                    if log['is_active'] == 'active':
-                        cell_stat.fill = green_fill
-                    elif log['is_active'] == 'break':
-                        cell_stat.fill = orange_fill
-                    elif log['is_active'] == 'training':
-                        cell_stat.fill = yellow_fill
-                    elif log['is_active'] == 'tech':
-                        cell_stat.fill = purple_fill
-                    elif log['is_active'] == 'iesigning':
-                        cell_stat.fill = blue_fill
-                    elif log['is_active'] == 'inactive':
-                        cell_stat.fill = inactive_fill
+                    fill_for_cell = status_fill_map.get(status_key)
+                    if fill_for_cell is not None:
+                        cell_stat.fill = fill_for_cell
+                    else:
+                        # fallback
+                        if status_key == 'inactive':
+                            cell_stat.fill = inactive_fill
 
                     # границы и выравнивание для строки события
                     for col_idx in range(1, 15):
@@ -2558,149 +2584,6 @@ class Database:
             logging.error(f"Error generating report: {e}")
             return None, None
 
-        
-    def get_user_history(self, user_id):
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT uh.id, uh.field_changed, uh.old_value, uh.new_value, uh.changed_at, u.name AS changed_by_name
-                FROM user_history uh
-                LEFT JOIN users u ON uh.changed_by = u.id
-                WHERE uh.user_id = %s
-                ORDER BY uh.changed_at DESC
-            """, (user_id,))
-            return [
-                {
-                    "id": row[0],
-                    "field": row[1],
-                    "old_value": row[2],
-                    "new_value": row[3],
-                    "changed_at": row[4].strftime('%Y-%m-%d %H:%M:%S'),
-                    "changed_by": row[5] or "System"
-                } for row in cursor.fetchall()
-            ]
-
-    def generate_users_report(self, current_date=None):
-        """
-        Generates an Excel report of all operators with columns: ФИО | Направление | Супервайзер | Статус | Ставка | Дата принятия | Логин.
-    
-        :param current_date: Optional, current date for filename (defaults to today).
-        :return: (filename, content) or (None, None) on error.
-        """
-        try:
-            if current_date is None:
-                current_date = date.today()
-            else:
-                current_date = datetime.strptime(current_date, "%Y-%m-%d").date() if isinstance(current_date, str) else current_date
-    
-            filename = f"users_report_{current_date.strftime('%Y-%m-%d')}.xlsx"
-    
-            # Fetch all operators with required data
-            with self._get_cursor() as cursor:
-                cursor.execute("""
-                    SELECT u.name, COALESCE(d.name, 'N/A') as direction, COALESCE(s.name, 'N/A') as supervisor,
-                           u.status, u.rate, u.hire_date, u.supervisor_id, u.login
-                    FROM users u
-                    LEFT JOIN directions d ON u.direction_id = d.id
-                    LEFT JOIN users s ON u.supervisor_id = s.id
-                    WHERE u.role = 'operator'
-                    ORDER BY s.name, u.name
-                """)
-                all_operators = cursor.fetchall()
-    
-            if not all_operators:
-                logging.warning("No operators found for users report")
-                return None, None
-    
-            # Group by supervisor
-            operators_by_supervisor = defaultdict(list)
-            supervisors = {}  # supervisor_id -> name
-            for row in all_operators:
-                name, direction, supervisor, status, rate, hire_date, sup_id, login = row
-                operators_by_supervisor[sup_id].append((name, direction, supervisor, status, rate, hire_date, login))
-                if sup_id and supervisor != 'N/A':
-                    supervisors[sup_id] = supervisor
-    
-            # Create workbook
-            wb = Workbook()
-            ws_summary = wb.active
-            ws_summary.title = "Summary"
-    
-            # Headers for summary
-            headers = ["ФИО", "Направление", "Супервайзер", "Статус", "Ставка", "Дата принятия", "Логин"]
-            for col, header in enumerate(headers, start=1):
-                cell = ws_summary.cell(1, col)
-                cell.value = header
-                cell.font = Font(bold=True)
-    
-            # Fill summary data
-            row = 2
-            for op in all_operators:
-                name, direction, supervisor, status, rate, hire_date, _, login = op
-                ws_summary.cell(row, 1).value = name
-                ws_summary.cell(row, 2).value = direction
-                ws_summary.cell(row, 3).value = supervisor
-                ws_summary.cell(row, 4).value = status
-                ws_summary.cell(row, 5).value = float(rate) if rate else 1.0
-                ws_summary.cell(row, 6).value = hire_date.strftime('%Y-%m-%d') if hire_date else 'N/A'
-                ws_summary.cell(row, 7).value = login
-                row += 1
-    
-            # Add table to summary
-            tab_summary = Table(displayName="SummaryTable", ref=f"A1:G{row-1}")
-            style = TableStyleInfo(name="TableStyleMedium2", showFirstColumn=True, showLastColumn=False, showRowStripes=True, showColumnStripes=False)
-            tab_summary.tableStyleInfo = style
-            ws_summary.add_table(tab_summary)
-    
-            # Auto-adjust columns
-            for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G']:
-                ws_summary.column_dimensions[col].auto_size = True
-    
-            # Create per-supervisor sheets
-            for sup_id, ops in operators_by_supervisor.items():
-                sup_name = supervisors.get(sup_id, "No Supervisor")
-                sheet_title = sup_name[:31]  # Truncate to Excel sheet name limit
-                ws = wb.create_sheet(title=sheet_title)
-    
-                # Headers
-                for col, header in enumerate(headers, start=1):
-                    cell = ws.cell(1, col)
-                    cell.value = header
-                    cell.font = Font(bold=True)
-    
-                # Fill data
-                row = 2
-                for name, direction, supervisor, status, rate, hire_date, login in ops:
-                    ws.cell(row, 1).value = name
-                    ws.cell(row, 2).value = direction
-                    ws.cell(row, 3).value = supervisor
-                    ws.cell(row, 4).value = status
-                    ws.cell(row, 5).value = float(rate) if rate else 1.0
-                    ws.cell(row, 6).value = hire_date.strftime('%Y-%m-%d') if hire_date else 'N/A'
-                    ws.cell(row, 7).value = login
-                    row += 1
-    
-                # Add table
-                if row > 2:
-                    table_ref = f"A1:G{row-1}"
-                    tab = Table(displayName=f"Table_{sheet_title.replace(' ', '_')}", ref=table_ref)
-                    tab.tableStyleInfo = style
-                    ws.add_table(tab)
-    
-                # Auto-adjust columns
-                for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G']:
-                    ws.column_dimensions[col].auto_size = True
-    
-            # Save to BytesIO
-            output = BytesIO()
-            wb.save(output)
-            output.seek(0)
-            content = output.getvalue()
-    
-            return filename, content
-    
-        except Exception as e:
-            logging.error(f"Error generating users report: {e}")
-            return None, None
 
 
     def add_training(self, operator_id, training_date, start_time, end_time, reason, comment, created_by, count_in_hours=True):
