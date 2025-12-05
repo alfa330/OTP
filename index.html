@@ -6244,10 +6244,8 @@
                                         )}
                                     </div>
                                 </div>
-                                <div className="flex-1" style={{ overflow: 'visible' }}>
-                                    <div className="flex flex-col gap-2">
-                                    <div className="grid grid-cols-1 gap-2">
-                                        <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
+                                <div className="flex-1">
+                                    <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
                                         {visibleRange.map(d => {
                                             const parts = getShiftPartsForDate(op, d);
                                             const origArr = (op.shifts?.[d] ?? []).map((s, idx) => {
@@ -6330,8 +6328,6 @@
                                             </div>
                                             );
                                         })}
-                                        </div>
-                                    </div>
                                     </div>
                                 </div>
                                 </div>
