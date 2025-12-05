@@ -5808,18 +5808,33 @@
             const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [] });
             const dragState = useRef(null);
 
-            // Получаем уникальных супервайзеров
+            // Получаем уникальных супервайзеров (скрываем тех, у кого все операторы со статусом "fired")
             const uniqueSupervisors = useMemo(() => {
                 const supervisorsMap = new Map();
+                const supervisorsOperators = new Map();
+                
+                // Собираем всех операторов по супервайзерам
                 (initialOperators || []).forEach(op => {
                     if (op.supervisor_id && op.supervisor_name) {
+                        if (!supervisorsOperators.has(op.supervisor_id)) {
+                            supervisorsOperators.set(op.supervisor_id, []);
+                        }
+                        supervisorsOperators.get(op.supervisor_id).push(op);
+                        
                         supervisorsMap.set(op.supervisor_id, {
                             id: op.supervisor_id,
                             name: op.supervisor_name
                         });
                     }
                 });
-                return Array.from(supervisorsMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+                
+                // Фильтруем: оставляем только тех супервайзеров, у которых есть хотя бы один оператор не со статусом "fired"
+                const filtered = Array.from(supervisorsMap.values()).filter(sv => {
+                    const operators = supervisorsOperators.get(sv.id) || [];
+                    return operators.some(op => op.status !== 'fired');
+                });
+                
+                return filtered.sort((a, b) => a.name.localeCompare(b.name));
             }, [initialOperators]);
 
             // Получаем уникальные направления
@@ -6006,7 +6021,7 @@
                 <div className="p-4 min-h-screen bg-slate-50">
                 <div className="flex items-start gap-4 mb-4 h-[calc(100vh-2rem)]">
                     <div className="flex flex-col gap-3">
-                        <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
+                    <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
                         <div className="bg-white rounded shadow-sm p-3 w-[260px] flex-shrink-0">
                             <div className="text-sm font-medium mb-2">Фильтр по супервайзерам</div>
                             <div className="max-h-64 overflow-y-auto border rounded p-2">
