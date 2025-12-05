@@ -2069,357 +2069,459 @@ class Database:
             return None
 
         
-    def generate_monthly_report(self, supervisor_id, month=None, current_date=None):
-        """
-        Генерация месячного отчёта (xlsx).
-        Summary: даты по столбцам + цветной RichText активаций/деактиваций.
-        Operator sheets: строки событий + одна строка "Итого" на день с колонками-итогами
-        (E..I человеко-читаемые в формате HH:MM:SS, J..N — секунды, скрытые для сортировки).
-        """
-        def sanitize_table_name(name):
-            sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', (name or ""))
-            if not sanitized or (not sanitized[0].isalpha() and sanitized[0] != '_'):
-                sanitized = f"_{sanitized}"
-            return sanitized[:255]
+def generate_monthly_report(self, supervisor_id, month=None, current_date=None):
+    """
+    Генерация месячного отчёта (xlsx).
+    Summary: даты по столбцам + цветной RichText активаций/деактиваций.
+    Operator sheets: строки событий + одна строка "Итого" на день с колонками-итогами
+    (E..I человеко-читаемые в формате HH:MM:SS, J..N — секунды, скрытые для сортировки).
+    Добавлен лист "All active" — суммы часов активности ("active","iesigning") по дням
+    по каждому оператору и итог (в формате часов с 2 знаками после запятой).
+    """
+    def sanitize_table_name(name):
+        sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', (name or ""))
+        if not sanitized or (not sanitized[0].isalpha() and sanitized[0] != '_'):
+            sanitized = f"_{sanitized}"
+        return sanitized[:255]
 
-        def format_hms(duration):
-            """Возвращает строку HH:MM:SS, где hours может быть >=24 (полные часы)."""
-            if duration is None:
-                return "N/A"
-            total = int(duration.total_seconds())
-            if total < 0:
-                return "N/A"
-            h = total // 3600
-            m = (total % 3600) // 60
-            s = total % 60
-            return f"{h:02d}:{m:02d}:{s:02d}"
+    def format_hms(duration):
+        """Возвращает строку HH:MM:SS, где hours может быть >=24 (полные часы)."""
+        if duration is None:
+            return "N/A"
+        total = int(duration.total_seconds())
+        if total < 0:
+            return "N/A"
+        h = total // 3600
+        m = (total % 3600) // 60
+        s = total % 60
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
-        try:
-            if current_date is None:
-                current_date = date.today()
+    try:
+        if current_date is None:
+            current_date = date.today()
+        else:
+            current_date = datetime.strptime(current_date, "%Y-%m-%d").date() if isinstance(current_date, str) else current_date
+
+        if month is None:
+            year = current_date.year
+            mon = current_date.month
+        else:
+            try:
+                year, mon = map(int, month.split('-'))
+                if not (1 <= mon <= 12):
+                    raise ValueError("Invalid month")
+            except:
+                raise ValueError("Invalid month format. Use YYYY-MM")
+
+        month_str = f"{year}-{mon:02d}"
+        filename = f"monthly_report_supervisor_{supervisor_id}_{month_str}.xlsx"
+
+        month_start_date = date(year, mon, 1)
+        days_in_month = calendar.monthrange(year, mon)[1]
+        month_end = date(year, mon, days_in_month)
+        end_date = min(month_end, current_date)
+
+        end_time = datetime.combine(end_date, dt_time(23, 59, 59))
+
+        # Получаем данные
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, name
+                FROM users
+                WHERE supervisor_id = %s AND role = 'operator'
+            """, (supervisor_id,))
+            operators = cursor.fetchall()
+            if not operators:
+                raise ValueError("No operators found for the given supervisor")
+            operators_dict = {op[0]: op[1] for op in operators}
+
+            cursor.execute("""
+                SELECT o.operator_id, o.change_time, o.is_active
+                FROM operator_activity_logs o
+                JOIN users u ON o.operator_id = u.id
+                WHERE u.supervisor_id = %s AND u.role = 'operator'
+                AND o.change_time >= %s
+                AND o.change_time < %s + INTERVAL '1 DAY'
+                ORDER BY o.operator_id, o.change_time
+            """, (supervisor_id, month_start_date, end_date))
+            all_logs = cursor.fetchall()
+
+        # Группируем логи и считаем активации/деактивации для summary
+        logs_per_op = defaultdict(list)
+        counts_per_op = defaultdict(lambda: defaultdict(lambda: {'act': 0, 'deact': 0}))
+        total_counts_per_op = defaultdict(lambda: {'act': 0, 'deact': 0})
+
+        for log in all_logs:
+            op_id, change_time, is_active = log
+            dt = change_time.date()
+            logs_per_op[op_id].append({'change_time': change_time, 'is_active': is_active, 'date': dt})
+            if is_active == 'active':
+                counts_per_op[op_id][dt]['act'] += 1
+                total_counts_per_op[op_id]['act'] += 1
             else:
-                current_date = datetime.strptime(current_date, "%Y-%m-%d").date() if isinstance(current_date, str) else current_date
+                counts_per_op[op_id][dt]['deact'] += 1
+                total_counts_per_op[op_id]['deact'] += 1
 
-            if month is None:
-                year = current_date.year
-                mon = current_date.month
-            else:
-                try:
-                    year, mon = map(int, month.split('-'))
-                    if not (1 <= mon <= 12):
-                        raise ValueError("Invalid month")
-                except:
-                    raise ValueError("Invalid month format. Use YYYY-MM")
+        # Список дат для summary (от 1 числа до end_date)
+        dates = [month_start_date + timedelta(days=i) for i in range((end_date - month_start_date).days + 1)]
 
-            month_str = f"{year}-{mon:02d}"
-            filename = f"monthly_report_supervisor_{supervisor_id}_{month_str}.xlsx"
-
-            month_start_date = date(year, mon, 1)
-            days_in_month = calendar.monthrange(year, mon)[1]
-            month_end = date(year, mon, days_in_month)
-            end_date = min(month_end, current_date)
-
-            end_time = datetime.combine(end_date, dt_time(23, 59, 59))
-
-            # Получаем данные
-            with self._get_cursor() as cursor:
-                cursor.execute("""
-                    SELECT id, name
-                    FROM users
-                    WHERE supervisor_id = %s AND role = 'operator'
-                """, (supervisor_id,))
-                operators = cursor.fetchall()
-                if not operators:
-                    raise ValueError("No operators found for the given supervisor")
-                operators_dict = {op[0]: op[1] for op in operators}
-
-                cursor.execute("""
-                    SELECT o.operator_id, o.change_time, o.is_active
-                    FROM operator_activity_logs o
-                    JOIN users u ON o.operator_id = u.id
-                    WHERE u.supervisor_id = %s AND u.role = 'operator'
-                    AND o.change_time >= %s
-                    AND o.change_time < %s + INTERVAL '1 DAY'
-                    ORDER BY o.operator_id, o.change_time
-                """, (supervisor_id, month_start_date, end_date))
-                all_logs = cursor.fetchall()
-
-            # Группируем логи и считаем активации/деактивации для summary
-            logs_per_op = defaultdict(list)
-            counts_per_op = defaultdict(lambda: defaultdict(lambda: {'act': 0, 'deact': 0}))
-            total_counts_per_op = defaultdict(lambda: {'act': 0, 'deact': 0})
-
-            for log in all_logs:
-                op_id, change_time, is_active = log
-                dt = change_time.date()
-                logs_per_op[op_id].append({'change_time': change_time, 'is_active': is_active, 'date': dt})
-                if is_active == 'active':
-                    counts_per_op[op_id][dt]['act'] += 1
-                    total_counts_per_op[op_id]['act'] += 1
+        # --------- НОВЫЙ БЛОК: подсчёт суммарных секунд активности (active + iesigning) по дням для каждого оператора
+        active_seconds_per_op_per_day = defaultdict(lambda: defaultdict(int))
+        # Пройдём по каждому оператору и его логам, воспроизведём логику расчёта длительностей,
+        # чтобы аккумулировать секунды для статусов active и iesigning.
+        for op_id, logs in logs_per_op.items():
+            logs_sorted = sorted(logs, key=lambda x: x['change_time'])
+            for i, log in enumerate(logs_sorted):
+                dt = log['date']
+                # next_time
+                if i < len(logs_sorted) - 1:
+                    next_time = logs_sorted[i + 1]['change_time']
                 else:
-                    counts_per_op[op_id][dt]['deact'] += 1
-                    total_counts_per_op[op_id]['deact'] += 1
+                    next_time = end_time
+                duration = next_time - log['change_time']
+                # пропускаем дубликаты состояния (как в основном коде)
+                if i > 0 and log['is_active'] == logs_sorted[i - 1]['is_active']:
+                    continue
+                if log['is_active'] in ('active', 'iesigning'):
+                    active_seconds_per_op_per_day[op_id][dt] += int(duration.total_seconds())
+        # --------- КОНЕЦ НОВОГО БЛОКА
 
-            # Список дат для summary (от 1 числа до end_date)
-            dates = [month_start_date + timedelta(days=i) for i in range((end_date - month_start_date).days + 1)]
+        wb = Workbook()
+        ws_summary = wb.active
+        ws_summary.title = "Summary"
 
-            wb = Workbook()
-            ws_summary = wb.active
-            ws_summary.title = "Summary"
+        # -------------------------
+        # 1) Summary: заголовки и данные (как раньше, но стилизовано)
+        # -------------------------
+        ws_summary.cell(1, 1).value = "ФИО"
+        for col, dt in enumerate(dates, start=2):
+            ws_summary.cell(1, col).value = dt.strftime("%Y-%m-%d")
+            ws_summary.cell(1, col).alignment = Alignment(horizontal='center', vertical='center')
+        last_date_col = 1 + len(dates)
+        ws_summary.cell(1, last_date_col + 1).value = "Итого активаций"
+        ws_summary.cell(1, last_date_col + 2).value = "Итого деактиваций"
 
-            # -------------------------
-            # 1) Summary: заголовки и данные (как раньше, но стилизовано)
-            # -------------------------
-            ws_summary.cell(1, 1).value = "ФИО"
+        # шрифты для rich text
+        green_font = InlineFont(color="00AA00") if InlineFont else None
+        red_font = InlineFont(color="AA0000") if InlineFont else None
+        default_font = InlineFont() if InlineFont else None
+
+        # Заполняем summary
+        row = 2
+        for op_id, name in operators_dict.items():
+            ws_summary.cell(row, 1).value = name
             for col, dt in enumerate(dates, start=2):
-                ws_summary.cell(1, col).value = dt.strftime("%Y-%m-%d")
-                ws_summary.cell(1, col).alignment = Alignment(horizontal='center', vertical='center')
-            last_date_col = 1 + len(dates)
-            ws_summary.cell(1, last_date_col + 1).value = "Итого активаций"
-            ws_summary.cell(1, last_date_col + 2).value = "Итого деактиваций"
-
-            # шрифты для rich text
-            green_font = InlineFont(color="00AA00") if InlineFont else None
-            red_font = InlineFont(color="AA0000") if InlineFont else None
-            default_font = InlineFont() if InlineFont else None
-
-            # Заполняем summary
-            row = 2
-            for op_id, name in operators_dict.items():
-                ws_summary.cell(row, 1).value = name
-                for col, dt in enumerate(dates, start=2):
-                    activations = counts_per_op[op_id][dt]['act']
-                    deactivations = counts_per_op[op_id][dt]['deact']
-                    cell = ws_summary.cell(row, col)
-                    if CellRichText and TextBlock and green_font and red_font:
-                        # отображаем как цветной rich text: "activations | deactivations"
-                        rt = CellRichText([
-                            TextBlock(green_font, str(activations)),
-                            TextBlock(default_font, " | "),
-                            TextBlock(red_font, str(deactivations))
-                        ])
-                        cell.value = rt
-                    else:
-                        # fallback plain text
-                        cell.value = f"{activations} | {deactivations}"
-                    cell.alignment = Alignment(horizontal='center', vertical='center', wrapText=True)
-                # итоговые колонки
-                act_cell = ws_summary.cell(row, last_date_col + 1)
-                deact_cell = ws_summary.cell(row, last_date_col + 2)
+                activations = counts_per_op[op_id][dt]['act']
+                deactivations = counts_per_op[op_id][dt]['deact']
+                cell = ws_summary.cell(row, col)
                 if CellRichText and TextBlock and green_font and red_font:
-                    act_cell.value = CellRichText([TextBlock(green_font, str(total_counts_per_op[op_id]['act']))])
-                    deact_cell.value = CellRichText([TextBlock(red_font, str(total_counts_per_op[op_id]['deact']))])
+                    # отображаем как цветной rich text: "activations | deactivations"
+                    rt = CellRichText([
+                        TextBlock(green_font, str(activations)),
+                        TextBlock(default_font, " | "),
+                        TextBlock(red_font, str(deactivations))
+                    ])
+                    cell.value = rt
                 else:
-                    act_cell.value = total_counts_per_op[op_id]['act']
-                    deact_cell.value = total_counts_per_op[op_id]['deact']
-                act_cell.alignment = Alignment(horizontal='center', vertical='center')
-                deact_cell.alignment = Alignment(horizontal='center', vertical='center')
-                row += 1
+                    # fallback plain text
+                    cell.value = f"{activations} | {deactivations}"
+                cell.alignment = Alignment(horizontal='center', vertical='center', wrapText=True)
+            # итоговые колонки
+            act_cell = ws_summary.cell(row, last_date_col + 1)
+            deact_cell = ws_summary.cell(row, last_date_col + 2)
+            if CellRichText and TextBlock and green_font and red_font:
+                act_cell.value = CellRichText([TextBlock(green_font, str(total_counts_per_op[op_id]['act']))])
+                deact_cell.value = CellRichText([TextBlock(red_font, str(total_counts_per_op[op_id]['deact']))])
+            else:
+                act_cell.value = total_counts_per_op[op_id]['act']
+                deact_cell.value = total_counts_per_op[op_id]['deact']
+            act_cell.alignment = Alignment(horizontal='center', vertical='center')
+            deact_cell.alignment = Alignment(horizontal='center', vertical='center')
+            row += 1
 
-            # легенда
-            ws_summary.cell(row + 1, 1).value = "Легенда:"
-            ws_summary.cell(row + 2, 1).value = "Зелёный — активации"
-            ws_summary.cell(row + 3, 1).value = "Красный — деактивации"
+        # легенда
+        ws_summary.cell(row + 1, 1).value = "Легенда:"
+        ws_summary.cell(row + 2, 1).value = "Зелёный — активации"
+        ws_summary.cell(row + 3, 1).value = "Красный — деактивации"
 
-            # стили summary: жирная шапка, границы, автоширины
-            thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+        # стили summary: жирная шапка, границы, автоширины
+        thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+        for c in range(1, last_date_col + 3):
+            cell = ws_summary.cell(1, c)
+            cell.font = Font(bold=True)
+            cell.border = thin_border
+        # применим границы к заполненным ячейкам summary
+        for r in range(1, row):
             for c in range(1, last_date_col + 3):
-                cell = ws_summary.cell(1, c)
-                cell.font = Font(bold=True)
+                ws_summary.cell(r, c).border = thin_border
+        # автоширина (приближённая)
+        ws_summary.column_dimensions['A'].width = 24
+        for idx in range(2, last_date_col + 3):
+            col_letter = ws_summary.cell(1, idx).column_letter
+            ws_summary.column_dimensions[col_letter].width = 12
+        ws_summary.freeze_panes = "A2"
+
+        # -------------------------
+        # НОВЫЙ ЛИСТ: All active (суммы часов активности по дням для каждого оператора)
+        # -------------------------
+        ws_all_active = wb.create_sheet(title="All active")
+        # Заголовок
+        ws_all_active.cell(1, 1).value = "ФИО"
+        for col, dt in enumerate(dates, start=2):
+            ws_all_active.cell(1, col).value = dt.strftime("%Y-%m-%d")
+            ws_all_active.cell(1, col).alignment = Alignment(horizontal='center', vertical='center')
+        total_col_idx = 1 + len(dates) + 1  # колонка для Итого (ч)
+        ws_all_active.cell(1, total_col_idx).value = "Итого (ч)"
+
+        # стили шапки
+        for c in range(1, total_col_idx + 1):
+            cell = ws_all_active.cell(1, c)
+            cell.font = Font(bold=True)
+            cell.border = thin_border
+
+        # Заполним строки по операторам
+        row = 2
+        # структура для сумм по колонкам (дням)
+        daily_totals_seconds = defaultdict(int)
+        grand_total_seconds = 0
+
+        for op_id in operators_dict.keys():
+            name = operators_dict[op_id]
+            ws_all_active.cell(row, 1).value = name
+            row_total_seconds = 0
+            for col_idx, dt in enumerate(dates, start=2):
+                secs = active_seconds_per_op_per_day[op_id].get(dt, 0)
+                hours = secs / 3600.0
+                # записываем число в часах с 2 знаками
+                cell = ws_all_active.cell(row, col_idx)
+                cell.value = round(hours, 2)
+                cell.number_format = '0.00'
+                cell.alignment = Alignment(horizontal='center', vertical='center')
                 cell.border = thin_border
-            # применим границы к заполненным ячейкам summary
-            for r in range(1, row):
-                for c in range(1, last_date_col + 3):
-                    ws_summary.cell(r, c).border = thin_border
-            # автоширина (приближённая)
-            ws_summary.column_dimensions['A'].width = 24
-            for idx in range(2, last_date_col + 3):
-                col_letter = ws_summary.cell(1, idx).column_letter
-                ws_summary.column_dimensions[col_letter].width = 12
-            ws_summary.freeze_panes = "A2"
 
-            # -------------------------
-            # 2) Листы по операторам: события + одна строка итого на день с колонками итогов
-            #    (E..I — HH:MM:SS, J..N — секунды (скрыты) для фильтрации)
-            # -------------------------
-            # стили и заливки
-            total_fill = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
-            status_fill = PatternFill(start_color="F7F7F7", end_color="F7F7F7", fill_type="solid")
-            green_fill = PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")
-            orange_fill = PatternFill(start_color="FFE8C0", end_color="FFE8C0", fill_type="solid")
-            yellow_fill = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
-            purple_fill = PatternFill(start_color="E8D7F7", end_color="E8D7F7", fill_type="solid")
-            blue_fill = PatternFill(start_color="DCEEFF", end_color="DCEEFF", fill_type="solid")
-            inactive_fill = PatternFill(start_color="FFDADA", end_color="FFDADA", fill_type="solid")
+                row_total_seconds += secs
+                daily_totals_seconds[dt] += secs
 
-            # порядок статусов (исключаем 'inactive') — используется для колонок итогов E..I
-            status_order = [
-                ('active', 'Активен', green_fill),
-                ('iesigning', 'Подписание', blue_fill),
-                ('break', 'Перерыв', orange_fill),
-                ('training', 'Тренинг', yellow_fill),
-                ('tech', 'Тех. поддержка', purple_fill),
+            # итого по строке (оператору) в часах
+            row_total_hours = row_total_seconds / 3600.0
+            total_cell = ws_all_active.cell(row, total_col_idx)
+            total_cell.value = round(row_total_hours, 2)
+            total_cell.number_format = '0.00'
+            total_cell.alignment = Alignment(horizontal='center', vertical='center')
+            total_cell.border = thin_border
+
+            grand_total_seconds += row_total_seconds
+            row += 1
+
+        # Добавим строку итогов по дням (и общий итог)
+        ws_all_active.cell(row, 1).value = "Итого"
+        ws_all_active.cell(row, 1).font = Font(bold=True)
+        for col_idx, dt in enumerate(dates, start=2):
+            secs = daily_totals_seconds.get(dt, 0)
+            hours = secs / 3600.0
+            cell = ws_all_active.cell(row, col_idx)
+            cell.value = round(hours, 2)
+            cell.number_format = '0.00'
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.border = thin_border
+
+        # общий итог всех операторов в часах
+        ws_all_active.cell(row, total_col_idx).value = round(grand_total_seconds / 3600.0, 2)
+        ws_all_active.cell(row, total_col_idx).font = Font(bold=True)
+        ws_all_active.cell(row, total_col_idx).number_format = '0.00'
+        ws_all_active.cell(row, total_col_idx).alignment = Alignment(horizontal='center', vertical='center')
+        ws_all_active.cell(row, total_col_idx).border = thin_border
+
+        # автоширины и фиксация панелей
+        ws_all_active.column_dimensions['A'].width = 24
+        for idx in range(2, total_col_idx + 1):
+            col_letter = ws_all_active.cell(1, idx).column_letter
+            ws_all_active.column_dimensions[col_letter].width = 12
+        ws_all_active.freeze_panes = "A2"
+
+        # -------------------------
+        # 2) Листы по операторам: события + одна строка итого на день с колонками итогов
+        #    (E..I — HH:MM:SS, J..N — секунды (скрыты) для фильтрации)
+        # -------------------------
+        # стили и заливки
+        total_fill = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
+        status_fill = PatternFill(start_color="F7F7F7", end_color="F7F7F7", fill_type="solid")
+        green_fill = PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")
+        orange_fill = PatternFill(start_color="FFE8C0", end_color="FFE8C0", fill_type="solid")
+        yellow_fill = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
+        purple_fill = PatternFill(start_color="E8D7F7", end_color="E8D7F7", fill_type="solid")
+        blue_fill = PatternFill(start_color="DCEEFF", end_color="DCEEFF", fill_type="solid")
+        inactive_fill = PatternFill(start_color="FFDADA", end_color="FFDADA", fill_type="solid")
+
+        # порядок статусов (исключаем 'inactive') — используется для колонок итогов E..I
+        status_order = [
+            ('active', 'Активен', green_fill),
+            ('iesigning', 'Подписание', blue_fill),
+            ('break', 'Перерыв', orange_fill),
+            ('training', 'Тренинг', yellow_fill),
+            ('tech', 'Тех. поддержка', purple_fill),
+        ]
+
+        for op_id, name in operators_dict.items():
+            ws = wb.create_sheet(title=(name[:31] or f"op_{op_id}"))
+
+            # Заголовок: A..N (A-D — события, E-I — human totals, J-N — seconds hidden)
+            headers = [
+                "Дата", "Время / Описание", "Статус", "Длительность",
+                "Итого: Активен", "Итого: Подписание", "Итого: Перерыв", "Итого: Тренинг", "Итого: Тех",
+                "Итого Активен (сек)", "Итого Подписание (сек)", "Итого Перерыв (сек)", "Итого Тренинг (сек)", "Итого Тех (сек)"
             ]
+            for col_idx, h in enumerate(headers, start=1):
+                cell = ws.cell(1, col_idx)
+                cell.value = h
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+                cell.border = thin_border
 
-            for op_id, name in operators_dict.items():
-                ws = wb.create_sheet(title=(name[:31] or f"op_{op_id}"))
+            # Скрываем числовые колонки J..N (10..14)
+            for col_letter in ['J', 'K', 'L', 'M', 'N']:
+                ws.column_dimensions[col_letter].hidden = True
 
-                # Заголовок: A..N (A-D — события, E-I — human totals, J-N — seconds hidden)
-                headers = [
-                    "Дата", "Время / Описание", "Статус", "Длительность",
-                    "Итого: Активен", "Итого: Подписание", "Итого: Перерыв", "Итого: Тренинг", "Итого: Тех",
-                    "Итого Активен (сек)", "Итого Подписание (сек)", "Итого Перерыв (сек)", "Итого Тренинг (сек)", "Итого Тех (сек)"
-                ]
-                for col_idx, h in enumerate(headers, start=1):
-                    cell = ws.cell(1, col_idx)
-                    cell.value = h
+            ws.freeze_panes = "A2"
+            ws.column_dimensions['A'].width = 12
+            ws.column_dimensions['B'].width = 36
+            ws.column_dimensions['C'].width = 18
+            ws.column_dimensions['D'].width = 14
+            ws.column_dimensions['E'].width = 16
+            ws.column_dimensions['F'].width = 16
+            ws.column_dimensions['G'].width = 14
+            ws.column_dimensions['H'].width = 14
+            ws.column_dimensions['I'].width = 14
+
+            logs = sorted(logs_per_op[op_id], key=lambda x: x['change_time'])
+            current_row = 2
+            current_day = None
+            day_status_times = defaultdict(timedelta)  # суммарное timedelta по статусам для дня
+
+            def write_day_totals_row(r, day_dt, counts_dict, day_status_times_dict):
+                """
+                Записывает одну строку 'Итого' с колонками E..I (HH:MM:SS) и J..N (секунды).
+                Возвращает следующий свободный row.
+                """
+                # A..D
+                ws.cell(r, 1).value = day_dt.strftime("%Y-%m-%d")
+                ws.cell(r, 2).value = "Итого"
+                ws.cell(r, 3).value = CellRichText([TextBlock(green_font, str(counts_dict['act'])), TextBlock(default_font, " | "), TextBlock(red_font, str(counts_dict['deact']))]) if CellRichText and TextBlock and green_font and red_font else f"{counts_dict['act']} | {counts_dict['deact']}"
+                ws.cell(r, 4).value = ""  # оставляем D пустой в строке Итого
+
+                # стиль для A..D
+                for c in range(1, 5):
+                    cell = ws.cell(r, c)
+                    cell.fill = total_fill
                     cell.font = Font(bold=True)
                     cell.alignment = Alignment(horizontal='center', vertical='center')
                     cell.border = thin_border
 
-                # Скрываем числовые колонки J..N (10..14)
-                for col_letter in ['J', 'K', 'L', 'M', 'N']:
-                    ws.column_dimensions[col_letter].hidden = True
+                # колонки итогов E..I и J..N
+                for idx, (status_key, status_name, fill) in enumerate(status_order):
+                    dur = day_status_times_dict.get(status_key, timedelta(0))
+                    dur_sec = int(dur.total_seconds())
+                    dur_hms = format_hms(dur)
+                    col_read = 5 + idx   # E..I
+                    col_sec = 10 + idx   # J..N
+                    ws.cell(r, col_read).value = dur_hms
+                    ws.cell(r, col_sec).value = dur_sec
+                    # стили
+                    ws.cell(r, col_read).alignment = Alignment(horizontal='center', vertical='center')
+                    ws.cell(r, col_sec).alignment = Alignment(horizontal='center', vertical='center')
+                    ws.cell(r, col_read).border = thin_border
+                    ws.cell(r, col_sec).border = thin_border
+                    # лёгкая заливка
+                    ws.cell(r, col_read).fill = status_fill
 
-                ws.freeze_panes = "A2"
-                ws.column_dimensions['A'].width = 12
-                ws.column_dimensions['B'].width = 36
-                ws.column_dimensions['C'].width = 18
-                ws.column_dimensions['D'].width = 14
-                ws.column_dimensions['E'].width = 16
-                ws.column_dimensions['F'].width = 16
-                ws.column_dimensions['G'].width = 14
-                ws.column_dimensions['H'].width = 14
-                ws.column_dimensions['I'].width = 14
+                return r + 1
 
-                logs = sorted(logs_per_op[op_id], key=lambda x: x['change_time'])
-                current_row = 2
-                current_day = None
-                day_status_times = defaultdict(timedelta)  # суммарное timedelta по статусам для дня
-
-                def write_day_totals_row(r, day_dt, counts_dict, day_status_times_dict):
-                    """
-                    Записывает одну строку 'Итого' с колонками E..I (HH:MM:SS) и J..N (секунды).
-                    Возвращает следующий свободный row.
-                    """
-                    # A..D
-                    ws.cell(r, 1).value = day_dt.strftime("%Y-%m-%d")
-                    ws.cell(r, 2).value = "Итого"
-                    ws.cell(r, 3).value = CellRichText([TextBlock(green_font, str(counts_dict['act'])), TextBlock(default_font, " | "), TextBlock(red_font, str(counts_dict['deact']))]) if CellRichText and TextBlock and green_font and red_font else f"{counts_dict['act']} | {counts_dict['deact']}"
-                    ws.cell(r, 4).value = ""  # оставляем D пустой в строке Итого
-
-                    # стиль для A..D
-                    for c in range(1, 5):
-                        cell = ws.cell(r, c)
-                        cell.fill = total_fill
-                        cell.font = Font(bold=True)
-                        cell.alignment = Alignment(horizontal='center', vertical='center')
-                        cell.border = thin_border
-
-                    # колонки итогов E..I и J..N
-                    for idx, (status_key, status_name, fill) in enumerate(status_order):
-                        dur = day_status_times_dict.get(status_key, timedelta(0))
-                        dur_sec = int(dur.total_seconds())
-                        dur_hms = format_hms(dur)
-                        col_read = 5 + idx   # E..I
-                        col_sec = 10 + idx   # J..N
-                        ws.cell(r, col_read).value = dur_hms
-                        ws.cell(r, col_sec).value = dur_sec
-                        # стили
-                        ws.cell(r, col_read).alignment = Alignment(horizontal='center', vertical='center')
-                        ws.cell(r, col_sec).alignment = Alignment(horizontal='center', vertical='center')
-                        ws.cell(r, col_read).border = thin_border
-                        ws.cell(r, col_sec).border = thin_border
-                        # лёгкая заливка
-                        ws.cell(r, col_read).fill = status_fill
-
-                    return r + 1
-
-                for i, log in enumerate(logs):
-                    dt = log['date']
-                    if current_day is None:
-                        current_day = dt
-                    if dt != current_day:
-                        # записать строку итогов предыдущего дня
-                        counts = counts_per_op[op_id][current_day]
-                        current_row = write_day_totals_row(current_row, current_day, counts, day_status_times)
-                        # сброс
-                        day_status_times = defaultdict(timedelta)
-                        current_day = dt
-
-                    # next_time
-                    if i < len(logs) - 1:
-                        next_time = logs[i + 1]['change_time']
-                    else:
-                        next_time = end_time
-
-                    duration = next_time - log['change_time']
-
-                    # дубликат состояния?
-                    if i > 0 and log['is_active'] == logs[i - 1]['is_active']:
-                        dur_str = "N/A (дубликат)"
-                    else:
-                        dur_str = format_hms(duration)
-                        if log['is_active'] != 'inactive':
-                            day_status_times[log['is_active']] += duration
-
-                    # пишем событие (A..D)
-                    ws.cell(current_row, 1).value = dt.strftime("%Y-%m-%d")
-                    ws.cell(current_row, 2).value = log['change_time'].strftime("%H:%M:%S")
-                    ws.cell(current_row, 3).value = log['is_active'].capitalize()
-                    ws.cell(current_row, 4).value = dur_str
-
-                    # заливка статуса
-                    cell_stat = ws.cell(current_row, 3)
-                    if log['is_active'] == 'active':
-                        cell_stat.fill = green_fill
-                    elif log['is_active'] == 'break':
-                        cell_stat.fill = orange_fill
-                    elif log['is_active'] == 'training':
-                        cell_stat.fill = yellow_fill
-                    elif log['is_active'] == 'tech':
-                        cell_stat.fill = purple_fill
-                    elif log['is_active'] == 'iesigning':
-                        cell_stat.fill = blue_fill
-                    elif log['is_active'] == 'inactive':
-                        cell_stat.fill = inactive_fill
-
-                    # границы и выравнивание для строки события
-                    for col_idx in range(1, 15):
-                        ccell = ws.cell(current_row, col_idx)
-                        ccell.border = thin_border
-                        if col_idx == 4:
-                            ccell.alignment = Alignment(horizontal='center', vertical='center')
-                        else:
-                            ccell.alignment = Alignment(horizontal='left', vertical='center')
-
-                    current_row += 1
-
-                # итоги для последнего дня
-                if current_day is not None:
+            for i, log in enumerate(logs):
+                dt = log['date']
+                if current_day is None:
+                    current_day = dt
+                if dt != current_day:
+                    # записать строку итогов предыдущего дня
                     counts = counts_per_op[op_id][current_day]
                     current_row = write_day_totals_row(current_row, current_day, counts, day_status_times)
+                    # сброс
+                    day_status_times = defaultdict(timedelta)
+                    current_day = dt
 
-                # добавляем таблицу, охватывающую A..N
-                if current_row > 2:
-                    last_row = current_row - 1
-                    sanitized_name = sanitize_table_name(f"{name}_{op_id}")
-                    tab_ref = f"A1:N{last_row}"
-                    tab_op = Table(displayName=f"Table_{sanitized_name}", ref=tab_ref)
-                    style_op = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False, showRowStripes=True)
-                    tab_op.tableStyleInfo = style_op
-                    ws.add_table(tab_op)
+                # next_time
+                if i < len(logs) - 1:
+                    next_time = logs[i + 1]['change_time']
+                else:
+                    next_time = end_time
 
-            # Сохранение в BytesIO
-            output = BytesIO()
-            wb.save(output)
-            output.seek(0)
-            content = output.getvalue()
-            return filename, content
+                duration = next_time - log['change_time']
 
-        except Exception as e:
-            logging.error(f"Error generating report: {e}")
-            return None, None
+                # дубликат состояния?
+                if i > 0 and log['is_active'] == logs[i - 1]['is_active']:
+                    dur_str = "N/A (дубликат)"
+                else:
+                    dur_str = format_hms(duration)
+                    if log['is_active'] != 'inactive':
+                        day_status_times[log['is_active']] += duration
+
+                # пишем событие (A..D)
+                ws.cell(current_row, 1).value = dt.strftime("%Y-%m-%d")
+                ws.cell(current_row, 2).value = log['change_time'].strftime("%H:%M:%S")
+                ws.cell(current_row, 3).value = log['is_active'].capitalize()
+                ws.cell(current_row, 4).value = dur_str
+
+                # заливка статуса
+                cell_stat = ws.cell(current_row, 3)
+                if log['is_active'] == 'active':
+                    cell_stat.fill = green_fill
+                elif log['is_active'] == 'break':
+                    cell_stat.fill = orange_fill
+                elif log['is_active'] == 'training':
+                    cell_stat.fill = yellow_fill
+                elif log['is_active'] == 'tech':
+                    cell_stat.fill = purple_fill
+                elif log['is_active'] == 'iesigning':
+                    cell_stat.fill = blue_fill
+                elif log['is_active'] == 'inactive':
+                    cell_stat.fill = inactive_fill
+
+                # границы и выравнивание для строки события
+                for col_idx in range(1, 15):
+                    ccell = ws.cell(current_row, col_idx)
+                    ccell.border = thin_border
+                    if col_idx == 4:
+                        ccell.alignment = Alignment(horizontal='center', vertical='center')
+                    else:
+                        ccell.alignment = Alignment(horizontal='left', vertical='center')
+
+                current_row += 1
+
+            # итоги для последнего дня
+            if current_day is not None:
+                counts = counts_per_op[op_id][current_day]
+                current_row = write_day_totals_row(current_row, current_day, counts, day_status_times)
+
+            # добавляем таблицу, охватывающую A..N
+            if current_row > 2:
+                last_row = current_row - 1
+                sanitized_name = sanitize_table_name(f"{name}_{op_id}")
+                tab_ref = f"A1:N{last_row}"
+                tab_op = Table(displayName=f"Table_{sanitized_name}", ref=tab_ref)
+                style_op = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False, showRowStripes=True)
+                tab_op.tableStyleInfo = style_op
+                ws.add_table(tab_op)
+
+        # Сохранение в BytesIO
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+        content = output.getvalue()
+        return filename, content
+
+    except Exception as e:
+        logging.error(f"Error generating report: {e}")
+        return None, None
 
         
     def get_user_history(self, user_id):
