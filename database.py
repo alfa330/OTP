@@ -2433,12 +2433,16 @@ class Database:
                 def write_day_totals_row(r, day_dt, counts_dict, day_status_times_dict):
                     """
                     Строка 'Итого' для оператора за день.
-                    Изменения:
-                    - C = "В работе" (зелёная насыщенная)
-                    - D = часы (active + iesigning)
-                    - Вся строка имеет жирную нижнюю границу (medium)
-                    """
+                    A — пустая объединяемая ячейка
+                    B — "Итого"
+                    C — "В работе" (ярко-зелёная заливка)
+                    D — итог рабочих часов (active + iesigning) в часах, 2 знака
+                    E..I — часы по статусам (число часов, 2 знака), J..N — секунды
+                    Возвращает следующий свободный row (r + 1).
 
+                    ВАЖНО: НЕ присваивает cell.fill = None (openpyxl ожидает объект Fill).
+                            Вместо этого fill задаётся только когда нужно.
+                    """
                     # fallback на случай отсутствия глобальных стилей
                     try:
                         _ = total_fill
@@ -2449,19 +2453,30 @@ class Database:
                     except NameError:
                         thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
                                             top=Side(style='thin'), bottom=Side(style='thin'))
+                    try:
+                        _ = status_order
+                    except NameError:
+                        # default minimal status_order: (key, name, fill)
+                        status_order = [
+                            ('active', 'Активен', PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")),
+                            ('iesigning', 'Подписание', PatternFill(start_color="DCEEFF", end_color="DCEEFF", fill_type="solid")),
+                            ('break', 'Перерыв', PatternFill(start_color="FFE8C0", end_color="FFE8C0", fill_type="solid")),
+                            ('training', 'Тренинг', PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")),
+                            ('tech', 'Перерыв', PatternFill(start_color="FFE8C0", end_color="FFE8C0", fill_type="solid")),
+                        ]
 
-                    # жирная нижняя граница (только низ строки)
+                    # жирная нижняя граница (для визуального раздела)
                     bottom_bold_border = Border(
                         left=Side(style='thin'),
                         right=Side(style='thin'),
                         top=Side(style='thin'),
-                        bottom=Side(style='medium')   # <── жирная нижняя линия
+                        bottom=Side(style='medium')
                     )
 
                     # насыщённый зелёный цвет для "В работе" и часов
                     strong_green_fill = PatternFill(start_color="66CC66", end_color="66CC66", fill_type="solid")
 
-                    # A — пустая объединяемая ячейка
+                    # A — пустая объединяемая ячейка (обычно объединена выше)
                     a_cell = ws.cell(r, 1)
                     a_cell.fill = total_fill
                     a_cell.border = bottom_bold_border
@@ -2475,7 +2490,7 @@ class Database:
                     b_cell.fill = total_fill
                     b_cell.border = bottom_bold_border
 
-                    # C — "В работе" зелёный
+                    # C — "В работе" (ярко-зелёный)
                     c_cell = ws.cell(r, 3)
                     c_cell.value = "В работе"
                     c_cell.font = Font(bold=True)
@@ -2483,7 +2498,7 @@ class Database:
                     c_cell.fill = strong_green_fill
                     c_cell.border = bottom_bold_border
 
-                    # D — итог рабочих часов = active + iesigning
+                    # D — итог рабочих часов = active + iesigning (в часах)
                     active_td = day_status_times_dict.get('active', timedelta(0))
                     iesigning_td = day_status_times_dict.get('iesigning', timedelta(0))
                     total_work_sec = int((active_td + iesigning_td).total_seconds())
@@ -2493,34 +2508,35 @@ class Database:
                     d_cell.value = total_work_hours
                     d_cell.number_format = '0.00'
                     d_cell.alignment = Alignment(horizontal='center', vertical='center')
-                    d_cell.fill = strong_green_fill if total_work_hours > 0 else None
+                    # ставим заливку ТОЛЬКО если > 0
+                    if total_work_hours > 0:
+                        d_cell.fill = strong_green_fill
                     d_cell.border = bottom_bold_border
 
-                    # E..I (часы по статусам) и J..N (секунды)
+                    # E..I (часы по статусам) и J..N (секунды) — заполняем и даём заливку по статусу, если >0
                     for idx, (status_key, status_name, fill) in enumerate(status_order):
-
-                        dur = day_status_times_dict.get(status_key, timedelta(0))
-                        dur_sec = int(dur.total_seconds())
+                        dur_td = day_status_times_dict.get(status_key, timedelta(0))
+                        dur_sec = int(dur_td.total_seconds())
                         dur_hours = round(dur_sec / 3600.0, 2)
 
-                        col_read = 5 + idx
-                        col_sec = 10 + idx
+                        col_read = 5 + idx   # E..I
+                        col_sec = 10 + idx   # J..N
 
-                        # Часы
-                        hrs_cell = ws.cell(r, col_read)
-                        hrs_cell.value = dur_hours
-                        hrs_cell.number_format = '0.00'
-                        hrs_cell.alignment = Alignment(horizontal='center', vertical='center')
-                        hrs_cell.border = bottom_bold_border
+                        # часы (число)
+                        rcell = ws.cell(r, col_read)
+                        rcell.value = dur_hours
+                        rcell.number_format = '0.00'
+                        rcell.alignment = Alignment(horizontal='center', vertical='center')
+                        # заливаем ТОЛЬКО если >0 и у нас есть валидная заливка
+                        if dur_hours > 0 and isinstance(fill, PatternFill):
+                            rcell.fill = fill
+                        rcell.border = bottom_bold_border
 
-                        if dur_hours > 0 and fill is not None:
-                            hrs_cell.fill = fill
-
-                        # Секунды (скрытые)
-                        sec_cell = ws.cell(r, col_sec)
-                        sec_cell.value = dur_sec
-                        sec_cell.alignment = Alignment(horizontal='center', vertical='center')
-                        sec_cell.border = bottom_bold_border
+                        # секунды (скрытые колонки) — всегда записываем число
+                        scell = ws.cell(r, col_sec)
+                        scell.value = dur_sec
+                        scell.alignment = Alignment(horizontal='center', vertical='center')
+                        scell.border = bottom_bold_border
 
                     return r + 1
 
