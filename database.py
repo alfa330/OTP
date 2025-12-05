@@ -2074,7 +2074,7 @@ class Database:
         Генерация месячного отчёта (xlsx).
         Summary: даты по столбцам + цветной RichText активаций/деактиваций.
         Operator sheets: строки событий + одна строка "Итого" на день с колонками-итогами
-        (E..I человеко-читаемые в формате HH:MM:SS, J..N — секунды, скрытые для сортировки).
+        (E..I человеко-читаемые -> теперь ЧАСЫ с 2 знаками, J..N — секунды, скрытые для сортировки).
         Добавлен лист "All active" — суммы часов активности ("active","iesigning") по дням
         по каждому оператору и итог (в формате часов с 2 знаками после запятой).
         """
@@ -2085,7 +2085,7 @@ class Database:
             return sanitized[:255]
 
         def format_hms(duration):
-            """Возвращает строку HH:MM:SS, где hours может быть >=24 (полные часы)."""
+            """Оставляю для совместимости — не используется для числовых полей."""
             if duration is None:
                 return "N/A"
             total = int(duration.total_seconds())
@@ -2167,19 +2167,16 @@ class Database:
 
             # --------- НОВЫЙ БЛОК: подсчёт суммарных секунд активности (active + iesigning) по дням для каждого оператора
             active_seconds_per_op_per_day = defaultdict(lambda: defaultdict(int))
-            # Пройдём по каждому оператору и его логам, воспроизведём логику расчёта длительностей,
-            # чтобы аккумулировать секунды для статусов active и iesigning.
             for op_id, logs in logs_per_op.items():
                 logs_sorted = sorted(logs, key=lambda x: x['change_time'])
                 for i, log in enumerate(logs_sorted):
                     dt = log['date']
-                    # next_time
                     if i < len(logs_sorted) - 1:
                         next_time = logs_sorted[i + 1]['change_time']
                     else:
                         next_time = end_time
                     duration = next_time - log['change_time']
-                    # пропускаем дубликаты состояния (как в основном коде)
+                    # пропускаем дубликаты состояния
                     if i > 0 and log['is_active'] == logs_sorted[i - 1]['is_active']:
                         continue
                     if log['is_active'] in ('active', 'iesigning'):
@@ -2191,7 +2188,7 @@ class Database:
             ws_summary.title = "Summary"
 
             # -------------------------
-            # 1) Summary: заголовки и данные (как раньше, но стилизовано)
+            # 1) Summary: заголовки и данные
             # -------------------------
             ws_summary.cell(1, 1).value = "ФИО"
             for col, dt in enumerate(dates, start=2):
@@ -2215,7 +2212,6 @@ class Database:
                     deactivations = counts_per_op[op_id][dt]['deact']
                     cell = ws_summary.cell(row, col)
                     if CellRichText and TextBlock and green_font and red_font:
-                        # отображаем как цветной rich text: "activations | deactivations"
                         rt = CellRichText([
                             TextBlock(green_font, str(activations)),
                             TextBlock(default_font, " | "),
@@ -2223,7 +2219,6 @@ class Database:
                         ])
                         cell.value = rt
                     else:
-                        # fallback plain text
                         cell.value = f"{activations} | {deactivations}"
                     cell.alignment = Alignment(horizontal='center', vertical='center', wrapText=True)
                 # итоговые колонки
@@ -2250,11 +2245,9 @@ class Database:
                 cell = ws_summary.cell(1, c)
                 cell.font = Font(bold=True)
                 cell.border = thin_border
-            # применим границы к заполненным ячейкам summary
             for r in range(1, row):
                 for c in range(1, last_date_col + 3):
                     ws_summary.cell(r, c).border = thin_border
-            # автоширина (приближённая)
             ws_summary.column_dimensions['A'].width = 24
             for idx in range(2, last_date_col + 3):
                 col_letter = ws_summary.cell(1, idx).column_letter
@@ -2265,23 +2258,18 @@ class Database:
             # НОВЫЙ ЛИСТ: All active (суммы часов активности по дням для каждого оператора)
             # -------------------------
             ws_all_active = wb.create_sheet(title="All active")
-            # Заголовок
             ws_all_active.cell(1, 1).value = "ФИО"
             for col, dt in enumerate(dates, start=2):
                 ws_all_active.cell(1, col).value = dt.strftime("%Y-%m-%d")
                 ws_all_active.cell(1, col).alignment = Alignment(horizontal='center', vertical='center')
             total_col_idx = 1 + len(dates) + 1  # колонка для Итого (ч)
             ws_all_active.cell(1, total_col_idx).value = "Итого (ч)"
-
-            # стили шапки
             for c in range(1, total_col_idx + 1):
                 cell = ws_all_active.cell(1, c)
                 cell.font = Font(bold=True)
                 cell.border = thin_border
 
-            # Заполним строки по операторам
             row = 2
-            # структура для сумм по колонкам (дням)
             daily_totals_seconds = defaultdict(int)
             grand_total_seconds = 0
 
@@ -2292,17 +2280,14 @@ class Database:
                 for col_idx, dt in enumerate(dates, start=2):
                     secs = active_seconds_per_op_per_day[op_id].get(dt, 0)
                     hours = secs / 3600.0
-                    # записываем число в часах с 2 знаками
                     cell = ws_all_active.cell(row, col_idx)
                     cell.value = round(hours, 2)
                     cell.number_format = '0.00'
                     cell.alignment = Alignment(horizontal='center', vertical='center')
                     cell.border = thin_border
-
                     row_total_seconds += secs
                     daily_totals_seconds[dt] += secs
 
-                # итого по строке (оператору) в часах
                 row_total_hours = row_total_seconds / 3600.0
                 total_cell = ws_all_active.cell(row, total_col_idx)
                 total_cell.value = round(row_total_hours, 2)
@@ -2313,7 +2298,7 @@ class Database:
                 grand_total_seconds += row_total_seconds
                 row += 1
 
-            # Добавим строку итогов по дням (и общий итог)
+            # строка итогов
             ws_all_active.cell(row, 1).value = "Итого"
             ws_all_active.cell(row, 1).font = Font(bold=True)
             for col_idx, dt in enumerate(dates, start=2):
@@ -2325,15 +2310,12 @@ class Database:
                 cell.font = Font(bold=True)
                 cell.alignment = Alignment(horizontal='center', vertical='center')
                 cell.border = thin_border
-
-            # общий итог всех операторов в часах
             ws_all_active.cell(row, total_col_idx).value = round(grand_total_seconds / 3600.0, 2)
             ws_all_active.cell(row, total_col_idx).font = Font(bold=True)
             ws_all_active.cell(row, total_col_idx).number_format = '0.00'
             ws_all_active.cell(row, total_col_idx).alignment = Alignment(horizontal='center', vertical='center')
             ws_all_active.cell(row, total_col_idx).border = thin_border
 
-            # автоширины и фиксация панелей
             ws_all_active.column_dimensions['A'].width = 24
             for idx in range(2, total_col_idx + 1):
                 col_letter = ws_all_active.cell(1, idx).column_letter
@@ -2342,9 +2324,8 @@ class Database:
 
             # -------------------------
             # 2) Листы по операторам: события + одна строка итого на день с колонками итогов
-            #    (E..I — HH:MM:SS, J..N — секунды (скрыты) для фильтрации)
+            #    (E..I — ЧАСЫ с 2 знаками, J..N — секунды скрытые)
             # -------------------------
-            # стили и заливки
             total_fill = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
             status_fill = PatternFill(start_color="F7F7F7", end_color="F7F7F7", fill_type="solid")
             green_fill = PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")
@@ -2354,7 +2335,6 @@ class Database:
             blue_fill = PatternFill(start_color="DCEEFF", end_color="DCEEFF", fill_type="solid")
             inactive_fill = PatternFill(start_color="FFDADA", end_color="FFDADA", fill_type="solid")
 
-            # порядок статусов (исключаем 'inactive') — используется для колонок итогов E..I
             status_order = [
                 ('active', 'Активен', green_fill),
                 ('iesigning', 'Подписание', blue_fill),
@@ -2366,9 +2346,8 @@ class Database:
             for op_id, name in operators_dict.items():
                 ws = wb.create_sheet(title=(name[:31] or f"op_{op_id}"))
 
-                # Заголовок: A..N (A-D — события, E-I — human totals, J-N — seconds hidden)
                 headers = [
-                    "Дата", "Время / Описание", "Статус", "Длительность",
+                    "Дата", "Время / Описание", "Статус", "Длительность (ч)",
                     "Итого: Активен", "Итого: Подписание", "Итого: Перерыв", "Итого: Тренинг", "Итого: Тех",
                     "Итого Активен (сек)", "Итого Подписание (сек)", "Итого Перерыв (сек)", "Итого Тренинг (сек)", "Итого Тех (сек)"
                 ]
@@ -2379,7 +2358,6 @@ class Database:
                     cell.alignment = Alignment(horizontal='center', vertical='center')
                     cell.border = thin_border
 
-                # Скрываем числовые колонки J..N (10..14)
                 for col_letter in ['J', 'K', 'L', 'M', 'N']:
                     ws.column_dimensions[col_letter].hidden = True
 
@@ -2398,14 +2376,15 @@ class Database:
                 current_row = 2
                 current_day = None
                 day_status_times = defaultdict(timedelta)  # суммарное timedelta по статусам для дня
+                day_start_row = None  # для объединения дат
 
                 def write_day_totals_row(r, day_dt, counts_dict, day_status_times_dict):
                     """
-                    Записывает одну строку 'Итого' с колонками E..I (HH:MM:SS) и J..N (секунды).
+                    Записывает одну строку 'Итого' с колонками E..I (ЧАСЫ, 2 знака) и J..N (секунды).
                     Возвращает следующий свободный row.
+                    (A оставляем пустым — дата будет в объединённой ячейке)
                     """
-                    # A..D
-                    ws.cell(r, 1).value = day_dt.strftime("%Y-%m-%d")
+                    # A остаётся пустой (объединённая ячейка)
                     ws.cell(r, 2).value = "Итого"
                     ws.cell(r, 3).value = CellRichText([TextBlock(green_font, str(counts_dict['act'])), TextBlock(default_font, " | "), TextBlock(red_font, str(counts_dict['deact']))]) if CellRichText and TextBlock and green_font and red_font else f"{counts_dict['act']} | {counts_dict['deact']}"
                     ws.cell(r, 4).value = ""  # оставляем D пустой в строке Итого
@@ -2418,14 +2397,16 @@ class Database:
                         cell.alignment = Alignment(horizontal='center', vertical='center')
                         cell.border = thin_border
 
-                    # колонки итогов E..I и J..N
+                    # колонки итогов E..I (часы) и J..N (сек)
                     for idx, (status_key, status_name, fill) in enumerate(status_order):
                         dur = day_status_times_dict.get(status_key, timedelta(0))
                         dur_sec = int(dur.total_seconds())
-                        dur_hms = format_hms(dur)
+                        dur_hours = round(dur_sec / 3600.0, 2)
                         col_read = 5 + idx   # E..I
                         col_sec = 10 + idx   # J..N
-                        ws.cell(r, col_read).value = dur_hms
+                        # записываем часы (число)
+                        ws.cell(r, col_read).value = dur_hours
+                        ws.cell(r, col_read).number_format = '0.00'
                         ws.cell(r, col_sec).value = dur_sec
                         # стили
                         ws.cell(r, col_read).alignment = Alignment(horizontal='center', vertical='center')
@@ -2441,13 +2422,25 @@ class Database:
                     dt = log['date']
                     if current_day is None:
                         current_day = dt
+                        day_start_row = current_row  # первый ряд для этого дня (включая будущий "Итого")
                     if dt != current_day:
+                        # Перед записью итоговой строки — объединяем столбец A для предыдущего дня:
+                        if day_start_row is not None:
+                            # объединяем от day_start_row до текущ_row (включая строку "Итого", которая будет записана сейчас)
+                            merge_end = current_row  # текущ_row — место где будет написан "Итого"
+                            ws.merge_cells(start_row=day_start_row, start_column=1, end_row=merge_end, end_column=1)
+                            merged_cell = ws.cell(day_start_row, 1)
+                            merged_cell.value = current_day.strftime("%d.%m.%Y")
+                            merged_cell.alignment = Alignment(horizontal='center', vertical='center')
+
                         # записать строку итогов предыдущего дня
                         counts = counts_per_op[op_id][current_day]
                         current_row = write_day_totals_row(current_row, current_day, counts, day_status_times)
                         # сброс
                         day_status_times = defaultdict(timedelta)
+                        # переходим к новому дню
                         current_day = dt
+                        day_start_row = current_row  # первый ряд нового дня (включая будущий Итого)
 
                     # next_time
                     if i < len(logs) - 1:
@@ -2458,19 +2451,25 @@ class Database:
                     duration = next_time - log['change_time']
 
                     # дубликат состояния?
-                    if i > 0 and log['is_active'] == logs[i - 1]['is_active']:
-                        dur_str = "N/A (дубликат)"
+                    is_duplicate = (i > 0 and log['is_active'] == logs[i - 1]['is_active'])
+                    if is_duplicate:
+                        dur_hours = None
                     else:
-                        dur_str = format_hms(duration)
+                        dur_hours = round(duration.total_seconds() / 3600.0, 2)
                         if log['is_active'] != 'inactive':
                             day_status_times[log['is_active']] += duration
 
                     # пишем событие (A..D)
-                    ws.cell(current_row, 1).value = dt.strftime("%Y-%m-%d")
+                    # A оставляем пустой — объединится позже
                     ws.cell(current_row, 2).value = log['change_time'].strftime("%H:%M:%S")
                     ws.cell(current_row, 3).value = log['is_active'].capitalize()
-                    ws.cell(current_row, 4).value = dur_str
-
+                    # длительность — ЧАСЫ числом с 2 знаками или пусто для дубликата
+                    dur_cell = ws.cell(current_row, 4)
+                    if dur_hours is None:
+                        dur_cell.value = None
+                    else:
+                        dur_cell.value = dur_hours
+                        dur_cell.number_format = '0.00'
                     # заливка статуса
                     cell_stat = ws.cell(current_row, 3)
                     if log['is_active'] == 'active':
@@ -2499,6 +2498,14 @@ class Database:
 
                 # итоги для последнего дня
                 if current_day is not None:
+                    # перед записью итоговой строки — объединяем столбец A от day_start_row до current_row (где будет "Итого")
+                    if day_start_row is not None:
+                        merge_end = current_row  # сюда запишется "Итого"
+                        ws.merge_cells(start_row=day_start_row, start_column=1, end_row=merge_end, end_column=1)
+                        merged_cell = ws.cell(day_start_row, 1)
+                        merged_cell.value = current_day.strftime("%d.%m.%Y")
+                        merged_cell.alignment = Alignment(horizontal='center', vertical='center')
+
                     counts = counts_per_op[op_id][current_day]
                     current_row = write_day_totals_row(current_row, current_day, counts, day_status_times)
 
