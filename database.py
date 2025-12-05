@@ -2431,75 +2431,94 @@ class Database:
 
                 def write_day_totals_row(r, day_dt, counts_dict, day_status_times_dict):
                     """
-                    Записывает одну строку 'Итого' с:
-                    - A остаётся пустой (дата в объединённой ячейке выше),
-                    - B = "Итого",
-                    - C = "В работе" (зелёная заливка),
-                    - D = суммарные рабочие часы (active + iesigning) — число часов с 2 знаками,
-                    - E..I = по-статусные часы (как раньше),
-                    - J..N = секунды (скрытые).
-                    Возвращает следующий свободный row.
+                    Записывает одну строку 'Итого' для текущего оператора и дня.
+                    Параметры:
+                    r - номер строки для записи (int)
+                    day_dt - дата (datetime.date) — используется только для контекста/логики, в ячейке не выводится
+                    counts_dict - {'act': int, 'deact': int} (кол-во подключений/отключений)
+                    day_status_times_dict - dict(status_key -> timedelta) с накопленными длительностями за день
+                    Возвращает: следующий свободный row (r + 1)
+                    Зависит от внешних переменных (должны быть определены в enclosing scope):
+                    ws, status_order (список (key, name, fill)), thin_border, total_fill
                     """
-                    # A остаётся пустой (объединённая ячейка)
-                    ws.cell(r, 2).value = "Итого"
+                    # если нет внешнего total_fill / thin_border / status_order - можно определить fallback
+                    try:
+                        _ = total_fill
+                    except NameError:
+                        total_fill = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
+                    try:
+                        _ = thin_border
+                    except NameError:
+                        thin_border = Border(left=Side(style='thin'), right=Side(style='thin'),
+                                            top=Side(style='thin'), bottom=Side(style='thin'))
 
-                    # -------------- Колонка C: "В работе" (зелёный) --------------
-                    work_cell = ws.cell(r, 3)
-                    work_cell.value = "В работе"
-                    work_cell.alignment = Alignment(horizontal='center', vertical='center')
-                    work_cell.font = Font(bold=True)
-                    # используем заливку для active (green_fill) — предполагается, что green_fill определён в скоупе
-                    if 'green_fill' in globals():
-                        work_cell.fill = green_fill
-                    else:
-                        # если у вас локально green_fill в enclosing scope, оно будет использовано;
-                        # иначе можно использовать явную PatternFill здесь.
-                        work_cell.fill = PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")
+                    # более насыщенный зелёный для "В работе"
+                    strong_green_fill = PatternFill(start_color="66CC66", end_color="66CC66", fill_type="solid")
 
-                    work_cell.border = thin_border
+                    # A остаётся пустой (дата — объединённая ячейка выше)
+                    # B = "Итого"
+                    b_cell = ws.cell(r, 2)
+                    b_cell.value = "Итого"
+                    b_cell.font = Font(bold=True)
+                    b_cell.alignment = Alignment(horizontal='center', vertical='center')
+                    b_cell.border = thin_border
+                    b_cell.fill = total_fill
 
-                    # -------------- Колонка D: суммарные рабочие часы (active + iesigning) --------------
+                    # C = "В работе" (ярко-зелёная заливка)
+                    c_cell = ws.cell(r, 3)
+                    c_cell.value = "В работе"
+                    c_cell.font = Font(bold=True)
+                    c_cell.alignment = Alignment(horizontal='center', vertical='center')
+                    c_cell.border = thin_border
+                    c_cell.fill = strong_green_fill
+
+                    # D = суммарные рабочие часы (active + iesigning) в часах, 2 знака
                     active_td = day_status_times_dict.get('active', timedelta(0))
                     iesigning_td = day_status_times_dict.get('iesigning', timedelta(0))
                     total_work_sec = int((active_td + iesigning_td).total_seconds())
                     total_work_hours = round(total_work_sec / 3600.0, 2)
 
-                    hours_cell = ws.cell(r, 4)
-                    hours_cell.value = total_work_hours
-                    hours_cell.number_format = '0.00'
-                    hours_cell.alignment = Alignment(horizontal='center', vertical='center')
-                    hours_cell.border = thin_border
-                    # окрашивать длительность в цвет статуса - тут суммарный рабочий цвет делаем зелёным
-                    hours_cell.fill = green_fill if 'green_fill' in globals() else PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")
+                    d_cell = ws.cell(r, 4)
+                    d_cell.value = total_work_hours
+                    d_cell.number_format = '0.00'
+                    d_cell.alignment = Alignment(horizontal='center', vertical='center')
+                    d_cell.border = thin_border
+                    d_cell.fill = strong_green_fill if total_work_hours > 0 else None
 
-                    # стиль для A..B (как раньше — total_fill)
-                    for c in range(1, 3):
-                        cell = ws.cell(r, c)
-                        cell.fill = total_fill
-                        cell.font = Font(bold=True)
-                        cell.alignment = Alignment(horizontal='center', vertical='center')
-                        cell.border = thin_border
+                    # стиль для A (оставляем общий total_fill) — обычно A объединена, но всё равно стилизуем верх ячейку
+                    a_cell = ws.cell(r, 1)
+                    a_cell.fill = total_fill
+                    a_cell.border = thin_border
+                    a_cell.alignment = Alignment(horizontal='center', vertical='center')
 
-                    # -------------- Колонки E..I и J..N (оставляем прежнюю логику) --------------
+                    # Заполняем колонки E..I (часы) и J..N (секунды)
+                    # ожидается, что status_order — список кортежей (status_key, status_name, fill)
                     for idx, (status_key, status_name, fill) in enumerate(status_order):
-                        dur = day_status_times_dict.get(status_key, timedelta(0))
-                        dur_sec = int(dur.total_seconds())
+                        dur_td = day_status_times_dict.get(status_key, timedelta(0))
+                        dur_sec = int(dur_td.total_seconds())
                         dur_hours = round(dur_sec / 3600.0, 2)
-                        col_read = 5 + idx   # E..I
-                        col_sec = 10 + idx   # J..N
+
+                        col_read = 5 + idx   # E..I (часы)
+                        col_sec = 10 + idx   # J..N (сек)
+
+                        # часы (число с 2 знаками)
                         rcell = ws.cell(r, col_read)
                         rcell.value = dur_hours
                         rcell.number_format = '0.00'
                         rcell.alignment = Alignment(horizontal='center', vertical='center')
                         rcell.border = thin_border
-                        # заливаем в цвет статуса, если >0
+                        # окраска в цвет статуса, если > 0 и есть fill
                         if dur_hours > 0 and fill is not None:
                             rcell.fill = fill
-                        ws.cell(r, col_sec).value = dur_sec
-                        ws.cell(r, col_sec).alignment = Alignment(horizontal='center', vertical='center')
-                        ws.cell(r, col_sec).border = thin_border
+
+                        # секунды (скрытые столбцы) для сортировки/фильтрации
+                        scell = ws.cell(r, col_sec)
+                        scell.value = dur_sec
+                        scell.alignment = Alignment(horizontal='center', vertical='center')
+                        scell.border = thin_border
 
                     return r + 1
+
 
                 for i, log in enumerate(logs):
                     dt = log['date']
