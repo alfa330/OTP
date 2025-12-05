@@ -2077,6 +2077,9 @@ class Database:
         - All active (даты dd.mm.yyyy, ФИО с рамкой, ячейки часов >0 — серый B3B3B3);
         - Листы операторов: дата в формате dd.mm.yyyy в объединённой ячейке на день,
         длительности в числовом формате (часы, 2 знака), длительности окрашены в цвет статуса.
+        В строке "Итого" на листах операторов:
+        - колонка C: "В работе" (зелёный),
+        - колонка D: итог рабочих часов (active + iesigning) в часах, 2 знака.
         """
         def sanitize_table_name(name):
             sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', (name or ""))
@@ -2166,7 +2169,6 @@ class Database:
             dates = [month_start_date + timedelta(days=i) for i in range((end_date - month_start_date).days + 1)]
 
             # Подготовим переводы статусов и заливки
-            # перевод статусов, согласно вашему запросу:
             status_display = {
                 'active': 'Активен',
                 'tech': 'Перерыв',
@@ -2179,7 +2181,7 @@ class Database:
             # стили и заливки
             total_fill = PatternFill(start_color="EDEDED", end_color="EDEDED", fill_type="solid")
             status_fill = PatternFill(start_color="F7F7F7", end_color="F7F7F7", fill_type="solid")
-            green_fill = PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")   # active
+            green_fill = PatternFill(start_color="CFF5D0", end_color="CFF5D0", fill_type="solid")   # active / "В работе"
             orange_fill = PatternFill(start_color="FFE8C0", end_color="FFE8C0", fill_type="solid")  # break/tech
             yellow_fill = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")  # training
             purple_fill = PatternFill(start_color="E8D7F7", end_color="E8D7F7", fill_type="solid")  # tech/alt
@@ -2187,13 +2189,12 @@ class Database:
             inactive_fill = PatternFill(start_color="FFDADA", end_color="FFDADA", fill_type="solid")# inactive
             grey_fill = PatternFill(start_color="B3B3B3", end_color="B3B3B3", fill_type="solid")     # All active >0
 
-            # Соответствие статуса -> заливка (используем явное сопоставление)
             status_fill_map = {
                 'active': green_fill,
                 'iesigning': blue_fill,
                 'break': orange_fill,
                 'training': yellow_fill,
-                'tech': orange_fill,      # вы просили tech = "Перерыв", поэтому даём тот же цвет что и break
+                'tech': orange_fill,
                 'inactive': inactive_fill
             }
 
@@ -2431,18 +2432,41 @@ class Database:
 
                 def write_day_totals_row(r, day_dt, counts_dict, day_status_times_dict):
                     """
-                    Записывает одну строку 'Итого' с колонками E..I (ЧАСЫ, 2 знака) и J..N (секунды).
+                    Записывает одну строку 'Итого' с колонками:
+                    - C => "В работе" (зелёная заливка)
+                    - D => итог рабочих часов (active + iesigning) в часах 0.00
+                    - E..I => часы по каждому статусу (как раньше)
+                    - J..N => секунды по статусам
                     Возвращает следующий свободный row.
                     (A оставляем пустым — дата будет в объединённой ячейке)
                     """
                     # A остаётся пустой (объединённая ячейка)
                     ws.cell(r, 2).value = "Итого"
-                    # количество активаций/деактиваций — отображаем цветным rich text если есть
-                    ws.cell(r, 3).value = CellRichText([TextBlock(green_font, str(counts_dict['act'])), TextBlock(default_font, " | "), TextBlock(red_font, str(counts_dict['deact']))]) if CellRichText and TextBlock and green_font and red_font else f"{counts_dict['act']} | {counts_dict['deact']}"
-                    ws.cell(r, 4).value = ""  # оставляем D пустой в строке Итого
 
-                    # стиль для A..D
-                    for c in range(1, 5):
+                    # C -> "В работе" зелёная
+                    ccell = ws.cell(r, 3)
+                    ccell.value = "В работе"
+                    ccell.fill = green_fill
+                    ccell.font = Font(bold=True)
+                    ccell.alignment = Alignment(horizontal='center', vertical='center')
+                    ccell.border = thin_border
+
+                    # D -> итог рабочих часов (active + iesigning) в часах (число, 0.00)
+                    active_td = day_status_times_dict.get('active', timedelta(0))
+                    iesigning_td = day_status_times_dict.get('iesigning', timedelta(0))
+                    total_work_sec = int(active_td.total_seconds() + iesigning_td.total_seconds())
+                    total_work_hours = round(total_work_sec / 3600.0, 2)
+                    dcell = ws.cell(r, 4)
+                    dcell.value = total_work_hours
+                    dcell.number_format = '0.00'
+                    dcell.alignment = Alignment(horizontal='center', vertical='center')
+                    dcell.border = thin_border
+                    # если >0, окрашиваем в цвет active (зелёный)
+                    if total_work_hours > 0:
+                        dcell.fill = green_fill
+
+                    # стиль для A..B (A пустая объединённая) и остальные
+                    for c in range(1, 3):
                         cell = ws.cell(r, c)
                         cell.fill = total_fill
                         cell.font = Font(bold=True)
@@ -2459,7 +2483,7 @@ class Database:
                         rcell = ws.cell(r, col_read)
                         rcell.value = dur_hours
                         rcell.number_format = '0.00'
-                        rcell.alignment = Alignment(horizontal='center', vertical='Center')
+                        rcell.alignment = Alignment(horizontal='center', vertical='center')
                         rcell.border = thin_border
                         # заливаем в цвет статуса, если >0
                         if dur_hours > 0 and fill is not None:
@@ -2484,7 +2508,7 @@ class Database:
                             merged_cell.value = current_day.strftime("%d.%m.%Y")
                             merged_cell.alignment = Alignment(horizontal='center', vertical='center')
 
-                        # записать строку итогов предыдущего дня
+                        # записать строку итогов предыдущего дня (теперь с "В работе" и итогом часов)
                         counts = counts_per_op[op_id][current_day]
                         current_row = write_day_totals_row(current_row, current_day, counts, day_status_times)
                         # сброс
@@ -2536,7 +2560,6 @@ class Database:
                     if fill_for_cell is not None:
                         cell_stat.fill = fill_for_cell
                     else:
-                        # fallback
                         if status_key == 'inactive':
                             cell_stat.fill = inactive_fill
 
