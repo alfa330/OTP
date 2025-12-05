@@ -23,6 +23,7 @@ from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
 from openpyxl.cell.rich_text import CellRichText, TextBlock
 from openpyxl.cell.text import InlineFont
 from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.styles.fills import Fill
 from collections import defaultdict
 import pandas as pd
 from typing import List, Dict, Any, Tuple, Optional
