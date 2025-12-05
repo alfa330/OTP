@@ -2085,7 +2085,7 @@ class Database:
             return sanitized[:255]
 
         def format_hms(duration):
-            """Оставляю для совместимости — не используется для числовых полей."""
+            """Оставлю для совместимости — не используется для числовых полей."""
             if duration is None:
                 return "N/A"
             total = int(duration.total_seconds())
@@ -2258,16 +2258,22 @@ class Database:
             # НОВЫЙ ЛИСТ: All active (суммы часов активности по дням для каждого оператора)
             # -------------------------
             ws_all_active = wb.create_sheet(title="All active")
+            # Заголовок: даты в формате dd.mm.yyyy
             ws_all_active.cell(1, 1).value = "ФИО"
             for col, dt in enumerate(dates, start=2):
-                ws_all_active.cell(1, col).value = dt.strftime("%Y-%m-%d")
+                ws_all_active.cell(1, col).value = dt.strftime("%d.%m.%Y")
                 ws_all_active.cell(1, col).alignment = Alignment(horizontal='center', vertical='center')
             total_col_idx = 1 + len(dates) + 1  # колонка для Итого (ч)
             ws_all_active.cell(1, total_col_idx).value = "Итого (ч)"
+
+            # стиль шапки
             for c in range(1, total_col_idx + 1):
                 cell = ws_all_active.cell(1, c)
                 cell.font = Font(bold=True)
                 cell.border = thin_border
+
+            # подготовим заливки
+            grey_fill = PatternFill(start_color="B3B3B3", end_color="B3B3B3", fill_type="solid")
 
             row = 2
             daily_totals_seconds = defaultdict(int)
@@ -2275,7 +2281,11 @@ class Database:
 
             for op_id in operators_dict.keys():
                 name = operators_dict[op_id]
-                ws_all_active.cell(row, 1).value = name
+                name_cell = ws_all_active.cell(row, 1)
+                name_cell.value = name
+                name_cell.border = thin_border  # обводка ФИО
+                name_cell.alignment = Alignment(horizontal='left', vertical='center')
+
                 row_total_seconds = 0
                 for col_idx, dt in enumerate(dates, start=2):
                     secs = active_seconds_per_op_per_day[op_id].get(dt, 0)
@@ -2285,37 +2295,57 @@ class Database:
                     cell.number_format = '0.00'
                     cell.alignment = Alignment(horizontal='center', vertical='center')
                     cell.border = thin_border
+                    # если сумма больше 0 — красим в серый
+                    if hours > 0:
+                        cell.fill = grey_fill
+
                     row_total_seconds += secs
                     daily_totals_seconds[dt] += secs
 
+                # итого по строке (оператору) в часах
                 row_total_hours = row_total_seconds / 3600.0
                 total_cell = ws_all_active.cell(row, total_col_idx)
                 total_cell.value = round(row_total_hours, 2)
                 total_cell.number_format = '0.00'
                 total_cell.alignment = Alignment(horizontal='center', vertical='center')
                 total_cell.border = thin_border
+                if row_total_hours > 0:
+                    total_cell.fill = grey_fill
 
                 grand_total_seconds += row_total_seconds
                 row += 1
 
-            # строка итогов
-            ws_all_active.cell(row, 1).value = "Итого"
-            ws_all_active.cell(row, 1).font = Font(bold=True)
+            # Добавим строку итогов по дням (и общий итог)
+            total_row = row
+            tot_label_cell = ws_all_active.cell(total_row, 1)
+            tot_label_cell.value = "Итого"
+            tot_label_cell.font = Font(bold=True)
+            tot_label_cell.border = thin_border
+            tot_label_cell.alignment = Alignment(horizontal='left', vertical='center')
+
             for col_idx, dt in enumerate(dates, start=2):
                 secs = daily_totals_seconds.get(dt, 0)
                 hours = secs / 3600.0
-                cell = ws_all_active.cell(row, col_idx)
+                cell = ws_all_active.cell(total_row, col_idx)
                 cell.value = round(hours, 2)
                 cell.number_format = '0.00'
                 cell.font = Font(bold=True)
                 cell.alignment = Alignment(horizontal='center', vertical='center')
                 cell.border = thin_border
-            ws_all_active.cell(row, total_col_idx).value = round(grand_total_seconds / 3600.0, 2)
-            ws_all_active.cell(row, total_col_idx).font = Font(bold=True)
-            ws_all_active.cell(row, total_col_idx).number_format = '0.00'
-            ws_all_active.cell(row, total_col_idx).alignment = Alignment(horizontal='center', vertical='center')
-            ws_all_active.cell(row, total_col_idx).border = thin_border
+                if hours > 0:
+                    cell.fill = grey_fill
 
+            # общий итог всех операторов в часах
+            grand_cell = ws_all_active.cell(total_row, total_col_idx)
+            grand_cell.value = round(grand_total_seconds / 3600.0, 2)
+            grand_cell.font = Font(bold=True)
+            grand_cell.number_format = '0.00'
+            grand_cell.alignment = Alignment(horizontal='center', vertical='center')
+            grand_cell.border = thin_border
+            if grand_total_seconds > 0:
+                grand_cell.fill = grey_fill
+
+            # автоширины и фиксация панелей
             ws_all_active.column_dimensions['A'].width = 24
             for idx in range(2, total_col_idx + 1):
                 col_letter = ws_all_active.cell(1, idx).column_letter
@@ -2405,16 +2435,16 @@ class Database:
                         col_read = 5 + idx   # E..I
                         col_sec = 10 + idx   # J..N
                         # записываем часы (число)
-                        ws.cell(r, col_read).value = dur_hours
-                        ws.cell(r, col_read).number_format = '0.00'
+                        rcell = ws.cell(r, col_read)
+                        rcell.value = dur_hours
+                        rcell.number_format = '0.00'
+                        rcell.alignment = Alignment(horizontal='center', vertical='center')
+                        rcell.border = thin_border
+                        if dur_hours > 0:
+                            rcell.fill = grey_fill
                         ws.cell(r, col_sec).value = dur_sec
-                        # стили
-                        ws.cell(r, col_read).alignment = Alignment(horizontal='center', vertical='center')
                         ws.cell(r, col_sec).alignment = Alignment(horizontal='center', vertical='center')
-                        ws.cell(r, col_read).border = thin_border
                         ws.cell(r, col_sec).border = thin_border
-                        # лёгкая заливка
-                        ws.cell(r, col_read).fill = status_fill
 
                     return r + 1
 
@@ -2426,7 +2456,6 @@ class Database:
                     if dt != current_day:
                         # Перед записью итоговой строки — объединяем столбец A для предыдущего дня:
                         if day_start_row is not None:
-                            # объединяем от day_start_row до текущ_row (включая строку "Итого", которая будет записана сейчас)
                             merge_end = current_row  # текущ_row — место где будет написан "Итого"
                             ws.merge_cells(start_row=day_start_row, start_column=1, end_row=merge_end, end_column=1)
                             merged_cell = ws.cell(day_start_row, 1)
@@ -2498,7 +2527,6 @@ class Database:
 
                 # итоги для последнего дня
                 if current_day is not None:
-                    # перед записью итоговой строки — объединяем столбец A от day_start_row до current_row (где будет "Итого")
                     if day_start_row is not None:
                         merge_end = current_row  # сюда запишется "Итого"
                         ws.merge_cells(start_row=day_start_row, start_column=1, end_row=merge_end, end_column=1)
