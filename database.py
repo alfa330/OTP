@@ -2750,123 +2750,128 @@ class Database:
             return cursor.fetchone() is not None
 
     def generate_users_report(self, current_date=None):
-            """
-            Generates an Excel report of all operators with columns: ФИО | Направление | Супервайзер | Статус | Ставка.
-            Includes a summary sheet and sheets per supervisor.
+        """
+        Generates an Excel report of all operators with columns: ФИО | Логин | Направление | Супервайзер | Статус | Ставка | Дата принятия.
+        
+        :param current_date: Optional, current date for filename (defaults to today).
+        :return: (filename, content) or (None, None) on error.
+        """
+        try:
+            if current_date is None:
+                current_date = date.today()
+            else:
+                current_date = datetime.strptime(current_date, "%Y-%m-%d").date() if isinstance(current_date, str) else current_date
             
-            :param current_date: Optional, current date for filename (defaults to today).
-            :return: (filename, content) or (None, None) on error.
-            """
-            try:
-                if current_date is None:
-                    current_date = date.today()
-                else:
-                    current_date = datetime.strptime(current_date, "%Y-%m-%d").date() if isinstance(current_date, str) else current_date
+            filename = f"users_report_{current_date.strftime('%Y-%m-%d')}.xlsx"
+            
+            # Fetch all operators with required data (added u.login)
+            with self._get_cursor() as cursor:
+                cursor.execute("""
+                    SELECT u.name, u.login, COALESCE(d.name, 'N/A') as direction, COALESCE(s.name, 'N/A') as supervisor,
+                        u.status, u.rate, u.hire_date, u.supervisor_id
+                    FROM users u
+                    LEFT JOIN directions d ON u.direction_id = d.id
+                    LEFT JOIN users s ON u.supervisor_id = s.id
+                    WHERE u.role = 'operator'
+                    ORDER BY s.name, u.name
+                """)
+                all_operators = cursor.fetchall()
+            
+            if not all_operators:
+                logging.warning("No operators found for users report")
+                return None, None
+            
+            # Group by supervisor
+            operators_by_supervisor = defaultdict(list)
+            supervisors = {}  # supervisor_id -> name
+            for row in all_operators:
+                # note: row structure: name, login, direction, supervisor, status, rate, hire_date, sup_id
+                name, login, direction, supervisor, status, rate, hire_date, sup_id = row
+                operators_by_supervisor[sup_id].append((name, login, direction, supervisor, status, rate, hire_date))
+                if sup_id and supervisor != 'N/A':
+                    supervisors[sup_id] = supervisor
+            
+            # Create workbook
+            wb = Workbook()
+            ws_summary = wb.active
+            ws_summary.title = "Summary"
+            
+            # Headers for summary (added "Логин")
+            headers = ["ФИО", "Логин", "Направление", "Супервайзер", "Статус", "Ставка", "Дата принятия"]
+            for col, header in enumerate(headers, start=1):
+                cell = ws_summary.cell(1, col)
+                cell.value = header
+                cell.font = Font(bold=True)
+            
+            # Fill summary data
+            row = 2
+            for op in all_operators:
+                # op: name, login, direction, supervisor, status, rate, hire_date, sup_id
+                name, login, direction, supervisor, status, rate, hire_date = op[:7]
+                ws_summary.cell(row, 1).value = name
+                ws_summary.cell(row, 2).value = login
+                ws_summary.cell(row, 3).value = direction
+                ws_summary.cell(row, 4).value = supervisor
+                ws_summary.cell(row, 5).value = status
+                ws_summary.cell(row, 6).value = float(rate) if rate else 1.0
+                ws_summary.cell(row, 7).value = hire_date.strftime('%Y-%m-%d') if hire_date else 'N/A'
+                row += 1
+            
+            # Add table to summary (expanded to G)
+            tab_summary = Table(displayName="SummaryTable", ref=f"A1:G{row-1}")
+            style = TableStyleInfo(name="TableStyleMedium2", showFirstColumn=True, showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+            tab_summary.tableStyleInfo = style
+            ws_summary.add_table(tab_summary)
+            
+            # Auto-adjust columns A..G
+            for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G']:
+                ws_summary.column_dimensions[col].auto_size = True
+            
+            # Create per-supervisor sheets
+            for sup_id, ops in operators_by_supervisor.items():
+                sup_name = supervisors.get(sup_id, "No Supervisor")
+                sheet_title = sup_name[:31]  # Truncate to Excel sheet name limit
+                ws = wb.create_sheet(title=sheet_title)
                 
-                filename = f"users_report_{current_date.strftime('%Y-%m-%d')}.xlsx"
-                
-                # Fetch all operators with required data
-                with self._get_cursor() as cursor:
-                    cursor.execute("""
-                        SELECT u.name, COALESCE(d.name, 'N/A') as direction, COALESCE(s.name, 'N/A') as supervisor,
-                               u.status, u.rate, u.supervisor_id
-                        FROM users u
-                        LEFT JOIN directions d ON u.direction_id = d.id
-                        LEFT JOIN users s ON u.supervisor_id = s.id
-                        WHERE u.role = 'operator'
-                        ORDER BY s.name, u.name
-                    """)
-                    all_operators = cursor.fetchall()
-                
-                if not all_operators:
-                    logging.warning("No operators found for users report")
-                    return None, None
-                
-                # Group by supervisor
-                operators_by_supervisor = defaultdict(list)
-                supervisors = {}  # supervisor_id -> name
-                for row in all_operators:
-                    name, direction, supervisor, status, rate, sup_id = row
-                    operators_by_supervisor[sup_id].append((name, direction, supervisor, status, rate))
-                    if sup_id and supervisor != 'N/A':
-                        supervisors[sup_id] = supervisor
-                
-                # Create workbook
-                wb = Workbook()
-                ws_summary = wb.active
-                ws_summary.title = "Summary"
-                
-                # Headers for summary
-                headers = ["ФИО", "Направление", "Супервайзер", "Статус", "Ставка"]
+                # Headers
                 for col, header in enumerate(headers, start=1):
-                    cell = ws_summary.cell(1, col)
+                    cell = ws.cell(1, col)
                     cell.value = header
                     cell.font = Font(bold=True)
                 
-                # Fill summary data
+                # Fill data
                 row = 2
-                for op in all_operators:
-                    name, direction, supervisor, status, rate = op[:5]
-                    ws_summary.cell(row, 1).value = name
-                    ws_summary.cell(row, 2).value = direction
-                    ws_summary.cell(row, 3).value = supervisor
-                    ws_summary.cell(row, 4).value = status
-                    ws_summary.cell(row, 5).value = float(rate) if rate else 1.0
+                for name, login, direction, supervisor, status, rate, hire_date in ops:
+                    ws.cell(row, 1).value = name
+                    ws.cell(row, 2).value = login
+                    ws.cell(row, 3).value = direction
+                    ws.cell(row, 4).value = supervisor
+                    ws.cell(row, 5).value = status
+                    ws.cell(row, 6).value = float(rate) if rate else 1.0
+                    ws.cell(row, 7).value = hire_date.strftime('%Y-%m-%d') if hire_date else 'N/A'
                     row += 1
                 
-                # Add table to summary
-                tab_summary = Table(displayName="SummaryTable", ref=f"A1:E{row-1}")
-                style = TableStyleInfo(name="TableStyleMedium2", showFirstColumn=True, showLastColumn=False, showRowStripes=True, showColumnStripes=False)
-                tab_summary.tableStyleInfo = style
-                ws_summary.add_table(tab_summary)
+                # Add table
+                if row > 2:
+                    tab = Table(displayName=f"Table_{sheet_title.replace(' ', '_')}", ref=f"A1:G{row-1}")
+                    tab.tableStyleInfo = style
+                    ws.add_table(tab)
                 
-                # Auto-adjust columns
-                for col in ['A', 'B', 'C', 'D', 'E']:
-                    ws_summary.column_dimensions[col].auto_size = True
-                
-                # Create per-supervisor sheets
-                for sup_id, ops in operators_by_supervisor.items():
-                    sup_name = supervisors.get(sup_id, "No Supervisor")
-                    sheet_title = sup_name[:31]  # Truncate to Excel sheet name limit
-                    ws = wb.create_sheet(title=sheet_title)
-                    
-                    # Headers
-                    for col, header in enumerate(headers, start=1):
-                        cell = ws.cell(1, col)
-                        cell.value = header
-                        cell.font = Font(bold=True)
-                    
-                    # Fill data
-                    row = 2
-                    for name, direction, supervisor, status, rate in ops:
-                        ws.cell(row, 1).value = name
-                        ws.cell(row, 2).value = direction
-                        ws.cell(row, 3).value = supervisor
-                        ws.cell(row, 4).value = status
-                        ws.cell(row, 5).value = float(rate) if rate else 1.0
-                        row += 1
-                    
-                    # Add table
-                    if row > 2:
-                        tab = Table(displayName=f"Table_{sheet_title.replace(' ', '_')}", ref=f"A1:E{row-1}")
-                        tab.tableStyleInfo = style
-                        ws.add_table(tab)
-                    
-                    # Auto-adjust columns
-                    for col in ['A', 'B', 'C', 'D', 'E']:
-                        ws.column_dimensions[col].auto_size = True
-                
-                # Save to BytesIO
-                output = BytesIO()
-                wb.save(output)
-                output.seek(0)
-                content = output.getvalue()
-                
-                return filename, content
+                # Auto-adjust columns A..G
+                for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G']:
+                    ws.column_dimensions[col].auto_size = True
             
-            except Exception as e:
-                logging.error(f"Error generating users report: {e}")
-                return None, None
+            # Save to BytesIO
+            output = BytesIO()
+            wb.save(output)
+            output.seek(0)
+            content = output.getvalue()
+            
+            return filename, content
+        
+        except Exception as e:
+            logging.error(f"Error generating users report: {e}")
+            return None, None
 
     def generate_excel_report_from_view(self,
         operators: List[Dict[str, Any]],
