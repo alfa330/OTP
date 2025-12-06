@@ -5798,10 +5798,6 @@
                     shifts: op.shifts ? { ...op.shifts } : {}
                 }));
 
-                if (copy[0]) copy[0].shifts[today] = mergeSegments([{ start: '09:00', end: '17:30' }]);
-                if (copy[1]) copy[1].shifts[today] = mergeSegments([{ start: '00:00', end: '06:00' }]);
-                if (copy[2]) copy[2].shifts[today] = mergeSegments([{ start: '14:15', end: '23:45' }]);
-
                 return copy;
             });
 
