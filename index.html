@@ -5806,6 +5806,7 @@
             });
 
             const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [] });
+            const headerMinWidth = viewMode === 'day' ? undefined : ((cellMinWidth || 110) * visibleRange.length);
             const dragState = useRef(null);
 
             // Получаем уникальных супервайзеров (скрываем тех, у кого все операторы со статусом "fired")
@@ -6168,167 +6169,179 @@
 
                     <div className="flex gap-4 w-full flex-1 min-h-0">
                         <div className="flex-1 bg-white rounded shadow-sm p-2 overflow-hidden w-full flex flex-col min-h-0">
-                        <div className="flex items-center border-b pb-2 mb-2">
-                            <div className="w-64 sticky left-0 z-20 bg-white pr-2" />
-                            <div className="flex-1">
-                            <div className="flex gap-2">
-                                {visibleRange.map(d => (
-                                <div key={d} className="text-center text-sm font-medium" style={viewMode === 'day' ? {flex:1} : {minWidth: cellMinWidth, flex: '0 0 auto'}}>
-                                    {viewMode === 'day' ? (
-                                    d
-                                    ) : (
-                                    <button
-                                        className="w-full text-left p-1 rounded border border-slate-300 hover:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-400"
-                                        onClick={(e) => { e.stopPropagation(); setViewMode('day'); setCurrentDate(parseDateStr(d)); }}
-                                    >
-                                        {parseDateStr(d).getDate() + ' ' + parseDateStr(d).toLocaleString('ru-RU', { month: 'short' })}
-                                    </button>
+                            {/* Обёртка слева (календарь/фильтры сверху остаются) */}
+                            {/* УДАЛИЛИ header отсюда — он теперь будет внутри прокручиваемой области */}
+
+                            <div className="flex gap-4 w-full flex-1 min-h-0">
+                            <div className="flex-1 bg-white rounded shadow-sm p-2 overflow-hidden w-full flex flex-col min-h-0">
+                                {/* (пустое, можно оставить для других внутренних элементов если нужно) */}
+                            </div>
+
+                            {/* table-scroll: теперь header находится ВНУТРИ этого прокручиваемого блока */}
+                            <div className="table-scroll overflow-auto w-full flex-1 min-h-0">
+                                {/* HEADER (теперь внутри прокрутки) */}
+                                <div className="min-w-full w-full mb-2">
+                                <div className="flex items-center border-b pb-2">
+                                    <div className="w-64 sticky left-0 z-20 bg-white pr-2" />
+                                    <div className="flex-1" style={ headerMinWidth ? { minWidth: `${headerMinWidth}px` } : undefined }>
+                                    <div className="flex gap-2">
+                                        {visibleRange.map(d => (
+                                        <div key={d} className="text-center text-sm font-medium" style={viewMode === 'day' ? {flex:1} : {minWidth: cellMinWidth, flex: '0 0 auto'}}>
+                                            {viewMode === 'day' ? (
+                                            d
+                                            ) : (
+                                            <button
+                                                className="w-full text-left p-1 rounded border border-slate-300 hover:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-400"
+                                                onClick={(e) => { e.stopPropagation(); setViewMode('day'); setCurrentDate(parseDateStr(d)); }}
+                                            >
+                                                {parseDateStr(d).getDate() + ' ' + parseDateStr(d).toLocaleString('ru-RU', { month: 'short' })}
+                                            </button>
+                                            )}
+                                        </div>
+                                        ))}
+                                    </div>
+
+                                    {viewMode === 'day' && (
+                                        <div className="mt-2">
+                                        <div className="relative h-8 px-1">
+                                            <div className="absolute inset-0 flex items-end">
+                                            {Array.from({ length: 24 }).map((_, i) => (
+                                                <div key={i} className="flex-1 text-center text-[11px] leading-[12px]">{cpad(i)}</div>
+                                            ))}
+                                            </div>
+                                            <div className="absolute inset-0 flex">
+                                            {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
+                                            </div>
+                                        </div>
+
+                                        <div className="relative h-6 mt-1 px-1">
+                                            <div className="absolute inset-0 flex items-start">
+                                            {(() => {
+                                                const totals = totalsPerHourForDate(visibleRange[0]);
+                                                return totals.map((t, hour) => <div key={hour} className="flex-1 text-center text-[10px] text-slate-700">{t > 0 ? t.toFixed(1) : '0'}</div>);
+                                            })()}
+                                            </div>
+                                            <div className="absolute inset-0 flex pointer-events-none">
+                                            {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
+                                            </div>
+                                        </div>
+                                        </div>
                                     )}
+                                    </div>
                                 </div>
-                                ))}
-                            </div>
-
-                            {viewMode === 'day' && (
-                                <div className="mt-2">
-                                <div className="relative h-8 px-1">
-                                    <div className="absolute inset-0 flex items-end">
-                                    {Array.from({ length: 24 }).map((_, i) => (
-                                        <div key={i} className="flex-1 text-center text-[11px] leading-[12px]">{pad(i)}</div>
-                                    ))}
-                                    </div>
-                                    <div className="absolute inset-0 flex">
-                                    {Array.from({ length: 24 }).map((_, i) => (
-                                        <div key={i} className="flex-1 border-r last:border-r-0" />
-                                    ))}
-                                    </div>
                                 </div>
 
-                                <div className="relative h-6 mt-1 px-1">
-                                    <div className="absolute inset-0 flex items-start">
-                                    {(() => {
-                                        const totals = totalsPerHourForDate(visibleRange[0]);
-                                        return totals.map((t, hour) => <div key={hour} className="flex-1 text-center text-[10px] text-slate-700">{t > 0 ? t.toFixed(1) : '0'}</div>);
-                                    })()}
-                                    </div>
-                                    <div className="absolute inset-0 flex pointer-events-none">
-                                    {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
-                                    </div>
-                                </div>
-                                </div>
-                            )}
-                            </div>
-                        </div>
-
-                        <div className="table-scroll overflow-auto w-full flex-1 min-h-0">
-                            <div className="min-w-full w-full">
-                            {filteredOperators.map(op => (
-                                <div key={op.id} className="flex items-start py-3 border-b">
-                                <div className="w-64 pr-2 sticky left-0 z-20 bg-white border-r">
-                                    <div className="font-medium">{op.name || '—'}</div>
-                                    <div className="flex items-center justify-between mt-1">
+                                {/* ТЕЛО: операторы (вставляем ваш существующий рендер операторов) */}
+                                <div className="min-w-full w-full">
+                                {filteredOperators.map(op => (
+                                    <div key={op.id} className="flex items-start py-3 border-b">
+                                    <div className="w-64 pr-2 sticky left-0 z-20 bg-white border-r">
+                                        <div className="font-medium">{op.name || '—'}</div>
+                                        <div className="flex items-center justify-between mt-1">
                                         <div className="text-xs text-slate-500">{op.direction || '—'}</div>
                                         {op.rate !== undefined && op.rate !== null && (
                                             <div className="text-xs font-bold text-slate-700">{op.rate}</div>
                                         )}
+                                        </div>
                                     </div>
-                                </div>
-                                <div className="flex-1" style={{ overflow: 'visible' }}>
-                                    <div className="flex flex-col gap-2">
-                                    <div className="grid grid-cols-1 gap-2">
-                                        <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
-                                        {visibleRange.map(d => {
-                                            const parts = getShiftPartsForDate(op, d);
-                                            const origArr = (op.shifts?.[d] ?? []).map((s, idx) => {
-                                            const sM = timeToMinutes(s.start);
-                                            const eM = timeToMinutes(s.end);
-                                            const crossing = eM <= sM;
-                                            const text = crossing ? `${s.start} — ${s.end} (+1)` : `${s.start} — ${s.end}`;
-                                            return { text, crossing, idx };
-                                            });
-                                            const prevArr = op.shifts?.[todayDateStr(addDays(parseDateStr(d), -1))] ?? [];
-                                            const prevCont = prevArr
-                                            .map((s, idx) => {
+                                    <div className="flex-1" style={{ overflow: 'visible' }}>
+                                        <div className="flex flex-col gap-2">
+                                        <div className="grid grid-cols-1 gap-2">
+                                            <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
+                                            {visibleRange.map(d => {
+                                                const parts = getShiftPartsForDate(op, d);
+                                                const origArr = (op.shifts?.[d] ?? []).map((s, idx) => {
                                                 const sM = timeToMinutes(s.start);
                                                 const eM = timeToMinutes(s.end);
                                                 const crossing = eM <= sM;
-                                                if (!crossing) return null;
-                                                return { text: `${minutesToTime(0)} — ${minutesToTime((timeToMinutes(s.end) + 1440) - 1440)}`, crossing: true, idx };
-                                            })
-                                            .filter(Boolean);
-                                            const labelList = [...origArr, ...prevCont];
-                                            const durationHours = parts.reduce((acc, p) => acc + (p.end - p.start) / 60, 0);
-                                            return (
-                                            <div key={d} className={"h-[56px] overflow-hidden border rounded p-1 relative bg-white border-slate-300" + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={() => openEditModal(op.id, d)}>
-                                                {viewMode === 'day' ? (
-                                                <div className="relative h-12">
-                                                    <div className="absolute inset-0 flex">
-                                                    {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
-                                                    </div>
-                                                    {parts.map((p, idx) => (
-                                                    <div key={idx}
-                                                        className="absolute top-1/4 h-1/2 rounded text-xs overflow-hidden flex items-center justify-between"
-                                                        style={{
-                                                        left: `${computeLeftPercent(p.start)}%`,
-                                                        width: `${((p.end - p.start) / minutesInDay) * 100}%`,
-                                                        background: ((op.shifts?.[p.sourceDate]?.[p.sourceIndex] && timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].end) <= timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].start)) ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)"),
-                                                        color: "white",
-                                                        }}
-                                                    >
-                                                        <div className="px-1 truncate text-[11px] border border-white/30 bg-white/10 rounded-sm z-40" style={{ paddingLeft: 6, paddingRight: 6 }}>{minutesToTime(p.start)} — {minutesToTime(p.end)}</div>
-                                                        <button
-                                                        onClick={(e) => { e.stopPropagation(); openEditModal(op.id, p.sourceDate, p.sourceIndex); }}
-                                                        className="text-[10px] px-1 py-0.5 mr-1 rounded bg-white/20"
-                                                        >
-                                                        <i className="fas fa-pen"></i>
-                                                        </button>
-                                                        {getBreakPartsForPart(op, p, d).map((b, bi) => (
-                                                        <div key={bi}
-                                                            className="absolute top-0 h-full text-[10px] flex items-center justify-center z-30"
+                                                const text = crossing ? `${s.start} — ${s.end} (+1)` : `${s.start} — ${s.end}`;
+                                                return { text, crossing, idx };
+                                                });
+                                                const prevArr = op.shifts?.[todayDateStr(addDays(parseDateStr(d), -1))] ?? [];
+                                                const prevCont = prevArr
+                                                .map((s, idx) => {
+                                                    const sM = timeToMinutes(s.start);
+                                                    const eM = timeToMinutes(s.end);
+                                                    const crossing = eM <= sM;
+                                                    if (!crossing) return null;
+                                                    return { text: `${minutesToTime(0)} — ${minutesToTime((timeToMinutes(s.end) + 1440) - 1440)}`, crossing: true, idx };
+                                                })
+                                                .filter(Boolean);
+                                                const labelList = [...origArr, ...prevCont];
+                                                const durationHours = parts.reduce((acc, p) => acc + (p.end - p.start) / 60, 0);
+                                                return (
+                                                <div key={d} className={"h-[56px] overflow-hidden border rounded p-1 relative bg-white border-slate-300" + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={() => openEditModal(op.id, d)}>
+                                                    {viewMode === 'day' ? (
+                                                    <div className="relative h-12">
+                                                        <div className="absolute inset-0 flex">
+                                                        {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
+                                                        </div>
+                                                        {parts.map((p, idx) => (
+                                                        <div key={idx}
+                                                            className="absolute top-1/4 h-1/2 rounded text-xs overflow-hidden flex items-center justify-between"
                                                             style={{
-                                                            left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
-                                                                width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`,
-                                                            background: "linear-gradient(90deg,#fde68a,#f59e0b)",
-                                                            color: "#5c3a00",
-                                                            fontWeight: 600,
+                                                            left: `${computeLeftPercent(p.start)}%`,
+                                                            width: `${((p.end - p.start) / minutesInDay) * 100}%`,
+                                                            background: ((op.shifts?.[p.sourceDate]?.[p.sourceIndex] && timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].end) <= timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].start)) ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)"),
+                                                            color: "white",
                                                             }}
-                                                        />
+                                                        >
+                                                            <div className="px-1 truncate text-[11px] border border-white/30 bg-white/10 rounded-sm z-40" style={{ paddingLeft: 6, paddingRight: 6 }}>{minutesToTime(p.start)} — {minutesToTime(p.end)}</div>
+                                                            <button
+                                                            onClick={(e) => { e.stopPropagation(); openEditModal(op.id, p.sourceDate, p.sourceIndex); }}
+                                                            className="text-[10px] px-1 py-0.5 mr-1 rounded bg-white/20"
+                                                            >
+                                                            <i className="fas fa-pen"></i>
+                                                            </button>
+                                                            {getBreakPartsForPart(op, p, d).map((b, bi) => (
+                                                            <div key={bi}
+                                                                className="absolute top-0 h-full text-[10px] flex items-center justify-center z-30"
+                                                                style={{
+                                                                left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
+                                                                width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`,
+                                                                background: "linear-gradient(90deg,#fde68a,#f59e0b)",
+                                                                color: "#5c3a00",
+                                                                fontWeight: 600,
+                                                                }}
+                                                            />
+                                                            ))}
+                                                        </div>
                                                         ))}
-                                                    </div>
-                                                    ))}
-                                                    {parts.length === 0 && <div className="text-[11px] text-slate-400">Нет смены</div>}
-                                                </div>
-                                                ) : (
-                                                <div className="flex flex-col text-sm overflow-hidden h-full">
-                                                    {labelList.length > 0 ? (
-                                                    <div className="relative h-full pb-4">
-                                                        {labelList.slice(0,2).map((l, i) => <div key={i} className={"font-medium text-xs truncate " + (l.crossing ? 'text-amber-600' : '')}>{l.text}</div>)}
-                                                        {labelList.length > 2 && (
-                                                        <div className="absolute right-1 bottom-[1px] text-xs text-slate-400">+{labelList.length - 2}</div>
-                                                        )}
-                                                        <div className="absolute left-1 bottom-[1px] text-xs text-slate-500">{durationHours.toFixed(2)} ч</div>
+                                                        {parts.length === 0 && <div className="text-[11px] text-slate-400">Нет смены</div>}
                                                     </div>
                                                     ) : (
-                                                    <div className="text-xs text-slate-400">—</div>
+                                                    <div className="flex flex-col text-sm overflow-hidden h-full">
+                                                        {labelList.length > 0 ? (
+                                                        <div className="relative h-full pb-4">
+                                                            {labelList.slice(0,2).map((l, i) => <div key={i} className={"font-medium text-xs truncate " + (l.crossing ? 'text-amber-600' : '')}>{l.text}</div>)}
+                                                            {labelList.length > 2 && (
+                                                            <div className="absolute right-1 bottom-[1px] text-xs text-slate-400">+{labelList.length - 2}</div>
+                                                            )}
+                                                            <div className="absolute left-1 bottom-[1px] text-xs text-slate-500">{durationHours.toFixed(2)} ч</div>
+                                                        </div>
+                                                        ) : (
+                                                        <div className="text-xs text-slate-400">—</div>
+                                                        )}
+                                                    </div>
+                                                    )}
+                                                    {viewMode === 'day' && durationHours > 0 && (
+                                                    <div className="absolute left-1 bottom-[1px] text-xs text-slate-500">{durationHours.toFixed(2)} ч</div>
                                                     )}
                                                 </div>
-                                                )}
-                                                {viewMode === 'day' && durationHours > 0 && (
-                                                <div className="absolute left-1 bottom-[1px] text-xs text-slate-500">{durationHours.toFixed(2)} ч</div>
-                                                )}
+                                                );
+                                            })}
                                             </div>
-                                            );
-                                        })}
+                                        </div>
                                         </div>
                                     </div>
                                     </div>
+                                ))}
                                 </div>
-                                </div>
-                            ))}
+                            </div>
                             </div>
                         </div>
-                        </div>
                     </div>
-                    </div>
+                </div>
                 </div>
 
                 <SimpleModal open={modalState.open} onClose={() => setModalState((m) => ({ ...m, open: false }))}>
