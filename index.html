@@ -6255,8 +6255,9 @@
                                             .filter(Boolean);
                                             const labelList = [...origArr, ...prevCont];
                                             const durationHours = parts.reduce((acc, p) => acc + (p.end - p.start) / 60, 0);
+                                            const hasShift = parts.length > 0 || labelList.length > 0;
                                             return (
-                                            <div key={d} className={"h-[56px] overflow-hidden border rounded p-1 relative bg-white border-slate-300" + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={() => openEditModal(op.id, d)}>
+                                            <div key={d} className={"h-[56px] overflow-hidden border rounded p-1 relative border-slate-300" + (hasShift ? ' bg-blue-50' : ' bg-white') + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={() => openEditModal(op.id, d)}>
                                                 {viewMode === 'day' ? (
                                                 <div className="relative h-12">
                                                     <div className="absolute inset-0 flex">
