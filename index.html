@@ -5795,13 +5795,15 @@
                 const copy = (initialOperators || []).map(op => ({
                     ...op,
                     // гарантируем существование объекта shifts
-                    shifts: op.shifts ? { ...op.shifts } : {}
+                    shifts: op.shifts ? { ...op.shifts } : {},
+                    // гарантируем существование массива daysOff
+                    daysOff: op.daysOff ? [...op.daysOff] : []
                 }));
 
                 return copy;
             });
 
-            const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [] });
+            const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff: false });
             const dragState = useRef(null);
 
             // Получаем уникальных супервайзеров (скрываем тех, у кого все операторы со статусом "fired")
@@ -5904,13 +5906,43 @@
             const openEditModal = (opId, date, editIndex = null) => {
                 const op = operators.find(o => o.id === opId);
                 const arr = op?.shifts?.[date] ?? [];
+                const isDayOff = op?.daysOff?.includes(date) ?? false;
                 if (editIndex !== null && arr[editIndex]) {
                 const seg = arr[editIndex];
                 const breaks = (seg.breaks ?? []).map(b => ({ start: b.start, end: b.end }));
-                setModalState({ open: true, opId, date, start: seg.start, end: seg.end, editIndex, breaks });
+                setModalState({ open: true, opId, date, start: seg.start, end: seg.end, editIndex, breaks, isDayOff });
                 } else {
-                setModalState({ open: true, opId, date, start: '09:00', end: '17:00', editIndex: null, breaks: [] });
+                setModalState({ open: true, opId, date, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff });
                 }
+            };
+
+            const toggleDayOff = (opId, date) => {
+                setOperators(prev => {
+                    const copy = prev.map(o => ({ 
+                        ...o, 
+                        shifts: { ...o.shifts },
+                        daysOff: o.daysOff ? [...o.daysOff] : []
+                    }));
+                    const op = copy.find(x => x.id === opId);
+                    if (!op) return prev;
+                    
+                    const isDayOff = op.daysOff.includes(date);
+                    if (isDayOff) {
+                        // Убираем выходной
+                        op.daysOff = op.daysOff.filter(d => d !== date);
+                    } else {
+                        // Добавляем выходной и удаляем все смены в этот день
+                        op.daysOff.push(date);
+                        if (op.shifts[date]) {
+                            delete op.shifts[date];
+                        }
+                    }
+                    
+                    return copy;
+                });
+                
+                // Обновляем состояние модального окна
+                setModalState(m => ({ ...m, isDayOff: !m.isDayOff }));
             };
 
             const saveSegment = ({ opId, date, start, end, editIndex = null, breaks = null }) => {
@@ -6256,10 +6288,23 @@
                                             const labelList = [...origArr, ...prevCont];
                                             const durationHours = parts.reduce((acc, p) => acc + (p.end - p.start) / 60, 0);
                                             const hasShift = parts.length > 0 || labelList.length > 0;
+                                            const isDayOff = op.daysOff?.includes(d) ?? false;
+                                            let bgColor = ' bg-white';
+                                            if (isDayOff) {
+                                                bgColor = ' bg-red-50';
+                                            } else if (hasShift) {
+                                                bgColor = ' bg-blue-50';
+                                            }
                                             return (
-                                            <div key={d} className={"h-[56px] overflow-hidden border rounded p-1 relative border-slate-300" + (hasShift ? ' bg-blue-50' : ' bg-white') + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={() => openEditModal(op.id, d)}>
+                                            <div key={d} className={"h-[56px] overflow-hidden border rounded p-1 relative border-slate-300" + bgColor + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={() => openEditModal(op.id, d)}>
                                                 {viewMode === 'day' ? (
                                                 <div className="relative h-12">
+                                                    {isDayOff ? (
+                                                        <div className="flex items-center justify-center h-full">
+                                                            <div className="text-sm font-medium text-red-600">Выходной</div>
+                                                        </div>
+                                                    ) : (
+                                                    <>
                                                     <div className="absolute inset-0 flex">
                                                     {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
                                                     </div>
@@ -6295,10 +6340,16 @@
                                                     </div>
                                                     ))}
                                                     {parts.length === 0 && <div className="text-[11px] text-slate-400">Нет смены</div>}
+                                                    </>
+                                                    )}
                                                 </div>
                                                 ) : (
                                                 <div className="flex flex-col text-sm overflow-hidden h-full">
-                                                    {labelList.length > 0 ? (
+                                                    {isDayOff ? (
+                                                        <div className="flex items-center justify-center h-full">
+                                                            <div className="text-xs font-medium text-red-600">Выходной</div>
+                                                        </div>
+                                                    ) : labelList.length > 0 ? (
                                                     <div className="relative h-full pb-4">
                                                         {labelList.slice(0,2).map((l, i) => <div key={i} className={"font-medium text-xs truncate " + (l.crossing ? 'text-amber-600' : '')}>{l.text}</div>)}
                                                         {labelList.length > 2 && (
@@ -6334,6 +6385,24 @@
                     <button onClick={() => setModalState(m => ({ ...m, open: false }))} className="text-slate-500 hover:text-slate-700 text-xl leading-none"><i className="fas fa-xmark"></i></button>
                     </div>
 
+                    <div className="mb-3 border rounded p-3 bg-slate-50">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                            <input 
+                                type="checkbox" 
+                                checked={modalState.isDayOff} 
+                                onChange={() => toggleDayOff(modalState.opId, modalState.date)}
+                                className="w-4 h-4 rounded"
+                            />
+                            <span className="text-sm font-medium text-red-600">Выходной день</span>
+                        </label>
+                        {modalState.isDayOff && (
+                            <div className="mt-2 text-xs text-slate-500">
+                                При установке выходного все смены в этот день будут удалены
+                            </div>
+                        )}
+                    </div>
+
+                    {!modalState.isDayOff && (
                     <div className="mb-3">
                     <div className="text-xs text-slate-500 mb-2">Существующие отрезки:</div>
                     {(() => {
@@ -6439,12 +6508,17 @@
                         </div>
                     </div>
                     </div>
+                    )}
 
                     <div className="flex items-center justify-between gap-2 mb-3">
-                    <div className="text-sm text-slate-500">Длительность сегмента: {' '}{(() => { const s = timeToMinutes(modalState.start); let e = timeToMinutes(modalState.end); if (e <= s) e += 1440; const dur = e - s; return dur > 0 ? `${(dur / 60).toFixed(2)} ч` : '—'; })()}</div>
-                    <div className="flex gap-2">
+                    {!modalState.isDayOff && (
+                        <div className="text-sm text-slate-500">Длительность сегмента: {' '}{(() => { const s = timeToMinutes(modalState.start); let e = timeToMinutes(modalState.end); if (e <= s) e += 1440; const dur = e - s; return dur > 0 ? `${(dur / 60).toFixed(2)} ч` : '—'; })()}</div>
+                    )}
+                    <div className="flex gap-2 ml-auto">
                         <button className="px-3 py-1 rounded bg-slate-100" onClick={() => setModalState((m) => ({ ...m, open: false }))}>Готово</button>
-                        <button className="px-3 py-1 rounded bg-sky-600 text-white" onClick={() => saveSegment({ opId: modalState.opId, date: modalState.date, start: modalState.start, end: modalState.end, editIndex: modalState.editIndex, breaks: modalState.breaks && modalState.breaks.length ? modalState.breaks : null })}>Сохранить сегмент</button>
+                        {!modalState.isDayOff && (
+                            <button className="px-3 py-1 rounded bg-sky-600 text-white" onClick={() => saveSegment({ opId: modalState.opId, date: modalState.date, start: modalState.start, end: modalState.end, editIndex: modalState.editIndex, breaks: modalState.breaks && modalState.breaks.length ? modalState.breaks : null })}>Сохранить сегмент</button>
+                        )}
                     </div>
                     </div>
                 </SimpleModal>
