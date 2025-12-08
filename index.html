@@ -6168,8 +6168,10 @@
                             <div className="min-w-full w-full">
                             <div className="flex items-center border-b pb-2 mb-2 sticky top-0 z-30 bg-white">
                                 <div className="w-64 sticky left-0 top-0 z-40 bg-white pr-2 border-r" />
-                                <div className="flex-1">
-                                <div className="flex gap-2">
+                                <div className="flex-1" style={{ overflow: 'visible' }}>
+                                <div className="flex flex-col gap-2">
+                                <div className="grid grid-cols-1 gap-2">
+                                <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
                                     {visibleRange.map(d => (
                                     <div
                                         key={d}
@@ -6188,6 +6190,7 @@
                                         )}
                                     </div>
                                     ))}
+                                </div>
                                 </div>
 
                                 {viewMode === 'day' && (
@@ -6218,6 +6221,7 @@
                                     </div>
                                     </div>
                                 )}
+                                </div>
                                 </div>
                             </div>
 
