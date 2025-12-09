@@ -6193,38 +6193,64 @@
                 try {
                   const op = operators.find(x => x.id === opId);
               
-                  // Обновляем локальное состояние сначала для всех дат
-                  const mergedResultsByDate = {};
-                  setOperators(prev => {
-                    const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
-                    const op = copy.find(x => x.id === opId);
-                    if (!op) return prev;
-                    dates.forEach((date) => {
-                      const arr = op.shifts[date] ? ([...op.shifts[date]]) : [];
+                  // Подготавливаем данные для массового сохранения — вычисляем breaks для каждой даты, если не передано
+                  const shifts = dates.map(date => {
+                    let bToSend = breaks;
+                    if (!bToSend) {
+                      const arr = (op?.shifts?.[date] ?? []).map(s => ({ ...s }));
                       arr.push({ start, end });
                       const merged = mergeSegments(arr);
-                      // Вычисляем перерывы для объединённой смены
-                      merged.forEach(seg => {
+                      const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                      if (seg) {
                         if (!seg.breaks || seg.breaks.length === 0) {
                           const sMin = seg.__startMin ?? timeToMinutes(seg.start);
                           const eMin = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
                           seg.breaks = computeBreaksForShiftMinutes(sMin, eMin);
                         }
-                      });
-                      mergedResultsByDate[date] = merged;
+                        bToSend = seg.breaks.map(b => ({ start: b.start, end: b.end }));
+                      } else {
+                        bToSend = [];
+                      }
+                    }
+                    return { date: date, start: start, end: end, breaks: bToSend || [] };
+                  });
+              
+                  // Отправляем список shifts с перерывами
+                  const response = await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'X-Api-Key': user.apiKey,
+                      'X-User-Id': user.id
+                    },
+                    body: JSON.stringify({
+                      operator_id: opId,
+                      shifts: shifts
+                    })
+                  });
+              
+                  if (!response.ok) throw new Error('Failed to save shifts');
+              
+                  // Обновляем локальное состояние (ваша текущая логика)
+                  setOperators(prev => {
+                    const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
+                    const op = copy.find(x => x.id === opId);
+                    if (!op) return prev;
+                    dates.forEach((date, i) => {
+                      const arr = op.shifts[date] ? ([...op.shifts[date]]) : [];
+                      arr.push({ start, end });
+                      const merged = mergeSegments(arr);
+                      // присваиваем перерывы, если были вычислены
+                      const bForDate = shifts[i].breaks;
+                      if (bForDate) {
+                        const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                        if (seg) seg.breaks = bForDate.map(b => ({ start: b.start, end: b.end }));
+                      }
                       op.shifts[date] = merged;
                       try { adjustBreaksForOperatorOnDate(op, date, copy); } catch (e) { /* ignore */ }
                     });
                     return copy;
                   });
-
-                  // Отправляем все объединённые смены для каждой даты на бэкенд
-                  for (const date of dates) {
-                    const merged = mergedResultsByDate[date];
-                    if (merged && merged.length > 0) {
-                      await saveMergedShiftsForDate(opId, date, merged);
-                    }
-                  }
               
                   clearSelectedDays();
                   setModalState(m => ({ ...m, open: false }));
@@ -6233,60 +6259,6 @@
                   alert('Ошибка массового сохранения смен');
                 }
               };              
-
-            // Функция для сохранения всех объединённых смен для даты на бэкенд
-            const saveMergedShiftsForDate = async (opId, date, mergedShifts) => {
-                if (!mergedShifts || mergedShifts.length === 0) {
-                    // Если смен нет, удаляем все смены для этой даты на бэкенде
-                    // (это обрабатывается через удаление отдельных смен)
-                    return;
-                }
-
-                try {
-                    // Подготавливаем данные для массового сохранения
-                    const shifts = mergedShifts.map(seg => {
-                        // Убеждаемся, что breaks есть и в правильном формате (минуты)
-                        let breaks = seg.breaks || [];
-                        if (!breaks || breaks.length === 0) {
-                            const sMin = seg.__startMin ?? timeToMinutes(seg.start);
-                            const eMin = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
-                            breaks = computeBreaksForShiftMinutes(sMin, eMin);
-                        }
-                        // Преобразуем breaks в формат для бэкенда (минуты)
-                        const breaksFormatted = breaks.map(b => ({
-                            start: typeof b.start === 'number' ? b.start : timeToMinutes(b.start),
-                            end: typeof b.end === 'number' ? b.end : timeToMinutes(b.end)
-                        }));
-                        return {
-                            date: date,
-                            start: seg.start,
-                            end: seg.end,
-                            breaks: breaksFormatted
-                        };
-                    });
-
-                    // Отправляем все объединённые смены на бэкенд
-                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-Api-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        },
-                        body: JSON.stringify({
-                            operator_id: opId,
-                            shifts: shifts
-                        })
-                    });
-
-                    if (!response.ok) {
-                        throw new Error('Failed to save merged shifts');
-                    }
-                } catch (error) {
-                    console.error('Error saving merged shifts:', error);
-                    throw error;
-                }
-            };
 
             const saveSegment = async ({ opId, date, start, end, editIndex = null, breaks = null }) => {
                 try {
@@ -6320,8 +6292,26 @@
                     }
                   }
               
-                  // Обновляем локальное состояние сначала
-                  let mergedResult = null;
+                  // Отправляем на сервер уже с breaksToSend
+                  const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'X-Api-Key': user.apiKey,
+                      'X-User-Id': user.id
+                    },
+                    body: JSON.stringify({
+                      operator_id: opId,
+                      shift_date: date,
+                      start_time: start,
+                      end_time: end,
+                      breaks: breaksToSend
+                    })
+                  });
+              
+                  if (!response.ok) throw new Error('Failed to save shift');
+              
+                  // Обновляем локальное состояние (оставляем вашу логику обновления как было)
                   setOperators(prev => {
                     const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
                     const op = copy.find(x => x.id === opId);
@@ -6332,19 +6322,16 @@
                     } else {
                       arr[editIndex] = { start, end };
                     }
-                    mergedResult = mergeSegments(arr);
+                    const merged = mergeSegments(arr);
                     // подставим перерывы, если они были
                     if (breaksToSend && editIndex !== null) {
-                      const seg = mergedResult.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                      const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
                       if (seg) seg.breaks = breaksToSend.map(b => ({ start: b.start, end: b.end }));
                     }
-                    op.shifts[date] = mergedResult;
+                    op.shifts[date] = merged;
                     try { adjustBreaksForOperatorOnDate(op, date, copy); } catch (e) { /* ignore */ }
                     return copy;
                   });
-
-                  // Отправляем все объединённые смены на бэкенд
-                  await saveMergedShiftsForDate(opId, date, mergedResult);
               
                   setModalState(m => ({ ...m, editIndex: null, multipleDates: null }));
                 } catch (error) {
@@ -6360,7 +6347,7 @@
                 if (!shift) return;
 
                 try {
-                    // Отправляем на сервер удаление конкретной смены
+                    // Отправляем на сервер
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift`, {
                         method: 'DELETE',
                         headers: {
@@ -6380,28 +6367,16 @@
                         throw new Error('Failed to delete shift');
                     }
 
-                    // Обновляем локальное состояние и получаем объединённые смены
-                    let mergedResult = null;
+                    // Обновляем локальное состояние
                     setOperators(prev => {
                     const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
                     const op = copy.find(x => x.id === opId);
                     if (!op) return prev;
                     const arr = (op.shifts[date] ?? []).slice();
                     arr.splice(index, 1);
-                    if (arr.length === 0) {
-                        delete op.shifts[date];
-                        mergedResult = [];
-                    } else {
-                        mergedResult = mergeSegments(arr);
-                        op.shifts[date] = mergedResult;
-                    }
+                    if (arr.length === 0) delete op.shifts[date]; else op.shifts[date] = mergeSegments(arr);
                     return copy;
                     });
-
-                    // Отправляем все оставшиеся объединённые смены на бэкенд
-                    if (mergedResult && mergedResult.length > 0) {
-                        await saveMergedShiftsForDate(opId, date, mergedResult);
-                    }
                 } catch (error) {
                     console.error('Error deleting shift:', error);
                     alert('Ошибка удаления смены');
