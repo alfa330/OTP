@@ -5760,6 +5760,32 @@
             if (!segs || segs.length === 0) return;
             let occupied = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id);
             for (const seg of segs) {
+                // Пропускаем автоматическую настройку перерывов, если они были заданы вручную
+                if (seg._manualBreaks && seg.breaks && seg.breaks.length > 0) {
+                    // Только проверяем, что перерывы не пересекаются с другими операторами
+                    const segStart = Math.max(0, seg.__startMin ?? timeToMinutes(seg.start));
+                    const segEnd = Math.min(1440, seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0)));
+                    const newBreaks = [];
+                    for (const b of seg.breaks) {
+                        const length = b.end - b.start;
+                        let desiredStart = Math.max(segStart, Math.min(segEnd - length, b.start));
+                        const found = findNonOverlappingStart(desiredStart, length, segStart, segEnd, occupied);
+                        if (found !== null) {
+                            const nb = { start: found, end: found + length };
+                            newBreaks.push(nb);
+                            occupied.push(nb);
+                        } else {
+                            // Если не удалось найти непересекающееся место, оставляем как есть
+                            const clamped = { start: Math.max(segStart, Math.min(segEnd - length, b.start)), end: Math.max(segStart, Math.min(segEnd, b.end)) };
+                            newBreaks.push(clamped);
+                            occupied.push(clamped);
+                        }
+                        occupied = mergeIntervals(occupied);
+                    }
+                    seg.breaks = newBreaks;
+                    continue;
+                }
+                // Для автоматически сгенерированных перерывов - генерируем и настраиваем как раньше
                 seg.breaks = seg.breaks ?? computeBreaksForShiftMinutes(seg.__startMin ?? timeToMinutes(seg.start), seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0)));
                 const segStart = Math.max(0, seg.__startMin ?? timeToMinutes(seg.start));
                 const segEnd = Math.min(1440, seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0)));
@@ -5789,7 +5815,13 @@
                 const start = timeToMinutes(s.start);
                 let end = timeToMinutes(s.end);
                 if (end <= start) end += 1440;
-                return { start, end };
+                return { 
+                    start, 
+                    end, 
+                    original: s,
+                    breaks: s.breaks || null,
+                    _manualBreaks: s._manualBreaks || false
+                };
             });
             intervals.sort((a, b) => a.start - b.start);
             const merged = [];
@@ -5799,6 +5831,14 @@
                 } else {
                 const last = merged[merged.length - 1];
                 if (iv.start <= last.end) {
+                    // При слиянии сегментов, сохраняем перерывы из обоих
+                    if (iv.breaks && iv._manualBreaks) {
+                        last.breaks = iv.breaks;
+                        last._manualBreaks = true;
+                    } else if (!last.breaks && iv.breaks) {
+                        last.breaks = iv.breaks;
+                        last._manualBreaks = iv._manualBreaks;
+                    }
                     last.end = Math.max(last.end, iv.end);
                 } else {
                     merged.push({ ...iv });
@@ -5808,8 +5848,16 @@
             return merged.map(m => {
                 const startStr = minutesToTime(m.start);
                 const endStr = minutesToTime(m.end % 1440);
-                const breaks = computeBreaksForShiftMinutes(m.start, m.end);
-                return { start: startStr, end: endStr, __startMin: m.start, __endMin: m.end, breaks };
+                // Сохраняем вручную заданные перерывы, иначе генерируем автоматически
+                const breaks = (m.breaks && m._manualBreaks) ? m.breaks : computeBreaksForShiftMinutes(m.start, m.end);
+                return { 
+                    start: startStr, 
+                    end: endStr, 
+                    __startMin: m.start, 
+                    __endMin: m.end, 
+                    breaks,
+                    _manualBreaks: m._manualBreaks || false
+                };
             });
             }
 
@@ -5959,9 +6007,32 @@
                                 return prevOps.map(op => {
                                     const serverOp = data.operators.find(sop => sop.id === op.id);
                                     if (serverOp) {
+                                        // Обрабатываем смены, сохраняя перерывы и помечая их как вручную заданные, если они есть
+                                        const processedShifts = {};
+                                        if (serverOp.shifts) {
+                                            for (const [date, shifts] of Object.entries(serverOp.shifts)) {
+                                                if (Array.isArray(shifts)) {
+                                                    processedShifts[date] = shifts.map(shift => {
+                                                        const processed = { ...shift };
+                                                        // Если у смены есть перерывы, помечаем их как вручную заданные
+                                                        if (shift.breaks && shift.breaks.length > 0) {
+                                                            processed._manualBreaks = true;
+                                                            // Убеждаемся, что перерывы в формате {start, end} с минутами
+                                                            processed.breaks = shift.breaks.map(b => ({
+                                                                start: typeof b.start === 'number' ? b.start : timeToMinutes(b.start),
+                                                                end: typeof b.end === 'number' ? b.end : timeToMinutes(b.end)
+                                                            }));
+                                                        }
+                                                        return processed;
+                                                    });
+                                                } else {
+                                                    processedShifts[date] = shifts;
+                                                }
+                                            }
+                                        }
                                         return {
                                             ...op,
-                                            shifts: serverOp.shifts || {},
+                                            shifts: processedShifts,
                                             daysOff: serverOp.daysOff || []
                                         };
                                     }
@@ -6205,18 +6276,41 @@
                         
                         dates.forEach(date => {
                             const arr = op.shifts[date] ? [...op.shifts[date]] : [];
-                            arr.push({ start, end });
+                            
+                            // Сохраняем информацию о вручную заданных перерывах
+                            const newShift = { start, end };
+                            if (breaks && breaks.length > 0) {
+                                newShift.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
+                                newShift._manualBreaks = true;
+                            }
+                            arr.push(newShift);
+                            
                             const merged = mergeSegments(arr);
-                            if (breaks) {
-                                const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                            
+                            // Если перерывы были заданы вручную, убеждаемся что они сохранены
+                            if (breaks && breaks.length > 0) {
+                                const startMin = timeToMinutes(start);
+                                let endMin = timeToMinutes(end);
+                                if (endMin <= startMin) endMin += 1440;
+                                
+                                // Находим сегмент, который содержит нашу смену
+                                const seg = merged.find(s => {
+                                    const sMin = s.__startMin ?? timeToMinutes(s.start);
+                                    let eMin = s.__endMin ?? timeToMinutes(s.end);
+                                    if (eMin <= sMin) eMin += 1440;
+                                    return sMin <= startMin && eMin >= endMin;
+                                });
+                                
                                 if (seg) {
                                     seg.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
+                                    seg._manualBreaks = true;
                                 }
                             }
+                            
                             op.shifts[date] = merged;
                             try { 
                                 adjustBreaksForOperatorOnDate(op, date, copy);
-                                // Сохраняем обновленные смены с автогенерированными перерывами
+                                // Сохраняем обновленные смены с перерывами
                                 shiftsToSync[date] = op.shifts[date];
                             } catch (e) { }
                         });
@@ -6267,12 +6361,29 @@
             // Функция синхронизации смен с сервером (после автогенерации перерывов)
             const syncShiftsWithServer = async (opId, date, shifts) => {
                 try {
-                    const shiftsToSync = shifts.map(shift => ({
-                        date: date,
-                        start: shift.start,
-                        end: shift.end,
-                        breaks: shift.breaks || []
-                    }));
+                    const shiftsToSync = shifts.map(shift => {
+                        // Убеждаемся, что перерывы в правильном формате (минуты)
+                        let breaks = shift.breaks || [];
+                        if (breaks.length > 0) {
+                            breaks = breaks.map(b => {
+                                // Если break уже в формате {start, end} с минутами, оставляем как есть
+                                if (typeof b.start === 'number' && typeof b.end === 'number') {
+                                    return { start: b.start, end: b.end };
+                                }
+                                // Иначе конвертируем из строк времени в минуты
+                                return {
+                                    start: timeToMinutes(b.start),
+                                    end: timeToMinutes(b.end)
+                                };
+                            });
+                        }
+                        return {
+                            date: date,
+                            start: shift.start,
+                            end: shift.end,
+                            breaks: breaks
+                        };
+                    });
 
                     await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
                         method: 'POST',
@@ -6300,18 +6411,46 @@
                         const op = copy.find(x => x.id === opId);
                         if (!op) return prev;
                         const arr = op.shifts[date] ? [...op.shifts[date]] : [];
+                        
+                        // Сохраняем информацию о вручную заданных перерывах
                         if (editIndex === null) {
-                            arr.push({ start, end });
+                            const newShift = { start, end };
+                            if (breaks && breaks.length > 0) {
+                                newShift.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
+                                newShift._manualBreaks = true;
+                            }
+                            arr.push(newShift);
                         } else {
-                            arr[editIndex] = { start, end };
+                            const editedShift = { start, end };
+                            if (breaks && breaks.length > 0) {
+                                editedShift.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
+                                editedShift._manualBreaks = true;
+                            }
+                            arr[editIndex] = editedShift;
                         }
+                        
                         const merged = mergeSegments(arr);
-                        if (breaks) {
-                            const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                        
+                        // Если перерывы были заданы вручную, убеждаемся что они сохранены
+                        if (breaks && breaks.length > 0) {
+                            const startMin = timeToMinutes(start);
+                            let endMin = timeToMinutes(end);
+                            if (endMin <= startMin) endMin += 1440;
+                            
+                            // Находим сегмент, который содержит нашу смену
+                            const seg = merged.find(s => {
+                                const sMin = s.__startMin ?? timeToMinutes(s.start);
+                                let eMin = s.__endMin ?? timeToMinutes(s.end);
+                                if (eMin <= sMin) eMin += 1440;
+                                return sMin <= startMin && eMin >= endMin;
+                            });
+                            
                             if (seg) {
                                 seg.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
+                                seg._manualBreaks = true;
                             }
                         }
+                        
                         op.shifts[date] = merged;
                         try { 
                             adjustBreaksForOperatorOnDate(op, date, copy);
