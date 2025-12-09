@@ -6310,9 +6310,11 @@
                             op.shifts[date] = merged;
                             try { 
                                 adjustBreaksForOperatorOnDate(op, date, copy);
-                                // Сохраняем обновленные смены с перерывами
-                                shiftsToSync[date] = op.shifts[date];
-                            } catch (e) { }
+                            } catch (e) {
+                                console.error('Error adjusting breaks for', date, e);
+                            }
+                            // Всегда сохраняем обновленные смены с перерывами, даже если adjustBreaksForOperatorOnDate не выполнился
+                            shiftsToSync[date] = op.shifts[date] || merged;
                         });
                         
                         return copy;
@@ -6361,6 +6363,11 @@
             // Функция синхронизации смен с сервером (после автогенерации перерывов)
             const syncShiftsWithServer = async (opId, date, shifts) => {
                 try {
+                    if (!shifts || shifts.length === 0) {
+                        console.warn('No shifts to sync for', opId, date);
+                        return;
+                    }
+                    
                     const shiftsToSync = shifts.map(shift => {
                         // Убеждаемся, что перерывы в правильном формате (минуты)
                         let breaks = shift.breaks || [];
@@ -6385,7 +6392,9 @@
                         };
                     });
 
-                    await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
+                    console.log('Sending shifts to server:', { operator_id: opId, shifts: shiftsToSync });
+                    
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -6397,15 +6406,24 @@
                             shifts: shiftsToSync
                         })
                     });
+
+                    if (!response.ok) {
+                        const errorText = await response.text();
+                        throw new Error(`Failed to save shifts: ${response.status} ${errorText}`);
+                    }
+                    
+                    const result = await response.json();
+                    console.log('Shifts saved successfully:', result);
                 } catch (error) {
                     console.error('Error syncing shifts with server:', error);
+                    throw error; // Пробрасываем ошибку дальше, чтобы её можно было обработать
                 }
             };
 
             const saveSegment = async ({ opId, date, start, end, editIndex = null, breaks = null }) => {
                 try {
                     // Сначала обновляем локальное состояние и генерируем перерывы
-                    let updatedShifts = null;
+                    let shiftsToSync = null;
                     setOperators(prev => {
                         const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
                         const op = copy.find(x => x.id === opId);
@@ -6454,20 +6472,34 @@
                         op.shifts[date] = merged;
                         try { 
                             adjustBreaksForOperatorOnDate(op, date, copy);
-                            updatedShifts = op.shifts[date]; // Сохраняем обновленные смены с перерывами
-                        } catch (e) { }
+                        } catch (e) { 
+                            console.error('Error adjusting breaks:', e);
+                        }
+                        // Всегда сохраняем обновленные смены для отправки на сервер
+                        shiftsToSync = op.shifts[date] || merged;
                         return copy;
                     });
 
                     // Теперь отправляем на сервер с уже сгенерированными перерывами
-                    if (updatedShifts) {
-                        await syncShiftsWithServer(opId, date, updatedShifts);
+                    if (shiftsToSync && shiftsToSync.length > 0) {
+                        try {
+                            await syncShiftsWithServer(opId, date, shiftsToSync);
+                        } catch (syncError) {
+                            console.error('Failed to sync shifts with server:', syncError);
+                            alert('Ошибка отправки смены на сервер: ' + syncError.message);
+                            // Не закрываем модальное окно, чтобы пользователь мог попробовать снова
+                            return;
+                        }
+                    } else {
+                        console.warn('No shifts to sync for', opId, date);
+                        alert('Ошибка: не удалось подготовить смены для сохранения');
+                        return;
                     }
 
                     setModalState(m => ({ ...m, editIndex: null, multipleDates: null }));
                 } catch (error) {
                     console.error('Error saving shift:', error);
-                    alert('Ошибка сохранения смены');
+                    alert('Ошибка сохранения смены: ' + error.message);
                 }
             };
 
