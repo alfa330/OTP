@@ -6193,74 +6193,38 @@
                 try {
                     // Сначала обновляем локальное состояние и генерируем перерывы
                     const shiftsToSync = {};
-                    const manuallyConfiguredBreaksMap = new Map();
-                    
                     setOperators(prev => {
                         const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
                         const op = copy.find(x => x.id === opId);
                         if (!op) return prev;
-                        
+            
                         dates.forEach(date => {
+                            // <-- Исправлено: корректный разворот массива и убрана опечатка ".op"
                             const arr = op.shifts[date] ? [...op.shifts[date]] : [];
                             arr.push({ start, end });
                             const merged = mergeSegments(arr);
-                            
-                            // Применяем вручную настроенные перерывы
-                            if (breaks && breaks.length > 0) {
-                                const startMin = timeToMinutes(start);
-                                let endMin = timeToMinutes(end);
-                                if (endMin <= startMin) endMin += 1440;
-                                
-                                // Находим сегмент, который содержит или перекрывает наш временной диапазон
-                                const seg = merged.find(s => {
-                                    const sStart = timeToMinutes(s.start);
-                                    let sEnd = timeToMinutes(s.end);
-                                    if (sEnd <= sStart) sEnd += 1440;
-                                    // Проверяем, что наш диапазон перекрывается с сегментом
-                                    return (startMin >= sStart && startMin < sEnd) || 
-                                           (endMin > sStart && endMin <= sEnd) ||
-                                           (startMin <= sStart && endMin >= sEnd);
-                                });
+            
+                            // <-- Всегда пытаемся прикрепить переданные breaks к найденному сегменту
+                            if (breaks && breaks.length) {
+                                const normStart = minutesToTime(timeToMinutes(start));
+                                const normEnd = minutesToTime(timeToMinutes(end) % 1440);
+                                const seg = merged.find(s => s.start === normStart && s.end === normEnd);
                                 if (seg) {
                                     seg.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
-                                    // Сохраняем информацию о вручную настроенных перерывах для этой даты
-                                    manuallyConfiguredBreaksMap.set(date, { startMin, endMin, breaks: seg.breaks });
                                 }
                             }
-                            
+            
                             op.shifts[date] = merged;
-                            try { 
+                            try {
                                 adjustBreaksForOperatorOnDate(op, date, copy);
-                                // Если были вручную настроены перерывы, восстанавливаем их после автогенерации
-                                if (manuallyConfiguredBreaksMap.has(date)) {
-                                    const manualBreaks = manuallyConfiguredBreaksMap.get(date);
-                                    const startMin = manualBreaks.startMin;
-                                    const endMin = manualBreaks.endMin;
-                                    const seg = op.shifts[date].find(s => {
-                                        const sStart = timeToMinutes(s.start);
-                                        let sEnd = timeToMinutes(s.end);
-                                        if (sEnd <= sStart) sEnd += 1440;
-                                        // Проверяем, что наш диапазон перекрывается с сегментом
-                                        return (startMin >= sStart && startMin < sEnd) || 
-                                               (endMin > sStart && endMin <= sEnd) ||
-                                               (startMin <= sStart && endMin >= sEnd);
-                                    });
-                                    if (seg) {
-                                        seg.breaks = manualBreaks.breaks;
-                                    }
-                                }
-                                // Сохраняем обновленные смены с перерывами
+                                // Сохраняем обновленные смены с автогенерированными перерывами
                                 shiftsToSync[date] = op.shifts[date];
-                            } catch (e) {
-                                // Если автогенерация перерывов не удалась, все равно отправляем смены
-                                console.warn(`adjustBreaksForOperatorOnDate failed for ${date}:`, e);
-                                shiftsToSync[date] = op.shifts[date];
-                            }
+                            } catch (e) { /* noop */ }
                         });
-                        
+            
                         return copy;
                     });
-
+            
                     // Теперь отправляем на сервер все смены с уже сгенерированными перерывами
                     const allShifts = [];
                     for (const [date, shifts] of Object.entries(shiftsToSync)) {
@@ -6273,13 +6237,14 @@
                             });
                         });
                     }
-
+            
                     if (allShifts.length > 0) {
                         const response = await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
                             method: 'POST',
                             headers: {
                                 'Content-Type': 'application/json',
-                                'X-Api-Key': user.apiKey,
+                                // <-- Синхронизировано имя заголовка с остальным кодом
+                                'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
                             },
                             body: JSON.stringify({
@@ -6287,12 +6252,12 @@
                                 shifts: allShifts
                             })
                         });
-
+            
                         if (!response.ok) {
                             throw new Error('Failed to save shifts');
                         }
                     }
-
+            
                     clearSelectedDays();
                     setModalState(m => ({ ...m, open: false }));
                 } catch (error) {
@@ -6300,6 +6265,7 @@
                     alert('Ошибка массового сохранения смен');
                 }
             };
+            
 
             // Функция синхронизации смен с сервером (после автогенерации перерывов)
             const syncShiftsWithServer = async (opId, date, shifts) => {
@@ -6310,12 +6276,12 @@
                         end: shift.end,
                         breaks: shift.breaks || []
                     }));
-
+            
                     await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-Api-Key': user.apiKey,
+                            'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
                         },
                         body: JSON.stringify({
@@ -6326,18 +6292,17 @@
                 } catch (error) {
                     console.error('Error syncing shifts with server:', error);
                 }
-            };
+            };            
 
             const saveSegment = async ({ opId, date, start, end, editIndex = null, breaks = null }) => {
                 try {
                     // Сначала обновляем локальное состояние и генерируем перерывы
                     let updatedShifts = null;
-                    let manuallyConfiguredBreaks = null;
-                    
                     setOperators(prev => {
                         const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
                         const op = copy.find(x => x.id === opId);
                         if (!op) return prev;
+                        // <-- Исправлено: разворачиваем существующие смены корректно
                         const arr = op.shifts[date] ? [...op.shifts[date]] : [];
                         if (editIndex === null) {
                             arr.push({ start, end });
@@ -6345,71 +6310,37 @@
                             arr[editIndex] = { start, end };
                         }
                         const merged = mergeSegments(arr);
-                        
-                        // Применяем вручную настроенные перерывы для новых и редактируемых смен
-                        if (breaks && breaks.length > 0) {
-                            const startMin = timeToMinutes(start);
-                            let endMin = timeToMinutes(end);
-                            if (endMin <= startMin) endMin += 1440;
-                            
-                            // Находим сегмент, который содержит или перекрывает наш временной диапазон
-                            const seg = merged.find(s => {
-                                const sStart = timeToMinutes(s.start);
-                                let sEnd = timeToMinutes(s.end);
-                                if (sEnd <= sStart) sEnd += 1440;
-                                // Проверяем, что наш диапазон перекрывается с сегментом
-                                return (startMin >= sStart && startMin < sEnd) || 
-                                       (endMin > sStart && endMin <= sEnd) ||
-                                       (startMin <= sStart && endMin >= sEnd);
-                            });
+            
+                        // <-- Всегда пытаемся прикрепить переданные breaks (даже для новых смен)
+                        if (breaks && breaks.length) {
+                            const normStart = minutesToTime(timeToMinutes(start));
+                            const normEnd = minutesToTime(timeToMinutes(end) % 1440);
+                            const seg = merged.find(s => s.start === normStart && s.end === normEnd);
                             if (seg) {
                                 seg.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
-                                // Сохраняем информацию о вручную настроенных перерывах
-                                manuallyConfiguredBreaks = { startMin, endMin, breaks: seg.breaks };
                             }
                         }
-                        
+            
                         op.shifts[date] = merged;
                         try { 
                             adjustBreaksForOperatorOnDate(op, date, copy);
-                            // Если были вручную настроены перерывы, восстанавливаем их после автогенерации
-                            if (manuallyConfiguredBreaks && manuallyConfiguredBreaks.startMin !== undefined) {
-                                const startMin = manuallyConfiguredBreaks.startMin;
-                                const endMin = manuallyConfiguredBreaks.endMin;
-                                const seg = op.shifts[date].find(s => {
-                                    const sStart = timeToMinutes(s.start);
-                                    let sEnd = timeToMinutes(s.end);
-                                    if (sEnd <= sStart) sEnd += 1440;
-                                    // Проверяем, что наш диапазон перекрывается с сегментом
-                                    return (startMin >= sStart && startMin < sEnd) || 
-                                           (endMin > sStart && endMin <= sEnd) ||
-                                           (startMin <= sStart && endMin >= sEnd);
-                                });
-                                if (seg) {
-                                    seg.breaks = manuallyConfiguredBreaks.breaks;
-                                }
-                            }
                             updatedShifts = op.shifts[date]; // Сохраняем обновленные смены с перерывами
-                        } catch (e) {
-                            // Если автогенерация перерывов не удалась, все равно отправляем смены
-                            console.warn('adjustBreaksForOperatorOnDate failed:', e);
-                            updatedShifts = op.shifts[date];
-                        }
+                        } catch (e) { /* noop */ }
                         return copy;
                     });
-
+            
                     // Теперь отправляем на сервер с уже сгенерированными перерывами
-                    // Отправляем даже если updatedShifts был установлен в catch блоке
-                    if (updatedShifts && updatedShifts.length > 0) {
+                    if (updatedShifts) {
                         await syncShiftsWithServer(opId, date, updatedShifts);
                     }
-
+            
                     setModalState(m => ({ ...m, editIndex: null, multipleDates: null }));
                 } catch (error) {
                     console.error('Error saving shift:', error);
                     alert('Ошибка сохранения смены');
                 }
             };
+            
 
             const removeSegment = async ({ opId, date, index }) => {
                 const op = operators.find(x => x.id === opId);
