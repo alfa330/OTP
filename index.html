@@ -5826,7 +5826,47 @@
 
             const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff: false, multipleDates: null });
             const [selectedDays, setSelectedDays] = useState({ opId: null, dates: [] });
+            const [isLoading, setIsLoading] = useState(false);
             const dragState = useRef(null);
+
+            // Загрузка данных с сервера
+            useEffect(() => {
+                const loadSchedules = async () => {
+                    try {
+                        setIsLoading(true);
+                        const response = await fetch('/api/work_schedules/operators', {
+                            headers: {
+                                'X-Api-Key': localStorage.getItem('api_key'),
+                                'X-User-Id': localStorage.getItem('user_id')
+                            }
+                        });
+                        
+                        if (response.ok) {
+                            const data = await response.json();
+                            // Объединяем данные с сервера с initialOperators
+                            setOperators(prevOps => {
+                                return prevOps.map(op => {
+                                    const serverOp = data.operators.find(sop => sop.id === op.id);
+                                    if (serverOp) {
+                                        return {
+                                            ...op,
+                                            shifts: serverOp.shifts || {},
+                                            daysOff: serverOp.daysOff || []
+                                        };
+                                    }
+                                    return op;
+                                });
+                            });
+                        }
+                    } catch (error) {
+                        console.error('Error loading schedules:', error);
+                    } finally {
+                        setIsLoading(false);
+                    }
+                };
+                
+                loadSchedules();
+            }, []);
 
             // Получаем уникальных супервайзеров (скрываем тех, у кого все операторы со статусом "fired")
             const uniqueSupervisors = useMemo(() => {
@@ -5938,33 +5978,61 @@
                 }
             };
 
-            const toggleDayOff = (opId, date) => {
-                setOperators(prev => {
-                    const copy = prev.map(o => ({ 
-                        ...o, 
-                        shifts: { ...o.shifts },
-                        daysOff: o.daysOff ? [...o.daysOff] : []
-                    }));
-                    const op = copy.find(x => x.id === opId);
-                    if (!op) return prev;
-                    
-                    const isDayOff = op.daysOff.includes(date);
-                    if (isDayOff) {
-                        // Убираем выходной
-                        op.daysOff = op.daysOff.filter(d => d !== date);
-                    } else {
-                        // Добавляем выходной и удаляем все смены в этот день
-                        op.daysOff.push(date);
-                        if (op.shifts[date]) {
-                            delete op.shifts[date];
-                        }
+            const toggleDayOff = async (opId, date) => {
+                try {
+                    // Отправляем на сервер
+                    const response = await fetch('/api/work_schedules/day_off', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Api-Key': localStorage.getItem('api_key'),
+                            'X-User-Id': localStorage.getItem('user_id')
+                        },
+                        body: JSON.stringify({
+                            operator_id: opId,
+                            day_off_date: date
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Failed to toggle day off');
                     }
+
+                    const result = await response.json();
+
+                    // Обновляем локальное состояние
+                    setOperators(prev => {
+                        const copy = prev.map(o => ({ 
+                            ...o, 
+                            shifts: { ...o.shifts },
+                            daysOff: o.daysOff ? [...o.daysOff] : []
+                        }));
+                        const op = copy.find(x => x.id === opId);
+                        if (!op) return prev;
+                        
+                        if (result.is_day_off) {
+                            // Добавляем выходной
+                            if (!op.daysOff.includes(date)) {
+                                op.daysOff.push(date);
+                            }
+                            // Удаляем все смены в этот день
+                            if (op.shifts[date]) {
+                                delete op.shifts[date];
+                            }
+                        } else {
+                            // Убираем выходной
+                            op.daysOff = op.daysOff.filter(d => d !== date);
+                        }
+                        
+                        return copy;
+                    });
                     
-                    return copy;
-                });
-                
-                // Обновляем состояние модального окна
-                setModalState(m => ({ ...m, isDayOff: !m.isDayOff }));
+                    // Обновляем состояние модального окна
+                    setModalState(m => ({ ...m, isDayOff: result.is_day_off }));
+                } catch (error) {
+                    console.error('Error toggling day off:', error);
+                    alert('Ошибка изменения выходного дня');
+                }
             };
 
             const handleDayClick = (e, opId, date) => {
@@ -6010,67 +6078,157 @@
                 setSelectedDays({ opId: null, dates: [] });
             };
 
-            const saveSegmentToMultipleDays = ({ opId, dates, start, end, breaks = null }) => {
-                setOperators(prev => {
+            const saveSegmentToMultipleDays = async ({ opId, dates, start, end, breaks = null }) => {
+                try {
+                    // Подготавливаем данные для массового сохранения
+                    const shifts = dates.map(date => ({
+                        date: date,
+                        start: start,
+                        end: end,
+                        breaks: breaks || []
+                    }));
+
+                    // Отправляем на сервер
+                    const response = await fetch('/api/work_schedules/shifts_bulk', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Api-Key': localStorage.getItem('api_key'),
+                            'X-User-Id': localStorage.getItem('user_id')
+                        },
+                        body: JSON.stringify({
+                            operator_id: opId,
+                            shifts: shifts
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Failed to save shifts');
+                    }
+
+                    // Обновляем локальное состояние
+                    setOperators(prev => {
+                        const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
+                        const op = copy.find(x => x.id === opId);
+                        if (!op) return prev;
+                        
+                        dates.forEach(date => {
+                            const arr = op.shifts[date] ? [...op.shifts[date]] : [];
+                            arr.push({ start, end });
+                            const merged = mergeSegments(arr);
+                            if (breaks) {
+                                const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                                if (seg) {
+                                    seg.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
+                                }
+                            }
+                            op.shifts[date] = merged;
+                            try { adjustBreaksForOperatorOnDate(op, date, copy); } catch (e) { }
+                        });
+                        
+                        return copy;
+                    });
+                    clearSelectedDays();
+                    setModalState(m => ({ ...m, open: false }));
+                } catch (error) {
+                    console.error('Error saving multiple shifts:', error);
+                    alert('Ошибка массового сохранения смен');
+                }
+            };
+
+            const saveSegment = async ({ opId, date, start, end, editIndex = null, breaks = null }) => {
+                try {
+                    // Отправляем на сервер
+                    const response = await fetch('/api/work_schedules/shift', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Api-Key': localStorage.getItem('api_key'),
+                            'X-User-Id': localStorage.getItem('user_id')
+                        },
+                        body: JSON.stringify({
+                            operator_id: opId,
+                            shift_date: date,
+                            start_time: start,
+                            end_time: end,
+                            breaks: breaks
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Failed to save shift');
+                    }
+
+                    // Обновляем локальное состояние
+                    setOperators(prev => {
                     const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
                     const op = copy.find(x => x.id === opId);
                     if (!op) return prev;
-                    
-                    dates.forEach(date => {
-                        const arr = op.shifts[date] ? [...op.shifts[date]] : [];
+                    const arr = op.shifts[date] ? [...op.shifts[date]] : [];
+                    if (editIndex === null) {
                         arr.push({ start, end });
-                        const merged = mergeSegments(arr);
-                        if (breaks) {
-                            const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
-                            if (seg) {
-                                seg.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
-                            }
-                        }
-                        op.shifts[date] = merged;
-                        try { adjustBreaksForOperatorOnDate(op, date, copy); } catch (e) { }
-                    });
-                    
-                    return copy;
-                });
-                clearSelectedDays();
-                setModalState(m => ({ ...m, open: false }));
-            };
-
-            const saveSegment = ({ opId, date, start, end, editIndex = null, breaks = null }) => {
-                setOperators(prev => {
-                const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
-                const op = copy.find(x => x.id === opId);
-                if (!op) return prev;
-                const arr = op.shifts[date] ? [...op.shifts[date]] : [];
-                if (editIndex === null) {
-                    arr.push({ start, end });
-                } else {
-                    arr[editIndex] = { start, end };
-                }
-                const merged = mergeSegments(arr);
-                if (breaks && editIndex !== null) {
-                    const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
-                    if (seg) {
-                    seg.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
+                    } else {
+                        arr[editIndex] = { start, end };
                     }
+                    const merged = mergeSegments(arr);
+                    if (breaks && editIndex !== null) {
+                        const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                        if (seg) {
+                        seg.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
+                        }
+                    }
+                    op.shifts[date] = merged;
+                    try { adjustBreaksForOperatorOnDate(op, date, copy); } catch (e) { }
+                    return copy;
+                    });
+                    setModalState(m => ({ ...m, editIndex: null, multipleDates: null }));
+                } catch (error) {
+                    console.error('Error saving shift:', error);
+                    alert('Ошибка сохранения смены');
                 }
-                op.shifts[date] = merged;
-                try { adjustBreaksForOperatorOnDate(op, date, copy); } catch (e) { }
-                return copy;
-                });
-                setModalState(m => ({ ...m, editIndex: null, multipleDates: null }));
             };
 
-            const removeSegment = ({ opId, date, index }) => {
-                setOperators(prev => {
-                const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
-                const op = copy.find(x => x.id === opId);
-                if (!op) return prev;
-                const arr = (op.shifts[date] ?? []).slice();
-                arr.splice(index, 1);
-                if (arr.length === 0) delete op.shifts[date]; else op.shifts[date] = mergeSegments(arr);
-                return copy;
-                });
+            const removeSegment = async ({ opId, date, index }) => {
+                const op = operators.find(x => x.id === opId);
+                if (!op) return;
+                const shift = op.shifts[date]?.[index];
+                if (!shift) return;
+
+                try {
+                    // Отправляем на сервер
+                    const response = await fetch('/api/work_schedules/shift', {
+                        method: 'DELETE',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Api-Key': localStorage.getItem('api_key'),
+                            'X-User-Id': localStorage.getItem('user_id')
+                        },
+                        body: JSON.stringify({
+                            operator_id: opId,
+                            shift_date: date,
+                            start_time: shift.start,
+                            end_time: shift.end
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Failed to delete shift');
+                    }
+
+                    // Обновляем локальное состояние
+                    setOperators(prev => {
+                    const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
+                    const op = copy.find(x => x.id === opId);
+                    if (!op) return prev;
+                    const arr = (op.shifts[date] ?? []).slice();
+                    arr.splice(index, 1);
+                    if (arr.length === 0) delete op.shifts[date]; else op.shifts[date] = mergeSegments(arr);
+                    return copy;
+                    });
+                } catch (error) {
+                    console.error('Error deleting shift:', error);
+                    alert('Ошибка удаления смены');
+                }
             };
 
             const getShiftPartsForDate = (op, dateStr) => {

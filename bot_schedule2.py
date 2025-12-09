@@ -2781,6 +2781,238 @@ def delete_training(training_id):
         logging.error(f"Error deleting training {training_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+
+# ==================== Work Schedules API ====================
+
+@app.route('/api/work_schedules/operators', methods=['GET'])
+@require_api_key
+def get_operators_with_schedules():
+    """
+    Получить всех операторов с их сменами и выходными днями.
+    Query params: start_date, end_date (optional, format: YYYY-MM-DD)
+    """
+    try:
+        user = request.headers.get('X-User-Id')
+        if not user:
+            return jsonify({"error": "Unauthorized"}), 401
+        
+        user_id = int(user)
+        user_data = db.get_user(id=user_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+        
+        role = user_data[3]
+        
+        # Только admin и sv могут видеть планировщик смен
+        if role not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+        
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        
+        operators = db.get_operators_with_shifts(start_date, end_date)
+        
+        return jsonify({"operators": operators}), 200
+    
+    except Exception as e:
+        logging.error(f"Error getting operators with schedules: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/work_schedules/shift', methods=['POST'])
+@require_api_key
+def save_work_shift():
+    """
+    Сохранить смену для оператора.
+    Body: {
+        "operator_id": int,
+        "shift_date": "YYYY-MM-DD",
+        "start_time": "HH:MM",
+        "end_time": "HH:MM",
+        "breaks": [{"start": minutes, "end": minutes}, ...]  // optional
+    }
+    """
+    try:
+        user = request.headers.get('X-User-Id')
+        if not user:
+            return jsonify({"error": "Unauthorized"}), 401
+        
+        user_id = int(user)
+        user_data = db.get_user(id=user_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+        
+        role = user_data[3]
+        
+        if role not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+        
+        data = request.get_json()
+        operator_id = data.get('operator_id')
+        shift_date = data.get('shift_date')
+        start_time = data.get('start_time')
+        end_time = data.get('end_time')
+        breaks = data.get('breaks')
+        
+        if not all([operator_id, shift_date, start_time, end_time]):
+            return jsonify({"error": "Missing required fields"}), 400
+        
+        shift_id = db.save_shift(operator_id, shift_date, start_time, end_time, breaks)
+        
+        return jsonify({"message": "Shift saved successfully", "shift_id": shift_id}), 200
+    
+    except Exception as e:
+        logging.error(f"Error saving shift: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/work_schedules/shift', methods=['DELETE'])
+@require_api_key
+def delete_work_shift():
+    """
+    Удалить смену оператора.
+    Body: {
+        "operator_id": int,
+        "shift_date": "YYYY-MM-DD",
+        "start_time": "HH:MM",
+        "end_time": "HH:MM"
+    }
+    """
+    try:
+        user = request.headers.get('X-User-Id')
+        if not user:
+            return jsonify({"error": "Unauthorized"}), 401
+        
+        user_id = int(user)
+        user_data = db.get_user(id=user_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+        
+        role = user_data[3]
+        
+        if role not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+        
+        data = request.get_json()
+        operator_id = data.get('operator_id')
+        shift_date = data.get('shift_date')
+        start_time = data.get('start_time')
+        end_time = data.get('end_time')
+        
+        if not all([operator_id, shift_date, start_time, end_time]):
+            return jsonify({"error": "Missing required fields"}), 400
+        
+        success = db.delete_shift(operator_id, shift_date, start_time, end_time)
+        
+        if success:
+            return jsonify({"message": "Shift deleted successfully"}), 200
+        else:
+            return jsonify({"error": "Shift not found"}), 404
+    
+    except Exception as e:
+        logging.error(f"Error deleting shift: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/work_schedules/day_off', methods=['POST'])
+@require_api_key
+def toggle_work_day_off():
+    """
+    Переключить выходной день для оператора.
+    Body: {
+        "operator_id": int,
+        "day_off_date": "YYYY-MM-DD"
+    }
+    """
+    try:
+        user = request.headers.get('X-User-Id')
+        if not user:
+            return jsonify({"error": "Unauthorized"}), 401
+        
+        user_id = int(user)
+        user_data = db.get_user(id=user_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+        
+        role = user_data[3]
+        
+        if role not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+        
+        data = request.get_json()
+        operator_id = data.get('operator_id')
+        day_off_date = data.get('day_off_date')
+        
+        if not all([operator_id, day_off_date]):
+            return jsonify({"error": "Missing required fields"}), 400
+        
+        is_day_off = db.toggle_day_off(operator_id, day_off_date)
+        
+        return jsonify({
+            "message": "Day off toggled successfully",
+            "is_day_off": is_day_off
+        }), 200
+    
+    except Exception as e:
+        logging.error(f"Error toggling day off: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/work_schedules/shifts_bulk', methods=['POST'])
+@require_api_key
+def save_shifts_bulk():
+    """
+    Массовое сохранение смен для оператора.
+    Body: {
+        "operator_id": int,
+        "shifts": [
+            {
+                "date": "YYYY-MM-DD",
+                "start": "HH:MM",
+                "end": "HH:MM",
+                "breaks": [{"start": minutes, "end": minutes}, ...]  // optional
+            },
+            ...
+        ]
+    }
+    """
+    try:
+        user = request.headers.get('X-User-Id')
+        if not user:
+            return jsonify({"error": "Unauthorized"}), 401
+        
+        user_id = int(user)
+        user_data = db.get_user(id=user_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+        
+        role = user_data[3]
+        
+        if role not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+        
+        data = request.get_json()
+        operator_id = data.get('operator_id')
+        shifts = data.get('shifts', [])
+        
+        if not operator_id:
+            return jsonify({"error": "Missing operator_id"}), 400
+        
+        if not shifts:
+            return jsonify({"error": "No shifts provided"}), 400
+        
+        shift_ids = db.save_shifts_bulk(operator_id, shifts)
+        
+        return jsonify({
+            "message": f"Successfully saved {len(shift_ids)} shifts",
+            "shift_ids": shift_ids
+        }), 200
+    
+    except Exception as e:
+        logging.error(f"Error saving shifts bulk: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False, use_reloader=False)
 
