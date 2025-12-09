@@ -7548,7 +7548,7 @@
             return () => document.removeEventListener("mousedown", handleClickOutside);
             }, [showSidebarAccountDropdown]);
 
-            const TrainingModal = ({ isOpen, onClose, onSave, initialData = {} }) => {
+            function TrainingModal({ isOpen, onClose, onSave, initialData = {} }) {
                 const [date, setDate] = useState(initialData.date || "");
                 const [startTime, setStartTime] = useState(initialData.start_time || "");
                 const [endTime, setEndTime] = useState(initialData.end_time || "");
@@ -7824,7 +7824,7 @@
                     </div>
                     </>
                 );
-                };
+                }
 
             const TrainingsView = ({ user, operators }) => {  // operators - список операторов (все для админа, свои для св)
                 // Preserve selected month across remounts — read/write from localStorage
