@@ -5834,7 +5834,7 @@
                 const loadSchedules = async () => {
                     try {
                         setIsLoading(true);
-                        const response = await fetch('/api/work_schedules/operators', {
+                        const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators`, {
                             headers: {
                                 'X-Api-Key': localStorage.getItem('api_key'),
                                 'X-User-Id': localStorage.getItem('user_id')
@@ -5981,7 +5981,7 @@
             const toggleDayOff = async (opId, date) => {
                 try {
                     // Отправляем на сервер
-                    const response = await fetch('/api/work_schedules/day_off', {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/day_off`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -6089,7 +6089,7 @@
                     }));
 
                     // Отправляем на сервер
-                    const response = await fetch('/api/work_schedules/shifts_bulk', {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -6139,7 +6139,7 @@
             const saveSegment = async ({ opId, date, start, end, editIndex = null, breaks = null }) => {
                 try {
                     // Отправляем на сервер
-                    const response = await fetch('/api/work_schedules/shift', {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -6196,7 +6196,7 @@
 
                 try {
                     // Отправляем на сервер
-                    const response = await fetch('/api/work_schedules/shift', {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift`, {
                         method: 'DELETE',
                         headers: {
                             'Content-Type': 'application/json',
