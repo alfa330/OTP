@@ -6191,113 +6191,154 @@
 
             const saveSegmentToMultipleDays = async ({ opId, dates, start, end, breaks = null }) => {
                 try {
-                    // Подготавливаем данные для массового сохранения
-                    const shifts = dates.map(date => ({
-                        date: date,
-                        start: start,
-                        end: end,
-                        breaks: breaks || []
-                    }));
-
-                    // Отправляем на сервер
-                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-Api-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        },
-                        body: JSON.stringify({
-                            operator_id: opId,
-                            shifts: shifts
-                        })
-                    });
-
-                    if (!response.ok) {
-                        throw new Error('Failed to save shifts');
+                  const op = operators.find(x => x.id === opId);
+              
+                  // Подготавливаем данные для массового сохранения — вычисляем breaks для каждой даты, если не передано
+                  const shifts = dates.map(date => {
+                    let bToSend = breaks;
+                    if (!bToSend) {
+                      const arr = (op?.shifts?.[date] ?? []).map(s => ({ ...s }));
+                      arr.push({ start, end });
+                      const merged = mergeSegments(arr);
+                      const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                      if (seg) {
+                        if (!seg.breaks || seg.breaks.length === 0) {
+                          const sMin = seg.__startMin ?? timeToMinutes(seg.start);
+                          const eMin = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
+                          seg.breaks = computeBreaksForShiftMinutes(sMin, eMin);
+                        }
+                        bToSend = seg.breaks.map(b => ({ start: b.start, end: b.end }));
+                      } else {
+                        bToSend = [];
+                      }
                     }
-
-                    // Обновляем локальное состояние
-                    setOperators(prev => {
-                        const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
-                        const op = copy.find(x => x.id === opId);
-                        if (!op) return prev;
-                        
-                        dates.forEach(date => {
-                            const arr = op.shifts[date] ? [...op.shifts[date]] : [];
-                            arr.push({ start, end });
-                            const merged = mergeSegments(arr);
-                            if (breaks) {
-                                const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
-                                if (seg) {
-                                    seg.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
-                                }
-                            }
-                            op.shifts[date] = merged;
-                            try { adjustBreaksForOperatorOnDate(op, date, copy); } catch (e) { }
-                        });
-                        
-                        return copy;
-                    });
-                    clearSelectedDays();
-                    setModalState(m => ({ ...m, open: false }));
-                } catch (error) {
-                    console.error('Error saving multiple shifts:', error);
-                    alert('Ошибка массового сохранения смен');
-                }
-            };
-
-            const saveSegment = async ({ opId, date, start, end, editIndex = null, breaks = null }) => {
-                try {
-                    // Отправляем на сервер
-                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-Api-Key': user.apiKey,
-                            'X-User-Id': user.id
-                        },
-                        body: JSON.stringify({
-                            operator_id: opId,
-                            shift_date: date,
-                            start_time: start,
-                            end_time: end,
-                            breaks: breaks
-                        })
-                    });
-
-                    if (!response.ok) {
-                        throw new Error('Failed to save shift');
-                    }
-
-                    // Обновляем локальное состояние
-                    setOperators(prev => {
+                    return { date: date, start: start, end: end, breaks: bToSend || [] };
+                  });
+              
+                  // Отправляем список shifts с перерывами
+                  const response = await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'X-Api-Key': user.apiKey,
+                      'X-User-Id': user.id
+                    },
+                    body: JSON.stringify({
+                      operator_id: opId,
+                      shifts: shifts
+                    })
+                  });
+              
+                  if (!response.ok) throw new Error('Failed to save shifts');
+              
+                  // Обновляем локальное состояние (ваша текущая логика)
+                  setOperators(prev => {
                     const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
                     const op = copy.find(x => x.id === opId);
                     if (!op) return prev;
-                    const arr = op.shifts[date] ? [...op.shifts[date]] : [];
+                    dates.forEach((date, i) => {
+                      const arr = op.shifts[date] ? ([...op.shifts[date]]) : [];
+                      arr.push({ start, end });
+                      const merged = mergeSegments(arr);
+                      // присваиваем перерывы, если были вычислены
+                      const bForDate = shifts[i].breaks;
+                      if (bForDate) {
+                        const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                        if (seg) seg.breaks = bForDate.map(b => ({ start: b.start, end: b.end }));
+                      }
+                      op.shifts[date] = merged;
+                      try { adjustBreaksForOperatorOnDate(op, date, copy); } catch (e) { /* ignore */ }
+                    });
+                    return copy;
+                  });
+              
+                  clearSelectedDays();
+                  setModalState(m => ({ ...m, open: false }));
+                } catch (error) {
+                  console.error('Error saving multiple shifts:', error);
+                  alert('Ошибка массового сохранения смен');
+                }
+              };              
+
+            const saveSegment = async ({ opId, date, start, end, editIndex = null, breaks = null }) => {
+                try {
+                  // найдём оператора в текущем state
+                  const op = operators.find(x => x.id === opId);
+              
+                  // вычислим breaksToSend — если breaks переданы явно, используем их,
+                  // иначе попытаемся получить перерывы из локального состояния / сгенерировать их
+                  let breaksToSend = breaks;
+                  if (!breaksToSend) {
+                    const arr = (op?.shifts?.[date] ?? []).map(s => ({ ...s }));
                     if (editIndex === null) {
-                        arr.push({ start, end });
+                      arr.push({ start, end });
                     } else {
-                        arr[editIndex] = { start, end };
+                      // если редактируем, заменим соответствующий индекс
+                      if (arr[editIndex]) arr[editIndex] = { start, end };
+                      else arr[editIndex] = { start, end };
                     }
                     const merged = mergeSegments(arr);
-                    if (breaks && editIndex !== null) {
-                        const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
-                        if (seg) {
-                        seg.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
-                        }
+                    const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                    if (seg) {
+                      // если в сегменте нет breaks — сгенерируем их по длине сегмента
+                      if (!seg.breaks || seg.breaks.length === 0) {
+                        const sMin = seg.__startMin ?? timeToMinutes(seg.start);
+                        const eMin = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
+                        seg.breaks = computeBreaksForShiftMinutes(sMin, eMin);
+                      }
+                      breaksToSend = seg.breaks.map(b => ({ start: b.start, end: b.end }));
+                    } else {
+                      breaksToSend = [];
+                    }
+                  }
+              
+                  // Отправляем на сервер уже с breaksToSend
+                  const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'X-Api-Key': user.apiKey,
+                      'X-User-Id': user.id
+                    },
+                    body: JSON.stringify({
+                      operator_id: opId,
+                      shift_date: date,
+                      start_time: start,
+                      end_time: end,
+                      breaks: breaksToSend
+                    })
+                  });
+              
+                  if (!response.ok) throw new Error('Failed to save shift');
+              
+                  // Обновляем локальное состояние (оставляем вашу логику обновления как было)
+                  setOperators(prev => {
+                    const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
+                    const op = copy.find(x => x.id === opId);
+                    if (!op) return prev;
+                    const arr = op.shifts[date] ? ([...op.shifts[date]]) : [];
+                    if (editIndex === null) {
+                      arr.push({ start, end });
+                    } else {
+                      arr[editIndex] = { start, end };
+                    }
+                    const merged = mergeSegments(arr);
+                    // подставим перерывы, если они были
+                    if (breaksToSend && editIndex !== null) {
+                      const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                      if (seg) seg.breaks = breaksToSend.map(b => ({ start: b.start, end: b.end }));
                     }
                     op.shifts[date] = merged;
-                    try { adjustBreaksForOperatorOnDate(op, date, copy); } catch (e) { }
+                    try { adjustBreaksForOperatorOnDate(op, date, copy); } catch (e) { /* ignore */ }
                     return copy;
-                    });
-                    setModalState(m => ({ ...m, editIndex: null, multipleDates: null }));
+                  });
+              
+                  setModalState(m => ({ ...m, editIndex: null, multipleDates: null }));
                 } catch (error) {
-                    console.error('Error saving shift:', error);
-                    alert('Ошибка сохранения смены');
+                  console.error('Error saving shift:', error);
+                  alert('Ошибка сохранения смены');
                 }
-            };
+              };              
 
             const removeSegment = async ({ opId, date, index }) => {
                 const op = operators.find(x => x.id === opId);
