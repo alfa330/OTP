@@ -6083,9 +6083,13 @@
                 if (editIndex !== null && arr[editIndex]) {
                 const seg = arr[editIndex];
                 const breaks = (seg.breaks ?? []).map(b => ({ start: b.start, end: b.end }));
-                setModalState({ open: true, opId, date, start: seg.start, end: seg.end, editIndex, breaks, isDayOff, multipleDates: null });
+                setModalState(m => ({ ...m, open: true, opId, date, start: seg.start, end: seg.end, editIndex, breaks, isDayOff, multipleDates: null }));
                 } else {
-                setModalState({ open: true, opId, date, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff, multipleDates: null });
+                setModalState(m => {
+                    const fallbackStart = m.start || '09:00';
+                    const fallbackEnd = m.end || '17:00';
+                    return { ...m, open: true, opId, date, start: fallbackStart, end: fallbackEnd, editIndex: null, breaks: [], isDayOff, multipleDates: null };
+                });
                 }
             };
 
@@ -6172,17 +6176,18 @@
             };
 
             const openEditModalForMultipleDays = (opId, dates) => {
-                setModalState({ 
+                setModalState(m => ({ 
+                    ...m,
                     open: true, 
                     opId, 
                     date: dates[0], // используем первую дату как основную
-                    start: '09:00', 
-                    end: '17:00', 
+                    start: m.start || '09:00', 
+                    end: m.end || '17:00', 
                     editIndex: null, 
                     breaks: [], 
                     isDayOff: false,
                     multipleDates: dates
-                });
+                }));
             };
 
             const clearSelectedDays = () => {
@@ -6301,7 +6306,7 @@
                             arr[editIndex] = { start, end };
                         }
                         const merged = mergeSegments(arr);
-                        if (breaks && editIndex !== null) {
+                        if (breaks) {
                             const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
                             if (seg) {
                                 seg.breaks = breaks.map(b => ({ start: b.start, end: b.end }));
