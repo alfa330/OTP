@@ -2375,6 +2375,9 @@
 
         const [selectedTab, setSelectedTab] = useState('work_time');
 
+        // Training modal component resolver (handles scope/hoisting)
+        const TrainingModalComponent = (typeof TrainingModal !== 'undefined' ? TrainingModal : (typeof window !== 'undefined' ? window.TrainingModal : null));
+
         // helpers: month parts
         const monthParts = useMemo(() => {
             const [y, m] = month.split('-').map(Number);
@@ -3972,8 +3975,8 @@
                 </div>
                 </div>
             )}
-            {trainingModalState?.open && (
-                <TrainingModal
+            {TrainingModalComponent && trainingModalState?.open && (
+                <TrainingModalComponent
                 isOpen={trainingModalState.open}
                 onClose={closeTrainingModal}
                 onSave={handleTrainingSaveFromModal}
@@ -7825,6 +7828,11 @@
                     </>
                 );
                 }
+
+            // Make accessible in global scope for nested components defined earlier
+            if (typeof window !== 'undefined') {
+                window.TrainingModal = TrainingModal;
+            }
 
             const TrainingsView = ({ user, operators }) => {  // operators - список операторов (все для админа, свои для св)
                 // Preserve selected month across remounts — read/write from localStorage
