@@ -5805,7 +5805,7 @@
             );
             }
 
-        function ShiftPlannerViewWithCalendar({ initialOperators }) {
+        function ShiftPlannerViewWithCalendar({ initialOperators, user }) {
             const [viewMode, setViewMode] = useState('day');
             const [currentDate, setCurrentDate] = useState(() => new Date());
             const [selectedSupervisors, setSelectedSupervisors] = useState([]);
@@ -5836,8 +5836,8 @@
                         setIsLoading(true);
                         const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators`, {
                             headers: {
-                                'X-Api-Key': localStorage.getItem('api_key'),
-                                'X-User-Id': localStorage.getItem('user_id')
+                                'X-Api-Key': user.apiKey,
+                                'X-User-Id': user.id
                             }
                         });
                         
@@ -5985,8 +5985,8 @@
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-Api-Key': localStorage.getItem('api_key'),
-                            'X-User-Id': localStorage.getItem('user_id')
+                            'X-Api-Key': user.apiKey,
+                            'X-User-Id': user.id
                         },
                         body: JSON.stringify({
                             operator_id: opId,
@@ -6093,8 +6093,8 @@
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-Api-Key': localStorage.getItem('api_key'),
-                            'X-User-Id': localStorage.getItem('user_id')
+                            'X-Api-Key': user.apiKey,
+                            'X-User-Id': user.id
                         },
                         body: JSON.stringify({
                             operator_id: opId,
@@ -6143,8 +6143,8 @@
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-Api-Key': localStorage.getItem('api_key'),
-                            'X-User-Id': localStorage.getItem('user_id')
+                            'X-Api-Key': user.apiKey,
+                            'X-User-Id': user.id
                         },
                         body: JSON.stringify({
                             operator_id: opId,
@@ -6200,8 +6200,8 @@
                         method: 'DELETE',
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-Api-Key': localStorage.getItem('api_key'),
-                            'X-User-Id': localStorage.getItem('user_id')
+                            'X-Api-Key': user.apiKey,
+                            'X-User-Id': user.id
                         },
                         body: JSON.stringify({
                             operator_id: opId,
@@ -11353,7 +11353,7 @@
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
-                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                             </>
                         )}
                         {user.role === 'sv' && (
@@ -11863,7 +11863,7 @@
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
-                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                             </>
                         )}
                         {user.role === 'operator' && (
