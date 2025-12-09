@@ -306,6 +306,42 @@ class Database:
                     changed_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
+            # Work schedules (shifts) table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS work_shifts (
+                    id SERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    shift_date DATE NOT NULL,
+                    start_time TIME NOT NULL,
+                    end_time TIME NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(operator_id, shift_date, start_time, end_time)
+                );
+            """)
+
+            # Break periods within shifts
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS shift_breaks (
+                    id SERIAL PRIMARY KEY,
+                    shift_id INTEGER NOT NULL REFERENCES work_shifts(id) ON DELETE CASCADE,
+                    start_minutes INTEGER NOT NULL,
+                    end_minutes INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
+            # Days off table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS days_off (
+                    id SERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    day_off_date DATE NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(operator_id, day_off_date)
+                );
+            """)
+
             # Optimized Indexes (added more based on query patterns)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
@@ -330,6 +366,9 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_hours_calls_per_hour ON work_hours(calls_per_hour);
                 CREATE INDEX IF NOT EXISTS idx_trainings_operator_id ON trainings(operator_id);
                 CREATE INDEX IF NOT EXISTS idx_trainings_training_date ON trainings(training_date);
+                CREATE INDEX IF NOT EXISTS idx_work_shifts_operator_date ON work_shifts(operator_id, shift_date);
+                CREATE INDEX IF NOT EXISTS idx_work_shifts_date ON work_shifts(shift_date);
+                CREATE INDEX IF NOT EXISTS idx_days_off_operator_date ON days_off(operator_id, day_off_date);
             """)
 
     def create_user(self, telegram_id, name, role, direction_id=None, rate=None, hire_date=None, supervisor_id=None, login=None, password=None, hours_table_url=None):
@@ -3438,6 +3477,218 @@ class Database:
 
         # Вызов генератора — один проход, файл формируется сразу с колонкой "Супервайзер"
         return self.generate_excel_report_from_view({"operators": ops}, trainings_map, month, filename=filename, include_supervisor=True)
+
+    # ==================== Work Shifts Methods ====================
+    
+    def get_operators_with_shifts(self, start_date=None, end_date=None):
+        """
+        Получить всех операторов со сменами и выходными днями за период.
+        Возвращает список операторов с их сменами и выходными.
+        """
+        with self._get_cursor() as cursor:
+            # Получаем всех операторов
+            cursor.execute("""
+                SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name, 
+                       d.name as direction, u.status, u.rate
+                FROM users u
+                LEFT JOIN users s ON u.supervisor_id = s.id
+                LEFT JOIN directions d ON u.direction_id = d.id
+                WHERE u.role = 'operator'
+                ORDER BY d.name, u.name
+            """)
+            operators = cursor.fetchall()
+            
+            result = []
+            for op in operators:
+                op_id, name, supervisor_id, supervisor_name, direction, status, rate = op
+                
+                # Получаем смены оператора
+                shifts_query = """
+                    SELECT ws.id, ws.shift_date, ws.start_time, ws.end_time
+                    FROM work_shifts ws
+                    WHERE ws.operator_id = %s
+                """
+                params = [op_id]
+                
+                if start_date:
+                    shifts_query += " AND ws.shift_date >= %s"
+                    params.append(start_date)
+                if end_date:
+                    shifts_query += " AND ws.shift_date <= %s"
+                    params.append(end_date)
+                    
+                shifts_query += " ORDER BY ws.shift_date, ws.start_time"
+                cursor.execute(shifts_query, params)
+                shifts_rows = cursor.fetchall()
+                
+                # Формируем словарь смен по датам
+                shifts_dict = {}
+                shift_ids = []
+                for shift_row in shifts_rows:
+                    shift_id, shift_date, start_time, end_time = shift_row
+                    date_str = shift_date.strftime('%Y-%m-%d')
+                    if date_str not in shifts_dict:
+                        shifts_dict[date_str] = []
+                    shifts_dict[date_str].append({
+                        'id': shift_id,
+                        'start': start_time.strftime('%H:%M'),
+                        'end': end_time.strftime('%H:%M'),
+                        'breaks': []
+                    })
+                    shift_ids.append(shift_id)
+                
+                # Получаем перерывы для всех смен оператора
+                if shift_ids:
+                    cursor.execute("""
+                        SELECT shift_id, start_minutes, end_minutes
+                        FROM shift_breaks
+                        WHERE shift_id = ANY(%s)
+                        ORDER BY shift_id, start_minutes
+                    """, (shift_ids,))
+                    breaks_rows = cursor.fetchall()
+                    
+                    # Группируем перерывы по shift_id
+                    for date_str, shifts in shifts_dict.items():
+                        for shift in shifts:
+                            shift['breaks'] = [
+                                {'start': b[1], 'end': b[2]} 
+                                for b in breaks_rows if b[0] == shift['id']
+                            ]
+                
+                # Получаем выходные дни оператора
+                days_off_query = """
+                    SELECT day_off_date
+                    FROM days_off
+                    WHERE operator_id = %s
+                """
+                params = [op_id]
+                
+                if start_date:
+                    days_off_query += " AND day_off_date >= %s"
+                    params.append(start_date)
+                if end_date:
+                    days_off_query += " AND day_off_date <= %s"
+                    params.append(end_date)
+                    
+                cursor.execute(days_off_query, params)
+                days_off = [row[0].strftime('%Y-%m-%d') for row in cursor.fetchall()]
+                
+                result.append({
+                    'id': op_id,
+                    'name': name,
+                    'supervisor_id': supervisor_id,
+                    'supervisor_name': supervisor_name,
+                    'direction': direction,
+                    'status': status,
+                    'rate': float(rate) if rate else 1.0,
+                    'shifts': shifts_dict,
+                    'daysOff': days_off
+                })
+            
+            return result
+
+    def save_shift(self, operator_id, shift_date, start_time, end_time, breaks=None):
+        """
+        Сохранить смену для оператора. Если смена с такими параметрами существует, обновить перерывы.
+        """
+        if isinstance(shift_date, str):
+            shift_date = datetime.strptime(shift_date, '%Y-%m-%d').date()
+        
+        with self._get_cursor() as cursor:
+            # Вставляем или получаем ID смены
+            cursor.execute("""
+                INSERT INTO work_shifts (operator_id, shift_date, start_time, end_time, updated_at)
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (operator_id, shift_date, start_time, end_time)
+                DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+                RETURNING id
+            """, (operator_id, shift_date, start_time, end_time))
+            shift_id = cursor.fetchone()[0]
+            
+            # Удаляем старые перерывы и добавляем новые
+            if breaks is not None:
+                cursor.execute("DELETE FROM shift_breaks WHERE shift_id = %s", (shift_id,))
+                
+                if breaks:
+                    cursor.executemany("""
+                        INSERT INTO shift_breaks (shift_id, start_minutes, end_minutes)
+                        VALUES (%s, %s, %s)
+                    """, [(shift_id, b['start'], b['end']) for b in breaks])
+            
+            return shift_id
+
+    def delete_shift(self, operator_id, shift_date, start_time, end_time):
+        """
+        Удалить конкретную смену оператора.
+        """
+        if isinstance(shift_date, str):
+            shift_date = datetime.strptime(shift_date, '%Y-%m-%d').date()
+        
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                DELETE FROM work_shifts
+                WHERE operator_id = %s AND shift_date = %s 
+                  AND start_time = %s AND end_time = %s
+                RETURNING id
+            """, (operator_id, shift_date, start_time, end_time))
+            return cursor.fetchone() is not None
+
+    def toggle_day_off(self, operator_id, day_off_date):
+        """
+        Переключить выходной день для оператора.
+        Если день уже выходной - убрать, иначе - добавить и удалить все смены в этот день.
+        Возвращает True если день стал выходным, False если был убран.
+        """
+        if isinstance(day_off_date, str):
+            day_off_date = datetime.strptime(day_off_date, '%Y-%m-%d').date()
+        
+        with self._get_cursor() as cursor:
+            # Проверяем, является ли день уже выходным
+            cursor.execute("""
+                SELECT id FROM days_off
+                WHERE operator_id = %s AND day_off_date = %s
+            """, (operator_id, day_off_date))
+            
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Убираем выходной
+                cursor.execute("""
+                    DELETE FROM days_off
+                    WHERE operator_id = %s AND day_off_date = %s
+                """, (operator_id, day_off_date))
+                return False
+            else:
+                # Добавляем выходной
+                cursor.execute("""
+                    INSERT INTO days_off (operator_id, day_off_date)
+                    VALUES (%s, %s)
+                """, (operator_id, day_off_date))
+                
+                # Удаляем все смены в этот день
+                cursor.execute("""
+                    DELETE FROM work_shifts
+                    WHERE operator_id = %s AND shift_date = %s
+                """, (operator_id, day_off_date))
+                
+                return True
+
+    def save_shifts_bulk(self, operator_id, shifts_data):
+        """
+        Массовое сохранение смен для оператора.
+        shifts_data: [{'date': 'YYYY-MM-DD', 'start': 'HH:MM', 'end': 'HH:MM', 'breaks': [...]}, ...]
+        """
+        result_ids = []
+        for shift in shifts_data:
+            shift_date = shift['date']
+            start_time = shift['start']
+            end_time = shift['end']
+            breaks = shift.get('breaks')
+            
+            shift_id = self.save_shift(operator_id, shift_date, start_time, end_time, breaks)
+            result_ids.append(shift_id)
+        
+        return result_ids
 
 
 # Initialize database
