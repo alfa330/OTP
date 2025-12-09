@@ -2349,6 +2349,8 @@
 
         const [operators, setOperators] = useState([]);
         const [trainingsMap, setTrainingsMap] = useState({}); // { operatorId: { dayNum: [trainings...] } }
+        const [trainingModalState, setTrainingModalState] = useState({ open: false, operatorId: null, date: null, training: null });
+        const [isTrainingActionLoading, setIsTrainingActionLoading] = useState(false);
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
         const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' (admin only)
         const [isLoading, setIsLoading] = useState(false);
@@ -3071,6 +3073,69 @@
             return sum;
         }
 
+        // ====== Trainings inside day modal ======
+        function openTrainingModalForDay(opId, day, training = null) {
+            if (!opId || !day) return;
+            setTrainingModalState({ open: true, operatorId: opId, date: dayToDateStr(day), training: training ? { ...training } : null });
+        }
+
+        function closeTrainingModal() {
+            setTrainingModalState({ open: false, operatorId: null, date: null, training: null });
+        }
+
+        async function handleTrainingSaveFromModal(data) {
+            if (!user || !trainingModalState.operatorId) return;
+            setIsTrainingActionLoading(true);
+            try {
+            if (trainingModalState.training?.id) {
+                await axios.put(`${API_BASE_URL}/api/trainings/${trainingModalState.training.id}`, data, {
+                headers: {
+                    'X-API-Key': user.apiKey,
+                    'X-User-Id': user.id
+                }
+                });
+                fallbackToast('Тренинг обновлен', 'success');
+            } else {
+                await axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: trainingModalState.operatorId }, {
+                headers: {
+                    'X-API-Key': user.apiKey,
+                    'X-User-Id': user.id
+                }
+                });
+                fallbackToast('Тренинг добавлен', 'success');
+            }
+            await fetchDailyHoursAndTrainings();
+            closeTrainingModal();
+            } catch (err) {
+            console.error('handleTrainingSaveFromModal error', err);
+            fallbackToast('Не удалось сохранить тренинг', 'error');
+            } finally {
+            setIsTrainingActionLoading(false);
+            }
+        }
+
+        async function handleTrainingDeleteFromModal(trainingId) {
+            if (!user || !trainingId) return;
+            const confirmed = window.confirm('Удалить тренинг?');
+            if (!confirmed) return;
+            setIsTrainingActionLoading(true);
+            try {
+            await axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
+                headers: {
+                'X-API-Key': user.apiKey,
+                'X-User-Id': user.id
+                }
+            });
+            fallbackToast('Тренинг удален', 'success');
+            await fetchDailyHoursAndTrainings();
+            } catch (err) {
+            console.error('handleTrainingDeleteFromModal error', err);
+            fallbackToast('Ошибка при удалении тренинга', 'error');
+            } finally {
+            setIsTrainingActionLoading(false);
+            }
+        }
+
         async function downloadMonthlyReport() {
             if (!user) {
             fallbackToast('Пользователь не авторизован', 'error');
@@ -3648,7 +3713,23 @@
                             <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
                             <i className="fas fa-chalkboard-teacher" aria-hidden="true" /> Тренинги
                             </h4>
+                            <div className="flex items-center gap-2">
                             <div className="text-xs text-gray-500">{getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).length} найдено</div>
+                            {isTrainingActionLoading && (
+                                <span className="text-xs text-blue-600 inline-flex items-center gap-1">
+                                <i className="fas fa-spinner fa-spin" aria-hidden="true" /> Сохранение...
+                                </span>
+                            )}
+                            <button
+                                type="button"
+                                onClick={() => openTrainingModalForDay(selectedCell.operator.operator_id, selectedCell.day)}
+                                disabled={isTrainingActionLoading}
+                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md border border-dashed border-green-500 text-sm text-green-700 bg-white hover:bg-green-50"
+                                aria-label="Добавить тренинг"
+                            >
+                                <i className="fas fa-plus" aria-hidden="true" /> Добавить
+                            </button>
+                            </div>
                         </div>
 
                         {getTrainingsFor(selectedCell.operator.operator_id, selectedCell.day).length === 0 ? (
@@ -3663,13 +3744,33 @@
                                     className={`p-3 rounded-lg border flex flex-col gap-2 ${
                                     t.count_in_hours ? 'bg-green-50 border-green-200' : 'bg-yellow-50 border-yellow-200'
                                     }`}>
-                                    <div className="flex items-center justify-between">
+                                    <div className="flex items-center justify-between gap-2">
                                     <div className="text-sm font-medium flex items-center gap-3">
                                         <i className="fas fa-clock" aria-hidden="true" />
                                         <span>{t.start_time || '—'} — {t.end_time || '—'}</span>
                                         <span className="text-xs text-gray-600">· {dur.toFixed(2)} ч</span>
                                     </div>
-                                    <div className="text-xs text-gray-500">by {t.created_by_name}</div>
+                                    <div className="flex items-center gap-2">
+                                        <div className="text-xs text-gray-500">by {t.created_by_name}</div>
+                                        <button
+                                        type="button"
+                                        onClick={() => openTrainingModalForDay(selectedCell.operator.operator_id, selectedCell.day, t)}
+                                        disabled={isTrainingActionLoading}
+                                        className="px-2 py-1 text-xs rounded-md border bg-white hover:bg-gray-50"
+                                        aria-label="Редактировать тренинг"
+                                        >
+                                        <i className="fas fa-pen" aria-hidden="true" />
+                                        </button>
+                                        <button
+                                        type="button"
+                                        onClick={() => handleTrainingDeleteFromModal(t.id)}
+                                        disabled={isTrainingActionLoading}
+                                        className="px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 bg-white hover:bg-red-50"
+                                        aria-label="Удалить тренинг"
+                                        >
+                                        <i className="fas fa-trash" aria-hidden="true" />
+                                        </button>
+                                    </div>
                                     </div>
 
                                     <div className="text-sm text-gray-700">{t.reason || '—'}</div>
@@ -3871,10 +3972,17 @@
                 </div>
                 </div>
             )}
+            {trainingModalState?.open && (
+                <TrainingModal
+                isOpen={trainingModalState.open}
+                onClose={closeTrainingModal}
+                onSave={handleTrainingSaveFromModal}
+                initialData={trainingModalState.training ? { ...trainingModalState.training, date: trainingModalState.date || trainingModalState.training.date } : { date: trainingModalState.date }}
+                />
+            )}
             </div>
         );
         };
-
         function AudioPlayer({ audioSrc, uniqueKey }) {
             const [duration, setDuration] = React.useState(0);
             const [currentTime, setCurrentTime] = React.useState(0);
