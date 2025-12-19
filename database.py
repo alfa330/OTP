@@ -2871,6 +2871,26 @@ class Database:
                 } for row in cursor.fetchall()
             ]
     
+    def get_user_history(self, user_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT uh.id, uh.field_changed, uh.old_value, uh.new_value, uh.changed_at, u.name AS changed_by_name
+                FROM user_history uh
+                LEFT JOIN users u ON uh.changed_by = u.id
+                WHERE uh.user_id = %s
+                ORDER BY uh.changed_at DESC
+            """, (user_id,))
+            return [
+                {
+                    "id": row[0],
+                    "field": row[1],
+                    "old_value": row[2],
+                    "new_value": row[3],
+                    "changed_at": row[4].strftime('%Y-%m-%d %H:%M:%S'),
+                    "changed_by": row[5] or "System"
+                } for row in cursor.fetchall()
+            ]
+
     def update_training(self, training_id, training_date=None, start_time=None, end_time=None, reason=None, comment=None, count_in_hours=None):
         updates = []
         params = []
