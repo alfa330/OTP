@@ -3166,7 +3166,7 @@ async def cancel_handler(message: types.Message, state: FSMContext):
 async def start_command(message: types.Message):
     await message.delete()
     user = db.get_user(telegram_id=message.from_user.id)
-    
+    logging.info(f"User {message.from_user.id} initiated /start command. User found: {bool(user)}")
     if user:
         if user[3] == 'admin':
             await bot.send_message(
