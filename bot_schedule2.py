@@ -3847,7 +3847,7 @@ async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
     
     operators_with_issues = []
     
-    for op_id, op_name, _, _, _, _ in operators:
+    for op_id, op_name, _, _, _, _, _, _, _ in operators:
         # Для каждого оператора получаем статистику звонков
         with db._get_cursor() as cursor:
             cursor.execute("""
