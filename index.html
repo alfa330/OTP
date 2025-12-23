@@ -90,134 +90,6 @@
       }
     }
     /* Используются дополнительные классы для повышения гибкости */
-    
-    /* === Sidebar styles === */
-    .sidebar {
-        transition: transform 0.3s ease-in-out, width 0.3s ease-in-out;
-    }
-    .sidebar.sidebar-closed {
-        transform: translateX(-100%);
-    }
-    .sidebar-overlay {
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.5);
-        z-index: 40;
-        opacity: 0;
-        visibility: hidden;
-        transition: opacity 0.3s ease-in-out, visibility 0.3s ease-in-out;
-        display: none;
-    }
-    @media (max-width: 768px) {
-        .sidebar-overlay {
-            display: block;
-        }
-        .sidebar-overlay.visible {
-            opacity: 1;
-            visibility: visible;
-        }
-    }
-    .hamburger-btn {
-        display: none;
-        position: fixed;
-        top: 16px;
-        left: 16px;
-        z-index: 60;
-        width: 48px;
-        height: 48px;
-        border-radius: 12px;
-        background: linear-gradient(135deg, #1e40af, #3b82f6);
-        border: none;
-        cursor: pointer;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-    .hamburger-btn:hover {
-        transform: scale(1.05);
-        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
-    }
-    .hamburger-btn:active {
-        transform: scale(0.95);
-    }
-    .hamburger-icon {
-        width: 24px;
-        height: 18px;
-        position: relative;
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-    }
-    .hamburger-icon span {
-        display: block;
-        height: 3px;
-        width: 100%;
-        background: white;
-        border-radius: 2px;
-        transition: transform 0.3s ease, opacity 0.3s ease;
-    }
-    .hamburger-btn.active .hamburger-icon span:nth-child(1) {
-        transform: translateY(7.5px) rotate(45deg);
-    }
-    .hamburger-btn.active .hamburger-icon span:nth-child(2) {
-        opacity: 0;
-    }
-    .hamburger-btn.active .hamburger-icon span:nth-child(3) {
-        transform: translateY(-7.5px) rotate(-45deg);
-    }
-    .sidebar-close-btn {
-        display: none;
-        position: absolute;
-        top: 16px;
-        right: 16px;
-        width: 36px;
-        height: 36px;
-        border-radius: 50%;
-        background: rgba(255, 255, 255, 0.15);
-        border: none;
-        cursor: pointer;
-        color: white;
-        font-size: 18px;
-        transition: background 0.2s ease, transform 0.2s ease;
-    }
-    .sidebar-close-btn:hover {
-        background: rgba(255, 255, 255, 0.25);
-        transform: scale(1.1);
-    }
-    .main-content {
-        transition: margin-left 0.3s ease-in-out;
-    }
-    /* Desktop: sidebar closed state */
-    @media (min-width: 769px) {
-        .sidebar.sidebar-closed {
-            transform: translateX(-100%);
-        }
-        .sidebar.sidebar-open {
-            transform: translateX(0);
-        }
-    }
-    
-    @media (max-width: 768px) {
-        .hamburger-btn {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .sidebar-close-btn {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .sidebar {
-            transform: translateX(-100%);
-        }
-        .sidebar.sidebar-open {
-            transform: translateX(0);
-        }
-        .main-content {
-            margin-left: 0 !important;
-            padding-top: 70px !important;
-        }
-    }
     </style>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7408,7 +7280,6 @@
             const [showAddSvModal, setShowAddSvModal] = useState(false);
             const [openMenuId, setOpenMenuId] = useState(null);
             const [showSidebarAccountDropdown, setShowSidebarAccountDropdown] = useState(false);
-            const [sidebarOpen, setSidebarOpen] = useState(true);
             const sidebarAccountRef = useRef(null);
             const [modalError, setModalError] = useState("");
             const [isClosing, setIsClosing] = useState(false);
@@ -10727,56 +10598,7 @@
 
             return (
                 <div className="flex h-screen overflow-hidden">
-                    {/* Hamburger Button for Mobile Only */}
-                    <button 
-                        className={`hamburger-btn md:hidden ${sidebarOpen ? 'active' : ''}`}
-                        onClick={() => setSidebarOpen(!sidebarOpen)}
-                        aria-label="Toggle menu"
-                    >
-                        <div className="hamburger-icon">
-                            <span></span>
-                            <span></span>
-                            <span></span>
-                        </div>
-                    </button>
-
-                    {/* Overlay for Mobile Only */}
-                    <div 
-                        className={`sidebar-overlay md:hidden ${sidebarOpen ? 'visible' : ''}`}
-                        onClick={() => setSidebarOpen(false)}
-                    />
-
-                    {/* Desktop Open Button (when sidebar is closed) */}
-                    {!sidebarOpen && (
-                        <button 
-                            className="hidden md:flex fixed top-4 left-4 w-10 h-10 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 rounded-lg items-center justify-center shadow-lg transition-all duration-200 z-50"
-                            onClick={() => setSidebarOpen(true)}
-                            aria-label="Open sidebar"
-                        >
-                            <i className="fas fa-bars text-white"></i>
-                        </button>
-                    )}
-
-                    {/* Sidebar */}
-                    <div className={`sidebar fixed top-0 left-0 h-full w-64 bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 ${sidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
-                        {/* Close button for Mobile */}
-                        <button 
-                            className="sidebar-close-btn"
-                            onClick={() => setSidebarOpen(false)}
-                            aria-label="Close menu"
-                        >
-                            <i className="fas fa-times"></i>
-                        </button>
-                        
-                        {/* Desktop Toggle Button */}
-                        <button 
-                            className="hidden md:flex absolute top-4 right-[-16px] w-8 h-8 bg-blue-600 hover:bg-blue-700 rounded-full items-center justify-center shadow-lg transition-all duration-200 z-50"
-                            onClick={() => setSidebarOpen(!sidebarOpen)}
-                            aria-label="Toggle sidebar"
-                        >
-                            <i className={`fas fa-chevron-${sidebarOpen ? 'left' : 'right'} text-white text-sm`}></i>
-                        </button>
-                        
+                    <div className="fixed top-0 left-0 h-full w-64 bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 transition-all duration-300 ease-in-out">
                         <div className="p-6">
                             <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
                               <span className="flex">
@@ -10963,7 +10785,7 @@
                             </ul>
                         </div>
                     </div>
-                    <div className={`main-content p-8 bg-gray-50 min-h-screen w-full overflow-y-auto ${sidebarOpen ? 'ml-64' : 'ml-0'}`}>
+                    <div className="ml-64 p-8 bg-gray-50 min-h-screen w-full overflow-y-auto">
                         {user.role === 'admin' && (
                         <>
                             {view === 'sv_list' && (
