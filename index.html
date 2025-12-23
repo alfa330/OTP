@@ -7529,7 +7529,6 @@
             const [svData, setSvData] = useState(null);
             const [operatorData, setOperatorData] = useState(null);
             const [profileData, setProfileData] = useState(null);
-            const [adminProfileData, setAdminProfileData] = useState(null);
             const [hoursData, setHoursData] = useState(null);
             const [view, setView] = useState('hours');
             const [newSvName, setNewSvName] = useState('');
@@ -10460,11 +10459,7 @@
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        if (user.role === 'admin' || user.role === 'supervisor') {
-                            setAdminProfileData(data.profile);
-                        } else {
-                            setProfileData(data.profile);
-                        }
+                        setProfileData(data.profile);
                     } else {
                         showToast(data.error || 'Failed to fetch profile data', 'error');
                     }
@@ -10815,7 +10810,6 @@
                     fetchSvList();
                     fetchUsers();
                     fetchDirections();
-                    fetchProfileData();
                 } else if (user.role === 'operator') {
                     fetchProfileData();
                     fetchHoursData();
@@ -12428,88 +12422,25 @@
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                             </>
                         )}
-                        {(user.role === 'operator' || user.role === 'admin' || user.role === 'supervisor') && (
+                        {user.role === 'operator' && (
                             <>
                                 {view === 'profile' && ( 
                                   <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 lg:mb-8 text-gray-900 flex items-center gap-2">
                                       <i className="fas fa-user-circle text-blue-600"></i>
-                                      <span>Мой профиль</span>
+                                      <span className="text-blue-600">
+                                        Профиль
+                                      </span>
                                     </h2>
+                            
                                     {isLoading ? (
-                                      <p className="text-center py-8 text-gray-500">
+                                      <p className="text-center text-gray-600 flex items-center justify-center">
                                         <i className="fas fa-spinner fa-spin mr-2 text-gray-500"></i>
                                         <span className="italic">Загрузка данных...</span>
                                       </p>
-                                    ) : (user.role === 'admin' || user.role === 'supervisor') && adminProfileData ? (
-                                      <div className="space-y-6">
-                                        {/* Profile header - avatar and name */}
-                                        <div className="flex flex-col sm:flex-row items-center gap-4 pb-4 sm:pb-6 border-b border-gray-200">
-                                          <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-3xl sm:text-4xl font-bold shadow-lg">
-                                            {(adminProfileData.name || 'U').charAt(0).toUpperCase()}
-                                          </div>
-                                          <div className="text-center sm:text-left">
-                                            <h3 className="text-xl sm:text-2xl font-bold text-gray-900">{adminProfileData.name || '-'}</h3>
-                                            <div className="flex flex-wrap justify-center sm:justify-start gap-2 mt-2">
-                                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-                                                <i className="fas fa-user-tag"></i> {adminProfileData.role === 'admin' ? 'Администратор' : 'Супервайзер'}
-                                              </span>
-                                              {adminProfileData.email && (
-                                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
-                                                  <i className="fas fa-envelope"></i> {adminProfileData.email}
-                                                </span>
-                                              )}
-                                            </div>
-                                          </div>
-                                        </div>
-                                        {/* Stats cards - evaluation & hours summary */}
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-                                          {/* Hire Date */}
-                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
-                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
-                                              <i className="fas fa-user-tie text-indigo-600 text-lg"></i>
-                                            </div>
-                                            <div className="min-w-0">
-                                              <p className="text-xs uppercase tracking-wide text-gray-500">Дата регистрации</p>
-                                              <p className="text-base sm:text-lg font-semibold text-gray-900 truncate">
-                                                {adminProfileData.created_at ? new Date(adminProfileData.created_at).toLocaleDateString('ru-RU') : '-'}
-                                              </p>
-                                            </div>
-                                          </div>
-                                          
-                                          {adminProfileData.last_login && (
-                                            <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-                                              <div className="p-2 bg-blue-100 rounded-lg text-blue-600">
-                                                <i className="fas fa-sign-in-alt"></i>
-                                              </div>
-                                              <div className="min-w-0">
-                                                <p className="text-xs uppercase tracking-wide text-gray-500">Последний вход</p>
-                                                <p className="text-base sm:text-lg font-medium text-gray-900">
-                                                  {new Date(adminProfileData.last_login).toLocaleString('ru-RU')}
-                                                </p>
-                                              </div>
-                                            </div>
-                                          )}
-                                          
-                                          {(user.role === 'admin' || user.role === 'supervisor') && adminProfileData.operators_count !== undefined && (
-                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
-                                              <div className="p-4 bg-blue-50 rounded-lg border border-blue-100">
-                                                <p className="text-sm text-blue-600 mb-1">Всего операторов</p>
-                                                <p className="text-2xl font-bold text-blue-800">{adminProfileData.operators_count || 0}</p>
-                                              </div>
-                                              {adminProfileData.active_operators !== undefined && (
-                                                <div className="p-4 bg-green-50 rounded-lg border border-green-100">
-                                                  <p className="text-sm text-green-600 mb-1">Активных операторов</p>
-                                                  <p className="text-2xl font-bold text-green-800">{adminProfileData.active_operators || 0}</p>
-                                                </div>
-                                              )}
-                                            </div>
-                                          )}
-                                        </div>
-                                      </div>
                                     ) : profileData ? (
                                       <div className="space-y-6">
-                                        {/* Operator profile content */}
+                                        {/* Profile header - avatar and name */}
                                         <div className="flex flex-col sm:flex-row items-center gap-4 pb-4 sm:pb-6 border-b border-gray-200">
                                           <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-3xl sm:text-4xl font-bold shadow-lg">
                                             {(profileData.name || 'U').charAt(0).toUpperCase()}
@@ -12528,44 +12459,91 @@
                                             </div>
                                           </div>
                                         </div>
-                                        
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                          <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-                                            <div className="p-2 bg-blue-100 rounded-lg text-blue-600">
-                                              <i className="fas fa-calendar-alt"></i>
+
+                                        {/* Stats cards - evaluation & hours summary */}
+                                        {(() => {
+                                          const evals = operatorData?.evaluations ?? [];
+                                          const evalsFiltered = evals.filter(ev => !(ev?.call?.is_imported === true || ev?.is_imported === true));
+                                          const evalCount = evalsFiltered.length;
+                                          const avgScore = evalCount > 0 ? evalsFiltered.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evalCount : 0;
+                                          
+                                          const hoursOp = hoursData?.operators?.find(o => Number(o.operator_id) === Number(user.id)) || hoursData?.operators?.[0];
+                                          const totalHours = Number(hoursOp?.aggregates?.regular_hours ?? hoursOp?.aggregates?.regular ?? 0);
+                                          const normHours = Number(hoursOp?.norm_hours ?? 0);
+                                          const hasHoursData = hoursData?.operators?.length > 0;
+                                          
+                                          return (
+                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+                                              <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-3 sm:p-4 rounded-xl text-center">
+                                                <div className="text-2xl sm:text-3xl font-bold text-blue-600">{evalCount}</div>
+                                                <div className="text-xs text-gray-600 mt-1">Оценок</div>
+                                              </div>
+                                              <div className="bg-gradient-to-br from-green-50 to-green-100 p-3 sm:p-4 rounded-xl text-center">
+                                                <div className={`text-2xl sm:text-3xl font-bold ${avgScore >= 90 ? 'text-green-600' : avgScore >= 70 ? 'text-yellow-600' : 'text-red-600'}`}>
+                                                  {avgScore > 0 ? avgScore.toFixed(1) : '-'}
+                                                </div>
+                                                <div className="text-xs text-gray-600 mt-1">Ср. балл</div>
+                                              </div>
+                                              <div className="bg-gradient-to-br from-purple-50 to-purple-100 p-3 sm:p-4 rounded-xl text-center">
+                                                <div className="text-2xl sm:text-3xl font-bold text-purple-600">{hasHoursData ? totalHours.toFixed(0) : '-'}</div>
+                                                <div className="text-xs text-gray-600 mt-1">Часов</div>
+                                              </div>
+                                              <div className="bg-gradient-to-br from-orange-50 to-orange-100 p-3 sm:p-4 rounded-xl text-center">
+                                                <div className="text-2xl sm:text-3xl font-bold text-orange-600">
+                                                  {hasHoursData && normHours > 0 ? ((totalHours / normHours) * 100).toFixed(0) + '%' : '-'}
+                                                </div>
+                                                <div className="text-xs text-gray-600 mt-1">Норма</div>
+                                              </div>
+                                            </div>
+                                          );
+                                        })()}
+
+                                        {/* Info cards grid */}
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                                          {/* Hire Date */}
+                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
+                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-green-100 flex items-center justify-center shrink-0">
+                                              <i className="fas fa-calendar-alt text-green-600 text-lg"></i>
                                             </div>
                                             <div className="min-w-0">
                                               <p className="text-xs uppercase tracking-wide text-gray-500">Дата найма</p>
                                               <p className="text-base sm:text-lg font-semibold text-gray-900 truncate">{profileData.hire_date || '-'}</p>
                                             </div>
                                           </div>
-                                          
-                                          <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-                                            <div className="p-2 bg-blue-100 rounded-lg text-blue-600">
-                                              <i className="fas fa-user-shield"></i>
+                                  
+                                          {/* Supervisor */}
+                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
+                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
+                                              <i className="fas fa-user-tie text-indigo-600 text-lg"></i>
                                             </div>
                                             <div className="min-w-0">
                                               <p className="text-xs uppercase tracking-wide text-gray-500">Супервайзер</p>
                                               <p className="text-base sm:text-lg font-medium text-gray-900 truncate">{profileData.supervisor_name || '-'}</p>
                                             </div>
                                           </div>
-                                        </div>
-                                        
-                                        <div className="p-4 bg-gray-50 rounded-lg">
-                                          <p className="text-xs uppercase tracking-wide text-gray-500 mb-2">Стаж работы <span className="text-gray-400 normal-case">(приблизительно)</span></p>
-                                          <p className="text-base sm:text-lg font-semibold text-gray-900">
-                                            {(() => {
-                                              if (!profileData.hire_date) return '-';
-                                              const hire = new Date(profileData.hire_date);
-                                              const now = new Date();
-                                              const months = (now.getFullYear() - hire.getFullYear()) * 12 + (now.getMonth() - hire.getMonth());
-                                              if (months < 1) return 'Меньше месяца';
-                                              if (months < 12) return `${months} мес.`;
-                                              const years = Math.floor(months / 12);
-                                              const remMonths = months % 12;
-                                              return `${years} г. ${remMonths > 0 ? remMonths + ' мес.' : ''}`;
-                                            })()}
-                                          </p>
+
+                                          {/* Experience */}
+                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
+                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-yellow-100 flex items-center justify-center shrink-0">
+                                              <i className="fas fa-award text-yellow-600 text-lg"></i>
+                                            </div>
+                                            <div className="min-w-0">
+                                              <p className="text-xs uppercase tracking-wide text-gray-500">Стаж работы <span className="text-gray-400 normal-case">(приблизительно)</span></p>
+                                              <p className="text-base sm:text-lg font-semibold text-gray-900">
+                                                {(() => {
+                                                  if (!profileData.hire_date) return '-';
+                                                  const hire = new Date(profileData.hire_date);
+                                                  const now = new Date();
+                                                  const months = (now.getFullYear() - hire.getFullYear()) * 12 + (now.getMonth() - hire.getMonth());
+                                                  if (months < 1) return 'Меньше месяца';
+                                                  if (months < 12) return `${months} мес.`;
+                                                  const years = Math.floor(months / 12);
+                                                  const remMonths = months % 12;
+                                                  return `${years} г. ${remMonths > 0 ? remMonths + ' мес.' : ''}`;
+                                                })()}
+                                              </p>
+                                            </div>
+                                          </div>
                                         </div>
 
                                         {/* Quick actions */}
