@@ -10727,9 +10727,9 @@
 
             return (
                 <div className="flex h-screen overflow-hidden">
-                    {/* Hamburger Button for Mobile */}
+                    {/* Hamburger Button for Mobile Only */}
                     <button 
-                        className={`hamburger-btn ${sidebarOpen ? 'active' : ''}`}
+                        className={`hamburger-btn md:hidden ${sidebarOpen ? 'active' : ''}`}
                         onClick={() => setSidebarOpen(!sidebarOpen)}
                         aria-label="Toggle menu"
                     >
