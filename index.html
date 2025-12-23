@@ -216,7 +216,30 @@
       .sidebar-collapse-btn {
         display: none !important;
       }
-      
+    }
+    
+    /* Общие стили скролла для модалки (все устройства) */
+    .workhours-modal-scroll {
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+      scrollbar-color: #cbd5e1 #f1f5f9;
+    }
+    .workhours-modal-scroll::-webkit-scrollbar {
+      width: 8px;
+    }
+    .workhours-modal-scroll::-webkit-scrollbar-track {
+      background: #f1f5f9;
+      border-radius: 4px;
+    }
+    .workhours-modal-scroll::-webkit-scrollbar-thumb {
+      background-color: #cbd5e1;
+      border-radius: 4px;
+    }
+    .workhours-modal-scroll::-webkit-scrollbar-thumb:hover {
+      background-color: #94a3b8;
+    }
+    
+    @media (max-width: 640px) {
       /* Мобильная адаптация раздела "Ваши рабочие часы" */
       .workhours-main-grid {
         grid-template-columns: 1fr !important;
@@ -270,50 +293,56 @@
       
       /* Модалка запроса по дню на мобильных */
       .workhours-modal {
-        margin: 0.5rem !important;
-        padding: 1rem !important;
-        max-width: calc(100vw - 1rem) !important;
-        max-height: calc(100vh - 2rem) !important;
-        overflow-y: auto !important;
+        margin: 0.25rem !important;
+        max-width: calc(100vw - 0.5rem) !important;
+        max-height: calc(100vh - 1rem) !important;
+        border-radius: 1rem !important;
       }
+      
       .workhours-modal h3 {
         font-size: 1rem !important;
-        margin-bottom: 0.75rem !important;
       }
       .workhours-modal .grid-cols-2 {
         grid-template-columns: 1fr !important;
         gap: 0.5rem !important;
       }
       .workhours-modal .mb-4 {
-        margin-bottom: 0.75rem !important;
+        margin-bottom: 0.5rem !important;
       }
       .workhours-modal .p-4 {
-        padding: 0.75rem !important;
+        padding: 0.5rem !important;
       }
       .workhours-modal .p-3 {
         padding: 0.5rem !important;
       }
       .workhours-modal .w-10 {
-        width: 2rem !important;
-        height: 2rem !important;
+        width: 1.75rem !important;
+        height: 1.75rem !important;
       }
       .workhours-modal .text-lg {
-        font-size: 0.9rem !important;
+        font-size: 0.85rem !important;
+      }
+      .workhours-modal .text-sm {
+        font-size: 0.75rem !important;
+      }
+      .workhours-modal .text-xs {
+        font-size: 0.65rem !important;
       }
       .workhours-modal textarea {
-        font-size: 0.875rem !important;
+        font-size: 0.8rem !important;
         padding: 0.5rem !important;
-      }
-      .workhours-modal .flex.justify-end {
-        flex-direction: column !important;
-        gap: 0.5rem !important;
-      }
-      .workhours-modal .flex.justify-end button {
-        width: 100% !important;
-        padding: 0.625rem 1rem !important;
+        min-height: 60px !important;
       }
       .workhours-modal .max-h-56 {
-        max-height: 120px !important;
+        max-height: 100px !important;
+      }
+      
+      /* Секции тренингов и штрафов компактнее */
+      .workhours-modal .border-l-4 {
+        padding: 0.5rem !important;
+      }
+      .workhours-modal .space-y-2 > div {
+        margin-bottom: 0.375rem !important;
       }
       .workhours-info-panel .grid {
         gap: 0.5rem !important;
@@ -9185,15 +9214,32 @@
                     {/* Модальное окно для запроса (показываем все данные дня) */}
                     {showModal && selectedDay && (
                         <div
-                            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-2"
+                            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-2 sm:p-4"
                             role="dialog"
                             aria-modal="true"
                             aria-labelledby="day-modal-title"
+                            onClick={(e) => { if (e.target === e.currentTarget) { setShowModal(false); setSelectedDay(null); } }}
                         >
-                            <div className="workhours-modal bg-white p-6 rounded-2xl shadow-xl w-full max-w-lg">
-                            <h3 id="day-modal-title" className="text-xl font-bold mb-4 text-gray-800">
-                                Запрос по дню: {selectedDay.day} {monthLabel}
-                            </h3>
+                            <div className="workhours-modal bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col">
+                            {/* Заголовок - фиксированный */}
+                            <div className="flex-shrink-0 p-4 sm:p-6 pb-0 border-b border-gray-100">
+                                <div className="flex items-center justify-between">
+                                    <h3 id="day-modal-title" className="text-lg sm:text-xl font-bold text-gray-800">
+                                        <i className="fas fa-calendar-day text-blue-500 mr-2"></i>
+                                        {selectedDay.day} {monthLabel}
+                                    </h3>
+                                    <button
+                                        onClick={() => { setShowModal(false); setSelectedDay(null); }}
+                                        className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition"
+                                        aria-label="Закрыть"
+                                    >
+                                        <i className="fas fa-times text-lg"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            {/* Скроллируемый контент */}
+                            <div className="flex-1 overflow-y-auto p-4 sm:p-6 pt-4 workhours-modal-scroll">
 
                             {/* --- Верхняя инфо-панель (дата, часы, ключевые метрики с иконками) --- */}
                             <div className="workhours-info-panel mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
@@ -9447,34 +9493,46 @@
                             })()}
 
                             {/* Поле запроса */}
-                            <textarea
-                                value={requestMessage}
-                                onChange={(e) => setRequestMessage(e.target.value)}
-                                placeholder="Введите текст запроса..."
-                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4 text-sm"
-                                rows={4}
-                                disabled={isSending}
-                            />
+                            <div className="mt-2">
+                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <i className="fas fa-pen text-gray-400 mr-1"></i> Текст запроса
+                                </label>
+                                <textarea
+                                    value={requestMessage}
+                                    onChange={(e) => setRequestMessage(e.target.value)}
+                                    placeholder="Введите текст запроса..."
+                                    className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm resize-none"
+                                    rows={3}
+                                    disabled={isSending}
+                                />
+                            </div>
+                            </div>
 
-                            {/* Кнопки */}
-                            <div className="flex justify-end gap-2">
-                                <button
-                                onClick={handleSendRequest}
-                                className={`px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition ${isSending ? "opacity-50 cursor-not-allowed" : ""}`}
-                                disabled={isSending}
-                                >
-                                {isSending ? "Отправка..." : "Отправить запрос"}
-                                </button>
-                                <button
-                                onClick={() => {
-                                    setShowModal(false);
-                                    setSelectedDay(null);
-                                }}
-                                className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition"
-                                disabled={isSending}
-                                >
-                                Отмена
-                                </button>
+                            {/* Кнопки - фиксированные внизу */}
+                            <div className="flex-shrink-0 p-4 sm:p-6 pt-4 border-t border-gray-100 bg-gray-50 rounded-b-2xl">
+                                <div className="flex flex-col-reverse sm:flex-row justify-end gap-2">
+                                    <button
+                                        onClick={() => {
+                                            setShowModal(false);
+                                            setSelectedDay(null);
+                                        }}
+                                        className="w-full sm:w-auto px-4 py-2.5 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition font-medium text-sm"
+                                        disabled={isSending}
+                                    >
+                                        Отмена
+                                    </button>
+                                    <button
+                                        onClick={handleSendRequest}
+                                        className={`w-full sm:w-auto px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium text-sm flex items-center justify-center gap-2 ${isSending ? "opacity-50 cursor-not-allowed" : ""}`}
+                                        disabled={isSending}
+                                    >
+                                        {isSending ? (
+                                            <><i className="fas fa-spinner fa-spin"></i> Отправка...</>
+                                        ) : (
+                                            <><i className="fas fa-paper-plane"></i> Отправить запрос</>
+                                        )}
+                                    </button>
+                                </div>
                             </div>
                             </div>
                         </div>
