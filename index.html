@@ -164,25 +164,6 @@
     .hamburger-btn.active .hamburger-icon span:nth-child(3) {
         transform: translateY(-7.5px) rotate(-45deg);
     }
-    .sidebar-close-btn {
-        display: none;
-        position: absolute;
-        top: 16px;
-        right: 16px;
-        width: 36px;
-        height: 36px;
-        border-radius: 50%;
-        background: rgba(255, 255, 255, 0.15);
-        border: none;
-        cursor: pointer;
-        color: white;
-        font-size: 18px;
-        transition: background 0.2s ease, transform 0.2s ease;
-    }
-    .sidebar-close-btn:hover {
-        background: rgba(255, 255, 255, 0.25);
-        transform: scale(1.1);
-    }
     .main-content {
         transition: margin-left 0.3s ease-in-out;
     }
@@ -202,13 +183,9 @@
             align-items: center;
             justify-content: center;
         }
-        .sidebar-close-btn {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
         .sidebar {
             transform: translateX(-100%);
+            width: 220px !important;
         }
         .sidebar.sidebar-open {
             transform: translateX(0);
@@ -216,6 +193,12 @@
         .main-content {
             margin-left: 0 !important;
             padding-top: 70px !important;
+        }
+        .sidebar .p-6 {
+            padding: 1rem !important;
+        }
+        .sidebar h1 {
+            margin-bottom: 1rem !important;
         }
     }
     </style>
@@ -10758,16 +10741,7 @@
                     )}
 
                     {/* Sidebar */}
-                    <div className={`sidebar fixed top-0 left-0 h-full w-64 bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 ${sidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
-                        {/* Close button for Mobile */}
-                        <button 
-                            className="sidebar-close-btn"
-                            onClick={() => setSidebarOpen(false)}
-                            aria-label="Close menu"
-                        >
-                            <i className="fas fa-times"></i>
-                        </button>
-                        
+                    <div className={`sidebar fixed top-0 left-0 h-full w-64 md:w-64 bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 overflow-y-auto ${sidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
                         {/* Desktop Toggle Button */}
                         <button 
                             className="hidden md:flex absolute top-4 right-[-16px] w-8 h-8 bg-blue-600 hover:bg-blue-700 rounded-full items-center justify-center shadow-lg transition-all duration-200 z-50"
