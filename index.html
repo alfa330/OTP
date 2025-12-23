@@ -90,6 +90,122 @@
       }
     }
     /* Используются дополнительные классы для повышения гибкости */
+    
+    /* === Сворачиваемый сайдбар === */
+    .sidebar {
+      width: 256px;
+      transition: width 0.3s ease;
+    }
+    .sidebar.collapsed {
+      width: 80px;
+    }
+    .sidebar.collapsed:hover {
+      width: 256px;
+    }
+    .sidebar .sidebar-text {
+      opacity: 1;
+      white-space: nowrap;
+      transition: opacity 0.2s ease;
+    }
+    .sidebar.collapsed .sidebar-text {
+      opacity: 0;
+      width: 0;
+      overflow: hidden;
+    }
+    .sidebar.collapsed:hover .sidebar-text {
+      opacity: 1;
+      width: auto;
+    }
+    .sidebar .sidebar-logo-full {
+      display: flex;
+    }
+    .sidebar .sidebar-logo-mini {
+      display: none;
+    }
+    .sidebar.collapsed .sidebar-logo-full {
+      display: none;
+    }
+    .sidebar.collapsed .sidebar-logo-mini {
+      display: flex;
+    }
+    .sidebar.collapsed:hover .sidebar-logo-full {
+      display: flex;
+    }
+    .sidebar.collapsed:hover .sidebar-logo-mini {
+      display: none;
+    }
+    .main-content {
+      margin-left: 256px;
+      transition: margin-left 0.3s ease;
+    }
+    .main-content.sidebar-collapsed {
+      margin-left: 80px;
+    }
+    
+    /* Гамбургер кнопка */
+    .hamburger-btn {
+      display: none;
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 60;
+      width: 44px;
+      height: 44px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #1e40af, #3b82f6);
+      color: white;
+      border: none;
+      cursor: pointer;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+    
+    /* Overlay для мобильного меню */
+    .sidebar-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 45;
+    }
+    .sidebar-overlay.active {
+      display: block;
+    }
+    
+    /* Мобильная версия */
+    @media (max-width: 768px) {
+      .hamburger-btn {
+        display: flex;
+      }
+      .sidebar {
+        width: 256px !important;
+        transform: translateX(-100%);
+        transition: transform 0.3s ease;
+      }
+      .sidebar.mobile-open {
+        transform: translateX(0);
+      }
+      .sidebar.collapsed {
+        width: 256px !important;
+      }
+      .sidebar .sidebar-text {
+        opacity: 1 !important;
+        width: auto !important;
+      }
+      .sidebar .sidebar-logo-full {
+        display: flex !important;
+      }
+      .sidebar .sidebar-logo-mini {
+        display: none !important;
+      }
+      .main-content {
+        margin-left: 0 !important;
+      }
+      .sidebar-collapse-btn {
+        display: none !important;
+      }
+    }
     </style>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7280,6 +7396,8 @@
             const [showAddSvModal, setShowAddSvModal] = useState(false);
             const [openMenuId, setOpenMenuId] = useState(null);
             const [showSidebarAccountDropdown, setShowSidebarAccountDropdown] = useState(false);
+            const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+            const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
             const sidebarAccountRef = useRef(null);
             const [modalError, setModalError] = useState("");
             const [isClosing, setIsClosing] = useState(false);
@@ -10598,10 +10716,33 @@
 
             return (
                 <div className="flex h-screen overflow-hidden">
-                    <div className="fixed top-0 left-0 h-full w-64 bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 transition-all duration-300 ease-in-out">
-                        <div className="p-6">
+                    {/* Гамбургер кнопка для мобильных */}
+                    <button 
+                        className="hamburger-btn"
+                        onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                    >
+                        <i className={`fas ${mobileMenuOpen ? 'fa-times' : 'fa-bars'} text-xl`}></i>
+                    </button>
+                    
+                    {/* Overlay для мобильного меню */}
+                    <div 
+                        className={`sidebar-overlay ${mobileMenuOpen ? 'active' : ''}`}
+                        onClick={() => setMobileMenuOpen(false)}
+                    ></div>
+                    
+                    <div className={`sidebar fixed top-0 left-0 h-full bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 ${sidebarCollapsed ? 'collapsed' : ''} ${mobileMenuOpen ? 'mobile-open' : ''}`}>
+                        <div className="p-4">
+                            {/* Кнопка сворачивания для десктопа */}
+                            <button 
+                                className="sidebar-collapse-btn absolute top-4 right-2 w-8 h-8 rounded-full bg-blue-700 hover:bg-blue-600 flex items-center justify-center transition-all"
+                                onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+                            >
+                                <i className={`fas fa-chevron-${sidebarCollapsed ? 'right' : 'left'} text-sm`}></i>
+                            </button>
+                            
                             <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
-                              <span className="flex">
+                              {/* Полный логотип */}
+                              <span className="sidebar-logo-full flex">
                                 <span className="bg-white text-blue-800 px-3 py-1.5 rounded-l-2xl shadow-md text-3xl border border-white">
                                   OTP
                                 </span>
@@ -10609,47 +10750,51 @@
                                   <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
                                 </span>
                               </span>
+                              {/* Мини логотип для свёрнутого состояния */}
+                              <span className="sidebar-logo-mini">
+                                <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
+                              </span>
                             </h1>
                             <ul className="space-y-2">
                                 {user.role === 'admin' && (
                                     <>
                                         <li>
-                                            <button onClick={() => setView('sv_list')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_list' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-users"></i> Супервайзеры
+                                            <button onClick={() => { setView('sv_list'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_list' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-users"></i> <span className="sidebar-text">Супервайзеры</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => setView('manage_users')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_users' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-user-cog"></i> Операторы
+                                            <button onClick={() => { setView('manage_users'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_users' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-user-cog"></i> <span className="sidebar-text">Операторы</span>
                                             </button>
                                         </li>
 
                                         <hr className="border-t border-white-700 my-2 opacity-40" />
 
                                         <li>
-                                            <button onClick={() => setView('view_scores')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'view_scores' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-chart-bar"></i> Оценки операторов
+                                            <button onClick={() => { setView('view_scores'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'view_scores' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-chart-bar"></i> <span className="sidebar-text">Оценки операторов</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button
-                                                onClick={() => setView('sv_hours')}
+                                                onClick={() => { setView('sv_hours'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-clock" /> Учет часов
+                                                <i className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button
-                                                onClick={() => setView('work_schedules')}
+                                                onClick={() => { setView('work_schedules'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-calendar-alt" /> Графики работы
+                                                <i className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => setView('trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-book"></i> Учет тренингов
+                                            <button onClick={() => { setView('trainings'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-book"></i> <span className="sidebar-text">Учет тренингов</span>
                                             </button>
                                         </li>
 
@@ -10657,15 +10802,15 @@
 
                                         <li>
                                             <button
-                                                onClick={() => setView('call_division')}
+                                                onClick={() => { setView('call_division'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-random" /> Деление звонков
+                                                <i className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true);}} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3">
-                                                <i className="fas fa-sliders-h"></i> Мониторинговая шкала
+                                            <button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true); setMobileMenuOpen(false);}} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3">
+                                                <i className="fas fa-sliders-h"></i> <span className="sidebar-text">Мониторинговая шкала</span>
                                             </button>
                                         </li>
                                     </>
@@ -10673,42 +10818,42 @@
                                 {user.role === 'sv' && (
                                     <>
                                         <li>
-                                            <button onClick={() => setView('operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'operators' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-users-cog"></i> Оценки операторов
+                                            <button onClick={() => { setView('operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'operators' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-users-cog"></i> <span className="sidebar-text">Оценки операторов</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => setView('manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-user-edit"></i> Управлять операторами
+                                            <button onClick={() => { setView('manage_operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-user-edit"></i> <span className="sidebar-text">Управлять операторами</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => setView('trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-book"></i> Учет тренингов
+                                            <button onClick={() => { setView('trainings'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-book"></i> <span className="sidebar-text">Учет тренингов</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button
-                                                onClick={() => setView('sv_hours')}
+                                                onClick={() => { setView('sv_hours'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-clock" /> Учет часов
+                                                <i className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button
-                                                onClick={() => setView('work_schedules')}
+                                                onClick={() => { setView('work_schedules'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-calendar-alt" /> Графики работы
+                                                <i className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button
-                                                onClick={() => setView('call_division')}
+                                                onClick={() => { setView('call_division'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-random" /> Деление звонков
+                                                <i className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
                                             </button>
                                         </li>
                                     </>
@@ -10716,25 +10861,25 @@
                                 {user.role === 'operator' && (
                                     <>
                                         <li>
-                                            <button onClick={() => setView('profile')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'profile' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-user-circle"></i> Профиль
+                                            <button onClick={() => { setView('profile'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'profile' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-user-circle"></i> <span className="sidebar-text">Профиль</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => setView('hours')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'hours' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-clock"></i> Мои часы
+                                            <button onClick={() => { setView('hours'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'hours' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-clock"></i> <span className="sidebar-text">Мои часы</span>
                                             </button>
                                         </li>
                                         <li>
-                                            <button onClick={() => setView('evaluation')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'evaluation' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-chart-bar"></i> Мои оценки
+                                            <button onClick={() => { setView('evaluation'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'evaluation' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-chart-bar"></i> <span className="sidebar-text">Мои оценки</span>
                                             </button>
                                         </li>
                                     </>
                                 )}
                                 <li>
-                                    <button onClick={() => setView('salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
-                                        <i className="fas fa-calculator"></i> Калькулятор зарплаты
+                                    <button onClick={() => { setView('salary'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
+                                        <i className="fas fa-calculator"></i> <span className="sidebar-text">Калькулятор зарплаты</span>
                                     </button>
                                 </li>
 
@@ -10748,10 +10893,10 @@
                                     aria-haspopup="menu"
                                 >
                                     <i className="fas fa-cog"></i>
-                                    <span className="ml-2">Аккаунт</span>
+                                    <span className="sidebar-text ml-2">Аккаунт</span>
 
                                     {/* Стрелка появляется только при hover */}
-                                    <i className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0"></i>
+                                    <i className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></i>
                                 </button>
 
                                 {(showSidebarAccountDropdown || isClosing) && (
@@ -10779,13 +10924,13 @@
                                 </li>
                                 <li>
                                 <button onClick={handleLogout} className="w-full text-left py-3 px-4 rounded-lg hover:bg-red-700 bg-red-600 transition-all duration-200 flex items-center gap-3">
-                                    <i className="fas fa-sign-out-alt"></i> Выход
+                                    <i className="fas fa-sign-out-alt"></i> <span className="sidebar-text">Выход</span>
                                 </button>
                                 </li>
                             </ul>
                         </div>
                     </div>
-                    <div className="ml-64 p-8 bg-gray-50 min-h-screen w-full overflow-y-auto">
+                    <div className={`main-content p-8 bg-gray-50 min-h-screen w-full overflow-y-auto ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
                         {user.role === 'admin' && (
                         <>
                             {view === 'sv_list' && (
