@@ -186,11 +186,16 @@
         width: 256px !important;
         transform: translateX(-100%);
         transition: transform 0.3s ease;
-        overflow-y: auto;
-        overflow-x: hidden;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        max-height: 100vh;
       }
       .sidebar.mobile-open {
         transform: translateX(0);
+      }
+      .sidebar > div {
+        min-height: min-content;
+        padding-bottom: 20px;
       }
       .sidebar.collapsed {
         width: 256px !important;
