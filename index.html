@@ -67,6 +67,29 @@
             transform: scale(1.05);
         }
     }
+    /* === Адаптивные стили для секции 'Ваши рабочие часы' === */
+    @media (max-width: 1024px) {
+      .workhours-main-grid {
+        grid-template-columns: 1fr !important;
+      }
+      .workhours-left {
+        grid-template-columns: 1fr !important;
+      }
+    }
+    @media (max-width: 700px) {
+      .workhours-main-grid, .workhours-left {
+        gap: 16px !important;
+        padding: 0 !important;
+      }
+      .workhours-card {
+        padding: 14px 8px !important;
+        min-width: 0;
+      }
+      .workhours-main-grid, .workhours-left {
+        grid-template-columns: 1fr !important;
+      }
+    }
+    /* Используются дополнительные классы для повышения гибкости */
     </style>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8794,7 +8817,7 @@
                 };
 
                 return (
-                    <div className="bg-white p-3 sm:p-6 rounded-lg shadow-lg max-w-full">
+                    <div className="bg-white p-6 rounded-lg shadow-lg">
                     <h2 className="text-2xl font-bold mb-4 text-center">Календарь работ</h2>
 
                     <div className="flex items-center justify-center gap-2 mb-2">
@@ -8832,10 +8855,10 @@
                     </div>
 
                     {/* Сетка календаря */}
-                    <div className="grid grid-cols-7 gap-1 overflow-visible min-w-[350px] sm:min-w-0 sm:max-w-full overflow-x-auto">
+                    <div className="grid grid-cols-7 gap-1 overflow-visible">
                         {/* Заголовки дней недели */}
                         {daysOfWeek.map((d) => (
-                        <div key={d} className="text-center font-bold text-gray-600 text-xs sm:text-sm">
+                        <div key={d} className="text-center font-bold text-gray-600 text-sm">
                             {d}
                         </div>
                         ))}
@@ -8847,7 +8870,7 @@
                             key={cell.dateStr}
                             onClick={() => handleDayClick(cell)}
                             tabIndex={0}
-                            className={`group relative w-8 h-8 sm:w-10 sm:h-10 md:w-12 md:h-12 rounded flex items-center justify-center font-semibold transition-all duration-150 ${getCellColor(
+                            className={`group relative w-10 h-10 rounded flex items-center justify-center font-semibold transition-all duration-150 ${getCellColor(
                                 cell.hours,
                                 cell.isPastDayWithZero
                             )} ${cell.isToday ? "ring-2 ring-blue-600" : ""} hover:scale-110 hover:ring-2 hover:ring-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer`}
@@ -8877,7 +8900,7 @@
                             </div>
                             </div>
                         ) : (
-                            <div key={`e-${idx}`} className="w-8 h-8 sm:w-10 sm:h-10 md:w-12 md:h-12" />
+                            <div key={`e-${idx}`} className="w-10 h-10" />
                         )
                         )}
                     </div>
@@ -12245,11 +12268,11 @@
 
                                             // --- отображаем ---
                                             return (
-                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                            <div className="grid workhours-main-grid grid-cols-1 md:grid-cols-3 gap-6">
                                                 {/* Левая часть с карточками */}
-                                                <div className="col-span-1 md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-6">
+                                                <div className="col-span-1 md:col-span-2 grid workhours-left grid-cols-1 sm:grid-cols-2 gap-6">
                                                 {/* Отработанные часы (включая зачтённые часы тренинга) */}
-                                                <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                                     <i className="fas fa-briefcase text-gray-400"></i> Отработанные часы
                                                     </p>
@@ -12259,7 +12282,7 @@
                                                 </div>
 
                                                 {/* Норма часов */}
-                                                <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                                     <i className="fas fa-bullseye text-gray-400"></i> Норма часов
                                                     </p>
@@ -12269,7 +12292,7 @@
                                                 </div>
 
                                                 {/* Часы тренинга (только те, что count_in_hours === true) */}
-                                                <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                                     <i className="fas fa-chalkboard-teacher text-gray-400"></i> Часы тренинга
                                                     </p>
@@ -12279,7 +12302,7 @@
                                                 </div>
 
                                                 {/* Штрафы */}
-                                                <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                                     <i className="fas fa-exclamation-triangle text-gray-400"></i> Штрафы
                                                     </p>
@@ -12289,7 +12312,7 @@
                                                 </div>
 
                                                 {/* Звонки в час */}
-                                                <div className="p-5 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                                <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
                                                     <i className="fas fa-phone-alt text-gray-400"></i> Звонки в час
                                                     </p>
