@@ -12527,7 +12527,7 @@
                                               <i className="fas fa-award text-yellow-600 text-lg"></i>
                                             </div>
                                             <div className="min-w-0">
-                                              <p className="text-xs uppercase tracking-wide text-gray-500">Стаж работы</p>
+                                              <p className="text-xs uppercase tracking-wide text-gray-500">Стаж работы <span className="text-gray-400 normal-case">(приблизительно)</span></p>
                                               <p className="text-base sm:text-lg font-semibold text-gray-900">
                                                 {(() => {
                                                   if (!profileData.hire_date) return '-';
@@ -12541,29 +12541,6 @@
                                                   return `${years} г. ${remMonths > 0 ? remMonths + ' мес.' : ''}`;
                                                 })()}
                                               </p>
-                                            </div>
-                                          </div>
-                                  
-                                          {/* Hours Table */}
-                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
-                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
-                                              <i className="fas fa-table text-blue-600 text-lg"></i>
-                                            </div>
-                                            <div className="min-w-0 flex-1">
-                                              <p className="text-xs uppercase tracking-wide text-gray-500">Таблица часов</p>
-                                              {profileData.hours_table_url ? (
-                                                <a
-                                                  href={profileData.hours_table_url}
-                                                  target="_blank"
-                                                  rel="noopener noreferrer"
-                                                  className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 font-semibold text-sm sm:text-base"
-                                                >
-                                                  <span>Открыть</span>
-                                                  <i className="fas fa-external-link-alt text-xs"></i>
-                                                </a>
-                                              ) : (
-                                                <p className="text-base text-gray-500">Не указано</p>
-                                              )}
                                             </div>
                                           </div>
                                         </div>
@@ -12585,13 +12562,6 @@
                                             >
                                               <i className="fas fa-chart-bar"></i>
                                               <span>Мои оценки</span>
-                                            </button>
-                                            <button 
-                                              onClick={() => setView('trainings')}
-                                              className="inline-flex items-center gap-2 px-4 py-2 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-lg text-sm font-medium transition"
-                                            >
-                                              <i className="fas fa-graduation-cap"></i>
-                                              <span>Обучения</span>
                                             </button>
                                           </div>
                                         </div>
