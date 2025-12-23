@@ -177,11 +177,17 @@
     @media (max-width: 768px) {
       .hamburger-btn {
         display: flex;
+        transition: left 0.3s ease;
+      }
+      .hamburger-btn.menu-open {
+        left: 220px;
       }
       .sidebar {
         width: 256px !important;
         transform: translateX(-100%);
         transition: transform 0.3s ease;
+        overflow-y: auto;
+        overflow-x: hidden;
       }
       .sidebar.mobile-open {
         transform: translateX(0);
@@ -10718,7 +10724,7 @@
                 <div className="flex h-screen overflow-hidden">
                     {/* Гамбургер кнопка для мобильных */}
                     <button 
-                        className="hamburger-btn"
+                        className={`hamburger-btn ${mobileMenuOpen ? 'menu-open' : ''}`}
                         onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
                     >
                         <i className={`fas ${mobileMenuOpen ? 'fa-times' : 'fa-bars'} text-xl`}></i>
