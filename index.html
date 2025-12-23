@@ -407,151 +407,6 @@
         font-size: 1.25rem !important;
         margin-bottom: 1rem !important;
       }
-      
-      /* === Мобильная адаптация раздела "Ваши оценки" === */
-      .evaluation-section {
-        width: 100% !important;
-        padding: 0.75rem !important;
-        overflow-x: hidden !important;
-        border-radius: 0.75rem !important;
-      }
-      .evaluation-section > h2 {
-        font-size: 1.25rem !important;
-        margin-bottom: 1rem !important;
-        flex-wrap: wrap;
-      }
-      .evaluation-section > h2 span {
-        font-size: 1.1rem !important;
-      }
-      
-      /* KPI карточки оценок */
-      .evaluation-kpi-grid {
-        grid-template-columns: 1fr !important;
-        gap: 0.75rem !important;
-      }
-      .evaluation-kpi-grid > div.col-span-1 {
-        grid-column: span 1 !important;
-      }
-      .evaluation-kpi-card {
-        padding: 1rem !important;
-      }
-      .evaluation-kpi-card p.text-4xl {
-        font-size: 2rem !important;
-      }
-      .evaluation-kpi-card p.text-lg {
-        font-size: 0.9rem !important;
-      }
-      
-      /* Полукруглый прогресс на мобильных */
-      .evaluation-progress-container {
-        justify-content: center !important;
-      }
-      .evaluation-progress-container svg {
-        width: 160px !important;
-        height: 100px !important;
-      }
-      
-      /* Таблица оценок на мобильных - превращаем в карточки */
-      .evaluation-table-container {
-        overflow-x: visible !important;
-        border: none !important;
-        box-shadow: none !important;
-      }
-      .evaluation-table {
-        display: block !important;
-      }
-      .evaluation-table thead {
-        display: none !important;
-      }
-      .evaluation-table tbody {
-        display: flex !important;
-        flex-direction: column !important;
-        gap: 0.75rem !important;
-      }
-      .evaluation-table tbody tr {
-        display: block !important;
-        background: white !important;
-        border: 1px solid #e5e7eb !important;
-        border-radius: 0.75rem !important;
-        padding: 0.75rem !important;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1) !important;
-      }
-      .evaluation-table tbody tr:hover {
-        box-shadow: 0 2px 6px rgba(0,0,0,0.15) !important;
-      }
-      .evaluation-table tbody tr td {
-        display: flex !important;
-        justify-content: space-between !important;
-        align-items: flex-start !important;
-        padding: 0.375rem 0 !important;
-        border-bottom: 1px solid #f3f4f6 !important;
-        font-size: 0.8rem !important;
-      }
-      .evaluation-table tbody tr td:last-child {
-        border-bottom: none !important;
-        justify-content: center !important;
-        padding-top: 0.5rem !important;
-      }
-      .evaluation-table tbody tr td::before {
-        content: attr(data-label);
-        font-weight: 600;
-        color: #6b7280;
-        font-size: 0.7rem;
-        text-transform: uppercase;
-        flex-shrink: 0;
-        margin-right: 0.5rem;
-      }
-      .evaluation-table tbody tr td .max-w-xs {
-        max-width: none !important;
-      }
-      
-      /* Кнопка "Оспорить" на мобильных */
-      .evaluation-table tbody tr td button {
-        width: 100% !important;
-        justify-content: center !important;
-      }
-      
-      /* Развернутые детали оценки */
-      .evaluation-expanded-row {
-        display: block !important;
-        border: none !important;
-        box-shadow: none !important;
-        padding: 0 !important;
-        margin-top: -0.5rem !important;
-      }
-      .evaluation-expanded {
-        padding: 0.75rem !important;
-        border-radius: 0 0 0.75rem 0.75rem !important;
-      }
-      .evaluation-expanded .space-y-4 > div {
-        margin-bottom: 0.75rem !important;
-      }
-      .evaluation-expanded h4 {
-        font-size: 0.85rem !important;
-        margin-bottom: 0.5rem !important;
-      }
-      .evaluation-expanded table {
-        font-size: 0.7rem !important;
-      }
-      .evaluation-expanded table th,
-      .evaluation-expanded table td {
-        padding: 0.375rem !important;
-      }
-      .evaluation-expanded .overflow-x-auto {
-        overflow-x: auto !important;
-        -webkit-overflow-scrolling: touch;
-      }
-      
-      /* Аудиоплеер компактнее */
-      .evaluation-audio {
-        margin-top: 0.5rem !important;
-      }
-      
-      /* Скрываем некоторые колонки на очень маленьких экранах */
-      .evaluation-table tbody tr td:nth-child(1),
-      .evaluation-table tbody tr td:nth-child(6) {
-        display: none !important;
-      }
     }
     </style>
     <meta charset="UTF-8">
@@ -12874,8 +12729,8 @@
                                     </div>
                                     )}
                                     {view === 'evaluation' && (
-                                    <div className="evaluation-section bg-white p-4 sm:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
-                                        <h2 className="text-xl sm:text-3xl font-bold mb-4 sm:mb-8 text-gray-900 flex items-center gap-2">
+                                    <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 lg:mb-8 text-gray-900 flex items-center gap-2">
                                         <i className="fas fa-chart-bar text-blue-600"></i>
                                         <span className="text-blue-600">Ваши оценки</span>
                                         </h2>
@@ -12902,33 +12757,211 @@
                                         ) : allEvals.length > 0 ? (
                                             <div>
                                             {/* KPI cards */}
-                                            <div className="evaluation-kpi-grid grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6 mb-4 sm:mb-8">
-                                                <div className="col-span-1 md:col-span-2">
-                                                <div className="evaluation-kpi-card p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
-                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 sm:mb-2 flex items-center gap-1">
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8">
+                                                <div className="col-span-1 sm:col-span-2">
+                                                <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
+                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-2 flex items-center gap-1">
                                                     <i className="fas fa-list-ol text-gray-400"></i> Количество оценок
                                                     </p>
-                                                    <p className="text-3xl sm:text-4xl font-bold text-gray-900">{evaluationCount}</p>
-                                                    <p className={`mt-1 sm:mt-2 text-base sm:text-lg font-medium ${evaluationCount >= 20 ? 'text-green-600' : 'text-yellow-600'}`}>
+                                                    <p className="text-2xl sm:text-3xl lg:text-4xl font-bold text-gray-900">{evaluationCount}</p>
+                                                    <p className={`mt-2 text-base sm:text-lg font-medium ${evaluationCount >= 20 ? 'text-green-600' : 'text-yellow-600'}`}>
                                                     {Math.max(0, 20 - evaluationCount)} оценок из 20
                                                     </p>
                                                     <p className="mt-1 text-xs text-gray-500">Всего оценок (включая не оцененные): {allEvals.length}</p>
                                                 </div>
                                                 </div>
 
-                                                <div className="evaluation-progress-container col-span-1 flex justify-center items-center">
+                                                <div className="col-span-1 flex justify-center items-center">
                                                 <SemiCircleProgress
                                                     percentage={Math.min(averageScore || 0, 100)}
                                                     label="Средний балл"
-                                                    width={200}
-                                                    height={120}
+                                                    width={window.innerWidth < 640 ? 160 : 200}
+                                                    height={window.innerWidth < 640 ? 96 : 120}
                                                 />
                                                 </div>
                                             </div>
 
-                                            {/* Evaluations table */}
-                                            <div className="evaluation-table-container overflow-x-auto rounded-xl shadow border border-gray-200">
-                                                <table className="evaluation-table min-w-full divide-y divide-gray-200 text-sm">
+                                            {/* Mobile card layout */}
+                                            <div className="block lg:hidden space-y-3">
+                                                {allEvals.map((ev, index) => {
+                                                    const id = ev.id ?? index;
+                                                    const isExpanded = expandedEvalId === id;
+                                                    const isImported = ev?.call?.is_imported === true || ev?.is_imported === true;
+
+                                                    const handleCardClick = () => {
+                                                        if (isImported) return;
+                                                        setExpandedEvalId(isExpanded ? null : id);
+                                                        handleEvaluationClick(ev);
+                                                    };
+
+                                                    return (
+                                                        <div key={id} className={`bg-white rounded-xl border ${isExpanded ? 'border-blue-300 shadow-md' : 'border-gray-200'} ${isImported ? 'opacity-60' : ''} transition-all duration-200`}>
+                                                            <div 
+                                                                className={`p-4 ${isImported ? 'cursor-not-allowed' : 'cursor-pointer active:bg-gray-50'}`}
+                                                                onClick={handleCardClick}
+                                                            >
+                                                                {/* Header row: score badge + phone */}
+                                                                <div className="flex items-center justify-between mb-3">
+                                                                    <div className="flex items-center gap-2">
+                                                                        <span className={`text-2xl font-bold ${getScoreColor?.(ev.score) || ''}`}>
+                                                                            {ev.score != null ? Number(ev.score).toFixed(0) : '-'}
+                                                                        </span>
+                                                                        {isImported && (
+                                                                            <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">Не оценено</span>
+                                                                        )}
+                                                                    </div>
+                                                                    <span className="text-xs text-gray-500">#{index + 1}</span>
+                                                                </div>
+                                                                
+                                                                {/* Phone number */}
+                                                                <div className="flex items-center gap-2 mb-2">
+                                                                    <i className="fas fa-phone text-gray-400 text-xs"></i>
+                                                                    <span className="text-sm font-medium text-gray-800">{ev.phone_number || '-'}</span>
+                                                                </div>
+                                                                
+                                                                {/* Dates row */}
+                                                                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 mb-2">
+                                                                    <div className="flex items-center gap-1">
+                                                                        <i className="fas fa-calendar text-gray-400"></i>
+                                                                        <span>{formatDate(ev.appeal_date || ev.created_at)}</span>
+                                                                    </div>
+                                                                    <div className="flex items-center gap-1">
+                                                                        <i className="fas fa-clipboard-check text-gray-400"></i>
+                                                                        <span>{formatDate(ev.evaluation_date)}</span>
+                                                                    </div>
+                                                                    {ev.month && (
+                                                                        <div className="flex items-center gap-1">
+                                                                            <i className="fas fa-folder text-gray-400"></i>
+                                                                            <span>{ev.month}</span>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                                
+                                                                {/* Summary */}
+                                                                <div className="text-sm text-gray-700 mb-2">{summarizeScores(ev.scores)}</div>
+                                                                
+                                                                {/* Comments preview */}
+                                                                {Array.isArray(ev.criterion_comments) && ev.criterion_comments.filter(Boolean).length > 0 ? (
+                                                                    <div className="text-xs text-gray-500 line-clamp-2">
+                                                                        {ev.criterion_comments.filter(Boolean).slice(0,1).map((c,i)=>(
+                                                                            <span key={i}>{c}</span>
+                                                                        ))}
+                                                                        {ev.criterion_comments.filter(Boolean).length > 1 && <span className="text-gray-400"> и ещё {ev.criterion_comments.filter(Boolean).length - 1}...</span>}
+                                                                    </div>
+                                                                ) : ev.comment ? (
+                                                                    <div className="text-xs text-gray-500 line-clamp-2">{String(ev.comment).slice(0,100)}</div>
+                                                                ) : null}
+
+                                                                {/* Action button */}
+                                                                <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
+                                                                    {!isImported && ev.score < 100 ? (
+                                                                        <button
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                setSelectedEvaluation(ev);
+                                                                                setShowDisputeModal(true);
+                                                                            }}
+                                                                            className="bg-yellow-500 text-white px-3 py-1.5 rounded-lg hover:bg-yellow-600 text-xs font-medium transition-all duration-200"
+                                                                        >
+                                                                            <i className="fas fa-exclamation-circle mr-1"></i>
+                                                                            Оспорить
+                                                                        </button>
+                                                                    ) : <div></div>}
+                                                                    <div className="flex items-center gap-1 text-xs text-blue-600">
+                                                                        <span>{isExpanded ? 'Свернуть' : 'Подробнее'}</span>
+                                                                        <i className={`fas fa-chevron-${isExpanded ? 'up' : 'down'}`}></i>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+
+                                                            {/* Expanded details for mobile */}
+                                                            {isExpanded && (
+                                                                <div className="border-t border-gray-200 p-4 bg-gray-50 space-y-4">
+                                                                    <div>
+                                                                        <h4 className="font-semibold text-gray-900 mb-2 text-sm">Общий комментарий</h4>
+                                                                        {ev.comment ? (
+                                                                            String(ev.comment).split(/\r?\n/).map((line, i) => (
+                                                                                <p key={i} className="text-sm text-gray-700 whitespace-pre-wrap">{line}</p>
+                                                                            ))
+                                                                        ) : (
+                                                                            <div className="text-sm text-gray-500">Комментариев нет.</div>
+                                                                        )}
+                                                                    </div>
+
+                                                                    <div>
+                                                                        <h4 className="font-semibold text-gray-900 mb-2 text-sm">Критерии</h4>
+                                                                        <div className="space-y-2">
+                                                                            {Array.isArray(ev.direction?.criteria) && ev.direction.criteria.length > 0 ? (
+                                                                                ev.direction.criteria.map((crit, cidx) => {
+                                                                                    const status = Array.isArray(ev.scores) ? ev.scores[cidx] : null;
+                                                                                    const critComment = Array.isArray(ev.criterion_comments) ? ev.criterion_comments[cidx] : '';
+                                                                                    return (
+                                                                                        <div key={cidx} className="bg-white rounded-lg p-3 border border-gray-200">
+                                                                                            <div className="flex items-start justify-between gap-2 mb-1">
+                                                                                                <span className="text-sm font-medium text-gray-800">{cidx + 1}. {crit.name}</span>
+                                                                                                <span className={`shrink-0 text-xs px-2 py-0.5 rounded-full font-medium ${
+                                                                                                    status === 'Correct' ? 'bg-green-100 text-green-700' :
+                                                                                                    status === 'Incorrect' ? 'bg-red-100 text-red-700' :
+                                                                                                    status === 'N/A' ? 'bg-gray-100 text-gray-700' : 'bg-yellow-100 text-yellow-700'
+                                                                                                }`}>{status || '-'}</span>
+                                                                                            </div>
+                                                                                            <div className="flex gap-3 text-xs text-gray-500 mb-1">
+                                                                                                <span>Вес: {crit.weight ?? '-'}</span>
+                                                                                                <span>Критич.: {crit.isCritical ? 'Да' : 'Нет'}</span>
+                                                                                            </div>
+                                                                                            {critComment && <div className="text-xs text-gray-600 mt-1">{critComment}</div>}
+                                                                                        </div>
+                                                                                    );
+                                                                                })
+                                                                            ) : Array.isArray(ev.scores) && ev.scores.length > 0 ? (
+                                                                                ev.scores.map((status, cidx) => {
+                                                                                    const critComment = Array.isArray(ev.criterion_comments) ? ev.criterion_comments[cidx] : '';
+                                                                                    const name = (ev.criterion_names && ev.criterion_names[cidx]) || `Критерий ${cidx+1}`;
+                                                                                    return (
+                                                                                        <div key={cidx} className="bg-white rounded-lg p-3 border border-gray-200">
+                                                                                            <div className="flex items-start justify-between gap-2 mb-1">
+                                                                                                <span className="text-sm font-medium text-gray-800">{cidx + 1}. {name}</span>
+                                                                                                <span className={`shrink-0 text-xs px-2 py-0.5 rounded-full font-medium ${
+                                                                                                    status === 'Correct' ? 'bg-green-100 text-green-700' :
+                                                                                                    status === 'Incorrect' ? 'bg-red-100 text-red-700' :
+                                                                                                    status === 'N/A' ? 'bg-gray-100 text-gray-700' : 'bg-yellow-100 text-yellow-700'
+                                                                                                }`}>{status || '-'}</span>
+                                                                                            </div>
+                                                                                            {critComment && <div className="text-xs text-gray-600 mt-1">{critComment}</div>}
+                                                                                        </div>
+                                                                                    );
+                                                                                })
+                                                                            ) : (
+                                                                                <div className="text-sm text-gray-500">Критерии не найдены.</div>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+
+                                                                    <div>
+                                                                        <h4 className="font-semibold text-gray-900 mb-2 text-sm">Аудио</h4>
+                                                                        {audioUrl ? (
+                                                                            <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} />
+                                                                        ) : (
+                                                                            <div className="text-sm text-red-500 flex items-center gap-2">
+                                                                                <i className="fas fa-times-circle"></i> Файлов не имеется
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+
+                                                                    <div className="text-xs text-gray-500 pt-2 border-t border-gray-200">
+                                                                        <div>Оценщик: {ev.evaluator || '-'}</div>
+                                                                        <div>Дата создания: {formatDate(ev.created_at)}</div>
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+
+                                            {/* Desktop table layout */}
+                                            <div className="hidden lg:block overflow-x-auto rounded-xl shadow border border-gray-200">
+                                                <table className="min-w-full divide-y divide-gray-200 text-sm">
                                                 <thead className="bg-blue-50">
                                                     <tr>
                                                     {['No.', 'Номер телефона', 'Дата обращения', 'Балл', 'Краткая сводка', 'Месяц', 'Дата оценки', 'Действия'].map(
@@ -12949,7 +12982,6 @@
                                                     const isExpanded = expandedEvalId === id;
                                                     const isImported = ev?.call?.is_imported === true || ev?.is_imported === true;
 
-                                                    // row click handler — disabled for imported evaluations
                                                     const handleRowClick = () => {
                                                         if (isImported) return;
                                                         setExpandedEvalId(isExpanded ? null : id);
@@ -12962,18 +12994,18 @@
                                                             className={`transition-colors duration-200 ${isImported ? 'opacity-60 cursor-not-allowed' : 'hover:bg-gray-50 cursor-pointer'} ${isExpanded ? 'bg-blue-50' : ''}`}
                                                             onClick={handleRowClick}
                                                         >
-                                                            <td data-label="№" className="px-3 sm:px-6 py-2 sm:py-4 whitespace-nowrap">{index + 1}</td>
-                                                            <td data-label="Телефон" className="px-3 sm:px-6 py-2 sm:py-4 whitespace-nowrap flex items-center gap-2">
+                                                            <td className="px-6 py-4 whitespace-nowrap">{index + 1}</td>
+                                                            <td className="px-6 py-4 whitespace-nowrap flex items-center gap-2">
                                                             <span>{ev.phone_number || '-'}</span>
                                                             {isImported && (
                                                                 <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">Не оценено</span>
                                                             )}
                                                             </td>
-                                                            <td data-label="Дата обращения" className="px-3 sm:px-6 py-2 sm:py-4 whitespace-nowrap">{formatDate(ev.appeal_date || ev.created_at)}</td>
-                                                            <td data-label="Балл" className={`px-3 sm:px-6 py-2 sm:py-4 whitespace-nowrap font-semibold ${getScoreColor?.(ev.score) || ''}`}>
+                                                            <td className="px-6 py-4 whitespace-nowrap">{formatDate(ev.appeal_date || ev.created_at)}</td>
+                                                            <td className={`px-6 py-4 whitespace-nowrap font-semibold ${getScoreColor?.(ev.score) || ''}`}>
                                                             {ev.score != null ? Number(ev.score).toFixed(0) : '-'}
                                                             </td>
-                                                            <td data-label="Сводка" className="px-3 sm:px-6 py-2 sm:py-4 max-w-xs">
+                                                            <td className="px-6 py-4 max-w-xs">
                                                             <div className="text-sm text-gray-700">{summarizeScores(ev.scores)}</div>
                                                             {Array.isArray(ev.criterion_comments) && ev.criterion_comments.filter(Boolean).length > 0 ? (
                                                                 <div className="mt-1 text-xs text-gray-500">
@@ -12986,10 +13018,9 @@
                                                                 <div className="mt-1 text-xs text-gray-500 truncate">{String(ev.comment).slice(0,160)}</div>
                                                             ) : null}
                                                             </td>
-                                                            <td data-label="Месяц" className="px-3 sm:px-6 py-2 sm:py-4 whitespace-nowrap">{ev.month || '-'}</td>
-                                                            <td data-label="Дата оценки" className="px-3 sm:px-6 py-2 sm:py-4 whitespace-nowrap">{formatDate(ev.evaluation_date)}</td>
-                                                            <td data-label="" className="px-3 sm:px-6 py-2 sm:py-4 whitespace-nowrap">
-                                                            {/* Oспорить: only for non-imported and score < 100 */}
+                                                            <td className="px-6 py-4 whitespace-nowrap">{ev.month || '-'}</td>
+                                                            <td className="px-6 py-4 whitespace-nowrap">{formatDate(ev.evaluation_date)}</td>
+                                                            <td className="px-6 py-4 whitespace-nowrap">
                                                             {!isImported && ev.score < 100 && (
                                                                 <button
                                                                 onClick={(e) => {
@@ -13006,10 +13037,9 @@
                                                             </td>
                                                         </tr>
 
-                                                        {/* expanded details — only visible when opened (click won't open for imported rows) */}
                                                         {isExpanded && (
-                                                            <tr className="evaluation-expanded-row">
-                                                            <td colSpan={8} className="evaluation-expanded p-2 sm:p-4 bg-gray-50 border-t text-sm">
+                                                            <tr>
+                                                            <td colSpan={8} className="p-4 bg-gray-50 border-t text-sm">
                                                                 <div className="space-y-4">
                                                                 <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Общий комментарий</h4>
