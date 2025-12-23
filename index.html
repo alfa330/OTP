@@ -240,41 +240,78 @@
     }
     
     @media (max-width: 640px) {
+      /* Предотвращение горизонтального скролла на всей странице */
+      body, html {
+        overflow-x: hidden !important;
+      }
+      .main-content {
+        overflow-x: hidden !important;
+        max-width: 100vw !important;
+      }
+      
+      /* Контейнер раздела - на всю ширину без горизонтального скролла */
+      .workhours-section {
+        width: 100% !important;
+        max-width: 100% !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+        padding-left: 0.75rem !important;
+        padding-right: 0.75rem !important;
+        overflow-x: hidden !important;
+        box-sizing: border-box !important;
+        border-radius: 0 !important;
+      }
+      
       /* Мобильная адаптация раздела "Ваши рабочие часы" */
       .workhours-main-grid {
         grid-template-columns: 1fr !important;
         gap: 1rem !important;
+        width: 100% !important;
+        overflow-x: hidden !important;
       }
       .workhours-left {
         grid-template-columns: 1fr !important;
+        width: 100% !important;
       }
       .workhours-card {
         padding: 1rem !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
       }
       .workhours-card p.text-xl {
         font-size: 1.125rem !important;
       }
       
-      /* Календарь на мобильных */
+      /* Календарь на мобильных - адаптивная сетка */
       .workhours-calendar {
-        padding: 0.75rem !important;
+        padding: 0.5rem !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+        overflow-x: hidden !important;
       }
       .workhours-calendar h2 {
-        font-size: 1.25rem !important;
+        font-size: 1.125rem !important;
         margin-bottom: 0.5rem !important;
       }
       .workhours-grid {
         gap: 2px !important;
         justify-items: center;
+        width: 100% !important;
+        display: grid !important;
+        grid-template-columns: repeat(7, 1fr) !important;
       }
       .workhours-grid > div {
-        width: 38px !important;
-        height: 38px !important;
-        font-size: 0.7rem !important;
+        width: 100% !important;
+        max-width: 42px !important;
+        aspect-ratio: 1 !important;
+        height: auto !important;
+        font-size: 0.65rem !important;
+        min-width: 0 !important;
       }
       .workhours-grid > div.text-sm {
-        font-size: 0.6rem !important;
+        font-size: 0.55rem !important;
         height: auto !important;
+        aspect-ratio: auto !important;
       }
       .workhours-legend {
         font-size: 0.65rem !important;
@@ -12512,7 +12549,7 @@
                                 )}
                                 
                                 {view === 'hours' && (
-                                    <div className="workhours-container bg-white p-4 sm:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                    <div className="workhours-section workhours-container bg-white p-4 sm:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-xl sm:text-3xl font-bold mb-4 sm:mb-8 text-gray-900 flex items-center gap-2">
                                         <i className="fas fa-clock text-blue-600"></i>
                                         <span className="text-blue-600">Ваши рабочие часы</span>
