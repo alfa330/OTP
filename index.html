@@ -106,10 +106,16 @@
         opacity: 0;
         visibility: hidden;
         transition: opacity 0.3s ease-in-out, visibility 0.3s ease-in-out;
+        display: none;
     }
-    .sidebar-overlay.visible {
-        opacity: 1;
-        visibility: visible;
+    @media (max-width: 768px) {
+        .sidebar-overlay {
+            display: block;
+        }
+        .sidebar-overlay.visible {
+            opacity: 1;
+            visibility: visible;
+        }
     }
     .hamburger-btn {
         display: none;
@@ -210,9 +216,6 @@
         .main-content {
             margin-left: 0 !important;
             padding-top: 70px !important;
-        }
-        .sidebar-overlay.visible {
-            display: block;
         }
     }
     </style>
@@ -10737,9 +10740,9 @@
                         </div>
                     </button>
 
-                    {/* Overlay for Mobile */}
+                    {/* Overlay for Mobile Only */}
                     <div 
-                        className={`sidebar-overlay ${sidebarOpen ? 'visible' : ''}`}
+                        className={`sidebar-overlay md:hidden ${sidebarOpen ? 'visible' : ''}`}
                         onClick={() => setSidebarOpen(false)}
                     />
 
