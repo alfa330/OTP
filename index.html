@@ -7600,13 +7600,20 @@
             const [showDevLetterModal, setShowDevLetterModal] = useState(false);
             // Global helper to open/close the Dev Letter modal programmatically
             useEffect(() => {
-                window.ShowDevLetterModal = () => setShowDevLetterModal(true);
-                window.HideDevLetterModal = () => setShowDevLetterModal(false);
+                window.ShowDevLetterModal = () => { console.log('window.ShowDevLetterModal called'); showToast?.('Открываю письмо от разработа'); setShowDevLetterModal(true); };
+                window.HideDevLetterModal = () => { console.log('window.HideDevLetterModal called'); setShowDevLetterModal(false); };
+
+                const onKeyDown = (e) => {
+                    if (e.key === 'Escape') setShowDevLetterModal(false);
+                };
+                window.addEventListener('keydown', onKeyDown);
+
                 return () => {
+                    window.removeEventListener('keydown', onKeyDown);
                     try { delete window.ShowDevLetterModal; } catch(e) {}
                     try { delete window.HideDevLetterModal; } catch(e) {}
                 };
-            }, []);
+            }, [showToast]);
             const [openMenuId, setOpenMenuId] = useState(null);
             const [showSidebarAccountDropdown, setShowSidebarAccountDropdown] = useState(false);
             const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
@@ -11128,7 +11135,7 @@
                                 <hr className="border-t border-white-700 my-2 opacity-40" />
 
                                 <li>
-                                    <button onClick={() => { setShowDevLetterModal(true); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
+                                    <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('Открываю письмо от разработа'); setShowDevLetterModal(true); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
                                         <i className="fas fa-envelope"></i> <span className="sidebar-text">Письмо от разработа</span>
                                     </button>
                                 </li>
@@ -11402,55 +11409,6 @@
                                 </div>
                                 )}
 
-                                {showDevLetterModal && (
-                                <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50 p-4">
-                                    <div className="bg-white w-full max-w-xl rounded-lg shadow-2xl relative">
-                                    <button 
-                                        onClick={() => setShowDevLetterModal(false)} 
-                                        className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 transition-colors"
-                                    >
-                                        <i className="fas fa-times text-xl"></i>
-                                    </button>
-                                    
-                                    <div className="p-8 pt-12">
-                                        <div className="border-l-4 border-blue-500 pl-6 mb-6">
-                                        <h2 className="text-xl font-medium text-gray-900 mb-1">Письмо от модератора</h2>
-                                        <p className="text-sm text-gray-500">26 декабря 2025</p>
-                                        </div>
-                                        
-                                        <div className="space-y-4 text-gray-700 leading-relaxed">
-                                        <p>Дорогие коллеги,</p>
-                                        
-                                        <p>
-                                            Поздравляю вас с наступающим <strong>новым годом</strong>! 
-                                            Для меня большая гордость, что смог в этом году принести пользу нашему отделу, 
-                                            и хотелось бы дальше работать с таким классным коллективом, как вы.
-                                        </p>
-                                        
-                                        <p>
-                                            Большое спасибо, что провели этот год со мной.
-                                        </p>
-                                        
-                                        <div className="mt-6 pt-4 border-t border-gray-200">
-                                            <p className="text-gray-600 italic">
-                                            С уважением,<br />
-                                            <span className="font-medium text-gray-800">Модератор - Ядигаров Руслан Азизулы</span>
-                                            </p>
-                                        </div>
-                                        </div>
-                                        
-                                        <div className="flex justify-end mt-8">
-                                        <button 
-                                            onClick={() => setShowDevLetterModal(false)} 
-                                            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-                                        >
-                                            Закрыть
-                                        </button>
-                                        </div>
-                                    </div>
-                                    </div>
-                                </div>
-                                )}
                                 {view === 'view_scores' && (
                                     <div className="bg-white p-6 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         {/* Header: title + month + report */}
@@ -13919,6 +13877,64 @@
                         </>
                         )}
                     </div>
+
+                    {showDevLetterModal && (
+                      <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50 p-4" role="dialog" aria-modal="true" onClick={() => setShowDevLetterModal(false)}>
+                        <div className="bg-white w-full max-w-xl rounded-lg shadow-2xl relative" onClick={(e) => e.stopPropagation()}>
+                        <button 
+                            onClick={() => setShowDevLetterModal(false)} 
+                            className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 transition-colors"
+                        >
+                            <i className="fas fa-times text-xl"></i>
+                        </button>
+
+                        <div className="p-8 pt-12">
+                            <div className="border-l-4 border-blue-500 pl-6 mb-6">
+                            <h2 className="text-xl font-medium text-gray-900 mb-1">Письмо от разработа</h2>
+                            <p className="text-sm text-gray-500">26 декабря 2025</p>
+                            </div>
+
+                            <div className="space-y-4 text-gray-700 leading-relaxed">
+                            <p>Дорогие коллеги,</p>
+
+                            <p>
+                                Поздравляю вас с наступающим <strong>новым годом</strong>! 
+                                Для меня большая гордость, что смог в этом году принести пользу нашему отделу, 
+                                и хотелось бы дальше работать с таким классным коллективом, как вы.
+                            </p>
+
+                            <p>
+                                Большое спасибо, что провели этот год со мной.
+                            </p>
+
+                            <div className="mt-6 pt-4 border-t border-gray-200">
+                                <p className="text-gray-600 italic">
+                                С уважением,<br />
+                                <span className="font-medium text-gray-800">Разработчик — Ядигаров Руслан Азизулы</span>
+                                </p>
+                            </div>
+                            </div>
+
+                            <div className="flex justify-end mt-8">
+                            <button 
+                                onClick={() => { navigator.clipboard?.writeText('dev@example.com'); showToast('Скопировано в буфер обмена'); }} 
+                                className="px-4 py-2 bg-gray-100 rounded hover:bg-gray-200 mr-2"
+                            >
+                                Копировать почту
+                            </button>
+
+                            <button 
+                                onClick={() => setShowDevLetterModal(false)} 
+                                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                            >
+                                Закрыть
+                            </button>
+                            </div>
+                        </div>
+                        </div>
+                      </div>
+                    )}
+
                     <ToastContainer toasts={toasts} removeToast={removeToast} />
                 </div>
             );
