@@ -51,11 +51,15 @@ document.addEventListener('DOMContentLoaded', function() {
         const margin = 30;
         const x = margin + t * (screenWidth - 2 * margin);
         
-        // Вертикальная позиция с красивой волной
-        // Используем комбинацию синусоид для более интересной формы
-        const wave1 = Math.sin(t * Math.PI * 2.5) * 35;
-        const wave2 = Math.sin(t * Math.PI * 1.2 + Math.PI/4) * 15;
-        const y = 50 + wave1 + wave2;
+        // Вертикальная позиция: поднимаем левую сторону к верхней части экрана
+        // baseY — начальная высота у левого края; slope придает наклон вниз вправо
+        const baseY = 6;
+        const slope = 36; // насколько нижняя (правая) сторона смещена вниз
+        const wave1 = Math.sin(t * Math.PI * 2.5) * 18;
+        const wave2 = Math.sin(t * Math.PI * 1.2 + Math.PI/4) * 8;
+        let y = baseY + wave1 + wave2 + t * slope;
+        // Предотвратить отрицательные значения и слишком большие смещения
+        y = Math.max(4, Math.min(150, Math.round(y)));
 
         bulb.style.left = Math.round(x) + 'px';
         bulb.style.top = Math.round(y) + 'px';
