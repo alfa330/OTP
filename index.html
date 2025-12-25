@@ -7597,6 +7597,16 @@
             const [converterData, setConverterData] = useState({amount: "", kpi: ""});
             const [operatorTrainings, setOperatorTrainings] = useState([]);
             const [showAddSvModal, setShowAddSvModal] = useState(false);
+            const [showDevLetterModal, setShowDevLetterModal] = useState(false);
+            // Global helper to open/close the Dev Letter modal programmatically
+            useEffect(() => {
+                window.ShowDevLetterModal = () => setShowDevLetterModal(true);
+                window.HideDevLetterModal = () => setShowDevLetterModal(false);
+                return () => {
+                    try { delete window.ShowDevLetterModal; } catch(e) {}
+                    try { delete window.HideDevLetterModal; } catch(e) {}
+                };
+            }, []);
             const [openMenuId, setOpenMenuId] = useState(null);
             const [showSidebarAccountDropdown, setShowSidebarAccountDropdown] = useState(false);
             const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
@@ -11117,6 +11127,12 @@
 
                                 <hr className="border-t border-white-700 my-2 opacity-40" />
 
+                                <li>
+                                    <button onClick={() => { setShowDevLetterModal(true); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
+                                        <i className="fas fa-envelope"></i> <span className="sidebar-text">Письмо от разработа</span>
+                                    </button>
+                                </li>
+
                                <li className="relative" ref={sidebarAccountRef}>
                                 <button
                                     onClick={handleToggleDropdown}
@@ -11130,7 +11146,7 @@
                                     {/* Стрелка появляется только при hover */}
                                     <i className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></i>
                                 </button>
-
+ 
                                 {(showSidebarAccountDropdown || isClosing) && (
                                     <div
                                     className={`absolute left-full top-0 ml-2 w-56 origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
@@ -11384,6 +11400,23 @@
                                     </button>
                                     </div>
                                 </div>
+                                )}
+
+                                {showDevLetterModal && (
+                                  <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50">
+                                    <div className="bg-white w-full max-w-2xl p-6 rounded-xl shadow-lg relative">
+                                      <h2 className="text-2xl font-semibold mb-4 text-gray-800">Письмо от разработа</h2>
+                                      <div className="prose max-w-none text-gray-700 mb-4">
+                                        <p>Здравствуйте! Это письмо от разработчика. Здесь можно указать заметки о релизах, контакты или инструкции.</p>
+                                        <p>Контакты: <a href="mailto:dev@example.com">dev@example.com</a></p>
+                                      </div>
+                                      <div className="flex justify-end gap-2">
+                                        <button onClick={() => { navigator.clipboard?.writeText('dev@example.com'); showToast('Скопировано в буфер обмена'); }} className="px-4 py-2 bg-gray-100 rounded hover:bg-gray-200">Копировать почту</button>
+                                        <button onClick={() => setShowDevLetterModal(false)} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Закрыть</button>
+                                      </div>
+                                      <button onClick={() => setShowDevLetterModal(false)} className="absolute top-4 right-4 text-gray-600 hover:text-gray-900"><i className="fas fa-times"></i></button>
+                                    </div>
+                                  </div>
                                 )}
                                 {view === 'view_scores' && (
                                     <div className="bg-white p-6 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
