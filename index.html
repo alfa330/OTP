@@ -422,27 +422,9 @@
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-
-    <!-- New Year decorations: subtle CSS for snow, stars, ornaments and garland -->
-    <style>
-      /* Container for randomly placed decorations */
-      #ny-root{ position:fixed; inset:0; pointer-events:none; z-index:9998; overflow:visible; }
-      /* Subtle top garland */
-      #ny-garland{ position:fixed; top:0; left:0; right:0; height:42px; z-index:9997; pointer-events:none; opacity:0.08; background-image: repeating-linear-gradient(90deg, #c026d3 0 40px, #60a5fa 40px 80px); }
-      .ny-deco{ position:absolute; pointer-events:none; transform-origin:center; will-change:transform,opacity; }
-      .ny-snow{ font-family:serif; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,0.25); animation-name:ny-snow-fall; animation-timing-function:linear; animation-iteration-count:infinite; }
-      @keyframes ny-snow-fall{ from{ transform: translateY(-10vh) rotate(0deg); opacity:0.95 } to{ transform: translateY(110vh) rotate(360deg); opacity:0.7 } }
-      .ny-twinkle{ animation: ny-twinkle 2.5s ease-in-out infinite; }
-      @keyframes ny-twinkle{ 0%,100%{ opacity:0.95; transform:scale(1) } 50%{ opacity:0.5; transform:scale(0.85) } }
-      .ny-ornament{ border-radius:50%; box-shadow:0 4px 10px rgba(0,0,0,0.2); }
-      .ny-banner{ position:fixed; top:12px; right:12px; background:linear-gradient(45deg,#ff7eb3,#7afcff); color:#fff; padding:6px 10px; border-radius:8px; font-weight:600; z-index:9999; box-shadow:0 6px 20px rgba(0,0,0,0.15); transform:translateY(-6px); animation:ny-banner 4s ease-in-out infinite; }
-      @keyframes ny-banner{ 0%,100%{ transform:translateY(-6px) } 50%{ transform:translateY(0) } }
-    </style>
 </head>
 <body class="bg-gray-50 font-sans antialiased text-gray-900">
     <div id="root"></div>
-    <!-- Новогодние украшения (случайные) -->
-    <div id="ny-root" aria-hidden="true"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef, useMemo } = React;
         const ToastContainer = ({ toasts, removeToast }) => {
@@ -13894,59 +13876,6 @@
                 </div>
             `;
         }
-    </script>
-    <script>
-    // New Year decorations — случайные украшения, не мешают интерактивности
-    (function(){
-      document.addEventListener('DOMContentLoaded', function(){
-        try{
-          const root=document.getElementById('ny-root');
-          if(!root) return;
-          const types=['snow','star','ornament'];
-          const count=18;
-          for(let i=0;i<count;i++){
-            const t=types[Math.floor(Math.random()*types.length)];
-            const el=document.createElement('div');
-            el.className='ny-deco ny-'+t;
-            const size = Math.round(8 + Math.random()*36);
-            el.style.width = size + 'px';
-            el.style.height = size + 'px';
-            el.style.left = (Math.random()*100) + '%';
-            el.style.top = (Math.random()*100) + '%';
-            if(t==='snow'){
-              el.textContent='❄';
-              el.style.fontSize = (size) + 'px';
-              el.classList.add('ny-snow');
-              el.style.animationDuration = (10 + Math.random()*20) + 's';
-              el.style.opacity = 0.95;
-            } else if(t==='star'){
-              el.textContent='★';
-              el.style.fontSize = (size) + 'px';
-              el.style.color = ['#ffeb3b','#ffd54f','#fff'][Math.floor(Math.random()*3)];
-              el.classList.add('ny-twinkle');
-              el.style.animationDuration = (2 + Math.random()*2) + 's';
-            } else {
-              el.classList.add('ny-ornament');
-              const colors = ['#FF5C7A','#FFB74D','#4DD0E1','#A1887F'];
-              el.style.background = 'radial-gradient(circle at 30% 30%, rgba(255,255,255,0.6), ' + colors[Math.floor(Math.random()*colors.length)] + ')';
-            }
-            el.style.transform = 'translate(-50%,-50%) rotate(' + Math.floor(Math.random()*360) + 'deg)';
-            root.appendChild(el);
-          }
-          // Banner и легкий гирлянд
-          const banner=document.createElement('div');
-          banner.className='ny-banner';
-          banner.textContent='С Новым Годом! 🎉';
-          document.body.appendChild(banner);
-          setTimeout(()=>banner.remove(),7000);
-          const gar=document.createElement('div');
-          gar.id='ny-garland';
-          document.body.appendChild(gar);
-        }catch(e){
-          console.error('NY deco error', e);
-        }
-      });
-    })();
     </script>
 </body>
 </html>
