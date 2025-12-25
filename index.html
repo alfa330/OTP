@@ -7600,7 +7600,7 @@
             const [showDevLetterModal, setShowDevLetterModal] = useState(false);
             // Global helper to open/close the Dev Letter modal programmatically
             useEffect(() => {
-                window.ShowDevLetterModal = () => { console.log('window.ShowDevLetterModal called'); showToast?.('Открываю письмо от разработа'); setShowDevLetterModal(true); };
+                window.ShowDevLetterModal = () => { console.log('window.ShowDevLetterModal called'); showToast?.('С наступающим вас!'); setShowDevLetterModal(true); };
                 window.HideDevLetterModal = () => { console.log('window.HideDevLetterModal called'); setShowDevLetterModal(false); };
 
                 const onKeyDown = (e) => {
@@ -11135,8 +11135,8 @@
                                 <hr className="border-t border-white-700 my-2 opacity-40" />
 
                                 <li>
-                                    <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('Открываю письмо от разработа'); setShowDevLetterModal(true); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
-                                        <i className="fas fa-envelope"></i> <span className="sidebar-text">Письмо от разработа</span>
+                                    <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('С наступающим вас!'); setShowDevLetterModal(true); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
+                                        <i className="fas fa-envelope"></i> <span className="sidebar-text">Письмо от модера</span>
                                     </button>
                                 </li>
 
