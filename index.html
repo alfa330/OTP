@@ -91,74 +91,6 @@
     }
     /* Используются дополнительные классы для повышения гибкости */
     
-    /* === Минималистичные гирлянды === */
-    .garland-container {
-      position: fixed;
-      top: 0;
-      right: 0;
-      width: 200px;
-      height: 120px;
-      pointer-events: none;
-      z-index: 1000;
-      overflow: hidden;
-    }
-    
-    .garland-line {
-      position: absolute;
-      width: 100%;
-      height: 3px;
-      background: linear-gradient(90deg, transparent, #ff6b6b, #ffd93d, #6bcf7f, #4d96ff, #ff6b6b, transparent);
-      top: 20px;
-      transform: scaleX(0.8);
-      opacity: 0.7;
-    }
-    
-    .garland-bulb {
-      position: absolute;
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      box-shadow: 0 0 8px currentColor;
-      animation: twinkle 3s infinite;
-    }
-    
-    .bulb-red {
-      background: #ff6b6b;
-      color: #ff6b6b;
-      right: 20px;
-      top: 25px;
-      animation-delay: 0s;
-    }
-    
-    .bulb-yellow {
-      background: #ffd93d;
-      color: #ffd93d;
-      right: 50px;
-      top: 30px;
-      animation-delay: 0.5s;
-    }
-    
-    .bulb-green {
-      background: #6bcf7f;
-      color: #6bcf7f;
-      right: 80px;
-      top: 25px;
-      animation-delay: 1s;
-    }
-    
-    .bulb-blue {
-      background: #4d96ff;
-      color: #4d96ff;
-      right: 110px;
-      top: 30px;
-      animation-delay: 1.5s;
-    }
-    
-    @keyframes twinkle {
-      0%, 100% { opacity: 0.3; }
-      50% { opacity: 1; }
-    }
-    
     /* === Сворачиваемый сайдбар === */
     .sidebar {
       width: 256px;
@@ -477,78 +409,6 @@
         margin-bottom: 1rem !important;
       }
     }
-    
-    /* === Минималистичная гирлянда === */
-    .garland-container {
-      position: fixed;
-      top: 0;
-      right: 0;
-      width: 100%;
-      height: 80px;
-      pointer-events: none;
-      z-index: 1000;
-      background: linear-gradient(180deg, rgba(255,255,255,0.8) 0%, rgba(255,255,255,0) 100%);
-    }
-    
-    .garland-lights {
-      position: absolute;
-      top: 20px;
-      right: 30px;
-      width: 400px;
-      height: 50px;
-      background: 
-        radial-gradient(circle 8px at 5% 50%, #ff6b6b, #ff6b6b) 0% 0% no-repeat,
-        radial-gradient(circle 8px at 15% 35%, #ffd93d, #ffd93d) 0% 0% no-repeat,
-        radial-gradient(circle 8px at 25% 50%, #6bcf7f, #6bcf7f) 0% 0% no-repeat,
-        radial-gradient(circle 8px at 35% 40%, #4d96ff, #4d96ff) 0% 0% no-repeat,
-        radial-gradient(circle 8px at 45% 50%, #ff6b6b, #ff6b6b) 0% 0% no-repeat,
-        radial-gradient(circle 8px at 55% 35%, #ffd93d, #ffd93d) 0% 0% no-repeat,
-        radial-gradient(circle 8px at 65% 50%, #6bcf7f, #6bcf7f) 0% 0% no-repeat,
-        radial-gradient(circle 8px at 75% 40%, #4d96ff, #4d96ff) 0% 0% no-repeat,
-        radial-gradient(circle 8px at 85% 50%, #ff6b6b, #ff6b6b) 0% 0% no-repeat,
-        radial-gradient(circle 8px at 95% 35%, #ffd93d, #ffd93d) 0% 0% no-repeat;
-      background-size: 50px 50px;
-      animation: twinkle 3s ease-in-out infinite;
-    }
-    
-    @keyframes twinkle {
-      0%, 100% {
-        opacity: 0.7;
-        filter: brightness(1) drop-shadow(0 0 4px rgba(255,107,107,0.6));
-      }
-      50% {
-        opacity: 1;
-        filter: brightness(1.2) drop-shadow(0 0 10px rgba(255,107,107,0.8));
-      }
-    }
-    
-    /* Линия гирлянды */
-    .garland-lights::before {
-      content: '';
-      position: absolute;
-      top: 20px;
-      right: 0;
-      width: 100%;
-      height: 2px;
-      background: linear-gradient(90deg, transparent 0%, #ddd 20%, #ddd 80%, transparent 100%);
-      z-index: -1;
-    }
-    
-    @media (max-width: 768px) {
-      .garland-lights {
-        width: 250px;
-        right: 20px;
-        background-size: 35px 50px;
-      }
-    }
-    
-    @media (max-width: 480px) {
-      .garland-lights {
-        width: 150px;
-        right: 10px;
-        background-size: 25px 50px;
-      }
-    }
     </style>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -564,15 +424,6 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 </head>
 <body class="bg-gray-50 font-sans antialiased text-gray-900">
-    <!-- Гирлянды в верхнем правом углу -->
-    <div class="garland-container">
-      <div class="garland-line"></div>
-      <div class="garland-bulb bulb-red"></div>
-      <div class="garland-bulb bulb-yellow"></div>
-      <div class="garland-bulb bulb-green"></div>
-      <div class="garland-bulb bulb-blue"></div>
-    </div>
-    
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef, useMemo } = React;
