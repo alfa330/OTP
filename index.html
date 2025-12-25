@@ -2,24 +2,7 @@
 <html lang="en">
 <head>
     <style>
-    /* Snowflakes */
-    .snowflake {
-        position: absolute;
-        background-color: white;
-        border-radius: 50%;
-        pointer-events: none;
-        z-index: 100;
-        opacity: 0.8;
-        animation: fall linear forwards;
-    }
-    
-    @keyframes fall {
-        to {
-            transform: translateY(100vh);
-        }
-    }
-
-    body {
+     body {
        background-image: url("https://iili.io/KfVwgf4.png");
        background-repeat: no-repeat;
        background-position: center;
@@ -442,7 +425,6 @@
 </head>
 <body class="bg-gray-50 font-sans antialiased text-gray-900">
     <div id="root"></div>
-    <div id="snow-container" style="position: fixed; top: 0; left: 0; width: 256px; height: 100vh; overflow: hidden; pointer-events: none; z-index: 40;"></div>
     <script type="text/babel">
         const { useState, useEffect, useCallback, useRef, useMemo } = React;
         const ToastContainer = ({ toasts, removeToast }) => {
@@ -1143,37 +1125,6 @@
                 </div>
             );
         };
-        // Snow effect for sidebar
-        function createSnowflake() {
-            const snowflake = document.createElement('div');
-            snowflake.classList.add('snowflake');
-            
-            // Random size between 2 and 6 pixels
-            const size = Math.random() * 4 + 2;
-            snowflake.style.width = `${size}px`;
-            snowflake.style.height = `${size}px`;
-            
-            // Random position within sidebar width (256px)
-            snowflake.style.left = `${Math.random() * 256}px`;
-            
-            // Random animation duration between 2 and 5 seconds
-            const duration = Math.random() * 3 + 2;
-            snowflake.style.animationDuration = `${duration}s`;
-            
-            // Random delay up to 5 seconds
-            snowflake.style.animationDelay = `${Math.random() * 5}s`;
-            
-            document.getElementById('snow-container').appendChild(snowflake);
-            
-            // Remove snowflake after it falls
-            setTimeout(() => {
-                snowflake.remove();
-            }, duration * 1000);
-        }
-        
-        // Create snowflakes every 100ms
-        setInterval(createSnowflake, 100);
-
         const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 
         // Error Boundary Component
