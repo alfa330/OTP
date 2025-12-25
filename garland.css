@@ -1,54 +1,210 @@
-/* Garland decorations: fixed top-right string with twinkling bulbs */
-.garland{
-  position:fixed;
-  top:0;
-  right:0;
-  width:320px;
-  height:160px;
-  pointer-events:none;
-  z-index:99999;
-  overflow:visible;
-}
-.garland .string{
-  position:absolute;
-  left:8px;
-  right:8px;
-  top:56px;
-  height:2px;
-  background:linear-gradient(90deg,#8b5cf6,#f97316);
-  border-radius:2px;
-  opacity:0.95;
-}
-.garland-bulb{
-  position:absolute;
-  width:18px;
-  height:18px;
-  border-radius:50%;
-  box-shadow:0 4px 10px rgba(0,0,0,0.25);
-  transform-origin:center;
-  animation:twinkle 2.4s infinite ease-in-out;
-  border:2px solid rgba(255,255,255,0.25);
-}
-.garland-bulb::after{
-  content:'';
-  position:absolute;
-  left:50%;
-  top:-6px;
-  width:2px;
-  height:6px;
-  background:rgba(0,0,0,0.12);
-  transform:translateX(-50%);
-  border-radius:1px;
-}
-@keyframes twinkle{
-  0%{ opacity:0.6; transform:scale(0.9);} 
-  50%{ opacity:1; transform:scale(1.06);} 
-  100%{ opacity:0.75; transform:scale(0.95);} 
+/* Полноэкранная гирлянда с улучшенными эффектами */
+.garland {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  height: 180px;
+  pointer-events: none;
+  z-index: 99999;
+  overflow: visible;
 }
 
-/* Small responsive tweak so garland doesn't overlap very small screens */
-@media (max-width:420px){
-  .garland{ width:220px; height:120px; }
-  .garland .string{ top:48px; }
-  .garland-bulb{ width:14px; height:14px; }
+/* Основная нить гирлянды */
+.garland .string {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 60px;
+  height: 3px;
+  background: linear-gradient(90deg, 
+    #1e40af 0%, 
+    #7c3aed 20%, 
+    #db2777 40%, 
+    #dc2626 60%, 
+    #ea580c 80%, 
+    #ca8a04 100%
+  );
+  border-radius: 2px;
+  opacity: 0.85;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* Дополнительные нити для объема */
+.garland .string::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 1px;
+  height: 1px;
+  background: linear-gradient(90deg, 
+    rgba(255, 255, 255, 0.4) 0%, 
+    rgba(255, 255, 255, 0.6) 50%, 
+    rgba(255, 255, 255, 0.4) 100%
+  );
+  border-radius: 1px;
+}
+
+/* Лампочки гирлянды */
+.garland-bulb {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  box-shadow: 
+    0 0 20px currentColor,
+    0 0 40px currentColor,
+    0 4px 12px rgba(0, 0, 0, 0.4),
+    inset 0 -2px 8px rgba(0, 0, 0, 0.3),
+    inset 0 2px 8px rgba(255, 255, 255, 0.5);
+  transform-origin: center;
+  animation: twinkle 3s infinite ease-in-out;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  transition: all 0.3s ease;
+}
+
+/* Блик на лампочке */
+.garland-bulb::before {
+  content: '';
+  position: absolute;
+  left: 30%;
+  top: 20%;
+  width: 6px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 50%;
+  filter: blur(1px);
+}
+
+/* Провод от лампочки к нити */
+.garland-bulb::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: -12px;
+  width: 2px;
+  height: 12px;
+  background: linear-gradient(180deg, 
+    rgba(100, 100, 100, 0.6) 0%, 
+    rgba(50, 50, 50, 0.8) 100%
+  );
+  transform: translateX(-50%);
+  border-radius: 1px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* Анимация мерцания */
+@keyframes twinkle {
+  0% { 
+    opacity: 0.7; 
+    transform: scale(0.92);
+    filter: brightness(0.9);
+  } 
+  25% {
+    opacity: 0.95;
+    transform: scale(1.05);
+    filter: brightness(1.2);
+  }
+  50% { 
+    opacity: 1; 
+    transform: scale(1.08);
+    filter: brightness(1.3);
+  }
+  75% {
+    opacity: 0.9;
+    transform: scale(1.02);
+    filter: brightness(1.1);
+  }
+  100% { 
+    opacity: 0.75; 
+    transform: scale(0.95);
+    filter: brightness(0.95);
+  } 
+}
+
+/* Дополнительная анимация покачивания */
+@keyframes sway {
+  0%, 100% { 
+    transform: translateY(0) rotate(0deg); 
+  }
+  50% { 
+    transform: translateY(-3px) rotate(2deg); 
+  }
+}
+
+/* Применяем покачивание к каждой второй лампочке */
+.garland-bulb:nth-child(2n) {
+  animation: twinkle 3s infinite ease-in-out, sway 4s infinite ease-in-out;
+}
+
+.garland-bulb:nth-child(3n) {
+  animation: twinkle 2.5s infinite ease-in-out, sway 5s infinite ease-in-out;
+}
+
+/* Эффект свечения при наведении (если pointer-events включены) */
+.garland-bulb:hover {
+  transform: scale(1.15);
+  filter: brightness(1.5);
+}
+
+/* Адаптация для планшетов */
+@media (max-width: 768px) {
+  .garland {
+    height: 150px;
+  }
+  
+  .garland .string {
+    top: 50px;
+    height: 2px;
+  }
+  
+  .garland-bulb {
+    width: 18px;
+    height: 18px;
+  }
+  
+  .garland-bulb::after {
+    height: 10px;
+    top: -10px;
+  }
+}
+
+/* Адаптация для мобильных устройств */
+@media (max-width: 480px) {
+  .garland {
+    height: 120px;
+  }
+  
+  .garland .string {
+    top: 40px;
+  }
+  
+  .garland-bulb {
+    width: 16px;
+    height: 16px;
+  }
+  
+  .garland-bulb::before {
+    width: 4px;
+    height: 4px;
+  }
+  
+  .garland-bulb::after {
+    height: 8px;
+    top: -8px;
+  }
+}
+
+/* Уменьшаем эффекты на слабых устройствах */
+@media (prefers-reduced-motion: reduce) {
+  .garland-bulb {
+    animation: none;
+    opacity: 0.9;
+  }
+  
+  .garland .string {
+    box-shadow: none;
+  }
 }
