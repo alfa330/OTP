@@ -1,0 +1,54 @@
+/* Garland decorations: fixed top-right string with twinkling bulbs */
+.garland{
+  position:fixed;
+  top:0;
+  right:0;
+  width:320px;
+  height:160px;
+  pointer-events:none;
+  z-index:99999;
+  overflow:visible;
+}
+.garland .string{
+  position:absolute;
+  left:8px;
+  right:8px;
+  top:56px;
+  height:2px;
+  background:linear-gradient(90deg,#8b5cf6,#f97316);
+  border-radius:2px;
+  opacity:0.95;
+}
+.garland-bulb{
+  position:absolute;
+  width:18px;
+  height:18px;
+  border-radius:50%;
+  box-shadow:0 4px 10px rgba(0,0,0,0.25);
+  transform-origin:center;
+  animation:twinkle 2.4s infinite ease-in-out;
+  border:2px solid rgba(255,255,255,0.25);
+}
+.garland-bulb::after{
+  content:'';
+  position:absolute;
+  left:50%;
+  top:-6px;
+  width:2px;
+  height:6px;
+  background:rgba(0,0,0,0.12);
+  transform:translateX(-50%);
+  border-radius:1px;
+}
+@keyframes twinkle{
+  0%{ opacity:0.6; transform:scale(0.9);} 
+  50%{ opacity:1; transform:scale(1.06);} 
+  100%{ opacity:0.75; transform:scale(0.95);} 
+}
+
+/* Small responsive tweak so garland doesn't overlap very small screens */
+@media (max-width:420px){
+  .garland{ width:220px; height:120px; }
+  .garland .string{ top:48px; }
+  .garland-bulb{ width:14px; height:14px; }
+}
