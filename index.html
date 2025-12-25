@@ -13879,48 +13879,62 @@
                     </div>
 
                     {showDevLetterModal && (
-                    <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50 p-4">
-                        <div className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl relative">
-                        <button 
-                            onClick={() => setShowDevLetterModal(false)} 
-                            className="absolute top-6 right-6 text-gray-400 hover:text-gray-700 transition-colors z-10"
-                        >
-                            <i className="fas fa-times text-2xl"></i>
-                        </button>
+                    <div className="fixed inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-50 p-4">
+                        <div className="bg-[#fafafa] w-full max-w-2xl rounded-3xl shadow-[0_30px_80px_rgba(0,0,0,0.12)] relative">
                         
-                        <div className="p-10 pt-12">
-                            <div className="mb-8">
-                            <div className="inline-block border-b-2 border-blue-500 pb-2 mb-2">
-                                <h2 className="text-2xl font-semibold text-gray-900">Письмо от модератора</h2>
-                            </div>
-                            <p className="text-sm text-gray-500 mt-2">26 декабря 2025 г.</p>
-                            </div>
-                            
-                            <div className="space-y-5 text-gray-800 leading-relaxed text-base">
-                            <p className="text-lg">Дорогие коллеги,</p>
-                            
-                            <p className="text-justify">
-                                Поздравляю вас с наступающим <span className="font-semibold text-gray-900">новым годом</span>! 
-                                Для меня большая гордость, что смог в этом году принести пользу нашему отделу, 
-                                и хотелось бы дальше работать с таким классным коллективом, как вы.
+                        <button
+                            onClick={() => setShowDevLetterModal(false)}
+                            className="absolute top-6 right-6 text-gray-300 hover:text-gray-600 transition-colors"
+                        >
+                            <i className="fas fa-times text-xl"></i>
+                        </button>
+
+                        <div className="p-12">
+                            {/* Header */}
+                            <div className="mb-10">
+                            <h2 className="text-3xl font-semibold text-gray-900 tracking-tight">
+                                Письмо от модератора
+                            </h2>
+                            <p className="text-xs text-gray-400 mt-2 tracking-wide uppercase">
+                                26 декабря 2025
                             </p>
-                            
-                            <p className="text-justify">
-                                Большое спасибо, что провели этот год со мной.
+                            </div>
+
+                            {/* Content */}
+                            <div className="space-y-6 text-gray-700 leading-relaxed text-[15px]">
+                            <p className="text-base text-gray-900">
+                                Дорогие коллеги,
                             </p>
-                            
-                            <div className="mt-8 pt-6 border-t border-gray-200">
-                                <p className="text-gray-600 leading-relaxed">
-                                <span className="block mb-1">С уважением,</span>
-                                <span className="block font-medium text-gray-900 text-lg">Модератор — Ядигаров Руслан Азизулы</span>
+
+                            <p>
+                                Поздравляю вас с наступающим 
+                                <span className="font-medium text-gray-900"> Новым годом</span>. 
+                                Для меня большая гордость, что в этом году я смог принести пользу нашему отделу 
+                                и работать с таким сильным и тёплым коллективом.
+                            </p>
+
+                            <p>
+                                Спасибо вам за доверие, поддержку и совместную работу в течение всего года.
+                            </p>
+
+                            {/* Signature */}
+                            <div className="pt-8 mt-10 border-t border-gray-200">
+                                <p className="text-sm text-gray-500">
+                                С уважением,
+                                </p>
+                                <p className="mt-1 text-gray-900 font-medium">
+                                Модератор — Ядигаров Руслан Азизулы
                                 </p>
                             </div>
                             </div>
-                            
-                            <div className="flex justify-end mt-10">
-                            <button 
-                                onClick={() => setShowDevLetterModal(false)} 
-                                className="px-8 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all hover:shadow-lg font-medium"
+
+                            {/* Footer */}
+                            <div className="flex justify-end mt-12">
+                            <button
+                                onClick={() => setShowDevLetterModal(false)}
+                                className="px-7 py-2.5 text-sm font-medium text-gray-700
+                                        border border-gray-200 rounded-xl
+                                        hover:bg-gray-100 transition"
                             >
                                 Закрыть
                             </button>
