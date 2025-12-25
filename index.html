@@ -7598,35 +7598,13 @@
             const [operatorTrainings, setOperatorTrainings] = useState([]);
             const [showAddSvModal, setShowAddSvModal] = useState(false);
             const [showDevLetterModal, setShowDevLetterModal] = useState(false);
-            const [devLetterClosing, setDevLetterClosing] = useState(false);
-
-            // Open/close helpers with smooth animations
-            const openDevLetter = () => {
-                setDevLetterClosing(false);
-                setShowDevLetterModal(true);
-            };
-
-            const closeDevLetter = (immediate = false) => {
-                if (immediate) {
-                    setShowDevLetterModal(false);
-                    setDevLetterClosing(false);
-                    return;
-                }
-                setDevLetterClosing(true);
-                // Match animation duration below (300ms)
-                setTimeout(() => {
-                    setShowDevLetterModal(false);
-                    setDevLetterClosing(false);
-                }, 300);
-            };
-
             // Global helper to open/close the Dev Letter modal programmatically
             useEffect(() => {
-                window.ShowDevLetterModal = () => { console.log('window.ShowDevLetterModal called'); showToast?.('Открываю письмо от разработа'); openDevLetter(); };
-                window.HideDevLetterModal = () => { console.log('window.HideDevLetterModal called'); closeDevLetter(); };
+                window.ShowDevLetterModal = () => { console.log('window.ShowDevLetterModal called'); showToast?.('Открываю письмо от разработа'); setShowDevLetterModal(true); };
+                window.HideDevLetterModal = () => { console.log('window.HideDevLetterModal called'); setShowDevLetterModal(false); };
 
                 const onKeyDown = (e) => {
-                    if (e.key === 'Escape') closeDevLetter();
+                    if (e.key === 'Escape') setShowDevLetterModal(false);
                 };
                 window.addEventListener('keydown', onKeyDown);
 
@@ -11157,7 +11135,7 @@
                                 <hr className="border-t border-white-700 my-2 opacity-40" />
 
                                 <li>
-                                    <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('Открываю письмо от разработа'); openDevLetter(); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
+                                    <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('Открываю письмо от разработа'); setShowDevLetterModal(true); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
                                         <i className="fas fa-envelope"></i> <span className="sidebar-text">Письмо от разработа</span>
                                     </button>
                                 </li>
@@ -13900,12 +13878,12 @@
                         )}
                     </div>
 
-                    {(showDevLetterModal || devLetterClosing) && (
-                    <div className={`fixed inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-50 p-4 transition-opacity duration-300 ${showDevLetterModal && !devLetterClosing ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`} role="dialog" aria-modal="true" onClick={() => closeDevLetter()}>
-                        <div className={`bg-[#fafafa] w-full max-w-2xl rounded-3xl shadow-[0_30px_80px_rgba(0,0,0,0.12)] relative transform transition-all duration-300 ${showDevLetterModal && !devLetterClosing ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-6 scale-95'}`} onClick={(e) => e.stopPropagation()}>
+                    {showDevLetterModal && (
+                    <div className="fixed inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-50 p-4">
+                        <div className="bg-[#fafafa] w-full max-w-2xl rounded-3xl shadow-[0_30px_80px_rgba(0,0,0,0.12)] relative">
                         
                         <button
-                            onClick={() => closeDevLetter()}
+                            onClick={() => setShowDevLetterModal(false)}
                             className="absolute top-6 right-6 text-gray-300 hover:text-gray-600 transition-colors"
                         >
                             <i className="fas fa-times text-xl"></i>
@@ -13915,7 +13893,7 @@
                             {/* Header */}
                             <div className="mb-10">
                             <h2 className="text-3xl font-semibold text-gray-900 tracking-tight">
-                                Письмо от разработа
+                                Письмо от модератора
                             </h2>
                             <p className="text-xs text-gray-400 mt-2 tracking-wide uppercase">
                                 26 декабря 2025
@@ -13953,15 +13931,10 @@
                             {/* Footer */}
                             <div className="flex justify-end mt-12">
                             <button
-                                onClick={() => { navigator.clipboard?.writeText('dev@example.com'); showToast('Скопировано в буфер обмена'); }}
-                                className="px-7 py-2.5 text-sm font-medium text-gray-700 mr-4 border border-gray-200 rounded-xl hover:bg-gray-100 transition"
-                            >
-                                Копировать почту
-                            </button>
-
-                            <button
-                                onClick={() => closeDevLetter()}
-                                className="px-7 py-2.5 text-sm font-medium text-white bg-blue-600 rounded-xl hover:bg-blue-700 transition"
+                                onClick={() => setShowDevLetterModal(false)}
+                                className="px-7 py-2.5 text-sm font-medium text-gray-700
+                                        border border-gray-200 rounded-xl
+                                        hover:bg-gray-100 transition"
                             >
                                 Закрыть
                             </button>
