@@ -13879,38 +13879,41 @@
                     </div>
 
                     {showDevLetterModal && (
-                        <div className="fixed inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-50 p-4">
-                            <div className="bg-[#fafafa] w-full max-w-2xl rounded-3xl shadow-[0_30px_80px_rgba(0,0,0,0.12)] relative">
+                        <div className="fixed inset-0 flex items-center justify-center bg-black/50 backdrop-blur-md z-50 p-4">
+                            <div className="bg-gradient-to-br from-white to-gray-50 w-full max-w-2xl rounded-3xl shadow-[0_25px_80px_rgba(0,0,0,0.2)] relative border border-gray-100">
                             
                                 <button
                                     onClick={() => setShowDevLetterModal(false)}
-                                    className="absolute top-6 right-6 text-gray-300 hover:text-gray-600 transition-colors z-10"
+                                    className="absolute top-6 right-6 w-10 h-10 flex items-center justify-center rounded-full bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700 transition-all z-10"
                                 >
-                                    <i className="fas fa-times text-xl"></i>
+                                    <i className="fas fa-times"></i>
                                 </button>
 
                                 <div className="p-12">
                                     {/* Header */}
                                     <div className="mb-10">
-                                        <div className="inline-block border-b-2 border-blue-500 pb-2 mb-3">
-                                            <h2 className="text-3xl font-semibold text-gray-900 tracking-tight">
-                                                Письмо от модератора
-                                            </h2>
+                                        <div className="flex items-center gap-3 mb-3">
+                                            <div className="w-1 h-12 bg-blue-600 rounded-full"></div>
+                                            <div>
+                                                <h2 className="text-3xl font-bold text-gray-900">
+                                                    Письмо от модератора
+                                                </h2>
+                                            </div>
                                         </div>
-                                        <p className="text-xs text-gray-400 mt-2 tracking-wide uppercase">
+                                        <p className="text-sm text-gray-400 ml-7">
                                             26 декабря 2025 г.
                                         </p>
                                     </div>
 
                                     {/* Content */}
-                                    <div className="space-y-6 text-gray-700 leading-relaxed text-[15px]">
-                                        <p className="text-lg text-gray-900">
+                                    <div className="bg-white rounded-2xl p-8 shadow-sm space-y-5 text-gray-700 leading-relaxed">
+                                        <p className="text-lg font-semibold text-gray-900">
                                             Дорогие коллеги,
                                         </p>
 
                                         <p className="text-justify">
                                             Поздравляю вас с наступающим 
-                                            <span className="font-semibold text-gray-900"> новым годом</span>! 
+                                            <span className="font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-indigo-600"> новым годом</span>! 
                                             Для меня большая гордость, что смог в этом году принести пользу нашему отделу, 
                                             и хотелось бы дальше работать с таким классным коллективом, как вы.
                                         </p>
@@ -13920,21 +13923,21 @@
                                         </p>
 
                                         {/* Signature */}
-                                        <div className="pt-8 mt-10 border-t border-gray-200">
-                                            <p className="text-sm text-gray-500 mb-2">
+                                        <div className="pt-6 mt-8 border-t border-gray-200">
+                                            <p className="text-sm text-gray-500 italic mb-1">
                                                 С уважением,
                                             </p>
-                                            <p className="text-base text-gray-900 font-medium">
+                                            <p className="text-base text-gray-900 font-semibold">
                                                 Модератор — Ядигаров Руслан Азизулы
                                             </p>
                                         </div>
                                     </div>
 
                                     {/* Footer */}
-                                    <div className="flex justify-end mt-12">
+                                    <div className="flex justify-end mt-8">
                                         <button
                                             onClick={() => setShowDevLetterModal(false)}
-                                            className="px-8 py-3 text-sm font-medium text-white bg-blue-600 rounded-xl hover:bg-blue-700 transition-all hover:shadow-lg"
+                                            className="px-8 py-3 text-sm font-semibold text-white bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl hover:from-blue-700 hover:to-indigo-700 transition-all shadow-lg hover:shadow-xl transform hover:scale-105"
                                         >
                                             Закрыть
                                         </button>
