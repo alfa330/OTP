@@ -13879,69 +13879,69 @@
                     </div>
 
                     {showDevLetterModal && (
-                    <div className="fixed inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-50 p-4">
-                        <div className="bg-[#fafafa] w-full max-w-2xl rounded-3xl shadow-[0_30px_80px_rgba(0,0,0,0.12)] relative">
-                        
-                        <button
-                            onClick={() => setShowDevLetterModal(false)}
-                            className="absolute top-6 right-6 text-gray-300 hover:text-gray-600 transition-colors"
-                        >
-                            <i className="fas fa-times text-xl"></i>
-                        </button>
+                        <div className="fixed inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm z-50 p-4">
+                            <div className="bg-[#fafafa] w-full max-w-2xl rounded-3xl shadow-[0_30px_80px_rgba(0,0,0,0.12)] relative">
+                            
+                                <button
+                                    onClick={() => setShowDevLetterModal(false)}
+                                    className="absolute top-6 right-6 text-gray-300 hover:text-gray-600 transition-colors z-10"
+                                >
+                                    <i className="fas fa-times text-xl"></i>
+                                </button>
 
-                        <div className="p-12">
-                            {/* Header */}
-                            <div className="mb-10">
-                            <h2 className="text-3xl font-semibold text-gray-900 tracking-tight">
-                                Письмо от модератора
-                            </h2>
-                            <p className="text-xs text-gray-400 mt-2 tracking-wide uppercase">
-                                26 декабря 2025
-                            </p>
-                            </div>
+                                <div className="p-12">
+                                    {/* Header */}
+                                    <div className="mb-10">
+                                        <div className="inline-block border-b-2 border-blue-500 pb-2 mb-3">
+                                            <h2 className="text-3xl font-semibold text-gray-900 tracking-tight">
+                                                Письмо от модератора
+                                            </h2>
+                                        </div>
+                                        <p className="text-xs text-gray-400 mt-2 tracking-wide uppercase">
+                                            26 декабря 2025 г.
+                                        </p>
+                                    </div>
 
-                            {/* Content */}
-                            <div className="space-y-6 text-gray-700 leading-relaxed text-[15px]">
-                            <p className="text-base text-gray-900">
-                                Дорогие коллеги,
-                            </p>
+                                    {/* Content */}
+                                    <div className="space-y-6 text-gray-700 leading-relaxed text-[15px]">
+                                        <p className="text-lg text-gray-900">
+                                            Дорогие коллеги,
+                                        </p>
 
-                            <p>
-                                Поздравляю вас с наступающим 
-                                <span className="font-medium text-gray-900"> Новым годом</span>. 
-                                Для меня большая гордость, что в этом году я смог принести пользу нашему отделу 
-                                и работать с таким сильным и тёплым коллективом.
-                            </p>
+                                        <p className="text-justify">
+                                            Поздравляю вас с наступающим 
+                                            <span className="font-semibold text-gray-900"> новым годом</span>! 
+                                            Для меня большая гордость, что смог в этом году принести пользу нашему отделу, 
+                                            и хотелось бы дальше работать с таким классным коллективом, как вы.
+                                        </p>
 
-                            <p>
-                                Спасибо вам за доверие, поддержку и совместную работу в течение всего года.
-                            </p>
+                                        <p className="text-justify">
+                                            Большое спасибо, что провели этот год со мной.
+                                        </p>
 
-                            {/* Signature */}
-                            <div className="pt-8 mt-10 border-t border-gray-200">
-                                <p className="text-sm text-gray-500">
-                                С уважением,
-                                </p>
-                                <p className="mt-1 text-gray-900 font-medium">
-                                Модератор — Ядигаров Руслан Азизулы
-                                </p>
-                            </div>
-                            </div>
+                                        {/* Signature */}
+                                        <div className="pt-8 mt-10 border-t border-gray-200">
+                                            <p className="text-sm text-gray-500 mb-2">
+                                                С уважением,
+                                            </p>
+                                            <p className="text-base text-gray-900 font-medium">
+                                                Модератор — Ядигаров Руслан Азизулы
+                                            </p>
+                                        </div>
+                                    </div>
 
-                            {/* Footer */}
-                            <div className="flex justify-end mt-12">
-                            <button
-                                onClick={() => setShowDevLetterModal(false)}
-                                className="px-7 py-2.5 text-sm font-medium text-gray-700
-                                        border border-gray-200 rounded-xl
-                                        hover:bg-gray-100 transition"
-                            >
-                                Закрыть
-                            </button>
+                                    {/* Footer */}
+                                    <div className="flex justify-end mt-12">
+                                        <button
+                                            onClick={() => setShowDevLetterModal(false)}
+                                            className="px-8 py-3 text-sm font-medium text-white bg-blue-600 rounded-xl hover:bg-blue-700 transition-all hover:shadow-lg"
+                                        >
+                                            Закрыть
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
-                        </div>
-                    </div>
                     )}
 
                     <ToastContainer toasts={toasts} removeToast={removeToast} />
