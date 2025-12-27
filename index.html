@@ -7704,14 +7704,38 @@
                 { src: 'assets/7.jpg', caption: 'Хэллоуинские настроения' }
             ];
             const [devLetterIndex, setDevLetterIndex] = useState(0);
-            // Автопрокрутка карусели, активна только когда модалка открыта
+            // Refs for autoplay pause and thumbnail scrolling
+            const devAutoplayPausedRef = useRef(false);
+            const thumbsContainerRef = useRef(null);
+            const thumbItemsRef = useRef([]);
+
+            // Автопрокрутка карусели, активна только когда модалка открыта и не на hover
             useEffect(() => {
                 if (!showDevLetterModal) return;
                 const t = setInterval(() => {
-                    setDevLetterIndex(i => (i + 1) % devLetterImages.length);
+                    if (!devAutoplayPausedRef.current) {
+                        setDevLetterIndex(i => (i + 1) % devLetterImages.length);
+                    }
                 }, 4200);
                 return () => clearInterval(t);
             }, [showDevLetterModal]);
+
+            // Smooth-scroll thumbnails into view when slide changes
+            useEffect(() => {
+                try {
+                    const el = thumbItemsRef.current[devLetterIndex];
+                    if (el && typeof el.scrollIntoView === 'function') {
+                        el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+                    } else if (thumbsContainerRef.current && el) {
+                        // fallback: center by adjusting scrollLeft
+                        const container = thumbsContainerRef.current;
+                        const offset = el.offsetLeft + el.offsetWidth / 2 - container.clientWidth / 2;
+                        container.scrollTo({ left: offset, behavior: 'smooth' });
+                    }
+                } catch (e) {
+                    // ignore
+                }
+            }, [devLetterIndex]);
             // Global helper to open/close the Dev Letter modal programmatically
             useEffect(() => {
                 window.ShowDevLetterModal = () => { console.log('window.ShowDevLetterModal called'); showToast?.('С наступающим вас!'); setShowDevLetterModal(true); };
@@ -14048,7 +14072,7 @@
                                         {/* Carousel: photos with caption overlay (wider + horizontal scroll for thumbnails) */}
                                         <div className="mt-6">
                                             <div className="relative bg-gray-100 rounded-2xl overflow-hidden">
-                                                <img src={devLetterImages[devLetterIndex].src} alt={devLetterImages[devLetterIndex].caption} className="w-full h-48 sm:h-64 md:h-80 lg:h-96 xl:h-[28rem] object-cover" />
+                                                <img src={devLetterImages[devLetterIndex].src} alt={devLetterImages[devLetterIndex].caption} onMouseEnter={() => { devAutoplayPausedRef.current = true; }} onMouseLeave={() => { devAutoplayPausedRef.current = false; }} onTouchStart={() => { devAutoplayPausedRef.current = true; }} onTouchEnd={() => { devAutoplayPausedRef.current = false; }} className="w-full h-48 sm:h-64 md:h-80 lg:h-96 xl:h-[28rem] object-cover" />
                                                 <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-transparent"></div>
                                                 <div className="absolute left-4 sm:left-6 bottom-4 sm:bottom-6">
                                                     <div className="bg-black/60 text-white px-3 sm:px-4 py-1.5 sm:py-2 rounded-md text-sm sm:text-sm max-w-[86%]">{devLetterImages[devLetterIndex].caption}</div>
@@ -14063,9 +14087,9 @@
                                             </div>
 
                                             <div className="mt-3">
-                                                <div className="flex gap-3 dev-carousel-thumbs overflow-x-auto py-2 px-1" style={{ WebkitOverflowScrolling: 'touch' }}>
+                                                <div ref={thumbsContainerRef} className="flex gap-3 dev-carousel-thumbs overflow-x-auto py-2 px-1" style={{ WebkitOverflowScrolling: 'touch' }}>
                                                     {devLetterImages.map((img, i) => (
-                                                        <button key={i} onClick={() => setDevLetterIndex(i)} className={`flex-shrink-0 w-24 sm:w-28 md:w-36 h-16 sm:h-20 md:h-24 rounded-lg overflow-hidden border-2 ${i === devLetterIndex ? 'border-blue-500' : 'border-transparent'} shadow-sm` }>
+                                                        <button ref={el => thumbItemsRef.current[i] = el} key={i} onClick={() => setDevLetterIndex(i)} className={`flex-shrink-0 w-24 sm:w-28 md:w-36 h-16 sm:h-20 md:h-24 rounded-lg overflow-hidden border-2 ${i === devLetterIndex ? 'border-blue-500' : 'border-transparent'} shadow-sm` }>
                                                             <img src={img.src} alt={img.caption} className="w-full h-full object-cover" />
                                                         </button>
                                                     ))}
