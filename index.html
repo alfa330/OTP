@@ -7671,6 +7671,25 @@
             const [operatorTrainings, setOperatorTrainings] = useState([]);
             const [showAddSvModal, setShowAddSvModal] = useState(false);
             const [showDevLetterModal, setShowDevLetterModal] = useState(false);
+            // Images and state for Dev Letter carousel
+            const devLetterImages = [
+                { src: '/assets/1.jpg', caption: 'Золотая молодежь' },
+                { src: '/assets/2.jpg', caption: 'Неформалогия' },
+                { src: '/assets/3.jpg', caption: 'Наши нериалки, тигрицы и т.д' },
+                { src: '/assets/4.jpg', caption: 'Непередаваемы улыбки' },
+                { src: '/assets/5.jpg', caption: 'Иююю...' },
+                { src: '/assets/6.jpg', caption: '...Наш хранитель отдела' },
+                { src: '/assets/7.jpg', caption: 'Хэллоуинские настроения' }
+            ];
+            const [devLetterIndex, setDevLetterIndex] = useState(0);
+            // Автопрокрутка карусели, активна только когда модалка открыта
+            useEffect(() => {
+                if (!showDevLetterModal) return;
+                const t = setInterval(() => {
+                    setDevLetterIndex(i => (i + 1) % devLetterImages.length);
+                }, 4200);
+                return () => clearInterval(t);
+            }, [showDevLetterModal]);
             // Global helper to open/close the Dev Letter modal programmatically
             useEffect(() => {
                 window.ShowDevLetterModal = () => { console.log('window.ShowDevLetterModal called'); showToast?.('С наступающим вас!'); setShowDevLetterModal(true); };
@@ -14002,6 +14021,32 @@
                                             <p className="text-base text-gray-900 font-semibold">
                                                 Модератор — Ядигаров Руслан Азизулы
                                             </p>
+                                        </div>
+
+                                        {/* Carousel: photos with caption overlay */}
+                                        <div className="mt-6">
+                                            <div className="relative bg-gray-100 rounded-2xl overflow-hidden">
+                                                <img src={devLetterImages[devLetterIndex].src} alt={devLetterImages[devLetterIndex].caption} className="w-full h-56 object-cover" />
+                                                <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-transparent"></div>
+                                                <div className="absolute left-4 bottom-4">
+                                                    <div className="bg-black/55 text-white px-3 py-1 rounded-md text-sm max-w-[85%]">{devLetterImages[devLetterIndex].caption}</div>
+                                                </div>
+
+                                                <button onClick={() => setDevLetterIndex((devLetterIndex - 1 + devLetterImages.length) % devLetterImages.length)} className="absolute left-3 top-1/2 -translate-y-1/2 bg-white/80 hover:bg-white p-2 rounded-full shadow-md">
+                                                    <i className="fas fa-chevron-left"></i>
+                                                </button>
+                                                <button onClick={() => setDevLetterIndex((devLetterIndex + 1) % devLetterImages.length)} className="absolute right-3 top-1/2 -translate-y-1/2 bg-white/80 hover:bg-white p-2 rounded-full shadow-md">
+                                                    <i className="fas fa-chevron-right"></i>
+                                                </button>
+                                            </div>
+
+                                            <div className="flex gap-2 mt-3 justify-center">
+                                                {devLetterImages.map((img, i) => (
+                                                    <button key={i} onClick={() => setDevLetterIndex(i)} className={`w-14 h-10 rounded overflow-hidden border-2 ${i === devLetterIndex ? 'border-blue-500' : 'border-transparent'}`}>
+                                                        <img src={img.src} alt={img.caption} className="w-full h-full object-cover" />
+                                                    </button>
+                                                ))}
+                                            </div>
                                         </div>
                                     </div>
 
