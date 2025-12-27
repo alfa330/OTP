@@ -13972,7 +13972,7 @@
 
                     {showDevLetterModal && (
                         <div className="fixed inset-0 flex items-center justify-center bg-black/50 backdrop-blur-md z-50 p-4">
-                            <div className="bg-blue-50 w-full max-w-3xl rounded-3xl shadow-[0_25px_80px_rgba(0,0,0,0.2)] relative border border-blue-100 max-h-[90vh] overflow-y-auto">
+                            <div className="bg-blue-50 w-full max-w-5xl rounded-3xl shadow-[0_25px_80px_rgba(0,0,0,0.2)] relative border border-blue-100 max-h-[90vh] overflow-y-auto">
                             
                                 <button
                                     onClick={() => setShowDevLetterModal(false)}
@@ -14023,29 +14023,31 @@
                                             </p>
                                         </div>
 
-                                        {/* Carousel: photos with caption overlay */}
+                                        {/* Carousel: photos with caption overlay (wider + horizontal scroll for thumbnails) */}
                                         <div className="mt-6">
                                             <div className="relative bg-gray-100 rounded-2xl overflow-hidden">
-                                                <img src={devLetterImages[devLetterIndex].src} alt={devLetterImages[devLetterIndex].caption} className="w-full h-56 object-cover" />
+                                                <img src={devLetterImages[devLetterIndex].src} alt={devLetterImages[devLetterIndex].caption} className="w-full h-80 md:h-96 lg:h-[28rem] object-cover" />
                                                 <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-transparent"></div>
-                                                <div className="absolute left-4 bottom-4">
-                                                    <div className="bg-black/55 text-white px-3 py-1 rounded-md text-sm max-w-[85%]">{devLetterImages[devLetterIndex].caption}</div>
+                                                <div className="absolute left-6 bottom-6">
+                                                    <div className="bg-black/60 text-white px-4 py-2 rounded-md text-sm max-w-[85%]">{devLetterImages[devLetterIndex].caption}</div>
                                                 </div>
 
-                                                <button onClick={() => setDevLetterIndex((devLetterIndex - 1 + devLetterImages.length) % devLetterImages.length)} className="absolute left-3 top-1/2 -translate-y-1/2 bg-white/80 hover:bg-white p-2 rounded-full shadow-md">
+                                                <button onClick={() => setDevLetterIndex((devLetterIndex - 1 + devLetterImages.length) % devLetterImages.length)} className="absolute left-4 top-1/2 -translate-y-1/2 bg-white/90 hover:bg-white p-3 rounded-full shadow-md">
                                                     <i className="fas fa-chevron-left"></i>
                                                 </button>
-                                                <button onClick={() => setDevLetterIndex((devLetterIndex + 1) % devLetterImages.length)} className="absolute right-3 top-1/2 -translate-y-1/2 bg-white/80 hover:bg-white p-2 rounded-full shadow-md">
+                                                <button onClick={() => setDevLetterIndex((devLetterIndex + 1) % devLetterImages.length)} className="absolute right-4 top-1/2 -translate-y-1/2 bg-white/90 hover:bg-white p-3 rounded-full shadow-md">
                                                     <i className="fas fa-chevron-right"></i>
                                                 </button>
                                             </div>
 
-                                            <div className="flex gap-2 mt-3 justify-center">
-                                                {devLetterImages.map((img, i) => (
-                                                    <button key={i} onClick={() => setDevLetterIndex(i)} className={`w-14 h-10 rounded overflow-hidden border-2 ${i === devLetterIndex ? 'border-blue-500' : 'border-transparent'}`}>
-                                                        <img src={img.src} alt={img.caption} className="w-full h-full object-cover" />
-                                                    </button>
-                                                ))}
+                                            <div className="mt-3">
+                                                <div className="flex gap-3 overflow-x-auto py-2 px-1 scrollbar-thin" style={{ WebkitOverflowScrolling: 'touch' }}>
+                                                    {devLetterImages.map((img, i) => (
+                                                        <button key={i} onClick={() => setDevLetterIndex(i)} className={`flex-shrink-0 w-36 h-24 rounded-lg overflow-hidden border-2 ${i === devLetterIndex ? 'border-blue-500' : 'border-transparent'} shadow-sm` }>
+                                                            <img src={img.src} alt={img.caption} className="w-full h-full object-cover" />
+                                                        </button>
+                                                    ))}
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
