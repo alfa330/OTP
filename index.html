@@ -413,11 +413,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OTP</title>
-    <link rel="icon" type="image/x-icon" href="favicon.ico">
-    <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.6/babel.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
@@ -7600,7 +7601,20 @@
             const [showDevLetterModal, setShowDevLetterModal] = useState(false);
             // Global helper to open/close the Dev Letter modal programmatically
             useEffect(() => {
-                window.ShowDevLetterModal = () => { console.log('window.ShowDevLetterModal called'); showToast?.('С наступающим вас!'); setShowDevLetterModal(true); };
+                window.ShowDevLetterModal = () => { 
+                console.log('window.ShowDevLetterModal called'); 
+                showToast?.('С наступающим вас!'); 
+                setShowDevLetterModal(true); 
+                // Trigger confetti effect
+                confetti({
+                    particleCount: 150,
+                    spread: 70,
+                    origin: { y: 0.6 },
+                    colors: ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF'],
+                    shapes: ['circle', 'square'],
+                    ticks: 300
+                });
+            };
                 window.HideDevLetterModal = () => { console.log('window.HideDevLetterModal called'); setShowDevLetterModal(false); };
 
                 const onKeyDown = (e) => {
