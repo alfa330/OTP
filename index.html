@@ -7521,6 +7521,73 @@
 
 
 
+        function startConfetti() {
+            const duration = 3000;
+            const end = Date.now() + duration;
+            const colors = ['#0ea5e9','#7c3aed','#06b6d4','#f97316','#ef4444','#10b981'];
+            const canvas = document.createElement('canvas');
+            canvas.style.position = 'fixed';
+            canvas.style.left = '0';
+            canvas.style.top = '0';
+            canvas.style.width = '100%';
+            canvas.style.height = '100%';
+            canvas.style.pointerEvents = 'none';
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            document.body.appendChild(canvas);
+            const ctx = canvas.getContext('2d');
+            const particles = [];
+            const gravity = 0.35;
+            const rand = (a,b) => Math.random()*(b-a)+a;
+            for (let i = 0; i < 140; i++) {
+                particles.push({
+                    x: rand(0, canvas.width),
+                    y: rand(-canvas.height*0.2, canvas.height*0.2),
+                    vx: rand(-8, 8),
+                    vy: rand(-10, -2),
+                    size: rand(6, 12),
+                    color: colors[Math.floor(Math.random()*colors.length)],
+                    rot: rand(0, 360),
+                    vr: rand(-10, 10)
+                });
+            }
+
+            function render() {
+                ctx.clearRect(0,0,canvas.width,canvas.height);
+                particles.forEach(p => {
+                    p.vy += gravity;
+                    p.x += p.vx;
+                    p.y += p.vy;
+                    p.rot += p.vr;
+                    ctx.save();
+                    ctx.fillStyle = p.color;
+                    ctx.translate(p.x, p.y);
+                    ctx.rotate(p.rot * Math.PI / 180);
+                    ctx.fillRect(-p.size/2, -p.size/2, p.size, p.size*0.6);
+                    ctx.restore();
+                });
+
+                if (Date.now() < end) {
+                    requestAnimationFrame(render);
+                } else {
+                    let alpha = 1;
+                    const fade = setInterval(() => {
+                        alpha -= 0.08;
+                        if (alpha <= 0) {
+                            clearInterval(fade);
+                            try { document.body.removeChild(canvas); } catch(e) {}
+                        } else {
+                            ctx.fillStyle = `rgba(255,255,255,${1-alpha})`;
+                            ctx.fillRect(0,0,canvas.width,canvas.height);
+                        }
+                    }, 50);
+                }
+            }
+
+            render();
+            window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; });
+        }
+
         const App = () => {
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
@@ -11135,7 +11202,7 @@
                                 <hr className="border-t border-white-700 my-2 opacity-40" />
 
                                 <li>
-                                    <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('С наступающим вас!'); setShowDevLetterModal(true); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
+                                        <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('С наступающим вас!'); setShowDevLetterModal(true); try { startConfetti(); } catch(e){}; setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
                                         <i className="fas fa-envelope"></i> <span className="sidebar-text">Письмо от модера</span>
                                     </button>
                                 </li>
