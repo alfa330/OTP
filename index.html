@@ -7710,15 +7710,7 @@
             const thumbItemsRef = useRef([]);
 
             // Автопрокрутка карусели, активна только когда модалка открыта и не на hover
-            useEffect(() => {
-                if (!showDevLetterModal) return;
-                const t = setInterval(() => {
-                    if (!devAutoplayPausedRef.current) {
-                        setDevLetterIndex(i => (i + 1) % devLetterImages.length);
-                    }
-                }, 4200);
-                return () => clearInterval(t);
-            }, [showDevLetterModal]);
+
 
             // Smooth-scroll thumbnails into view when slide changes
             useEffect(() => {
