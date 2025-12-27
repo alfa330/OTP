@@ -7600,23 +7600,46 @@
             const [showAddSvModal, setShowAddSvModal] = useState(false);
             const [showDevLetterModal, setShowDevLetterModal] = useState(false);
             // Global helper to open/close the Dev Letter modal programmatically
+            // Function to trigger confetti with error handling
+            const triggerConfetti = () => {
+                try {
+                    if (typeof window.confetti === 'function') {
+                        const confettiConfig = {
+                            particleCount: 200,
+                            spread: 120,
+                            startVelocity: 30,
+                            origin: { y: 0.6 },
+                            colors: ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF'],
+                            shapes: ['circle', 'square'],
+                            ticks: 500,
+                            gravity: 1,
+                            scalar: 1.2
+                        };
+                        window.confetti(confettiConfig);
+                        return true;
+                    }
+                } catch (e) {
+                    console.error('Confetti error:', e);
+                }
+                return false;
+            };
+
             useEffect(() => {
                 window.ShowDevLetterModal = () => { 
-                console.log('window.ShowDevLetterModal called'); 
-                showToast?.('С наступающим вас!'); 
-                setShowDevLetterModal(true);
-                // Trigger confetti effect using window.confetti
-                if (window.confetti) {
-                    window.confetti({
-                        particleCount: 150,
-                        spread: 70,
-                        origin: { y: 0.6 },
-                        colors: ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF'],
-                        shapes: ['circle', 'square'],
-                        ticks: 300
-                    });
-                }
-            };
+                    console.log('window.ShowDevLetterModal called'); 
+                    showToast?.('С наступающим вас!'); 
+                    setShowDevLetterModal(true);
+                    
+                    // Try to trigger confetti with retry logic
+                    if (!triggerConfetti()) {
+                        const retryInterval = setInterval(() => {
+                            if (triggerConfetti()) {
+                                clearInterval(retryInterval);
+                            }
+                        }, 100);
+                        setTimeout(() => clearInterval(retryInterval), 2000);
+                    }
+                };
                 window.HideDevLetterModal = () => { console.log('window.HideDevLetterModal called'); setShowDevLetterModal(false); };
 
                 const onKeyDown = (e) => {
