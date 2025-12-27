@@ -13993,8 +13993,8 @@
                     </div>
 
                     {showDevLetterModal && (
-                        <div className="fixed inset-0 flex items-center justify-center bg-black/50 backdrop-blur-md z-50 p-4">
-                            <div className="bg-blue-50 w-full max-w-5xl rounded-3xl shadow-[0_25px_80px_rgba(0,0,0,0.2)] relative border border-blue-100 max-h-[90vh] overflow-y-auto dev-letter-modal">
+                        <div className="fixed inset-0 flex items-center justify-center bg-black/50 backdrop-blur-md z-50 p-3 sm:p-4">
+                            <div className="bg-blue-50 w-full max-w-full sm:max-w-3xl md:max-w-4xl lg:max-w-5xl rounded-xl sm:rounded-3xl shadow-[0_25px_80px_rgba(0,0,0,0.2)] relative border border-blue-100 max-h-[92vh] overflow-y-auto dev-letter-modal">
                             
                                 <button
                                     onClick={() => setShowDevLetterModal(false)}
@@ -14003,7 +14003,7 @@
                                     <i className="fas fa-times"></i>
                                 </button>
 
-                                <div className="p-10">
+                                <div className="p-4 sm:p-6 md:p-10">
                                     {/* Header */}
                                     <div className="mb-10">
                                         <div className="mb-3">
@@ -14018,7 +14018,7 @@
                                     </div>
 
                                     {/* Content */}
-                                    <div className="bg-white rounded-2xl p-4 shadow-sm space-y-5 text-gray-700 leading-relaxed">
+                                        <div className="bg-white rounded-2xl p-4 shadow-sm space-y-5 text-gray-700 leading-relaxed">
                                         <p className="text-lg font-semibold text-gray-900">
                                             Дорогие коллеги,
                                         </p>
@@ -14048,16 +14048,16 @@
                                         {/* Carousel: photos with caption overlay (wider + horizontal scroll for thumbnails) */}
                                         <div className="mt-6">
                                             <div className="relative bg-gray-100 rounded-2xl overflow-hidden">
-                                                <img src={devLetterImages[devLetterIndex].src} alt={devLetterImages[devLetterIndex].caption} className="w-full h-80 md:h-96 lg:h-[28rem] object-cover" />
+                                                <img src={devLetterImages[devLetterIndex].src} alt={devLetterImages[devLetterIndex].caption} className="w-full h-48 sm:h-64 md:h-80 lg:h-96 xl:h-[28rem] object-cover" />
                                                 <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-transparent"></div>
-                                                <div className="absolute left-6 bottom-6">
-                                                    <div className="bg-black/60 text-white px-4 py-2 rounded-md text-sm max-w-[85%]">{devLetterImages[devLetterIndex].caption}</div>
+                                                <div className="absolute left-4 sm:left-6 bottom-4 sm:bottom-6">
+                                                    <div className="bg-black/60 text-white px-3 sm:px-4 py-1.5 sm:py-2 rounded-md text-sm sm:text-sm max-w-[86%]">{devLetterImages[devLetterIndex].caption}</div>
                                                 </div>
 
-                                                <button onClick={() => setDevLetterIndex((devLetterIndex - 1 + devLetterImages.length) % devLetterImages.length)} className="absolute left-4 top-1/2 -translate-y-1/2 bg-white/90 hover:bg-white p-3 rounded-full shadow-md">
+                                                <button onClick={() => setDevLetterIndex((devLetterIndex - 1 + devLetterImages.length) % devLetterImages.length)} className="absolute left-2 sm:left-4 top-1/2 -translate-y-1/2 bg-white/90 hover:bg-white p-2 sm:p-3 rounded-full shadow-md">
                                                     <i className="fas fa-chevron-left"></i>
                                                 </button>
-                                                <button onClick={() => setDevLetterIndex((devLetterIndex + 1) % devLetterImages.length)} className="absolute right-4 top-1/2 -translate-y-1/2 bg-white/90 hover:bg-white p-3 rounded-full shadow-md">
+                                                <button onClick={() => setDevLetterIndex((devLetterIndex + 1) % devLetterImages.length)} className="absolute right-2 sm:right-4 top-1/2 -translate-y-1/2 bg-white/90 hover:bg-white p-2 sm:p-3 rounded-full shadow-md">
                                                     <i className="fas fa-chevron-right"></i>
                                                 </button>
                                             </div>
@@ -14065,7 +14065,7 @@
                                             <div className="mt-3">
                                                 <div className="flex gap-3 dev-carousel-thumbs overflow-x-auto py-2 px-1" style={{ WebkitOverflowScrolling: 'touch' }}>
                                                     {devLetterImages.map((img, i) => (
-                                                        <button key={i} onClick={() => setDevLetterIndex(i)} className={`flex-shrink-0 w-36 h-24 rounded-lg overflow-hidden border-2 ${i === devLetterIndex ? 'border-blue-500' : 'border-transparent'} shadow-sm` }>
+                                                        <button key={i} onClick={() => setDevLetterIndex(i)} className={`flex-shrink-0 w-24 sm:w-28 md:w-36 h-16 sm:h-20 md:h-24 rounded-lg overflow-hidden border-2 ${i === devLetterIndex ? 'border-blue-500' : 'border-transparent'} shadow-sm` }>
                                                             <img src={img.src} alt={img.caption} className="w-full h-full object-cover" />
                                                         </button>
                                                     ))}
