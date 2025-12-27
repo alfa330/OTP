@@ -7540,48 +7540,53 @@
             const particles = [];
             const gravity = 0.35;
             const rand = (a,b) => Math.random()*(b-a)+a;
-            for (let i = 0; i < 140; i++) {
+            // increase particle count for a denser effect
+            for (let i = 0; i < 300; i++) {
                 particles.push({
                     x: rand(0, canvas.width),
                     y: rand(-canvas.height*0.2, canvas.height*0.2),
-                    vx: rand(-8, 8),
-                    vy: rand(-10, -2),
-                    size: rand(6, 12),
+                    vx: rand(-10, 10),
+                    vy: rand(-12, -2),
+                    size: rand(6, 14),
                     color: colors[Math.floor(Math.random()*colors.length)],
                     rot: rand(0, 360),
-                    vr: rand(-10, 10)
+                    vr: rand(-12, 12),
+                    opacity: 1
                 });
             }
 
+            let ending = false;
             function render() {
                 ctx.clearRect(0,0,canvas.width,canvas.height);
+                const now = Date.now();
+                if (now >= end) ending = true;
+
                 particles.forEach(p => {
-                    p.vy += gravity;
+                    if (!ending) p.vy += gravity;
                     p.x += p.vx;
                     p.y += p.vy;
                     p.rot += p.vr;
+                    if (ending) {
+                        p.opacity -= 0.02 + Math.random()*0.03;
+                        if (p.opacity < 0) p.opacity = 0;
+                    }
+
                     ctx.save();
+                    ctx.globalAlpha = p.opacity;
                     ctx.fillStyle = p.color;
                     ctx.translate(p.x, p.y);
                     ctx.rotate(p.rot * Math.PI / 180);
                     ctx.fillRect(-p.size/2, -p.size/2, p.size, p.size*0.6);
                     ctx.restore();
+                    ctx.globalAlpha = 1;
                 });
 
-                if (Date.now() < end) {
+                // continue animation while any particle still visible
+                const anyVisible = particles.some(p => p.opacity > 0);
+                if (anyVisible) {
                     requestAnimationFrame(render);
                 } else {
-                    let alpha = 1;
-                    const fade = setInterval(() => {
-                        alpha -= 0.08;
-                        if (alpha <= 0) {
-                            clearInterval(fade);
-                            try { document.body.removeChild(canvas); } catch(e) {}
-                        } else {
-                            ctx.fillStyle = `rgba(255,255,255,${1-alpha})`;
-                            ctx.fillRect(0,0,canvas.width,canvas.height);
-                        }
-                    }, 50);
+                    try { document.body.removeChild(canvas); } catch(e) {}
                 }
             }
 
@@ -13948,8 +13953,8 @@
 
                     {showDevLetterModal && (
                         <div className="fixed inset-0 flex items-center justify-center bg-black/50 backdrop-blur-md z-50 p-4">
-                            <div className="bg-gradient-to-br from-white to-gray-50 w-full max-w-3xl rounded-3xl shadow-[0_25px_80px_rgba(0,0,0,0.2)] relative border border-gray-100 max-h-[90vh] overflow-y-auto">
-                            
+                            <div className="bg-white w-full max-w-3xl rounded-3xl shadow-[0_25px_80px_rgba(0,0,0,0.2)] relative border border-gray-100 max-h-[90vh] overflow-y-auto">
+                                ё
                                 <button
                                     onClick={() => setShowDevLetterModal(false)}
                                     className="absolute top-6 right-6 w-10 h-10 flex items-center justify-center rounded-full bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700 transition-all z-10"
@@ -13959,16 +13964,11 @@
 
                                 <div className="p-12">
                                     {/* Header */}
-                                    <div className="mb-10">
-                                        <div className="flex items-center gap-3 mb-3">
-                                            <div className="w-1 h-12 bg-blue-600 rounded-full"></div>
-                                            <div>
-                                                <h2 className="text-3xl font-bold text-gray-900">
-                                                    Письмо от модератора
-                                                </h2>
-                                            </div>
-                                        </div>
-                                        <p className="text-sm text-gray-400 ml-7">
+                                    <div className="mb-10 pb-4 border-b-4 border-blue-600">
+                                        <h2 className="text-3xl font-bold text-gray-900">
+                                            Письмо от модератора
+                                        </h2>
+                                        <p className="text-sm text-gray-400 mt-2">
                                             26 декабря 2025 г.
                                         </p>
                                     </div>
@@ -13980,15 +13980,19 @@
                                         </p>
 
                                         <p className="text-justify">
-                                            Поздравляю вас с наступающим <span className="font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-indigo-600">Новым годом</span>! Для меня большая гордость работать с такими мощными профессионалами своего дела, как вы. Каждый из вас вносит свой уникальный вклад в нашу команду, и я искренне благодарен за вашу преданность, трудолюбие и творческий подход к решению задач. Пишет ChatGPT.
+                                            Поздравляю вас с наступающим{" "}
+                                            <span className="font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-indigo-600">
+                                                Новым годом
+                                            </span>
+                                            ! Для меня большая гордость работать с такими мощными профессионалами своего дела, как вы. Каждый из вас вносит свой уникальный вклад в нашу команду, и я искренне благодарен за вашу преданность, трудолюбие и творческий подход к решению задач. Пишет ChatGPT.
                                         </p>
 
                                         <p className="text-justify">
-                                            Шутки шутками но, большое спасибо, что провели этот год со мной, слушая мои самые крутые шутки, странные запросы и бесконечные «чукинги чал». Надеюсь, в новом году мы будем продолжать покорять вершины, делать невозможное возможным и смеяться над своими же гениальными (или не очень) идеями.
+                                            Шутки шутками но, большое спасибо, что провели этот год со мной, слушая мои самые крутые шутки, странные запросы и бесконечные «чукинги чал».
                                         </p>
 
                                         <p className="text-justify">
-                                            Желаю вам и вашим близким здоровья, счастья, вдохновения и чтобы все злые водители этого года ушли вместе с ним. А тем коллегам, которые только пришли в наш коллективчик, особенно крепких нервов — надеюсь, мы с вами так же продолжим работать и в следующем году, ведь дети — это цветы жизни.
+                                            Желаю вам и вашим близким здоровья, счастья, вдохновения и чтобы все злые водители этого года ушли вместе с ним.
                                         </p>
 
                                         {/* Signature */}
@@ -14006,7 +14010,7 @@
                                     <div className="flex justify-end mt-8">
                                         <button
                                             onClick={() => setShowDevLetterModal(false)}
-                                            className="px-8 py-3 text-sm font-semibold text-white bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl hover:from-blue-700 hover:to-indigo-700 transition-all shadow-lg hover:shadow-xl transform hover:scale-105"
+                                            className="px-8 py-3 text-sm font-semibold text-white bg-blue-600 rounded-xl hover:bg-blue-700 transition-all shadow-lg hover:shadow-xl transform hover:scale-105"
                                         >
                                             Закрыть
                                         </button>
