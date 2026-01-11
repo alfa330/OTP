@@ -1244,7 +1244,8 @@ def add_sv():
             name=name,
             role='sv',
             login=login,
-            password=password
+            password=password,
+            rate=1.0  # Default rate for SV
         )
         
         return jsonify({
