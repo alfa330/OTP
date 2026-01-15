@@ -41,10 +41,13 @@ API_TOKEN = os.getenv('BOT_TOKEN')
 FLASK_API_KEY = os.getenv('FLASK_API_KEY')
 admin = int(os.getenv('ADMIN_ID', '0'))
 admin2 = int(os.getenv('ADMIN_ID_2', '0'))
+admin3 = int(os.getenv('ADMIN_ID_3', '0'))
 ADMIN_LOGIN = os.getenv('ADMIN_LOGIN', 'admin')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'admin123')
 ADMIN_LOGIN_K = os.getenv('ADMIN_LOGIN_K', 'admin2')
 ADMIN_PASSWORD_K = os.getenv('ADMIN_PASSWORD_K', 'admin123')
+ADMIN_LOGIN_OKK = os.getenv('ADMIN_LOGIN_OKK', 'admin3')
+ADMIN_PASSWORD_OKK = os.getenv('ADMIN_PASSWORD_OKK', 'admin1234')
 
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
@@ -4721,6 +4724,16 @@ if __name__ == '__main__':
             password=ADMIN_PASSWORD_K
         )
         logging.info("Admin kronos created")
+    if not db.get_user(name='Доспаева Жанна'):
+        db.create_user(
+            telegram_id=admin3,
+            name='Доспаева Жанна',
+            role='admin',
+            rate=1.0
+            login=ADMIN_LOGIN_OKK,
+            password=ADMIN_PASSWORD_OKK
+        )
+        logging.info("Admin OKK created")
     
     # Запускаем Flask в отдельном потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
