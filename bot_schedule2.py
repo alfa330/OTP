@@ -4729,7 +4729,7 @@ if __name__ == '__main__':
             telegram_id=admin3,
             name='Доспаева Жанна',
             role='admin',
-            rate=1.0
+            rate=1.0,
             login=ADMIN_LOGIN_OKK,
             password=ADMIN_PASSWORD_OKK
         )
