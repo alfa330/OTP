@@ -1934,7 +1934,7 @@ def get_call_versions(call_id):
         logging.error(f"Error fetching call versions: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/call_evaluation/<int:evaluation_id>', methods=['DELETE'])
+@app.route('/api/call_evaluations/<int:evaluation_id>', methods=['DELETE'])
 def delete_draft_evaluation(evaluation_id):
     try:
         # Now delete from imported_calls by id (admin or supervisor of the operator)
