@@ -1369,41 +1369,6 @@ def save_directions():
         logging.error(f"Error saving directions: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route('/api/admin/remove_sv', methods=['POST'])
-@require_api_key
-def remove_sv():
-    try:
-        data = request.get_json()
-        if not data or 'id' not in data:
-            return jsonify({"error": "Missing ID field"}), 400
-
-        sv_id = int(data['id'])
-        user = db.get_user(id=sv_id)
-        if not user or user[3] != 'sv':
-            return jsonify({"error": "SV not found"}), 404
-        
-        telegram_id = user[1]
-        name = user[2]
-        
-        # Удаление пользователя
-        with db._get_cursor() as cursor:
-            cursor.execute("DELETE FROM users WHERE id = %s", (sv_id,))
-        
-        telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": telegram_id,
-            "text": f"Вы были исключены из команды❌",
-            "parse_mode": "HTML"
-        }
-        response = requests.post(telegram_url, json=payload, timeout=10)
-        if response.status_code != 200:
-            error_detail = response.json().get('description', 'Unknown error')
-            logging.error(f"Telegram API error: {error_detail}")
-        
-        return jsonify({"status": "success", "message": f"SV {name} removed"})
-    except Exception as e:
-        logging.error(f"Error removing SV: {e}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/operator/activity', methods=['GET'])
 @require_api_key
@@ -1969,38 +1934,45 @@ def get_call_versions(call_id):
 @app.route('/api/call_evaluation/<int:evaluation_id>', methods=['DELETE'])
 def delete_draft_evaluation(evaluation_id):
     try:
+        # Now delete from imported_calls by id (admin or supervisor of the operator)
         requester_id = int(request.headers.get('X-User-Id'))
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 403
+
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT is_draft, evaluator_id, audio_path FROM calls 
+                SELECT operator_id, status FROM imported_calls
                 WHERE id = %s
             """, (evaluation_id,))
-            result = cursor.fetchone()
-            if not result:
-                return jsonify({"error": "Evaluation not found"}), 404
-            is_draft, evaluator_id, audio_path = result
-            if not is_draft:
-                return jsonify({"error": "Can only delete draft evaluations"}), 400
-            if evaluator_id != requester_id:
-                return jsonify({"error": "Unauthorized to delete this draft"}), 403
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({"error": "Imported call not found"}), 404
 
-            # Удаление файла из GCS
-            if audio_path:
-                try:
-                    bucket_name = os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
-                    client = get_gcs_client()
-                    bucket = client.bucket(bucket_name)
-                    blob_path = audio_path.replace(f"https://storage.googleapis.com/{bucket_name}/", "")
-                    blob = bucket.blob(blob_path)
-                    blob.delete()
-                except Exception as e:
-                    logging.error(f"Error deleting file from GCS: {e}")
+            operator_id, status = row
+
+            # Prevent deleting already evaluated calls
+            if status == 'evaluated':
+                return jsonify({"error": "Cannot delete evaluated imported call"}), 400
+
+            # Authorization: admins can delete anything; supervisors can delete calls for their operators
+            allowed = False
+            try:
+                role = requester[3]
+            except Exception:
+                role = None
+
+            if role == 'admin':
+                allowed = True
+
+            if not allowed:
+                return jsonify({"error": "Unauthorized to delete this imported call"}), 403
 
             cursor.execute("""
-                DELETE FROM calls WHERE id = %s
+                DELETE FROM imported_calls WHERE id = %s
             """, (evaluation_id,))
-            
-        return jsonify({"status": "success", "message": "Draft deleted"}), 200
+
+        return jsonify({"status": "success", "message": "Imported call deleted"}), 200
     except Exception as e:
         logging.error(f"Error deleting draft evaluation: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
