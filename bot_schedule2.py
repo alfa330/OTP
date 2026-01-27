@@ -4712,10 +4712,27 @@ if __name__ == '__main__':
     flask_thread.start()
     
     # Настраиваем и запускаем планировщик
+    async def monthly_auto_fill_norm():
+        """Coroutine executed on the 1st day of each month to auto-fill norm_hours."""
+        try:
+            month = datetime.now().strftime('%Y-%m')
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(executor_pool, db.auto_fill_norm_hours, month)
+            logging.info(f"auto_fill_norm_hours result: {result}")
+        except Exception as e:
+            logging.exception(f"Error running monthly_auto_fill_norm: {e}")
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         generate_weekly_report, 
         CronTrigger(day_of_week='mon', hour=9, minute=0),
+        misfire_grace_time=3600
+    )
+
+    # Запуск авто-заполнения нормы часов: 1-й день каждого месяца в 03:00
+    scheduler.add_job(
+        monthly_auto_fill_norm,
+        CronTrigger(day='1', hour=3, minute=0),
         misfire_grace_time=3600
     )
 

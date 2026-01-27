@@ -1110,6 +1110,52 @@ class Database:
             "fines": float(total_fines)
         }
 
+    def auto_fill_norm_hours(self, month):
+        """
+        Авто-подсчет `norm_hours` для всех операторов за указанный месяц (формат 'YYYY-MM'),
+        где текущая `norm_hours` равна 0. Формула: рабочие дни * 8 * rate.
+
+        Возвращает словарь: {"month": month, "work_days": int, "processed": int}
+        processed — число строк, на которые сработал INSERT/UPDATE (оценочно).
+        """
+        import calendar as _py_calendar
+        from datetime import date as _date, timedelta as _td
+
+        try:
+            year, mon = map(int, month.split('-'))
+        except Exception as e:
+            raise ValueError("Invalid month format, expected YYYY-MM") from e
+
+        days_in_month = _py_calendar.monthrange(year, mon)[1]
+        start = _date(year, mon, 1)
+        end = _date(year, mon, days_in_month)
+
+        # считаем рабочие дни (понедельник=0 .. пятница=4)
+        work_days = 0
+        cur = start
+        while cur <= end:
+            if cur.weekday() < 5:
+                work_days += 1
+            cur += _td(days=1)
+
+        with self._get_cursor() as cursor:
+            # Вставляем/обновляем norm_hours для всех операторов.
+            # Для операторов без строки в work_hours будет INSERT, для существующих с norm_hours=0 — UPDATE.
+            cursor.execute("""
+                INSERT INTO work_hours (operator_id, month, norm_hours)
+                SELECT u.id, %s as month, (%s::float * 8.0 * COALESCE(u.rate, 1.0))::float
+                FROM users u
+                WHERE u.role = 'operator'
+                ON CONFLICT (operator_id, month) DO UPDATE
+                  SET norm_hours = EXCLUDED.norm_hours
+                  WHERE COALESCE(work_hours.norm_hours, 0) = 0
+            """, (month, work_days))
+
+            # rowcount может быть не точен при ON CONFLICT, но даёт оценку затронутых строк
+            processed = cursor.rowcount if cursor.rowcount is not None else 0
+
+        return {"month": month, "work_days": work_days, "processed": int(processed)}
+
     def save_directions(self, directions):
         """Сохранить направления в таблицу directions, создавая новые версии при изменениях."""
         with self._get_cursor() as cursor:
