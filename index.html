@@ -3640,13 +3640,13 @@
                         const fired = all.filter(sv => sv.status === 'fired');
                         return (
                             <>
-                            <optgroup label={`Активные (${active.length})`}>
+                            <optgroup label={`Активные`}>
                                 {active.map(sv => (
                                 <option key={sv.id} value={sv.id}>{sv.name}</option>
                                 ))}
                             </optgroup>
                             {fired.length > 0 && (
-                                <optgroup label={`Уволенные (${fired.length})`}>
+                                <optgroup label={`Уволенные`}>
                                 {fired.map(sv => (
                                     <option key={sv.id} value={sv.id}>{sv.name}</option>
                                 ))}
