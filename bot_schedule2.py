@@ -39,15 +39,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # === Переменные окружения =========================================================================================
 API_TOKEN = os.getenv('BOT_TOKEN')
 FLASK_API_KEY = os.getenv('FLASK_API_KEY')
-admin = int(os.getenv('ADMIN_ID', '0'))
-admin2 = int(os.getenv('ADMIN_ID_2', '0'))
-admin3 = int(os.getenv('ADMIN_ID_3', '0'))
-ADMIN_LOGIN = os.getenv('ADMIN_LOGIN', 'admin')
-ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'admin123')
-ADMIN_LOGIN_K = os.getenv('ADMIN_LOGIN_K', 'admin2')
-ADMIN_PASSWORD_K = os.getenv('ADMIN_PASSWORD_K', 'admin123')
-ADMIN_LOGIN_OKK = os.getenv('ADMIN_LOGIN_OKK', 'admin3')
-ADMIN_PASSWORD_OKK = os.getenv('ADMIN_PASSWORD_OKK', 'admin1234')
+admin4 = int(os.getenv('ADMIN_ID_4', '0'))
+ADMIN_LOGIN_CD = os.getenv('ADMIN_LOGIN_CD', 'admin4')
+ADMIN_PASSWORD_CD = os.getenv('ADMIN_PASSWORD_CD', 'admin1234')
 
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
@@ -4678,34 +4672,16 @@ async def generate_weekly_report():
 # === Главный запуск =============================================================================================
 if __name__ == '__main__':
     # Инициализация администратора
-    if not db.get_user(role='admin'):
+    if not db.get_user(name='Мулдир Юсупова'):
         db.create_user(
-            telegram_id=admin,
-            name='Omarova Aru',
-            role='admin',
-            login=ADMIN_LOGIN,
-            password=ADMIN_PASSWORD
-        )
-        logging.info("Admin user created")
-    if not db.get_user(name='Kronos1'):
-        db.create_user(
-            telegram_id=admin2,
-            name='Kronos1',
-            role='admin',
-            login=ADMIN_LOGIN_K,
-            password=ADMIN_PASSWORD_K
-        )
-        logging.info("Admin kronos created")
-    if not db.get_user(name='Доспаева Жанна'):
-        db.create_user(
-            telegram_id=admin3,
-            name='Доспаева Жанна',
+            telegram_id=admin4,
+            name='Мулдир Юсупова',
             role='admin',
             rate=1.0,
-            login=ADMIN_LOGIN_OKK,
-            password=ADMIN_PASSWORD_OKK
+            login=ADMIN_LOGIN_CD,
+            password=ADMIN_PASSWORD_CD
         )
-        logging.info("Admin OKK created")
+        logging.info("Admin CD created")
     
     # Запускаем Flask в отдельном потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
