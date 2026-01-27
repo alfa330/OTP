@@ -734,6 +734,7 @@ class Database:
             cursor.execute(
                 """
                 SELECT u.name, u.rate,
+                    d.name as direction_name,
                     COALESCE(w.norm_hours, 0) AS norm_hours,
                     COALESCE(w.regular_hours, 0) AS regular_hours,
                     COALESCE(w.total_break_time, 0) AS total_break_time,
@@ -745,6 +746,7 @@ class Database:
                 FROM users u
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
+                LEFT JOIN directions d ON u.direction_id = d.id
                 WHERE u.id = %s
                 LIMIT 1
                 """,
@@ -754,12 +756,13 @@ class Database:
 
         # default values if user / work_hours not found
         if row:
-            name, rate, norm_hours, regular_hours, total_break_time, total_talk_time, \
+            name, rate, direction_name, norm_hours, regular_hours, total_break_time, total_talk_time, \
                 total_calls, total_efficiency_hours, calls_per_hour, fines = row
             rate = float(rate) if rate is not None else 0.0
         else:
             name = None
             rate = 0.0
+            direction_name = None
             norm_hours = regular_hours = total_break_time = total_talk_time = 0.0
             total_calls = 0
             total_efficiency_hours = calls_per_hour = fines = 0.0
@@ -767,6 +770,7 @@ class Database:
         operator_obj = {
             "operator_id": operator_id,
             "name": name,
+            "direction": direction_name,
             "rate": rate,
             "norm_hours": float(norm_hours),
             "fines": float(fines),
@@ -804,6 +808,7 @@ class Database:
             # Получаем операторов + ставка + norm_hours + агрегаты work_hours (включая fines)
             cursor.execute("""
                 SELECT u.id, u.name, u.rate, u.status, u.supervisor_id,
+                    d.name as direction_name,
                     COALESCE(w.norm_hours, 0) as norm_hours,
                     COALESCE(w.regular_hours, 0) as regular_hours,
                     COALESCE(w.total_break_time, 0) as total_break_time,
@@ -815,6 +820,7 @@ class Database:
                 FROM users u
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
+                LEFT JOIN directions d ON u.direction_id = d.id
                 WHERE u.role = 'operator' AND u.supervisor_id = %s
                 ORDER BY u.name
             """, (month, supervisor_id))
@@ -877,13 +883,14 @@ class Database:
             # Сбор финального списка операторов
             operators = []
             for row in operator_rows:
-                (op_id, op_name, rate, status, sup_id, norm_hours, 
+                (op_id, op_name, rate, status, sup_id, direction_name, norm_hours, 
                 regular_hours, total_break_time, total_talk_time,
                 total_calls, total_efficiency_hours, calls_per_hour, fines) = row
 
                 operators.append({
                     "operator_id": op_id,
                     "name": op_name,
+                    "direction": direction_name,
                     "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
@@ -921,6 +928,7 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT u.id, u.name, u.rate, u.status, u.supervisor_id,
+                    d.name as direction_name,
                     COALESCE(w.norm_hours, 0) as norm_hours,
                     COALESCE(w.regular_hours, 0) as regular_hours,
                     COALESCE(w.total_break_time, 0) as total_break_time,
@@ -932,6 +940,7 @@ class Database:
                 FROM users u
                 LEFT JOIN work_hours w
                 ON w.operator_id = u.id AND w.month = %s
+                LEFT JOIN directions d ON u.direction_id = d.id
                 WHERE u.role = 'operator'
                 ORDER BY u.name
             """, (month,))
@@ -990,13 +999,14 @@ class Database:
 
             operators = []
             for row in operator_rows:
-                (op_id, op_name, rate, status, sup_id, norm_hours,
+                (op_id, op_name, rate, status, sup_id, direction_name, norm_hours,
                 regular_hours, total_break_time, total_talk_time,
                 total_calls, total_efficiency_hours, calls_per_hour, fines) = row
 
                 operators.append({
                     "operator_id": op_id,
                     "name": op_name,
+                    "direction": direction_name,
                     "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
