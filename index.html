@@ -1765,11 +1765,27 @@
                                         disabled={isLoading}
                                         >
                                         <option value="">Выберите супервайзера</option>
-                                        {svList.map((sv) => (
-                                            <option key={sv.id} value={sv.id}>
-                                            {sv.name}
-                                            </option>
-                                        ))}
+                                        {(() => {
+                                            const all = svList || [];
+                                            const active = all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
+                                            const fired = all.filter(sv => sv.status === 'fired');
+                                            return (
+                                                <>
+                                                <optgroup label={`Активные (${active.length})`}>
+                                                    {active.map(sv => (
+                                                    <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                                    ))}
+                                                </optgroup>
+                                                {fired.length > 0 && (
+                                                    <optgroup label={`Уволенные (${fired.length})`}>
+                                                    {fired.map(sv => (
+                                                        <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                                    ))}
+                                                    </optgroup>
+                                                )}
+                                                </>
+                                            );
+                                        })()}
                                         </select>
                                     </div>
 
@@ -3618,11 +3634,27 @@
                     title="Выберите супервайзера"
                 >
                     <option value="">Выберите супервайзера</option>
-                    {svList?.map(sv => (
-                    <option key={sv.id} value={sv.id}>
-                        {sv.name}
-                    </option>
-                    ))}
+                    {(() => {
+                        const all = svList || [];
+                        const active = all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
+                        const fired = all.filter(sv => sv.status === 'fired');
+                        return (
+                            <>
+                            <optgroup label={`Активные (${active.length})`}>
+                                {active.map(sv => (
+                                <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                ))}
+                            </optgroup>
+                            {fired.length > 0 && (
+                                <optgroup label={`Уволенные (${fired.length})`}>
+                                {fired.map(sv => (
+                                    <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                ))}
+                                </optgroup>
+                            )}
+                            </>
+                        );
+                    })()}
                 </select>
                 </div>
 
@@ -11591,9 +11623,27 @@
                                         disabled={isLoading || isAdminDataLoading}
                                         >
                                         <option value="">Выберите супервайзера</option>
-                                        {svList.map(sv => (
-                                            <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
-                                        ))}
+                                        {(() => {
+                                            const all = svList || [];
+                                            const active = all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
+                                            const fired = all.filter(sv => sv.status === 'fired');
+                                            return (
+                                                <>
+                                                <optgroup label={`Активные (${active.length})`}>
+                                                    {active.map(sv => (
+                                                    <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
+                                                    ))}
+                                                </optgroup>
+                                                {fired.length > 0 && (
+                                                    <optgroup label={`Уволенные (${fired.length})`}>
+                                                    {fired.map(sv => (
+                                                        <option key={sv.id} value={sv.id}>{sv.name} (ID: {sv.id})</option>
+                                                    ))}
+                                                    </optgroup>
+                                                )}
+                                                </>
+                                            );
+                                        })()}
                                         </select>
 
                                         {/* Tabs: Активные / Уволенные */}
