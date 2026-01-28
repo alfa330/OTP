@@ -3140,7 +3140,6 @@ async def cancel_handler(message: types.Message, state: FSMContext):
 async def start_command(message: types.Message):
     await message.delete()
     user = db.get_user(telegram_id=message.from_user.id)
-    logging.info(f"User {message.from_user.id} initiated /start command. User found: {bool(user)}")
     if user:
         if user[3] == 'admin':
             await bot.send_message(
@@ -3640,7 +3639,7 @@ async def show_operator_hours(callback: types.CallbackQuery):
     
     message_text = f"<b>Часы операторов {user[2]} за {current_month}:</b>\n\n"
     
-    for op_id, op_name, _, _, _, _ in operators:
+    for op_id, op_name, _, _, _, _, _, _, _ in operators:
         hours_data = db.get_hours_summary(op_id, current_month)
         if hours_data:
             hours = hours_data[0]
