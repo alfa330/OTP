@@ -1746,20 +1746,31 @@ class Database:
             row = cursor.fetchone()
             
             if row:
-                regular_hours, training_hours, fines, norm_hours, call_count, avg_score = row
+                # cast DB numeric types explicitly to python primitives
+                regular_hours = float(row[0]) if row[0] is not None else 0.0
+                training_hours = float(row[1]) if row[1] is not None else 0.0
+                fines = float(row[2]) if row[2] is not None else 0.0
+                norm_hours = float(row[3]) if row[3] is not None else 0.0
+                call_count = int(row[4]) if row[4] is not None else 0
+                avg_score = float(row[5]) if row[5] is not None else 0.0
             else:
-                regular_hours = training_hours = fines = norm_hours = call_count = avg_score = 0
-            
-            percent_complete = (regular_hours / norm_hours * 100) if norm_hours > 0 else 0
-            
+                regular_hours = 0.0
+                training_hours = 0.0
+                fines = 0.0
+                norm_hours = 0.0
+                call_count = 0
+                avg_score = 0.0
+
+            percent_complete = (float(regular_hours) / float(norm_hours) * 100.0) if norm_hours > 0 else 0.0
+
             return {
-                'regular_hours': regular_hours,
-                'training_hours': training_hours,
-                'fines': fines,
-                'norm_hours': norm_hours,
+                'regular_hours': float(regular_hours),
+                'training_hours': float(training_hours),
+                'fines': float(fines),
+                'norm_hours': float(norm_hours),
                 'percent_complete': round(percent_complete, 2),
-                'call_count': call_count,
-                'avg_score': float(avg_score) if avg_score else 0
+                'call_count': int(call_count),
+                'avg_score': round(float(avg_score), 2) if avg_score is not None else 0.0
             }
 
     def get_operators_by_supervisor(self, supervisor_id):
