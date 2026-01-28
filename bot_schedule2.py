@@ -4492,7 +4492,7 @@ async def show_operator_evaluations(message: types.Message):
         for eval in evaluations[:5]:  # Показываем последние 5 оценок (уже только последние версии)
             correction_mark = " (корректировка)" if eval['is_correction'] else ""
             message_text += (
-                f"📞 <b>Звонок {eval['call_number']}{correction_mark}</b>\n"
+                f"📞 <b>Звонок {eval['id']}{correction_mark}</b>\n"
                 f"   📅 {eval['month']}\n"
                 f"   📱 {eval['phone_number']}\n"
                 f"   ⭐ Оценка: <b>{eval['score']}</b>\n"
