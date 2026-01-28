@@ -8386,7 +8386,7 @@
                 window.TrainingModal = TrainingModal;
             }
 
-            const TrainingsView = React.memo(({ user, operators, showToast }) => {  // operators - список операторов (все для админа, свои для св)
+            const TrainingsView = ({ user, operators }) => {  // operators - список операторов (все для админа, свои для св)
                 // Preserve selected month across remounts — read/write from localStorage
                 const [month, setMonth] = useState(() => {
                     try {
@@ -8505,18 +8505,26 @@
                         }
                     })
                         .then(() => {
-                            // Обновляем только локальное состояние — удаляем тренинг из памяти
-                            setTrainings(prevTrainings => {
-                                const updated = { ...prevTrainings };
-                                Object.keys(updated).forEach(opId => {
-                                    updated[opId] = updated[opId].filter(t => t.id !== trainingId);
-                                    if (updated[opId].length === 0) {
-                                        delete updated[opId];
-                                    }
+                            // Обновляем только тренинги
+                            axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                                headers: {
+                                    'X-API-Key': user.apiKey,
+                                    'X-User-Id': user.id
+                                }
+                            })
+                                .then(res => {
+                                    const grouped = {};
+                                    (res.data.trainings || []).forEach(t => {
+                                        if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                                        grouped[t.operator_id].push(t);
+                                    });
+                                    setTrainings(grouped);
+                                    showToast('Тренинг успешно удален', 'success');
+                                })
+                                .catch(err => {
+                                    console.error('Error updating trainings after delete:', err);
+                                    showToast('Ошибка при обновлении списка тренингов', 'error');
                                 });
-                                return updated;
-                            });
-                            showToast('Тренинг успешно удален', 'success');
                         })
                         .catch(err => {
                             console.error('Error deleting training:', err);
@@ -8525,6 +8533,27 @@
                 };
 
                 const handleSave = (data) => {
+                    const updateTrainings = () => {
+                        axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
+                            headers: {
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            }
+                        })
+                            .then(res => {
+                                const grouped = {};
+                                (res.data.trainings || []).forEach(t => {
+                                    if (!grouped[t.operator_id]) grouped[t.operator_id] = [];
+                                    grouped[t.operator_id].push(t);
+                                });
+                                setTrainings(grouped);
+                                setShowModal(false);
+                            })
+                            .catch(err => {
+                                console.error('Error updating trainings:', err);
+                                showToast('Ошибка при обновлении списка тренингов','error')
+                            });
+                    };
                     if (editingTraining) {
                         axios.put(`${API_BASE_URL}/api/trainings/${editingTraining.id}`, data, {
                             headers: {
@@ -8532,26 +8561,8 @@
                                 'X-User-Id': user.id
                             }
                         })
-                            .then(res => {
-                                // Обновляем только локальное состояние с полученным тренингом
-                                const updatedTraining = res.data || data;
-                                setTrainings(prevTrainings => {
-                                    const updated = { ...prevTrainings };
-                                    const opId = currentOperator;
-                                    if (updated[opId]) {
-                                        const idx = updated[opId].findIndex(t => t.id === editingTraining.id);
-                                        if (idx !== -1) {
-                                            // Обновляем только если тренинг в текущем месяце
-                                            const trainingDate = updatedTraining.date || data.date;
-                                            const trainingMonth = trainingDate?.slice(0, 7);
-                                            if (trainingMonth === month) {
-                                                updated[opId][idx] = { ...updated[opId][idx], ...updatedTraining };
-                                            }
-                                        }
-                                    }
-                                    return updated;
-                                });
-                                setShowModal(false);
+                            .then(() => {
+                                updateTrainings();
                                 showToast('Тренинг успешно обновлен','success');
                             })
                             .catch(err => {
@@ -8565,24 +8576,8 @@
                                 'X-User-Id': user.id
                             }
                         })
-                            .then(res => {
-                                // Обновляем только локальное состояние с добавленным тренингом
-                                const newTraining = res.data || data;
-                                setTrainings(prevTrainings => {
-                                    const updated = { ...prevTrainings };
-                                    const opId = currentOperator;
-                                    // Добавляем только если тренинг в текущем просматриваемом месяце
-                                    const trainingDate = newTraining.date || data.date;
-                                    const trainingMonth = trainingDate?.slice(0, 7);
-                                    if (trainingMonth === month) {
-                                        if (!updated[opId]) {
-                                            updated[opId] = [];
-                                        }
-                                        updated[opId].push(newTraining);
-                                    }
-                                    return updated;
-                                });
-                                setShowModal(false);
+                            .then(() => {
+                                updateTrainings();
                                 showToast('Тренинг успешно добавлен','success');
                             })
                             .catch(err => {
@@ -9075,7 +9070,7 @@
                         )}
                     </div>
                 );
-            });
+            };
             
             // Load user from localStorage on mount
             useEffect(() => {
@@ -12131,7 +12126,7 @@
                                     )}
                                 </div>
                                 )}
-                                {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} />))}
+                                {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
@@ -12641,7 +12636,7 @@
                                     )}
                                 </div>
                                 )}
-                                {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} />))}
+                                {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
@@ -12800,7 +12795,7 @@
                                     )}
                                   </div>
                                 )} 
-                                {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} />))}
+                                {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                                 {(view === 'hours' || view === 'evaluation') && (
                                   <div className="mb-6">
                                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
