@@ -4461,6 +4461,7 @@ async def show_operator_stats(message: types.Message):
             f"<b>Ваша статистика за {current_month}:</b>\n\n"
             f"⏱ <b>Часы работы:</b> {stats['regular_hours']} из {stats['norm_hours']} ({stats['percent_complete']}%)\n"
             f"📚 <b>Часы тренинга:</b> {stats['training_hours']}\n"
+            f"📞 <b>Количество звонков в час:</b> {stats['calls_per_hour']}\n"
             f"💸 <b>Штрафы:</b> {stats['fines']}\n\n"
             f"📞 <b>Прослушано звонков:</b> {stats['call_count']}\n"
             f"⭐ <b>Средний балл:</b> {stats['avg_score']:.2f}"
