@@ -3121,7 +3121,7 @@ async def cancel_handler(message: types.Message, state: FSMContext):
     user = db.get_user(telegram_id=message.from_user.id)
     if user and user[3] == 'admin':
         kb = get_admin_keyboard()
-    if user and user[3] == 'sv':
+    elif user and user[3] == 'sv':
         kb = get_sv_keyboard()
     elif user and user[3] == 'operator':
         kb = get_operator_keyboard()
