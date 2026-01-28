@@ -1880,42 +1880,66 @@ class Database:
                 u.id AS operator_id,
                 u.name AS operator_name,
                 u.direction_id,
-                wh.regular_hours,
-                wh.training_hours,
-                wh.fines,
-                wh.norm_hours,
-                wh.calls_per_hour
+
+                COALESCE(wh.regular_hours, 0) AS regular_hours,
+                COALESCE(wh.fines, 0) AS fines,
+                COALESCE(wh.norm_hours, 0) AS norm_hours,
+                COALESCE(wh.total_calls, 0) AS total_calls,
+
+                -- training hours считаем из trainings
+                COALESCE((
+                    SELECT SUM(
+                        CASE
+                            WHEN t.end_time <= t.start_time
+                                THEN EXTRACT(EPOCH FROM (t.end_time + INTERVAL '24 hours' - t.start_time))
+                            ELSE EXTRACT(EPOCH FROM (t.end_time - t.start_time))
+                        END
+                    ) / 3600.0
+                    FROM trainings t
+                    WHERE t.operator_id = u.id
+                    AND t.count_in_hours = TRUE
+                    AND (%s IS NULL OR TO_CHAR(t.training_date, 'YYYY-MM') = %s)
+                ), 0) AS training_hours
+
             FROM users u
-            LEFT JOIN work_hours wh ON u.id = wh.operator_id
+            LEFT JOIN work_hours wh
+                ON u.id = wh.operator_id
+            AND (%s IS NULL OR wh.month = %s)
             WHERE u.role = 'operator'
         """
-        params = []
+
+        params = [month, month, month, month]
+
         if operator_id:
             query += " AND u.id = %s"
             params.append(operator_id)
-        if month:
-            query += " AND wh.month = %s"
-            params.append(month)
-        
-        # Добавить группировку, если operator_id не указан
-        if not operator_id:
-            query += " GROUP BY u.id, u.name, u.direction_id, wh.regular_hours, wh.training_hours, wh.fines, wh.norm_hours, wh.calls_per_hour"
-        
+
         with self._get_cursor() as cursor:
             cursor.execute(query, params)
-            return [
-                {
+            rows = cursor.fetchall()
+
+            result = []
+            for row in rows:
+                regular_hours = float(row[3])
+                total_calls = int(row[6])
+
+                calls_per_hour = (
+                    round(total_calls / regular_hours, 2)
+                    if regular_hours > 0 else 0.0
+                )
+
+                result.append({
                     "operator_id": row[0],
                     "operator_name": row[1],
                     "direction": row[2],
-                    "regular_hours": float(row[3]) if row[3] is not None else 0,
-                    "training_hours": float(row[4]) if row[4] is not None else 0,
-                    "fines": float(row[4]) if row[4] is not None else 0,
-                    "norm_hours": float(row[5]) if row[5] is not None else 0,
-                    "daily_hours": row[6] if row[6] is not None else [0.0]*31,
-                    "calls_per_hour": row[7]
-                } for row in cursor.fetchall()
-            ]
+                    "regular_hours": regular_hours,
+                    "training_hours": round(float(row[7]), 2),
+                    "fines": float(row[4]),
+                    "norm_hours": float(row[5]),
+                    "calls_per_hour": calls_per_hour
+                })
+
+            return result
 
     def get_supervisors(self):
         with self._get_cursor() as cursor:
