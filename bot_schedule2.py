@@ -3023,7 +3023,7 @@ def get_access_keyboard():
     kb.add(KeyboardButton('Сменить логин'))
     kb.insert(KeyboardButton('Сменить пароль'))
     kb.add(KeyboardButton('Выход🚪')) 
-    kb.add(KeyboardButton('Отмена ❌'))
+    kb.add(KeyboardButton('Назад 🔙'))
     return kb
 
 def get_current_week_of_month():
@@ -3343,6 +3343,20 @@ async def back_to_admin(message: types.Message):
             text='<b>Главное меню</b>',
             parse_mode='HTML',
             reply_markup=get_admin_keyboard()
+        )
+    elif user and user[3] == 'sv':
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text=f'<b>Главное меню</b>',
+            parse_mode='HTML',
+            reply_markup=get_sv_keyboard()
+        )
+    elif user and user[3] == 'operator':
+        await bot.send_message(
+            chat_id=message.from_user.id,
+            text=f'<b>Главное меню</b>',
+            parse_mode='HTML',
+            reply_markup=get_operator_keyboard()
         )
     await message.delete()
 
