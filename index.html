@@ -2746,6 +2746,10 @@
 
         const [selectedTab, setSelectedTab] = useState('work_time');
 
+        // Refs for scroll position preservation
+        const tableScrollRef = useRef(null);
+        const scrollPositionRef = useRef({ left: 0, top: 0 });
+
         // Training modal component resolver (handles scope/hoisting)
         const TrainingModalComponent = (typeof TrainingModal !== 'undefined' ? TrainingModal : (typeof window !== 'undefined' ? window.TrainingModal : null));
 
@@ -2775,6 +2779,20 @@
             // eslint-disable-next-line
         }, [user, selectedSvId, month]);
 
+        // Restore scroll position after data updates
+        useEffect(() => {
+            if (tableScrollRef.current && (scrollPositionRef.current.left > 0 || scrollPositionRef.current.top > 0)) {
+                const restoreScroll = () => {
+                    if (tableScrollRef.current) {
+                        tableScrollRef.current.scrollLeft = scrollPositionRef.current.left;
+                        tableScrollRef.current.scrollTop = scrollPositionRef.current.top;
+                    }
+                };
+                // Use setTimeout to ensure DOM is updated
+                setTimeout(restoreScroll, 50);
+            }
+        }, [operators, trainingsMap]);
+
         function fallbackToast(msg, type = 'success') {
             try {
             if (showToast) showToast(msg, type);
@@ -2788,6 +2806,15 @@
         // ---- fetch daily hours + trainings ----
         async function fetchDailyHoursAndTrainings() {
             if (!user || !selectedSvId) return;
+            
+            // Save scroll position before updating data
+            if (tableScrollRef.current) {
+                scrollPositionRef.current = {
+                    left: tableScrollRef.current.scrollLeft,
+                    top: tableScrollRef.current.scrollTop
+                };
+            }
+            
             setIsLoading(true);
             try {
             const hoursParams = new URLSearchParams();
@@ -2846,6 +2873,54 @@
             setTrainingsMap({});
             } finally {
             setIsLoading(false);
+            }
+        }
+
+        // ---- fetch only trainings (for training operations) ----
+        async function fetchTrainingsOnly() {
+            if (!user || !selectedSvId) return;
+            
+            // Save scroll position before updating data
+            if (tableScrollRef.current) {
+                scrollPositionRef.current = {
+                    left: tableScrollRef.current.scrollLeft,
+                    top: tableScrollRef.current.scrollTop
+                };
+            }
+            
+            try {
+                const trainingsParams = new URLSearchParams();
+                trainingsParams.append('month', month);
+                if (selectedSvId) {
+                    trainingsParams.append('id', selectedSvId);
+                } else if (user.role === 'sv') {
+                    trainingsParams.append('id', String(user.id));
+                }
+
+                const trainingsUrl = `${API_BASE_URL}/api/trainings?${trainingsParams.toString()}`;
+                const trainingsResp = await axios.get(trainingsUrl, { 
+                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } 
+                });
+
+                const trainingsList = Array.isArray(trainingsResp.data) ? trainingsResp.data : (trainingsResp.data?.trainings || []);
+                const tmap = {};
+                for (const t of trainingsList) {
+                    const op = t.operator_id;
+                    let dayNum;
+                    try {
+                        dayNum = new Date(t.date + 'T00:00:00').getDate();
+                    } catch (e) {
+                        dayNum = parseInt(t.date.slice(-2), 10);
+                    }
+                    if (!tmap[op]) tmap[op] = {};
+                    if (!tmap[op][dayNum]) tmap[op][dayNum] = [];
+                    tmap[op][dayNum].push(t);
+                }
+                setTrainingsMap(tmap);
+
+            } catch (err) {
+                console.error('fetchTrainingsOnly error', err);
+                fallbackToast('Ошибка загрузки тренингов', 'error');
             }
         }
 
@@ -3509,7 +3584,7 @@
                 });
                 fallbackToast('Тренинг добавлен', 'success');
             }
-            await fetchDailyHoursAndTrainings();
+            await fetchTrainingsOnly();
             closeTrainingModal();
             } catch (err) {
             console.error('handleTrainingSaveFromModal error', err);
@@ -3532,7 +3607,7 @@
                 }
             });
             fallbackToast('Тренинг удален', 'success');
-            await fetchDailyHoursAndTrainings();
+            await fetchTrainingsOnly();
             } catch (err) {
             console.error('handleTrainingDeleteFromModal error', err);
             fallbackToast('Ошибка при удалении тренинга', 'error');
@@ -7022,7 +7097,7 @@
 
                     <div className="flex gap-4 w-full flex-1 min-h-0">
                         <div className="flex-1 bg-white rounded shadow-sm p-2 w-full flex flex-col min-h-0 overflow-hidden">
-                        <div className="table-scroll overflow-auto w-full flex-1 min-h-0" style={{ position: 'relative' }}>
+                        <div ref={tableScrollRef} className="table-scroll overflow-auto w-full flex-1 min-h-0" style={{ position: 'relative' }}>
                             <div style={{ minWidth: 'max-content', width: '100%' }}>
                             <div className="flex items-start border-b pb-2 mb-2 sticky top-0 z-30 bg-white">
                                 <div className="w-64 sticky left-0 top-0 z-50 bg-white pr-2 border-r" style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }} />
