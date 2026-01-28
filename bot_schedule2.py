@@ -3113,6 +3113,7 @@ def get_operator_keyboard():
 
 @dp.message_handler(regexp='Отмена ❌', state='*')
 async def cancel_handler(message: types.Message, state: FSMContext):
+    logging.info(f"User {message.from_user.id} canceled the operation.")
     current_state = await state.get_state()
     if current_state is None:
         return
