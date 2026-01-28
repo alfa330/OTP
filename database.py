@@ -1726,52 +1726,90 @@ class Database:
 
 
     def get_operator_stats(self, operator_id):
-        """Получить статистику оператора (часы, оценки)"""
+        """Получить статистику оператора (часы, оценки, звонки в час, тренинги)"""
         with self._get_cursor() as cursor:
-            # Получаем текущий месяц
+            # Текущий месяц в формате YYYY-MM
             current_month = datetime.now().strftime('%Y-%m')
-            
-            # Получаем данные о часах и оценках в одном запросе для оптимизации
+
+            # 1) Берём агрегаты из work_hours (regular_hours, total_calls, fines, norm_hours)
             cursor.execute("""
                 SELECT 
-                    wh.regular_hours, 
-                    wh.training_hours, 
-                    wh.fines, 
-                    wh.norm_hours,
-                    (SELECT COUNT(*) FROM calls WHERE operator_id = %s AND month = %s AND is_draft = FALSE) AS call_count,
-                    (SELECT AVG(score) FROM calls WHERE operator_id = %s AND month = %s AND is_draft = FALSE) AS avg_score
+                    COALESCE(wh.regular_hours, 0) AS regular_hours,
+                    COALESCE(wh.fines, 0) AS fines,
+                    COALESCE(wh.norm_hours, 0) AS norm_hours,
+                    COALESCE(wh.total_calls, 0) AS total_calls
                 FROM work_hours wh
                 WHERE wh.operator_id = %s AND wh.month = %s
-            """, (operator_id, current_month, operator_id, current_month, operator_id, current_month))
-            row = cursor.fetchone()
-            
-            if row:
-                # cast DB numeric types explicitly to python primitives
-                regular_hours = float(row[0]) if row[0] is not None else 0.0
-                training_hours = float(row[1]) if row[1] is not None else 0.0
-                fines = float(row[2]) if row[2] is not None else 0.0
-                norm_hours = float(row[3]) if row[3] is not None else 0.0
-                call_count = int(row[4]) if row[4] is not None else 0
-                avg_score = float(row[5]) if row[5] is not None else 0.0
+                LIMIT 1
+            """, (operator_id, current_month))
+            wh_row = cursor.fetchone()
+
+            if wh_row:
+                regular_hours, fines, norm_hours, total_calls = wh_row
+                regular_hours = float(regular_hours or 0.0)
+                fines = float(fines or 0.0)
+                norm_hours = float(norm_hours or 0.0)
+                total_calls = int(total_calls or 0)
             else:
                 regular_hours = 0.0
-                training_hours = 0.0
                 fines = 0.0
                 norm_hours = 0.0
-                call_count = 0
-                avg_score = 0.0
+                total_calls = 0
 
-            percent_complete = (float(regular_hours) / float(norm_hours) * 100.0) if norm_hours > 0 else 0.0
+            # 2) Рассчитываем training_hours прямо по таблице trainings (учитываем count_in_hours = TRUE)
+            cursor.execute("""
+                SELECT COALESCE(SUM(
+                    CASE 
+                    WHEN t.end_time <= t.start_time 
+                        THEN EXTRACT(EPOCH FROM (t.end_time + INTERVAL '24 hours' - t.start_time))
+                    ELSE EXTRACT(EPOCH FROM (t.end_time - t.start_time))
+                    END
+                ) / 3600.0, 0) AS training_hours_seconds
+                FROM trainings t
+                WHERE t.operator_id = %s
+                AND TO_CHAR(t.training_date, 'YYYY-MM') = %s
+                AND t.count_in_hours = TRUE
+            """, (operator_id, current_month))
+            tr_row = cursor.fetchone()
+            training_hours = float(tr_row[0] or 0.0)
+
+            # 3) Количество оценённых звонков и средняя оценка (как раньше)
+            cursor.execute("""
+                SELECT 
+                    (SELECT COUNT(*) FROM calls WHERE operator_id = %s AND month = %s AND is_draft = FALSE) AS call_count,
+                    (SELECT AVG(score) FROM calls WHERE operator_id = %s AND month = %s AND is_draft = FALSE) AS avg_score
+            """, (operator_id, current_month, operator_id, current_month))
+            calls_row = cursor.fetchone()
+            call_count = int(calls_row[0] or 0)
+            avg_score = float(calls_row[1]) if calls_row[1] is not None else 0.0
+
+            # 4) calls_per_hour: используем total_calls (из work_hours) делённые на regular_hours
+            #    Если регулярных часов нет — 0.0
+            if regular_hours and regular_hours > 0:
+                calls_per_hour = float(total_calls) / float(regular_hours)
+            else:
+                calls_per_hour = 0.0
+
+            # 5) percent_complete: считаем с учётом зачётных тренингов (если вы хотите старое поведение — вернуть regular_hours/norm_hours)
+            if norm_hours and norm_hours > 0:
+                percent_complete = ((regular_hours + training_hours) / norm_hours) * 100.0
+            else:
+                percent_complete = 0.0
 
             return {
-                'regular_hours': float(regular_hours),
-                'training_hours': float(training_hours),
-                'fines': float(fines),
+                'operator_id': operator_id,
+                'month': current_month,
+                'regular_hours': round(float(regular_hours), 2),
+                'training_hours': round(float(training_hours), 2),
+                'fines': round(float(fines), 2),
                 'norm_hours': float(norm_hours),
                 'percent_complete': round(percent_complete, 2),
                 'call_count': int(call_count),
-                'avg_score': round(float(avg_score), 2) if avg_score is not None else 0.0
+                'avg_score': round(float(avg_score), 2),
+                'total_calls': int(total_calls),
+                'calls_per_hour': round(float(calls_per_hour), 2)
             }
+
 
     def get_operators_by_supervisor(self, supervisor_id):
         with self._get_cursor() as cursor:
