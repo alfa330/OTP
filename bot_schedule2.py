@@ -4478,7 +4478,7 @@ async def show_operator_stats(message: types.Message):
 async def show_operator_evaluations(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)
     if user and user[3] == 'operator':
-        evaluations = db.get_call_evaluations(user[0])
+        evaluations = db.get_call_evaluations(user[0], month=datetime.now().strftime('%Y-%m'))
         
         if not evaluations:
             await bot.send_message(
