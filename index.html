@@ -13680,7 +13680,7 @@
                                                                 }
                                                                 min="0"
                                                                 step="1"
-                                                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                className="w-1/2 p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                               />
                                                             </div>
                                                             <div className="form-group">
@@ -13696,13 +13696,13 @@
                                                                 min="0"
                                                                 max="2.5"
                                                                 step="0.01"
-                                                                className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                                className="w-1/2 p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                                               />
                                                             </div>
                                                     
                                                             {/* Результат */}
                                                             {converterData.amount && converterData.kpi ? (
-                                                              <div className="bg-blue-50 p-4 rounded-lg shadow-inner text-gray-800">
+                                                              <div className="w-1/2bg-blue-50 p-4 rounded-lg shadow-inner text-gray-800">
                                                                 <p className="font-semibold">Необходимые часы:</p>
                                                                 <p className="text-lg font-bold">
                                                                   {(converterData.amount / (converterData.kpi * 700)).toFixed(2)} ч.
@@ -13712,7 +13712,7 @@
                                                     
                                                             {/* Таблица для разных KPI */}
                                                             {converterData.amount ? (
-                                                              <div className="mt-6">
+                                                              <div className="w-1/2 mt-6">
                                                                 <h3 className="text-lg font-semibold mb-2">Часы при разных KPI</h3>
                                                                 <table className="w-full border border-gray-300 rounded-lg overflow-hidden">
                                                                   <thead className="bg-gray-100">
