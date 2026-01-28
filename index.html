@@ -3065,6 +3065,26 @@
             });
         }
 
+                // Clear all editable fields in the cell modal (does not delete trainings)
+                function clearCellFields() {
+                    setCellModel(prev => {
+                    if (!prev) return prev;
+                    const next = { ...prev };
+                    next.work_time = '';
+                    next.break_time = '';
+                    next.talk_time = '';
+                    next.calls = '';
+                    next.efficiency = '';
+                    // backward-compatible single fine fields
+                    next.fine_amount = 0;
+                    next.fine_reason = '';
+                    next.fine_comment = '';
+                    // clear multiple fines array
+                    next.fines = [];
+                    return next;
+                    });
+                }
+
         async function saveCell() {
             if (!cellModel || !user) return;
             setIsSavingCell(true);
@@ -4346,6 +4366,13 @@
                         className="px-4 py-2 rounded-md border text-sm text-gray-600 hover:bg-gray-50"
                     >
                         Отмена
+                    </button>
+
+                    <button
+                        onClick={clearCellFields}
+                        className="px-4 py-2 rounded-md border text-sm text-gray-600 hover:bg-gray-50"
+                    >
+                        Очистить
                     </button>
 
                     <button
