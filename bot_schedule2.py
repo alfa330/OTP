@@ -3639,7 +3639,9 @@ async def show_operator_hours(callback: types.CallbackQuery):
     
     message_text = f"<b>Часы операторов {user[2]} за {current_month}:</b>\n\n"
     
-    for op_id, op_name, _, _, _, _, _, _, _ in operators:
+    for op in operators:
+        op_id = op.get('id')
+        op_name = op.get('name')
         hours_data = db.get_hours_summary(op_id, current_month)
         if hours_data:
             hours = hours_data[0]
@@ -3834,8 +3836,10 @@ async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
     
     operators_with_issues = []
     
-    for op_id, op_name, _, _, _, _, _, _, _ in operators:
+    for op in operators:
         # Для каждого оператора получаем статистику звонков
+        op_id = op.get('id')
+        op_name = op.get('name')
         with db._get_cursor() as cursor:
             cursor.execute("""
                 SELECT COUNT(*), AVG(score) 
