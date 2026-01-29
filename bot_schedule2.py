@@ -3777,7 +3777,7 @@ async def remove_operator_callback(callback: types.CallbackQuery, state: FSMCont
     await state.finish()
 
 
-@dp.message_handler(regexp='Отчет за месяц📅', state=sv.view_evaluations)
+@dp.message_handler(regexp='Отчет за месяц📅')
 async def handle_monthly_report(message: types.Message, state: FSMContext):
     user = db.get_user(telegram_id=message.from_user.id)
     if user and user[3] == 'admin':
