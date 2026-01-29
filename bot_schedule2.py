@@ -3840,6 +3840,8 @@ async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
     
     for op in operators:
         # Для каждого оператора получаем статистику звонков
+        if op.get('status') == 'fired':
+            continue
         op_id = op.get('id')
         op_name = op.get('name')
         with db._get_cursor() as cursor:
