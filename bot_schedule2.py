@@ -3685,13 +3685,14 @@ async def view_evaluations(message: types.Message):
         
         await bot.send_message(
                     text='<b>Выберите чьи оценки просмотреть или сгенерируйте отчет</b>',
-                    chat_id=admin,
+                    chat_id=user[1],
                     parse_mode='HTML',
                     reply_markup=get_evaluations_keyboard()
                 )
         ikb = InlineKeyboardMarkup(row_width=1)
-        for sv_id, sv_name, _, _, _, _ in supervisors:
-            ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"eval_{sv_id}"))
+        for sv_id, sv_name, _, _, _, status in supervisors:
+            if status != 'fired':
+                ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"eval_{sv_id}"))
         
         await bot.send_message(
             chat_id=message.from_user.id,
