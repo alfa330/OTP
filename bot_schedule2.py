@@ -3613,8 +3613,9 @@ async def view_hours_data(message: types.Message):
             return
         
         ikb = InlineKeyboardMarkup(row_width=1)
-        for sv_id, sv_name, _, _, _, _ in supervisors:
-            ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"hours_{sv_id}"))
+        for sv_id, sv_name, _, _, _, status in supervisors:
+            if status != 'fired':
+                ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f"hours_{sv_id}"))
         
         await bot.send_message(
             chat_id=message.from_user.id,
