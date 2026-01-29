@@ -3019,13 +3019,15 @@ class Auth(StatesGroup):
 
 class sv_edit(StatesGroup):
     choose_action = State()
-    edit_name = State()
+    edit_login = State()
+    edit_password = State()
     edit_status = State()
 
 
 class operator_edit(StatesGroup):
     choose_action = State()
-    edit_name = State()
+    edit_login = State()
+    edit_password = State()
     change_sv = State()
 
 MAX_LOGIN_ATTEMPTS = 3
@@ -3579,9 +3581,10 @@ async def editSV_select(callback: types.CallbackQuery, state: FSMContext):
 
         ikb = InlineKeyboardMarkup(row_width=1)
         ikb.add(
-            InlineKeyboardButton('Изменить ФИО', callback_data=f'editsv_name_{sv_id}'),
-            InlineKeyboardButton('Изменить статус', callback_data=f'editsv_status_{sv_id}'),
+            InlineKeyboardButton('Сменить логин', callback_data=f'editsv_login_{sv_id}'),
+            InlineKeyboardButton('Сменить пароль', callback_data=f'editsv_pass_{sv_id}'),
         )
+        ikb.add(InlineKeyboardButton('Изменить статус', callback_data=f'editsv_status_{sv_id}'))
         ikb.add(InlineKeyboardButton('Отмена', callback_data='editsv_cancel'))
 
         await bot.send_message(
@@ -3596,27 +3599,57 @@ async def editSV_select(callback: types.CallbackQuery, state: FSMContext):
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editsv_name_'))
-async def editSV_name_start(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editsv_login_'))
+async def editSV_login_start(callback: types.CallbackQuery, state: FSMContext):
     sv_id = int(callback.data.split('_')[2])
     await state.update_data({'sv_edit_id': sv_id})
-    await sv_edit.edit_name.set()
-    await bot.send_message(chat_id=callback.from_user.id, text='Введите новое ФИО супервайзера:')
+    await sv_edit.edit_login.set()
+    await bot.send_message(chat_id=callback.from_user.id, text='Введите новый логин супервайзера:')
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
-@dp.message_handler(state=sv_edit.edit_name)
-async def process_sv_name_change(message: types.Message, state: FSMContext):
+@dp.message_handler(state=sv_edit.edit_login)
+async def process_sv_login_change(message: types.Message, state: FSMContext):
     data = await state.get_data()
     sv_id = data.get('sv_edit_id')
-    new_name = message.text.strip()
+    new_login = message.text.strip()
     try:
-        with db._get_cursor() as cursor:
-            cursor.execute("UPDATE users SET name = %s WHERE id = %s", (new_name, sv_id))
-        await bot.send_message(chat_id=message.from_user.id, text=f'ФИО супервайзера обновлено на: {new_name}', parse_mode='HTML', reply_markup=get_editor_keyboard())
+        success = db.update_operator_login(sv_id, None, new_login)
+        if success:
+            await bot.send_message(chat_id=message.from_user.id, text=f'Логин супервайзера обновлён на: <code>{new_login}</code>', parse_mode='HTML', reply_markup=get_editor_keyboard())
+        else:
+            await bot.send_message(chat_id=message.from_user.id, text='Не удалось изменить логин супервайзера')
     except Exception as e:
-        logging.error(f"Error updating supervisor name: {e}")
-        await bot.send_message(chat_id=message.from_user.id, text='Ошибка при обновлении ФИО')
+        logging.error(f"Error updating supervisor login: {e}")
+        await bot.send_message(chat_id=message.from_user.id, text='Ошибка при обновлении логина')
+    finally:
+        await state.finish()
+        await message.delete()
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editsv_pass_'))
+async def editSV_pass_start(callback: types.CallbackQuery, state: FSMContext):
+    sv_id = int(callback.data.split('_')[2])
+    await state.update_data({'sv_edit_id': sv_id})
+    await sv_edit.edit_password.set()
+    await bot.send_message(chat_id=callback.from_user.id, text='Введите новый пароль супервайзера:')
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+
+
+@dp.message_handler(state=sv_edit.edit_password)
+async def process_sv_password_change(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    sv_id = data.get('sv_edit_id')
+    new_pass = message.text.strip()
+    try:
+        success = db.update_user_password(sv_id, new_pass)
+        if success:
+            await bot.send_message(chat_id=message.from_user.id, text='Пароль супервайзера успешно обновлён', reply_markup=get_editor_keyboard())
+        else:
+            await bot.send_message(chat_id=message.from_user.id, text='Не удалось изменить пароль супервайзера')
+    except Exception as e:
+        logging.error(f"Error updating supervisor password: {e}")
+        await bot.send_message(chat_id=message.from_user.id, text='Ошибка при обновлении пароля')
     finally:
         await state.finish()
         await message.delete()
@@ -3627,9 +3660,10 @@ async def editSV_status_menu(callback: types.CallbackQuery):
     sv_id = int(callback.data.split('_')[2])
     ikb = InlineKeyboardMarkup(row_width=2)
     ikb.add(
-        InlineKeyboardButton('active', callback_data=f'editsv_status_set_{sv_id}_active'),
-        InlineKeyboardButton('fired', callback_data=f'editsv_status_set_{sv_id}_fired')
+        InlineKeyboardButton('Работает', callback_data=f'editsv_status_set_{sv_id}_working'),
+        InlineKeyboardButton('Уволен', callback_data=f'editsv_status_set_{sv_id}_fired')
     )
+    ikb.add(InlineKeyboardButton('БС', callback_data=f'editsv_status_set_{sv_id}_unpaid_leave'))
     ikb.add(InlineKeyboardButton('Отмена', callback_data='editsv_cancel'))
     await bot.send_message(chat_id=callback.from_user.id, text='Выберите новый статус для СВ:', reply_markup=ikb)
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
@@ -3778,39 +3812,51 @@ async def view_evaluations(message: types.Message):
 async def edit_operator_menu(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)
     if user and user[3] == 'admin':
-        with db._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT u.id, u.name, s.name 
-                FROM users u
-                LEFT JOIN users s ON u.supervisor_id = s.id
-                WHERE u.role = 'operator'
-            """)
-            operators = cursor.fetchall()
-
-        if not operators:
+        supervisors = db.get_supervisors()
+        if not supervisors:
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text="<b>Нет доступных операторов</b>",
+                text="<b>Нет доступных супервайзеров</b>",
                 parse_mode='HTML',
                 reply_markup=get_operators_keyboard()
             )
             return
 
         ikb = InlineKeyboardMarkup(row_width=1)
-        for op_id, op_name, sv_name in operators:
-            supervisor = f" ({sv_name})" if sv_name else ""
-            ikb.insert(InlineKeyboardButton(
-                text=f"{op_name}{supervisor}",
-                callback_data=f"editop_{op_id}"
-            ))
+        for sv_id, sv_name, *_ in supervisors:
+            ikb.insert(InlineKeyboardButton(text=sv_name, callback_data=f'editop_sv_{sv_id}'))
 
         await bot.send_message(
             chat_id=message.from_user.id,
-            text="<b>Выберите оператора для редактирования</b>",
+            text="<b>Выберите СВ, чтобы показать его операторов</b>",
             parse_mode='HTML',
             reply_markup=ikb
         )
     await message.delete()
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_sv_'))
+async def edit_operator_by_sv(callback: types.CallbackQuery, state: FSMContext):
+    sv_id = int(callback.data.split('_')[2])
+    sv = db.get_user(id=sv_id)
+    if not sv or sv[3] != 'sv':
+        await bot.answer_callback_query(callback.id, text='СВ не найден')
+        return
+
+    operators = db.get_operators_by_supervisor(sv_id)
+    if not operators:
+        await bot.send_message(chat_id=callback.from_user.id, text='У выбранного СВ нет операторов')
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+        return
+
+    ikb = InlineKeyboardMarkup(row_width=1)
+    for op in operators:
+        op_id = op.get('id')
+        op_name = op.get('name')
+        ikb.insert(InlineKeyboardButton(text=op_name, callback_data=f'editop_{op_id}'))
+
+    await bot.send_message(chat_id=callback.from_user.id, text=f"Операторы СВ: <b>{sv[2]}</b>", parse_mode='HTML', reply_markup=ikb)
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_'))
@@ -3823,8 +3869,10 @@ async def edit_operator_select(callback: types.CallbackQuery, state: FSMContext)
 
     ikb = InlineKeyboardMarkup(row_width=1)
     ikb.add(
-        InlineKeyboardButton('Изменить ФИО', callback_data=f'editop_name_{op_id}'),
-        InlineKeyboardButton('Сменить СВ', callback_data=f'editop_change_sv_{op_id}')
+        InlineKeyboardButton('Сменить логин', callback_data=f'editop_login_{op_id}'),
+        InlineKeyboardButton('Сменить пароль', callback_data=f'editop_pass_{op_id}'),
+        InlineKeyboardButton('Сменить ставку', callback_data=f'editop_rate_{op_id}'),
+        InlineKeyboardButton('Изменить статус', callback_data=f'editop_status_{op_id}')
     )
     ikb.add(InlineKeyboardButton('Отмена', callback_data='editop_cancel'))
 
@@ -3832,30 +3880,120 @@ async def edit_operator_select(callback: types.CallbackQuery, state: FSMContext)
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_name_'))
-async def edit_operator_name_start(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_login_'))
+async def edit_operator_login_start(callback: types.CallbackQuery, state: FSMContext):
     op_id = int(callback.data.split('_')[2])
     await state.update_data({'edit_op_id': op_id})
-    await operator_edit.edit_name.set()
-    await bot.send_message(chat_id=callback.from_user.id, text='Введите новое ФИО оператора:')
+    await operator_edit.edit_login.set()
+    await bot.send_message(chat_id=callback.from_user.id, text='Введите новый логин оператора:')
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
-@dp.message_handler(state=operator_edit.edit_name)
-async def process_operator_name_change(message: types.Message, state: FSMContext):
+@dp.message_handler(state=operator_edit.edit_login)
+async def process_operator_login_change(message: types.Message, state: FSMContext):
     data = await state.get_data()
     op_id = data.get('edit_op_id')
-    new_name = message.text.strip()
+    new_login = message.text.strip()
     try:
-        with db._get_cursor() as cursor:
-            cursor.execute("UPDATE users SET name = %s WHERE id = %s", (new_name, op_id))
-        await bot.send_message(chat_id=message.from_user.id, text=f'ФИО оператора обновлено: {new_name}', reply_markup=get_operators_keyboard())
+        success = db.update_operator_login(op_id, None, new_login)
+        if success:
+            await bot.send_message(chat_id=message.from_user.id, text=f'Логин оператора обновлён на: <code>{new_login}</code>', parse_mode='HTML', reply_markup=get_operators_keyboard())
+        else:
+            await bot.send_message(chat_id=message.from_user.id, text='Не удалось изменить логин оператора')
     except Exception as e:
-        logging.error(f"Error updating operator name: {e}")
-        await bot.send_message(chat_id=message.from_user.id, text='Ошибка при обновлении ФИО оператора')
+        logging.error(f"Error updating operator login: {e}")
+        await bot.send_message(chat_id=message.from_user.id, text='Ошибка при обновлении логина')
     finally:
         await state.finish()
         await message.delete()
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_pass_'))
+async def edit_operator_pass_start(callback: types.CallbackQuery, state: FSMContext):
+    op_id = int(callback.data.split('_')[2])
+    await state.update_data({'edit_op_id': op_id})
+    await operator_edit.edit_password.set()
+    await bot.send_message(chat_id=callback.from_user.id, text='Введите новый пароль оператора:')
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+
+
+@dp.message_handler(state=operator_edit.edit_password)
+async def process_operator_password_change(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    op_id = data.get('edit_op_id')
+    new_pass = message.text.strip()
+    try:
+        success = db.update_user_password(op_id, new_pass)
+        if success:
+            await bot.send_message(chat_id=message.from_user.id, text='Пароль оператора успешно обновлён', reply_markup=get_operators_keyboard())
+        else:
+            await bot.send_message(chat_id=message.from_user.id, text='Не удалось изменить пароль оператора')
+    except Exception as e:
+        logging.error(f"Error updating operator password: {e}")
+        await bot.send_message(chat_id=message.from_user.id, text='Ошибка при обновлении пароля')
+    finally:
+        await state.finish()
+        await message.delete()
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_rate_'))
+async def edit_operator_rate_menu(callback: types.CallbackQuery):
+    op_id = int(callback.data.split('_')[2])
+    ikb = InlineKeyboardMarkup(row_width=3)
+    ikb.add(
+        InlineKeyboardButton('0.5', callback_data=f'editop_rate_set_{op_id}_0.5'),
+        InlineKeyboardButton('0.75', callback_data=f'editop_rate_set_{op_id}_0.75'),
+        InlineKeyboardButton('1', callback_data=f'editop_rate_set_{op_id}_1')
+    )
+    ikb.add(InlineKeyboardButton('Отмена', callback_data='editop_cancel'))
+    await bot.send_message(chat_id=callback.from_user.id, text='Выберите новую ставку для оператора:', reply_markup=ikb)
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_rate_set_'))
+async def edit_operator_rate_set(callback: types.CallbackQuery):
+    parts = callback.data.split('_')
+    op_id = int(parts[3])
+    rate = float(parts[4])
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("UPDATE users SET rate = %s WHERE id = %s", (rate, op_id))
+        await bot.send_message(chat_id=callback.from_user.id, text=f'Ставка оператора обновлена на {rate}', reply_markup=get_operators_keyboard())
+    except Exception as e:
+        logging.error(f"Error updating operator rate: {e}")
+        await bot.send_message(chat_id=callback.from_user.id, text='Ошибка при обновлении ставки')
+    finally:
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_status_'))
+async def edit_operator_status_menu(callback: types.CallbackQuery):
+    op_id = int(callback.data.split('_')[2])
+    ikb = InlineKeyboardMarkup(row_width=2)
+    ikb.add(
+        InlineKeyboardButton('Работает', callback_data=f'editop_status_set_{op_id}_working'),
+        InlineKeyboardButton('Уволен', callback_data=f'editop_status_set_{op_id}_fired')
+    )
+    ikb.add(InlineKeyboardButton('БС', callback_data=f'editop_status_set_{op_id}_unpaid_leave'))
+    ikb.add(InlineKeyboardButton('Отмена', callback_data='editop_cancel'))
+    await bot.send_message(chat_id=callback.from_user.id, text='Выберите новый статус для оператора:', reply_markup=ikb)
+    await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
+
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_status_set_'))
+async def edit_operator_status_set(callback: types.CallbackQuery):
+    parts = callback.data.split('_')
+    op_id = int(parts[3])
+    new_status = parts[4]
+    try:
+        with db._get_cursor() as cursor:
+            cursor.execute("UPDATE users SET status = %s WHERE id = %s", (new_status, op_id))
+        await bot.send_message(chat_id=callback.from_user.id, text=f'Статус оператора обновлён на: {new_status}', reply_markup=get_operators_keyboard())
+    except Exception as e:
+        logging.error(f"Error updating operator status: {e}")
+        await bot.send_message(chat_id=callback.from_user.id, text='Ошибка при обновлении статуса')
+    finally:
+        await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_change_sv_'))
