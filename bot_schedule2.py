@@ -3657,7 +3657,7 @@ async def show_operator_hours(callback: types.CallbackQuery):
             )
         else:
             message_text += f"👤 <b>{op_name}</b> - данные отсутствуют\n\n"
-    
+    logging.info(message_text)
     await bot.send_message(
         chat_id=callback.from_user.id,
         text=message_text,
