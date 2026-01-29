@@ -3848,8 +3848,8 @@ async def show_sv_evaluations(callback: types.CallbackQuery, state: FSMContext):
             cursor.execute("""
                 SELECT COUNT(*), AVG(score) 
                 FROM calls 
-                WHERE operator_id = %s
-            """, (op_id,))
+                WHERE operator_id = %s AND month=%s
+            """, (op_id, datetime.now().strftime('%Y-%m')))
             result = cursor.fetchone()
         
         call_count = result[0] or 0
