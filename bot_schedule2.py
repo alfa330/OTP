@@ -3675,9 +3675,13 @@ async def editSV_status_set(callback: types.CallbackQuery):
     sv_id = int(parts[3])
     new_status = parts[4]
     try:
-        with db._get_cursor() as cursor:
-            cursor.execute("UPDATE users SET status = %s WHERE id = %s", (new_status, sv_id))
-        await bot.send_message(chat_id=callback.from_user.id, text=f'Статус супервайзера обновлён на: {new_status}', reply_markup=get_editor_keyboard())
+        requester = db.get_user(telegram_id=callback.from_user.id)
+        changed_by = requester[0] if requester else None
+        success = db.update_user(sv_id, 'status', new_status, changed_by=changed_by)
+        if success:
+            await bot.send_message(chat_id=callback.from_user.id, text=f'Статус супервайзера обновлён на: {new_status}', reply_markup=get_editor_keyboard())
+        else:
+            await bot.send_message(chat_id=callback.from_user.id, text='Не удалось изменить статус супервайзера')
     except Exception as e:
         logging.error(f"Error updating supervisor status: {e}")
         await bot.send_message(chat_id=callback.from_user.id, text='Ошибка при обновлении статуса')
@@ -3956,9 +3960,13 @@ async def edit_operator_rate_set(callback: types.CallbackQuery):
     op_id = int(parts[3])
     rate = float(parts[4])
     try:
-        with db._get_cursor() as cursor:
-            cursor.execute("UPDATE users SET rate = %s WHERE id = %s", (rate, op_id))
-        await bot.send_message(chat_id=callback.from_user.id, text=f'Ставка оператора обновлена на {rate}', reply_markup=get_operators_keyboard())
+        requester = db.get_user(telegram_id=callback.from_user.id)
+        changed_by = requester[0] if requester else None
+        success = db.update_user(op_id, 'rate', rate, changed_by=changed_by)
+        if success:
+            await bot.send_message(chat_id=callback.from_user.id, text=f'Ставка оператора обновлена на {rate}', reply_markup=get_operators_keyboard())
+        else:
+            await bot.send_message(chat_id=callback.from_user.id, text='Не удалось изменить ставку оператора')
     except Exception as e:
         logging.error(f"Error updating operator rate: {e}")
         await bot.send_message(chat_id=callback.from_user.id, text='Ошибка при обновлении ставки')
@@ -3986,9 +3994,13 @@ async def edit_operator_status_set(callback: types.CallbackQuery):
     op_id = int(parts[3])
     new_status = parts[4]
     try:
-        with db._get_cursor() as cursor:
-            cursor.execute("UPDATE users SET status = %s WHERE id = %s", (new_status, op_id))
-        await bot.send_message(chat_id=callback.from_user.id, text=f'Статус оператора обновлён на: {new_status}', reply_markup=get_operators_keyboard())
+        requester = db.get_user(telegram_id=callback.from_user.id)
+        changed_by = requester[0] if requester else None
+        success = db.update_user(op_id, 'status', new_status, changed_by=changed_by)
+        if success:
+            await bot.send_message(chat_id=callback.from_user.id, text=f'Статус оператора обновлён на: {new_status}', reply_markup=get_operators_keyboard())
+        else:
+            await bot.send_message(chat_id=callback.from_user.id, text='Не удалось изменить статус оператора')
     except Exception as e:
         logging.error(f"Error updating operator status: {e}")
         await bot.send_message(chat_id=callback.from_user.id, text='Ошибка при обновлении статуса')
@@ -4019,9 +4031,13 @@ async def edit_operator_set_sv(callback: types.CallbackQuery):
     op_id = int(parts[2])
     sv_id = int(parts[3])
     try:
-        with db._get_cursor() as cursor:
-            cursor.execute("UPDATE users SET supervisor_id = %s WHERE id = %s", (sv_id, op_id))
-        await bot.send_message(chat_id=callback.from_user.id, text='Супервайзер оператора успешно обновлён', reply_markup=get_operators_keyboard())
+        requester = db.get_user(telegram_id=callback.from_user.id)
+        changed_by = requester[0] if requester else None
+        success = db.update_user(op_id, 'supervisor_id', sv_id, changed_by=changed_by)
+        if success:
+            await bot.send_message(chat_id=callback.from_user.id, text='Супервайзер оператора успешно обновлён', reply_markup=get_operators_keyboard())
+        else:
+            await bot.send_message(chat_id=callback.from_user.id, text='Не удалось сменить супервайзера')
     except Exception as e:
         logging.error(f"Error setting operator supervisor: {e}")
         await bot.send_message(chat_id=callback.from_user.id, text='Ошибка при смене СВ')
