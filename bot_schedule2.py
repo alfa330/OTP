@@ -3660,16 +3660,16 @@ async def editSV_status_menu(callback: types.CallbackQuery):
     sv_id = int(callback.data.split('_')[2])
     ikb = InlineKeyboardMarkup(row_width=2)
     ikb.add(
-        InlineKeyboardButton('Работает', callback_data=f'edit_status_set_{sv_id}_working'),
-        InlineKeyboardButton('Уволен', callback_data=f'edit_status_set_{sv_id}_fired')
+        InlineKeyboardButton('Работает', callback_data=f'edit4_status_set_{sv_id}_working'),
+        InlineKeyboardButton('Уволен', callback_data=f'edit4_status_set_{sv_id}_fired')
     )
-    ikb.add(InlineKeyboardButton('БС', callback_data=f'editsv_status_set_{sv_id}_unpaid_leave'))
+    ikb.add(InlineKeyboardButton('БС', callback_data=f'edit4_status_set_{sv_id}_unpaid_leave'))
     ikb.add(InlineKeyboardButton('Отмена', callback_data='edit_cancel'))
     await bot.send_message(chat_id=callback.from_user.id, text='Выберите новый статус для СВ:', reply_markup=ikb)
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('edit_status_set_'))
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('edit4_status_set_'))
 async def editSV_status_set(callback: types.CallbackQuery):
     parts = callback.data.split('_')
     sv_id = int(parts[3])
@@ -3857,13 +3857,13 @@ async def edit_operator_by_sv(callback: types.CallbackQuery, state: FSMContext):
     for op in operators:
         op_id = op.get('id')
         op_name = op.get('name')
-        ikb.insert(InlineKeyboardButton(text=op_name, callback_data=f'editop_{op_id}'))
+        ikb.insert(InlineKeyboardButton(text=op_name, callback_data=f'editop1_{op_id}'))
 
     await bot.send_message(chat_id=callback.from_user.id, text=f"Операторы СВ: <b>{sv[2]}</b>", parse_mode='HTML', reply_markup=ikb)
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_'))
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop1_'))
 async def edit_operator_select(callback: types.CallbackQuery, state: FSMContext):
     op_id = int(callback.data.split('_')[1])
     user = db.get_user(id=op_id)
@@ -3945,16 +3945,16 @@ async def edit_operator_rate_menu(callback: types.CallbackQuery):
     op_id = int(callback.data.split('_')[2])
     ikb = InlineKeyboardMarkup(row_width=3)
     ikb.add(
-        InlineKeyboardButton('0.5', callback_data=f'editop_rate_set_{op_id}_0.5'),
-        InlineKeyboardButton('0.75', callback_data=f'editop_rate_set_{op_id}_0.75'),
-        InlineKeyboardButton('1', callback_data=f'editop_rate_set_{op_id}_1')
+        InlineKeyboardButton('0.5', callback_data=f'editop2_rate_set_{op_id}_0.5'),
+        InlineKeyboardButton('0.75', callback_data=f'editop2_rate_set_{op_id}_0.75'),
+        InlineKeyboardButton('1', callback_data=f'editop2_rate_set_{op_id}_1')
     )
     ikb.add(InlineKeyboardButton('Отмена', callback_data='editop_cancel'))
     await bot.send_message(chat_id=callback.from_user.id, text='Выберите новую ставку для оператора:', reply_markup=ikb)
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_rate_set_'))
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop2_rate_set_'))
 async def edit_operator_rate_set(callback: types.CallbackQuery):
     parts = callback.data.split('_')
     op_id = int(parts[3])
@@ -3979,16 +3979,16 @@ async def edit_operator_status_menu(callback: types.CallbackQuery):
     op_id = int(callback.data.split('_')[2])
     ikb = InlineKeyboardMarkup(row_width=2)
     ikb.add(
-        InlineKeyboardButton('Работает', callback_data=f'editop_status_set_{op_id}_working'),
-        InlineKeyboardButton('Уволен', callback_data=f'editop_status_set_{op_id}_fired')
+        InlineKeyboardButton('Работает', callback_data=f'editop2_status_set_{op_id}_working'),
+        InlineKeyboardButton('Уволен', callback_data=f'editop2_status_set_{op_id}_fired')
     )
-    ikb.add(InlineKeyboardButton('БС', callback_data=f'editop_status_set_{op_id}_unpaid_leave'))
+    ikb.add(InlineKeyboardButton('БС', callback_data=f'editop2_status_set_{op_id}_unpaid_leave'))
     ikb.add(InlineKeyboardButton('Отмена', callback_data='editop_cancel'))
     await bot.send_message(chat_id=callback.from_user.id, text='Выберите новый статус для оператора:', reply_markup=ikb)
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop_status_set_'))
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editop2_status_set_'))
 async def edit_operator_status_set(callback: types.CallbackQuery):
     parts = callback.data.split('_')
     op_id = int(parts[3])
