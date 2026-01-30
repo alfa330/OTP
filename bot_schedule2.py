@@ -3581,11 +3581,11 @@ async def editSV_select(callback: types.CallbackQuery, state: FSMContext):
 
         ikb = InlineKeyboardMarkup(row_width=1)
         ikb.add(
-            InlineKeyboardButton('Сменить логин', callback_data=f'editsv_login_{sv_id}'),
-            InlineKeyboardButton('Сменить пароль', callback_data=f'editsv_pass_{sv_id}'),
+            InlineKeyboardButton('Сменить логин', callback_data=f'edit_login_{sv_id}'),
+            InlineKeyboardButton('Сменить пароль', callback_data=f'edit_pass_{sv_id}'),
         )
-        ikb.add(InlineKeyboardButton('Изменить статус', callback_data=f'editsv_status_{sv_id}'))
-        ikb.add(InlineKeyboardButton('Отмена', callback_data='editsv_cancel'))
+        ikb.add(InlineKeyboardButton('Изменить статус', callback_data=f'edit_status_{sv_id}'))
+        ikb.add(InlineKeyboardButton('Отмена', callback_data='edit_cancel'))
 
         await bot.send_message(
             chat_id=callback.from_user.id,
@@ -3599,7 +3599,7 @@ async def editSV_select(callback: types.CallbackQuery, state: FSMContext):
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editsv_login_'))
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('edit_login_'))
 async def editSV_login_start(callback: types.CallbackQuery, state: FSMContext):
     sv_id = int(callback.data.split('_')[2])
     await state.update_data({'sv_edit_id': sv_id})
@@ -3627,7 +3627,7 @@ async def process_sv_login_change(message: types.Message, state: FSMContext):
         await message.delete()
 
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editsv_pass_'))
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('edit_pass_'))
 async def editSV_pass_start(callback: types.CallbackQuery, state: FSMContext):
     sv_id = int(callback.data.split('_')[2])
     await state.update_data({'sv_edit_id': sv_id})
@@ -3655,21 +3655,21 @@ async def process_sv_password_change(message: types.Message, state: FSMContext):
         await message.delete()
 
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editsv_status_'))
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('edit_status_'))
 async def editSV_status_menu(callback: types.CallbackQuery):
     sv_id = int(callback.data.split('_')[2])
     ikb = InlineKeyboardMarkup(row_width=2)
     ikb.add(
-        InlineKeyboardButton('Работает', callback_data=f'editsv_status_set_{sv_id}_working'),
-        InlineKeyboardButton('Уволен', callback_data=f'editsv_status_set_{sv_id}_fired')
+        InlineKeyboardButton('Работает', callback_data=f'edit_status_set_{sv_id}_working'),
+        InlineKeyboardButton('Уволен', callback_data=f'edit_status_set_{sv_id}_fired')
     )
     ikb.add(InlineKeyboardButton('БС', callback_data=f'editsv_status_set_{sv_id}_unpaid_leave'))
-    ikb.add(InlineKeyboardButton('Отмена', callback_data='editsv_cancel'))
+    ikb.add(InlineKeyboardButton('Отмена', callback_data='edit_cancel'))
     await bot.send_message(chat_id=callback.from_user.id, text='Выберите новый статус для СВ:', reply_markup=ikb)
     await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('editsv_status_set_'))
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('edit_status_set_'))
 async def editSV_status_set(callback: types.CallbackQuery):
     parts = callback.data.split('_')
     sv_id = int(parts[3])
@@ -3689,7 +3689,7 @@ async def editSV_status_set(callback: types.CallbackQuery):
         await bot.delete_message(chat_id=callback.from_user.id, message_id=callback.message.message_id)
 
 
-@dp.callback_query_handler(lambda c: c.data == 'editsv_cancel')
+@dp.callback_query_handler(lambda c: c.data == 'edit_cancel')
 async def editSV_cancel(callback: types.CallbackQuery):
     await bot.answer_callback_query(callback.id, text='Действие отменено')
     await bot.send_message(chat_id=callback.from_user.id, text='Отмена', reply_markup=get_editor_keyboard())
