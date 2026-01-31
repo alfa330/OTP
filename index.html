@@ -1360,15 +1360,29 @@
 
         const formatDate = (raw) => {
             if (!raw) return "-";
-            const d = new Date(raw);
-            if (!isNaN(d)) return d.toLocaleString("ru-RU");
-            const parts = String(raw).split(/[-/. ]/);
+            const toDate = (v) => {
+            const d = new Date(v);
+            if (!isNaN(d)) return d;
+            const parts = String(v).split(/[-/. ]/);
             if (parts.length === 3) {
-            const [a, b, c] = parts;
-            const maybe = new Date(`${c}-${b}-${a}`);
-            if (!isNaN(maybe)) return maybe.toLocaleString("ru-RU");
+                const [a, b, c] = parts;
+                const maybe = new Date(`${c}-${b}-${a}`);
+                if (!isNaN(maybe)) return maybe;
             }
-            return String(raw);
+            return null;
+            };
+
+            const d = toDate(raw);
+            if (!d) return String(raw);
+
+            const months = ['янв.', 'февр.', 'мар.', 'апр.', 'май', 'июн.', 'июл.', 'авг.', 'сент.', 'окт.', 'нояб.', 'дек.'];
+            const dd = String(d.getDate()).padStart(2, '0');
+            const mon = months[d.getMonth()] || '';
+            const yyyy = d.getFullYear();
+            const hh = String(d.getHours()).padStart(2, '0');
+            const mm = String(d.getMinutes()).padStart(2, '0');
+
+            return `${dd} ${mon} ${yyyy} ${hh}:${mm}`;
         };
 
         const filtered = useMemo(() => {
@@ -8624,12 +8638,29 @@
 
                 const formatDate = (dateStr) => {
                     if (!dateStr) return "";
-                    const parts = dateStr.split("-");
+                    const toDate = (v) => {
+                    const d = new Date(v);
+                    if (!isNaN(d)) return d;
+                    const parts = String(v).split(/[-/. ]/);
                     if (parts.length === 3) {
-                    const [y, m, d] = parts;
-                    return `${d}.${m}.${y}`;
+                        const [a, b, c] = parts;
+                        const maybe = new Date(`${c}-${b}-${a}`);
+                        if (!isNaN(maybe)) return maybe;
                     }
-                    return dateStr;
+                    return null;
+                    };
+
+                    const d = toDate(dateStr);
+                    if (!d) return String(dateStr);
+
+                    const months = ['янв.', 'февр.', 'мар.', 'апр.', 'май', 'июн.', 'июл.', 'авг.', 'сент.', 'окт.', 'нояб.', 'дек.'];
+                    const dd = String(d.getDate()).padStart(2, '0');
+                    const mon = months[d.getMonth()] || '';
+                    const yyyy = d.getFullYear();
+                    const hh = String(d.getHours()).padStart(2, '0');
+                    const mm = String(d.getMinutes()).padStart(2, '0');
+
+                    return `${dd} ${mon} ${yyyy} ${hh}:${mm}`;
                 };
 
                 const formattedDate = formatDate(training?.date);
@@ -10064,8 +10095,30 @@
 
             const formatDate = (d) => {
                 if (!d) return '-';
-                // если это строка вида "2025-09-18 08:33:00", покажем как есть
-                return String(d).replace('T', ' ').slice(0, 16);
+
+                const toDate = (v) => {
+                const dt = new Date(v);
+                if (!isNaN(dt)) return dt;
+                const parts = String(v).split(/[-/. ]/);
+                if (parts.length === 3) {
+                    const [a, b, c] = parts;
+                    const maybe = new Date(`${c}-${b}-${a}`);
+                    if (!isNaN(maybe)) return maybe;
+                }
+                return null;
+                };
+
+                const dt = toDate(d);
+                if (!dt) return String(d).replace('T', ' ').slice(0, 16);
+
+                const months = ['янв.', 'февр.', 'мар.', 'апр.', 'май', 'июн.', 'июл.', 'авг.', 'сент.', 'окт.', 'нояб.', 'дек.'];
+                const dd = String(dt.getDate()).padStart(2, '0');
+                const mon = months[dt.getMonth()] || '';
+                const yyyy = dt.getFullYear();
+                const hh = String(dt.getHours()).padStart(2, '0');
+                const mm = String(dt.getMinutes()).padStart(2, '0');
+
+                return `${dd} ${mon} ${yyyy} ${hh}:${mm}`;
             };
 
             const summarizeScores = (scores = []) => {
