@@ -3673,7 +3673,7 @@ async def editSV_status_menu(callback: types.CallbackQuery):
 async def editSV_status_set(callback: types.CallbackQuery):
     parts = callback.data.split('_')
     sv_id = int(parts[3])
-    new_status = parts[4]
+    new_status = parts[4]+'_' + parts[5] if len(parts) > 5 else parts[4]
     try:
         requester = db.get_user(telegram_id=callback.from_user.id)
         changed_by = requester[0] if requester else None
@@ -3992,7 +3992,7 @@ async def edit_operator_status_menu(callback: types.CallbackQuery):
 async def edit_operator_status_set(callback: types.CallbackQuery):
     parts = callback.data.split('_')
     op_id = int(parts[3])
-    new_status = parts[4]
+    new_status = parts[4]+'_' + parts[5] if len(parts) > 5 else parts[4]
     try:
         requester = db.get_user(telegram_id=callback.from_user.id)
         changed_by = requester[0] if requester else None
