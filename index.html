@@ -11675,6 +11675,22 @@
                                             <i className="fas fa-file-excel mr-2" />
                                             <span>{isLoading ? 'Загрузка...' : 'Скачать отчёт'}</span>
                                             </button>
+
+                                            <button
+                                            onClick={() => {
+                                                if (!selectedSvId) {
+                                                showToast('Выберите супервайзера', 'error');
+                                                return;
+                                                }
+                                                fetchSelectedSvData(selectedSvId, selectedReportMonth || selectedMonth);
+                                            }}
+                                            disabled={isAdminDataLoading || isLoading || !selectedSvId}
+                                            className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isAdminDataLoading || isLoading || !selectedSvId ? 'bg-gray-300 text-gray-700 opacity-60 cursor-not-allowed' : 'bg-gray-800 text-white hover:bg-gray-900'}`}
+                                            title="Обновить данные по оценкам для выбранного супервайзера"
+                                            >
+                                            <i className="fas fa-sync-alt" />
+                                            <span>{isAdminDataLoading ? 'Обновление...' : 'Обновить'}</span>
+                                            </button>
                                         </div>
                                         </div>
 
