@@ -12516,6 +12516,17 @@
                                         <i className="fas fa-arrow-down" />
                                         <span>{isLoading ? 'Скачивание...' : 'Сгенерировать отчет'}</span>
                                         </button>
+
+                                        <button
+                                        onClick={() => fetchSvData(selectedReportMonth || selectedMonth)}
+                                        disabled={isLoading || isAdminDataLoading}
+                                        className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isLoading || isAdminDataLoading ? 'bg-gray-300 text-gray-700 opacity-60 cursor-not-allowed' : 'bg-gray-800 text-white hover:bg-gray-900'}`}
+                                        aria-disabled={isLoading || isAdminDataLoading}
+                                        title="Обновить данные по оценкам за выбранный месяц"
+                                        >
+                                        <i className="fas fa-sync-alt" />
+                                        <span>{isLoading ? 'Обновление...' : 'Обновить'}</span>
+                                        </button>
                                     </div>
                                     </div>
 
