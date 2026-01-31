@@ -14264,81 +14264,10 @@
             );
         };
 
-        const showByRuslanOverlay = () => {
-            try {
-                if (document.getElementById('by-ruslan-overlay')) return;
-
-                const overlay = document.createElement('div');
-                overlay.id = 'by-ruslan-overlay';
-                overlay.setAttribute('role', 'dialog');
-                overlay.setAttribute('aria-modal', 'true');
-                overlay.style.position = 'fixed';
-                overlay.style.inset = '0';
-                overlay.style.zIndex = '2147483647';
-                overlay.style.background = 'rgba(0, 0, 0, 0.85)';
-                overlay.style.display = 'flex';
-                overlay.style.alignItems = 'center';
-                overlay.style.justifyContent = 'center';
-                overlay.style.padding = '24px';
-                overlay.style.userSelect = 'none';
-
-                const text = document.createElement('div');
-                text.textContent = 'BY RUSLAN';
-                text.style.color = '#ffffff';
-                text.style.fontWeight = '900';
-                text.style.textAlign = 'center';
-                text.style.letterSpacing = '0.08em';
-                text.style.textTransform = 'uppercase';
-                text.style.lineHeight = '1';
-                text.style.fontSize = 'clamp(48px, 12vw, 160px)';
-                text.style.textShadow = '0 10px 30px rgba(0,0,0,0.6)';
-
-                const closeBtn = document.createElement('button');
-                closeBtn.type = 'button';
-                closeBtn.setAttribute('aria-label', 'Закрыть');
-                closeBtn.innerHTML = '&times;';
-                closeBtn.style.position = 'absolute';
-                closeBtn.style.top = '18px';
-                closeBtn.style.right = '18px';
-                closeBtn.style.width = '56px';
-                closeBtn.style.height = '56px';
-                closeBtn.style.borderRadius = '16px';
-                closeBtn.style.border = '1px solid rgba(255,255,255,0.25)';
-                closeBtn.style.background = 'rgba(255,255,255,0.1)';
-                closeBtn.style.color = '#ffffff';
-                closeBtn.style.fontSize = '40px';
-                closeBtn.style.lineHeight = '1';
-                closeBtn.style.cursor = 'pointer';
-                closeBtn.style.display = 'flex';
-                closeBtn.style.alignItems = 'center';
-                closeBtn.style.justifyContent = 'center';
-
-                const remove = () => {
-                    const el = document.getElementById('by-ruslan-overlay');
-                    if (el) el.remove();
-                    document.removeEventListener('keydown', onKeyDown);
-                };
-
-                const onKeyDown = (e) => {
-                    if (e.key === 'Escape') remove();
-                };
-
-                closeBtn.addEventListener('click', remove);
-                document.addEventListener('keydown', onKeyDown);
-
-                overlay.appendChild(closeBtn);
-                overlay.appendChild(text);
-                document.body.appendChild(overlay);
-            } catch (e) {
-                console.error('Failed to show BY RUSLAN overlay:', e);
-            }
-        };
-
         try {
             const root = ReactDOM.createRoot(document.getElementById('root'));
             root.render(
                 <ErrorBoundary>
-
                     <App />
                 </ErrorBoundary>
             );
@@ -14347,15 +14276,12 @@
             document.getElementById('root').innerHTML = `
                 <div class="min-h-screen flex items-center justify-center bg-gray-100">
                     <div class="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-
                         <h1 class="text-2xl font-bold mb-4 text-center text-red-500">Application Failed to Load</h1>
                         <p class="text-center">An error occurred while loading the application. Please check the console for details.</p>
                     </div>
                 </div>
             `;
         }
-
-        window.addEventListener('load', showByRuslanOverlay);
     </script>
 </body>
 </html>
