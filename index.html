@@ -11685,7 +11685,7 @@
                                                 fetchSelectedSvData(selectedSvId, selectedReportMonth || selectedMonth);
                                             }}
                                             disabled={isAdminDataLoading || isLoading || !selectedSvId}
-                                            className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isAdminDataLoading || isLoading || !selectedSvId ? 'bg-gray-300 text-gray-700 opacity-60 cursor-not-allowed' : 'bg-gray-800 text-white hover:bg-gray-900'}`}
+                                            className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isAdminDataLoading || isLoading || !selectedSvId ? 'bg-blue-300 text-blue-600 opacity-60 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
                                             title="Обновить данные по оценкам для выбранного супервайзера"
                                             >
                                             <i className="fas fa-sync-alt" />
@@ -12520,7 +12520,7 @@
                                         <button
                                         onClick={() => fetchSvData(selectedReportMonth || selectedMonth)}
                                         disabled={isLoading || isAdminDataLoading}
-                                        className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isLoading || isAdminDataLoading ? 'bg-gray-300 text-gray-700 opacity-60 cursor-not-allowed' : 'bg-gray-800 text-white hover:bg-gray-900'}`}
+                                        className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isLoading || isAdminDataLoading ? 'bg-blue-300 text-blue-600 opacity-60 cursor-not-allowed' : 'bg-blue-700 text-white hover:bg-gray-900'}`}
                                         aria-disabled={isLoading || isAdminDataLoading}
                                         title="Обновить данные по оценкам за выбранный месяц"
                                         >
