@@ -1818,7 +1818,7 @@ class Database:
                 FROM users u
                 LEFT JOIN directions d ON u.direction_id = d.id
                 LEFT JOIN users s ON u.supervisor_id = s.id
-                WHERE u.supervisor_id = %s AND u.role = 'operator' AND u.status != 'fired'
+                WHERE u.supervisor_id = %s AND u.role = 'operator'
             """, (supervisor_id,))
             return [
                 {
