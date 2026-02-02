@@ -7763,6 +7763,11 @@
             const [operatorTrainings, setOperatorTrainings] = useState([]);
             const [showAddSvModal, setShowAddSvModal] = useState(false);
             const [showDevLetterModal, setShowDevLetterModal] = useState(false);
+            const [showAiMonthlyFeedbackModal, setShowAiMonthlyFeedbackModal] = useState(false);
+            const [aiMonthlyFeedbackLoading, setAiMonthlyFeedbackLoading] = useState(false);
+            const [aiMonthlyFeedbackError, setAiMonthlyFeedbackError] = useState('');
+            const [aiMonthlyFeedbackResult, setAiMonthlyFeedbackResult] = useState(null);
+            const [aiMonthlyFeedbackTitle, setAiMonthlyFeedbackTitle] = useState('');
             // Images and state for Dev Letter carousel
             const devLetterImages = [
                 { src: 'assets/1.jpg', caption: 'Золотая молодежь' },
@@ -11031,6 +11036,59 @@
                 }
             };
 
+            const openAiMonthlyFeedback = async (operatorId, operatorName, month) => {
+                if (!user?.apiKey) {
+                    showToast('Нет API ключа. Перелогиньтесь.', 'error');
+                    return;
+                }
+                if (!operatorId) {
+                    showToast('Не удалось определить оператора', 'error');
+                    return;
+                }
+                if (!month) {
+                    showToast('Выберите месяц', 'error');
+                    return;
+                }
+
+                setAiMonthlyFeedbackTitle(`${operatorName || 'Оператор'} · ${month}`);
+                setAiMonthlyFeedbackError('');
+                setAiMonthlyFeedbackResult(null);
+                setAiMonthlyFeedbackLoading(true);
+                setShowAiMonthlyFeedbackModal(true);
+
+                try {
+                    const resp = await axios.post(`${API_BASE_URL}/api/ai/monthly_feedback`, {
+                        operator_id: operatorId,
+                        month
+                    }, {
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        },
+                        timeout: 180000
+                    });
+
+                    const data = resp?.data;
+                    if (data?.status === 'success') {
+                        setAiMonthlyFeedbackResult(data.result || null);
+                    } else {
+                        setAiMonthlyFeedbackError(typeof data?.error === 'string' ? data.error : JSON.stringify(data?.error || data || 'Ошибка', null, 2));
+                    }
+                } catch (err) {
+                    const msg = err?.response?.data?.error || err?.message || 'Ошибка запроса';
+                    setAiMonthlyFeedbackError(typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2));
+                } finally {
+                    setAiMonthlyFeedbackLoading(false);
+                }
+            };
+
+            const closeAiMonthlyFeedbackModal = () => {
+                setShowAiMonthlyFeedbackModal(false);
+                setAiMonthlyFeedbackLoading(false);
+                setAiMonthlyFeedbackError('');
+            };
+
             const notifySupervisor = async (svId, operatorName) => {
                 setIsLoading(true);
                 
@@ -11873,6 +11931,13 @@
                                                                 >
                                                                 Оценки
                                                                 </button>
+                                                                <button
+                                                                onClick={() => openAiMonthlyFeedback(op.id, op.name, selectedReportMonth || selectedMonth)}
+                                                                className="bg-indigo-600 text-white px-3 py-1 rounded-lg hover:bg-indigo-700 text-sm"
+                                                                disabled={aiMonthlyFeedbackLoading}
+                                                                >
+                                                                ОС от ИИ
+                                                                </button>
                                                             </td>
                                                             </tr>
                                                         );
@@ -11906,6 +11971,52 @@
                                         initialDirections={directions}
                                     />
                                 )}
+
+                                {showAiMonthlyFeedbackModal && (
+                                    <>
+                                    <div
+                                        className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-200"
+                                        onClick={closeAiMonthlyFeedbackModal}
+                                        aria-hidden="true"
+                                    />
+                                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                                        <div
+                                        role="dialog"
+                                        aria-modal="true"
+                                        className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] overflow-hidden border border-gray-200"
+                                        onClick={(e) => e.stopPropagation()}
+                                        >
+                                        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+                                            <div className="min-w-0">
+                                            <div className="text-xs text-gray-500 truncate">{aiMonthlyFeedbackTitle}</div>
+                                            <div className="text-lg font-semibold text-gray-900 truncate">ОС от ИИ</div>
+                                            </div>
+                                            <button
+                                            onClick={closeAiMonthlyFeedbackModal}
+                                            className="text-gray-500 hover:text-gray-800 px-2 py-1 rounded-lg"
+                                            >
+                                            <i className="fas fa-times"></i>
+                                            </button>
+                                        </div>
+
+                                        <div className="p-5 overflow-y-auto max-h-[calc(85vh-72px)]">
+                                            {aiMonthlyFeedbackLoading ? (
+                                            <div className="text-sm text-gray-700">Генерируем обратную связь...</div>
+                                            ) : aiMonthlyFeedbackError ? (
+                                            <div className="text-sm text-red-600 whitespace-pre-wrap">{aiMonthlyFeedbackError}</div>
+                                            ) : aiMonthlyFeedbackResult ? (
+                                            <pre className="text-xs text-gray-800 whitespace-pre-wrap bg-gray-50 border border-gray-200 rounded-xl p-4">
+                                                {JSON.stringify(aiMonthlyFeedbackResult, null, 2)}
+                                            </pre>
+                                            ) : (
+                                            <div className="text-sm text-gray-700">Нет данных.</div>
+                                            )}
+                                        </div>
+                                        </div>
+                                    </div>
+                                    </>
+                                )}
+
                                 {view === 'manage_users' && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex items-center justify-between mb-6">

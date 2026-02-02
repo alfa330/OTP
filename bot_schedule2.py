@@ -29,6 +29,7 @@ import tempfile
 from datetime import datetime, timedelta
 import time
 import math
+from ai_feed_back_service import generate_monthly_feedback_with_ai
 
 os.environ['TZ'] = 'Asia/Almaty'
 time.tzset()
@@ -961,6 +962,53 @@ def get_call_evaluations():
     except Exception as e:
         logging.error(f"Error fetching evaluations: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/ai/monthly_feedback', methods=['POST'])
+@require_api_key
+def ai_monthly_feedback():
+    try:
+        data = request.get_json() or {}
+        operator_id = data.get('operator_id')
+        month = data.get('month')
+
+        if operator_id is None or month is None:
+            return jsonify({"status": "error", "error": "Missing operator_id or month"}), 400
+
+        try:
+            operator_id = int(operator_id)
+        except Exception:
+            return jsonify({"status": "error", "error": "Invalid operator_id"}), 400
+
+        try:
+            datetime.strptime(str(month), "%Y-%m")
+        except Exception:
+            return jsonify({"status": "error", "error": "Invalid month format. Use YYYY-MM"}), 400
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            fut = asyncio.run_coroutine_threadsafe(
+                generate_monthly_feedback_with_ai(operator_id=operator_id, month=str(month)),
+                loop,
+            )
+            result = fut.result(timeout=180)
+        else:
+            result = asyncio.run(generate_monthly_feedback_with_ai(operator_id=operator_id, month=str(month)))
+
+        if result is None:
+            return jsonify({"status": "error", "error": "ai_failed"}), 500
+
+        if isinstance(result, dict) and result.get('error'):
+            return jsonify({"status": "error", "error": result}), 200
+
+        return jsonify({"status": "success", "result": result}), 200
+
+    except Exception as e:
+        logging.exception("Error in /api/ai/monthly_feedback")
+        return jsonify({"status": "error", "error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/admin/operators_summary', methods=['GET'])
 @require_api_key
