@@ -186,6 +186,12 @@ async def generate_monthly_feedback_with_ai(operator_id: int, month: str) -> dic
         logger.error("Gemini API key is not configured.")
         return None
 
+    # Сначала проверяем кэш
+    cached_feedback = db.get_ai_feedback_cache(operator_id, month)
+    if cached_feedback:
+        logger.info(f"Returning cached AI feedback for operator {operator_id}, month {month}")
+        return cached_feedback['feedback_data']
+
     raw = db.get_call_evaluations(operator_id, month=month)
     evaluated = [
         ev
@@ -285,8 +291,6 @@ async def generate_monthly_feedback_with_ai(operator_id: int, month: str) -> dic
         f"ВЕРНИТЕ JSON ПО ШАБЛОНУ."
     )
 
-    logger.info(full_prompt)
-
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": full_prompt}]}],
@@ -299,7 +303,6 @@ async def generate_monthly_feedback_with_ai(operator_id: int, month: str) -> dic
             response = await client.post(api_url, json=payload)
             response.raise_for_status()
             result = response.json()
-            logger.info(result)
             if "candidates" not in result or not result["candidates"]:
                 logger.error("Gemini response empty or blocked.")
                 return None
@@ -321,6 +324,9 @@ async def generate_monthly_feedback_with_ai(operator_id: int, month: str) -> dic
 
             try:
                 parsed = json.loads(cleaned)
+                # Сохраняем результат в кэш
+                db.save_ai_feedback_cache(operator_id, month, parsed)
+                logger.info(f"Cached AI feedback for operator {operator_id}, month {month}")
                 return parsed
             except json.JSONDecodeError as e:
                 logger.error(f"JSON parse error: {e}. Cleaned: {cleaned}")
