@@ -285,6 +285,8 @@ async def generate_monthly_feedback_with_ai(operator_id: int, month: str) -> dic
         f"ВЕРНИТЕ JSON ПО ШАБЛОНУ."
     )
 
+    logger.info(full_prompt)
+
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": full_prompt}]}],
@@ -297,6 +299,7 @@ async def generate_monthly_feedback_with_ai(operator_id: int, month: str) -> dic
             response = await client.post(api_url, json=payload)
             response.raise_for_status()
             result = response.json()
+            logger.info(result)
             if "candidates" not in result or not result["candidates"]:
                 logger.error("Gemini response empty or blocked.")
                 return None
