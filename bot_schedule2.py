@@ -967,6 +967,20 @@ def get_call_evaluations():
 @require_api_key
 def ai_monthly_feedback():
     try:
+        # Проверка прав - только admin и sv
+        requester_id = request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"status": "error", "error": "Missing X-User-Id header"}), 400
+        
+        try:
+            requester_id = int(requester_id)
+        except (ValueError, TypeError):
+            return jsonify({"status": "error", "error": "Invalid X-User-Id format"}), 400
+        
+        requester = db.get_user(id=requester_id)
+        if not requester or requester[3] not in ['admin', 'sv']:
+            return jsonify({"status": "error", "error": "Access denied. Only admins and supervisors can access this endpoint"}), 403
+
         data = request.get_json() or {}
         operator_id = data.get('operator_id')
         month = data.get('month')
