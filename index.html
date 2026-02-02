@@ -7695,14 +7695,13 @@
 
         function formatMonth(ym) {
         if (!ym) return "";
-        // ожидается YYYY-MM
         const [y, m] = ym.split("-");
         if (!y || !m) return ym;
         const monthNames = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
         return `${monthNames[Number(m) - 1] || m} ${y}`;
         }
 
-        function MonthlyFeedbackModal({
+        export default function MonthlyFeedbackModal({
         title,
         loading,
         error,
@@ -7724,7 +7723,6 @@
         const copyJSON = async () => {
             try {
             await navigator.clipboard.writeText(JSON.stringify(result, null, 2));
-            // небольшая нотификация (можешь заменить на свою)
             alert("JSON скопирован в буфер обмена");
             } catch {
             alert("Не удалось скопировать");
@@ -7747,7 +7745,7 @@
 
         const scoreColor = useMemo(() => {
             if (avgScore == null) return "bg-gray-200";
-            if (avgScore >= 90) return "bg-green-400";
+            if (avgScore >= 90) return "bg-green-500";
             if (avgScore >= 75) return "bg-yellow-400";
             return "bg-red-400";
         }, [avgScore]);
@@ -7759,11 +7757,11 @@
                 onClick={onClose}
                 aria-hidden="true"
             />
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="fixed inset-0 z-50 flex items-start md:items-center justify-center p-4 overflow-y-auto">
                 <div
                 role="dialog"
                 aria-modal="true"
-                className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[85vh] overflow-hidden border border-gray-200"
+                className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl max-h-[calc(92vh-72px)] overflow-hidden border border-gray-200"
                 onClick={(e) => e.stopPropagation()}
                 >
                 {/* Header */}
@@ -7785,11 +7783,12 @@
                         className="text-sm px-3 py-1 border rounded-md text-gray-600 hover:bg-gray-50"
                         title="Скачать JSON"
                     >
-                        Скачать
+                        Скачать JSON
                     </button>
                     <button
                         onClick={onClose}
                         className="text-gray-500 hover:text-gray-800 px-2 py-1 rounded-lg"
+                        aria-label="Закрыть"
                     >
                         <i className="fas fa-times"></i>
                     </button>
@@ -7797,7 +7796,7 @@
                 </div>
 
                 {/* Body */}
-                <div className="p-5 overflow-y-auto max-h-[calc(85vh-72px)] space-y-4">
+                <div className="p-5 overflow-y-auto max-h-[calc(92vh-72px)] space-y-4">
                     {loading ? (
                     <div className="flex items-center gap-3">
                         <svg className="animate-spin h-5 w-5 text-gray-600" viewBox="0 0 24 24">
@@ -7811,18 +7810,11 @@
                     ) : result ? (
                     <>
                         {/* Top summary */}
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                         <div className="col-span-1 p-4 border rounded-2xl">
-                            <div className="flex items-center justify-between">
-                            <div>
-                                <div className="text-xs text-gray-500">Месяц</div>
-                                <div className="text-sm font-medium text-gray-900">{formatMonth(month) || "—"}</div>
-                            </div>
-                            <div className="text-right">
-                                <div className="text-xs text-gray-500">Направление</div>
-                                <div className="text-sm text-gray-900">{direction || "—"}</div>
-                            </div>
-                            </div>
+                            <div className="text-xs text-gray-500">Месяц</div>
+                            <div className="text-sm font-medium text-gray-900">{formatMonth(month) || "—"}</div>
+
                             <div className="mt-4">
                             <div className="text-xs text-gray-500">Оценено звонков</div>
                             <div className="text-lg font-semibold">{evaluatedCalls ?? "—"}</div>
@@ -7832,24 +7824,26 @@
                         <div className="col-span-1 p-4 border rounded-2xl flex flex-col justify-center items-center">
                             <div className="text-xs text-gray-500">Средний балл</div>
                             <div className="mt-2 flex items-center gap-3">
-                            <div className={`rounded-full w-16 h-16 flex items-center justify-center text-white font-semibold ${scoreColor}`}>
+                            <div className={`rounded-full w-20 h-20 flex items-center justify-center text-white font-semibold ${scoreColor}`}>
                                 {avgScore != null ? `${avgScore}` : "—"}
                             </div>
                             <div className="text-sm text-gray-700 max-w-xs">
                                 <div className="text-xs text-gray-500">Уровень: <span className="font-medium capitalize">{summary?.overall_level ?? "—"}</span></div>
-                                <div className="text-xs text-gray-500 mt-1">Топ приоритеты:</div>
-                                <ul className="text-sm list-disc list-inside mt-1">
-                                {(summary?.top_priorities || []).slice(0,3).map((p, i) => <li key={i}>{p}</li>)}
-                                {(!summary?.top_priorities || !summary.top_priorities.length) && <li>—</li>}
-                                </ul>
+                                <div className="text-xs text-gray-500 mt-1">Направление: <span className="font-medium">{direction || "—"}</span></div>
                             </div>
                             </div>
                         </div>
 
-                        <div className="col-span-1 p-4 border rounded-2xl">
-                            <div className="text-xs text-gray-500">План тренировок (быстро)</div>
+                        <div className="col-span-2 p-4 border rounded-2xl">
+                            <div className="text-xs text-gray-500">Топ приоритеты</div>
+                            <ul className="text-sm list-disc list-inside mt-2 space-y-1">
+                            {(summary?.top_priorities || []).map((p, i) => <li key={i}>{p}</li>)}
+                            {(!summary?.top_priorities || !summary.top_priorities.length) && <li>—</li>}
+                            </ul>
+
+                            <div className="text-xs text-gray-500 mt-3">План тренировок</div>
                             <ol className="list-decimal list-inside text-sm mt-2 space-y-1">
-                            {(summary?.training_plan || []).slice(0,3).map((t, i) => (
+                            {(summary?.training_plan || []).map((t, i) => (
                                 <li key={i} className="text-sm text-gray-700">{t}</li>
                             ))}
                             {(!summary?.training_plan || !summary.training_plan.length) && <li className="text-sm text-gray-700">Нет предложений</li>}
@@ -7860,20 +7854,48 @@
                         {/* Per-criterion list */}
                         <div>
                         <h3 className="text-sm font-medium text-gray-900 mb-3">Детализация по критериям</h3>
-                        <div className="space-y-3">
+                        <div className="space-y-4">
                             {perCriterion.length === 0 && <div className="text-sm text-gray-600">Нет данных по критериям.</div>}
                             {perCriterion.map((c, idx) => (
                             <div key={idx} className="border rounded-2xl p-4 bg-white shadow-sm">
                                 <div className="flex items-start justify-between gap-3">
                                 <div className="min-w-0">
-                                    <div className="flex items-center gap-2">
-                                    <div className="text-sm font-semibold text-gray-900 truncate">{c.criterion || c.criterion_name || `Критерий ${idx+1}`}</div>
-                                    <div className={`text-xs px-2 py-0.5 rounded-full ${priorityColor(c.priority)}`}>{c.priority ?? "low"}</div>
+                                <div className="flex items-center gap-3">
+                                <div className="min-w-0">
+                                    <div
+                                    className="text-sm font-semibold text-gray-900 whitespace-normal break-words leading-tight"
+                                    style={{ maxWidth: "min(70ch, 100%)" }}
+                                    title={c.criterion || `Критерий ${idx+1}`}
+                                    >
+                                    {c.criterion || `Критерий ${idx+1}`}
                                     </div>
-                                    <div className="text-xs text-gray-500 mt-1">{c.criterion_description ?? ""}</div>
+                                    {/* если нужно — можно показать краткое описание под названием */}
                                 </div>
-                                <div className="text-right text-sm text-gray-500">
-                                    <div>Ошибки: {c?.issues ? (<span className="text-gray-700">{String(c.issues).slice(0,120)}{String(c.issues).length>120?"…":""}</span>) : <span className="text-gray-400">—</span>}</div>
+
+                                <div className="flex-shrink-0">
+                                    <div className={`text-xs px-2 py-0.5 rounded-full ${priorityColor(c.priority)}`}>
+                                    {c.priority ?? "low"}
+                                    </div>
+                                </div>
+                                </div>
+                                    {c.criterion_description && (
+                                    <div className="text-xs text-gray-500 mt-1">{c.criterion_description}</div>
+                                    )}
+                                </div>
+                                <div className="text-sm text-gray-500">
+                                    {/* small right column kept for short info */}
+                                    <div>Состояние: <span className="text-gray-700">{c.status ?? "—"}</span></div>
+                                </div>
+                                </div>
+
+                                {/* Ошибки: теперь под заголовком, занимает всю ширину карточки и поддерживает перенос/скролл */}
+                                <div className="mt-3">
+                                <div className="text-xs text-gray-500">Ошибки</div>
+                                <div
+                                    className="mt-1 text-sm text-gray-700 whitespace-pre-wrap break-words bg-gray-50 p-3 rounded-lg border border-gray-100 max-h-36 overflow-auto"
+                                    title={typeof c.issues === "string" ? c.issues : ""}
+                                >
+                                    {c.issues ? String(c.issues) : "—"}
                                 </div>
                                 </div>
 
@@ -7930,7 +7952,7 @@
                         </div>
 
                         {showRaw && (
-                        <pre className="text-xs text-gray-800 whitespace-pre-wrap bg-gray-50 border border-gray-200 rounded-xl p-4 mt-2 max-h-64 overflow-auto">
+                        <pre className="text-xs text-gray-800 whitespace-pre-wrap bg-gray-50 border border-gray-200 rounded-xl p-4 mt-2 max-h-72 overflow-auto">
                             {JSON.stringify(result, null, 2)}
                         </pre>
                         )}
