@@ -1669,6 +1669,9 @@ def handle_monthly_report():
             safe_sheet_name = sv_name[:31].replace('/', '_').replace('\\', '_').replace('?', '_').replace('*', '_').replace('[', '_').replace(']', '_')
             worksheet = workbook.add_worksheet(safe_sheet_name)
 
+            special_evaluator_id = 169
+            special_table_header_row = len(operators) + 2
+
             # Headers
             headers = ['ФИО']
             for i in range(1, 21):
@@ -1678,6 +1681,9 @@ def handle_monthly_report():
 
             for col, header in enumerate(headers):
                 worksheet.write(0, col, header, header_format)
+
+            for col, header in enumerate(headers):
+                worksheet.write(special_table_header_row, col, header, header_format)
 
             for row_idx, op in enumerate(operators, start=1):
                 op_id = op['id']
@@ -1699,11 +1705,32 @@ def handle_monthly_report():
                     """, (op_id, month))
                     scores = [row[0] for row in cursor.fetchall()]
 
+                with db._get_cursor() as cursor:
+                    cursor.execute("""
+                        SELECT c.score
+                        FROM calls c
+                        JOIN (
+                            SELECT phone_number, MAX(created_at) as max_date
+                            FROM calls
+                            WHERE operator_id = %s AND month = %s AND is_draft = FALSE AND evaluator_id = %s
+                            GROUP BY phone_number
+                        ) lv ON c.phone_number = lv.phone_number AND c.created_at = lv.max_date
+                        WHERE c.is_draft = FALSE AND c.operator_id = %s AND c.month = %s AND c.evaluator_id = %s
+                        ORDER BY c.created_at ASC
+                    """, (op_id, month, special_evaluator_id, op_id, month, special_evaluator_id))
+                    special_scores = [row[0] for row in cursor.fetchall()]
+
                 count = len(scores)
                 avg_score = sum(scores) / count if count > 0 else 0.0
 
+                special_count = len(special_scores)
+                special_avg_score = sum(special_scores) / special_count if special_count > 0 else 0.0
+
                 # ФИО
                 worksheet.write(row_idx, 0, op_name, fio_format)
+
+                special_row_idx = special_table_header_row + row_idx
+                worksheet.write(special_row_idx, 0, op_name, fio_format)
 
                 # Оценки с цветом
                 for col in range(1, 21):
@@ -1719,9 +1746,24 @@ def handle_monthly_report():
                     else:
                         worksheet.write(row_idx, col, '', float_format)
 
+                    if col-1 < special_count:
+                        score = special_scores[col-1]
+                        if score < 80:
+                            fmt = red_format
+                        elif score < 95:
+                            fmt = yellow_format
+                        else:
+                            fmt = green_format
+                        worksheet.write(special_row_idx, col, score, fmt)
+                    else:
+                        worksheet.write(special_row_idx, col, '', float_format)
+
                 # Итоговые колонки
                 worksheet.write(row_idx, 21, avg_score, total_format)
                 worksheet.write(row_idx, 22, count, total_int_format)
+
+                worksheet.write(special_row_idx, 21, special_avg_score, total_format)
+                worksheet.write(special_row_idx, 22, special_count, total_int_format)
 
             worksheet.set_column('A:A', 30)
             for i in range(1, 21):
