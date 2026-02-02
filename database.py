@@ -454,6 +454,19 @@ class Database:
                 );
             """)
 
+            # AI feedback cache table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ai_feedback_cache (
+                    id SERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    month VARCHAR(7) NOT NULL,
+                    feedback_data JSONB NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(operator_id, month)
+                );
+            """)
+
             # Optimized Indexes (added more based on query patterns)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
@@ -481,6 +494,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_shifts_operator_date ON work_shifts(operator_id, shift_date);
                 CREATE INDEX IF NOT EXISTS idx_work_shifts_date ON work_shifts(shift_date);
                 CREATE INDEX IF NOT EXISTS idx_days_off_operator_date ON days_off(operator_id, day_off_date);
+                CREATE INDEX IF NOT EXISTS idx_ai_feedback_cache_operator_month ON ai_feedback_cache(operator_id, month);
             """)
 
     def create_user(self, telegram_id, name, role, direction_id=None, rate=None, hire_date=None, supervisor_id=None, login=None, password=None, hours_table_url=None):
@@ -4100,6 +4114,35 @@ class Database:
                         """, [(new_shift_id, b['start'], b['end']) for b in merged_shift['breaks']])
         
         return result_ids
+
+    def get_ai_feedback_cache(self, operator_id: int, month: str):
+        """Получить кэшированный AI фидбэк для оператора за месяц"""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT feedback_data, created_at, updated_at
+                FROM ai_feedback_cache
+                WHERE operator_id = %s AND month = %s
+            """, (operator_id, month))
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'feedback_data': result[0],
+                    'created_at': result[1],
+                    'updated_at': result[2]
+                }
+            return None
+
+    def save_ai_feedback_cache(self, operator_id: int, month: str, feedback_data: dict):
+        """Сохранить или обновить AI фидбэк в кэше"""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO ai_feedback_cache (operator_id, month, feedback_data, updated_at)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (operator_id, month)
+                DO UPDATE SET
+                    feedback_data = EXCLUDED.feedback_data,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (operator_id, month, json.dumps(feedback_data, ensure_ascii=False)))
 
 
 # Initialize database
