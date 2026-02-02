@@ -4,6 +4,7 @@ import httpx
 from loguru import logger
 from database import db
 from collections import defaultdict
+import os
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
