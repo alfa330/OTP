@@ -962,6 +962,8 @@ def get_call_evaluations():
     except Exception as e:
         logging.error(f"Error fetching evaluations: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    
+@app.route('/api/ai/monthly_feedback', methods=['POST'])
 @require_api_key
 def ai_monthly_feedback():
     try:
@@ -1000,7 +1002,7 @@ def ai_monthly_feedback():
 
         # Для операторов проверяем только кэш
         if is_operator:
-            cached_feedback = db.get_ai_feedback_cache(operator_id, str(month))
+            cached_feedback = db.get_ai_feedback_cache(requester_id, str(month))
             if cached_feedback:
                 return jsonify({"status": "success", "result": cached_feedback['feedback_data']}), 200
             else:
