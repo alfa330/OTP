@@ -12,7 +12,7 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.dispatcher import FSMContext
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
 from functools import wraps
 from openpyxl import load_workbook
@@ -1022,6 +1022,75 @@ def ai_monthly_feedback():
 
     except Exception as e:
         logging.exception("Error in /api/ai/monthly_feedback")
+        return jsonify({"status": "error", "error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/ai/monthly_feedback_stream', methods=['POST'])
+@require_api_key
+def ai_monthly_feedback_stream():
+    try:
+        # Проверка прав - только admin и sv
+        requester_id = request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"status": "error", "error": "Missing X-User-Id header"}), 400
+        
+        try:
+            requester_id = int(requester_id)
+        except (ValueError, TypeError):
+            return jsonify({"status": "error", "error": "Invalid X-User-Id format"}), 400
+        
+        requester = db.get_user(id=requester_id)
+        if not requester or requester[3] not in ['admin', 'sv']:
+            return jsonify({"status": "error", "error": "Access denied. Only admins and supervisors can access this endpoint"}), 403
+
+        data = request.get_json() or {}
+        operator_id = data.get('operator_id')
+        month = data.get('month')
+
+        if operator_id is None or month is None:
+            return jsonify({"status": "error", "error": "Missing operator_id or month"}), 400
+
+        try:
+            operator_id = int(operator_id)
+        except Exception:
+            return jsonify({"status": "error", "error": "Invalid operator_id"}), 400
+
+        try:
+            datetime.strptime(str(month), "%Y-%m")
+        except Exception:
+            return jsonify({"status": "error", "error": "Invalid month format. Use YYYY-MM"}), 400
+
+        def generate():
+            try:
+                # Send initial status
+                yield f"data: {json.dumps({'type': 'status', 'message': 'Starting AI feedback generation...'})}\n\n"
+                
+                # Import the streaming function
+                from ai_feed_back_service import generate_monthly_feedback_with_ai_stream
+                
+                # Stream the AI generation
+                for chunk in generate_monthly_feedback_with_ai_stream(operator_id=operator_id, month=str(month)):
+                    if chunk.get('type') == 'progress':
+                        yield f"data: {json.dumps({'type': 'progress', 'message': chunk.get('message', '')})}\n\n"
+                    elif chunk.get('type') == 'result':
+                        yield f"data: {json.dumps({'type': 'result', 'data': chunk.get('data')})}\n\n"
+                        break
+                    elif chunk.get('type') == 'error':
+                        yield f"data: {json.dumps({'type': 'error', 'error': chunk.get('error')})}\n\n"
+                        break
+                        
+            except Exception as e:
+                logging.exception("Error in streaming monthly feedback")
+                yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+
+        return Response(generate(), mimetype='text/plain', headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, X-User-Id'
+        })
+
+    except Exception as e:
+        logging.exception("Error in /api/ai/monthly_feedback_stream")
         return jsonify({"status": "error", "error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/admin/operators_summary', methods=['GET'])
