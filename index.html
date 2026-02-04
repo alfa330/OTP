@@ -7701,6 +7701,15 @@
         return `${monthNames[Number(m) - 1] || m} ${y}`;
         }
 
+        function monthAdd(ym, delta) {
+        // ym = "YYYY-MM"; delta in months
+        const [y, m] = ym.split("-").map(Number);
+        const date = new Date(y, m - 1 + delta, 1);
+        const yyyy = date.getFullYear();
+        const mm = String(date.getMonth() + 1).padStart(2, "0");
+        return `${yyyy}-${mm}`;
+        }
+
         function MonthlyFeedbackModal({
         title,
         loading,
