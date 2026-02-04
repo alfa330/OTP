@@ -1067,8 +1067,44 @@ def ai_monthly_feedback_stream():
                 # Import the streaming function
                 from ai_feed_back_service import generate_monthly_feedback_with_ai_stream
                 
-                # Stream the AI generation
-                for chunk in generate_monthly_feedback_with_ai_stream(operator_id=operator_id, month=str(month)):
+                # Handle the async generator properly
+                import asyncio
+                import queue
+                import threading
+                
+                # Create a queue to pass data between threads
+                result_queue = queue.Queue()
+                
+                def run_async_generator():
+                    """Run the async generator in a new event loop and put results in queue"""
+                    try:
+                        async def collect_and_queue():
+                            async for chunk in generate_monthly_feedback_with_ai_stream(operator_id=operator_id, month=str(month)):
+                                result_queue.put(chunk)
+                                if chunk.get('type') in ['result', 'error']:
+                                    break
+                            result_queue.put(None)  # Signal completion
+                        
+                        # Create new event loop
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(collect_and_queue())
+                        finally:
+                            loop.close()
+                    except Exception as e:
+                        result_queue.put({'type': 'error', 'error': str(e)})
+                
+                # Start the async generator in a separate thread
+                thread = threading.Thread(target=run_async_generator)
+                thread.start()
+                
+                # Yield results as they become available
+                while True:
+                    chunk = result_queue.get()
+                    if chunk is None:  # Completion signal
+                        break
+                    
                     if chunk.get('type') == 'progress':
                         yield f"data: {json.dumps({'type': 'progress', 'message': chunk.get('message', '')})}\n\n"
                     elif chunk.get('type') == 'result':
@@ -1077,6 +1113,9 @@ def ai_monthly_feedback_stream():
                     elif chunk.get('type') == 'error':
                         yield f"data: {json.dumps({'type': 'error', 'error': chunk.get('error')})}\n\n"
                         break
+                
+                # Wait for thread to complete
+                thread.join()
                         
             except Exception as e:
                 logging.exception("Error in streaming monthly feedback")
