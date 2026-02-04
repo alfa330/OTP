@@ -962,12 +962,10 @@ def get_call_evaluations():
     except Exception as e:
         logging.error(f"Error fetching evaluations: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/api/ai/monthly_feedback', methods=['POST'])
 @require_api_key
 def ai_monthly_feedback():
     try:
-        # Проверка прав - только admin и sv
+        # Проверка прав - admin, sv и operator (operator только для чтения из кэша)
         requester_id = request.headers.get('X-User-Id')
         if not requester_id:
             return jsonify({"status": "error", "error": "Missing X-User-Id header"}), 400
@@ -978,8 +976,10 @@ def ai_monthly_feedback():
             return jsonify({"status": "error", "error": "Invalid X-User-Id format"}), 400
         
         requester = db.get_user(id=requester_id)
-        if not requester or requester[3] not in ['admin', 'sv']:
-            return jsonify({"status": "error", "error": "Access denied. Only admins and supervisors can access this endpoint"}), 403
+        if not requester or requester[3] not in ['admin', 'sv', 'operator']:
+            return jsonify({"status": "error", "error": "Access denied"}), 403
+        
+        is_operator = (requester[3] == 'operator')
 
         data = request.get_json() or {}
         operator_id = data.get('operator_id')
@@ -997,6 +997,14 @@ def ai_monthly_feedback():
             datetime.strptime(str(month), "%Y-%m")
         except Exception:
             return jsonify({"status": "error", "error": "Invalid month format. Use YYYY-MM"}), 400
+
+        # Для операторов проверяем только кэш
+        if is_operator:
+            cached_feedback = db.get_ai_feedback_cache(operator_id, str(month))
+            if cached_feedback:
+                return jsonify({"status": "success", "result": cached_feedback['feedback_data']}), 200
+            else:
+                return jsonify({"status": "error", "error": "No cached feedback available"}), 404
 
         try:
             loop = asyncio.get_event_loop()
