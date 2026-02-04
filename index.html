@@ -14216,7 +14216,7 @@
                                     {view === 'ai_feedback' && (
                                         <MonthlyFeedbackSection 
                                             fetchFeedback={async (month) => {
-                                                const res = await fetch(`/api/ai/monthly_feedback?month=${month}`);
+                                                const res = await fetch(`${API_BASE_URL}/api/ai/monthly_feedback?month=${month}`);
                                                 if (!res.ok) throw new Error(`Ошибка ${res.status}`);
                                                 return await res.json();
                                             }}
