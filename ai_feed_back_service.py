@@ -5,6 +5,7 @@ from loguru import logger
 from database import db
 from collections import defaultdict
 import os
+import asyncio
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
@@ -338,3 +339,182 @@ async def generate_monthly_feedback_with_ai(operator_id: int, month: str) -> dic
     except Exception as e:
         logger.exception(f"Unexpected error while contacting Gemini: {e}")
         return None
+
+
+async def generate_monthly_feedback_with_ai_stream(operator_id: int, month: str):
+    """
+    Streaming version of generate_monthly_feedback_with_ai.
+    Yields progress updates and final result.
+    """
+    try:
+        # Check cache first
+        cached_feedback = db.get_ai_feedback_cache(operator_id, month)
+        if cached_feedback:
+            logger.info(f"Returning cached AI feedback for operator {operator_id}, month {month}")
+            yield {"type": "progress", "message": "Загрузка из кэша..."}
+            yield {"type": "result", "data": cached_feedback['feedback_data']}
+            return
+
+        yield {"type": "progress", "message": "Получение данных об оценках..."}
+        
+        raw = db.get_call_evaluations(operator_id, month=month)
+        evaluated = [
+            ev
+            for ev in raw
+            if isinstance(ev, dict)
+            and not ev.get("is_imported")
+            and not ev.get("is_draft")
+            and ev.get("score") is not None
+        ]
+
+        if not evaluated:
+            yield {"type": "error", "error": {"error": "no_evaluated_calls", "month": month, "operator_id": operator_id}}
+            return
+
+        yield {"type": "progress", "message": "Анализ данных и подготовка запроса..."}
+        
+        direction = _pick_direction(evaluated)
+        criteria_payload = _build_monthly_criteria_payload(evaluated, direction)
+
+        if not direction or not criteria_payload:
+            yield {"type": "error", "error": {"error": "missing_direction_or_criteria", "month": month, "operator_id": operator_id}}
+            return
+
+        comments_payload = []
+        criteria_names = [c.get("criterion_name") for c in criteria_payload]
+        for ev in evaluated:
+            phone = ev.get("phone_number")
+            evaluation_date = ev.get("evaluation_date")
+            evaluator = ev.get("evaluator")
+            call_comment = ev.get("comment")
+            sv_comment = ev.get("sv_request_comment")
+
+            if sv_comment:
+                comments_payload.append(
+                    {
+                        "type": "sv_request_comment",
+                        "phone_number": phone,
+                        "evaluation_date": evaluation_date,
+                        "comment": sv_comment,
+                    }
+                )
+            if call_comment:
+                comments_payload.append(
+                    {
+                        "type": "call_comment",
+                        "phone_number": phone,
+                        "evaluation_date": evaluation_date,
+                        "evaluator": evaluator,
+                        "comment": call_comment,
+                    }
+                )
+
+            scores_arr = ev.get("scores") if isinstance(ev.get("scores"), list) else []
+            crit_comments_arr = ev.get("criterion_comments") if isinstance(ev.get("criterion_comments"), list) else []
+            for cidx in range(min(len(scores_arr), len(criteria_names), len(crit_comments_arr))):
+                cmt = crit_comments_arr[cidx]
+                if not cmt:
+                    continue
+                comments_payload.append(
+                    {
+                        "type": "criterion_comment",
+                        "phone_number": phone,
+                        "evaluation_date": evaluation_date,
+                        "criterion": criteria_names[cidx] or f"Критерий {cidx + 1}",
+                        "status": scores_arr[cidx],
+                        "comment": cmt,
+                    }
+                )
+
+        comments_block = json.dumps(comments_payload, ensure_ascii=False)
+
+        scores = [ev.get("score") for ev in evaluated if isinstance(ev.get("score"), (int, float))]
+        avg_score = round(sum(scores) / len(scores), 2) if scores else None
+        direction_name = direction.get("name") if isinstance(direction, dict) else ""
+
+        meta_block = (
+            f"MONTH: {month}\n"
+            f"DIRECTION: {direction_name}\n"
+            f"EVALUATED_CALLS: {len(evaluated)}\n"
+            f"AVG_SCORE: {avg_score}\n"
+        )
+
+        items_text = []
+        for i, c in enumerate(criteria_payload, start=1):
+            items_text.append(
+                f"{i}. CRITERION_NAME: {c.get('criterion_name')}\n"
+                f"   CRITERION_DESCRIPTION: {c.get('criterion_description')}\n"
+                f"   WEIGHT: {c.get('weight')}\n"
+                f"   IS_CRITICAL: {c.get('is_critical')}\n"
+                f"   DEFICIENCY: {json.dumps(c.get('deficiency'), ensure_ascii=False)}\n"
+                f"   STATS: {json.dumps(c.get('stats'), ensure_ascii=False)}\n"
+                f"   EXAMPLES: {json.dumps(c.get('examples'), ensure_ascii=False)}\n"
+            )
+        items_block = "\n".join(items_text)
+
+        full_prompt = (
+            f"{MASTER_PROMPT_MONTHLY}\n"
+            f"---META---\n{meta_block}\n---END META---\n"
+            f"---CRITERIA---\n{items_block}\n---END CRITERIA---\n"
+            f"---COMMENTS---\n{comments_block}\n---END COMMENTS---\n"
+            f"ВЕРНИТЕ JSON ПО ШАБЛОНУ."
+        )
+
+        yield {"type": "progress", "message": "Отправка запроса к ИИ..."}
+        
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": full_prompt}]}],
+            "generationConfig": generation_config,
+            "safetySettings": safety_settings,
+        }
+
+        try:
+            yield {"type": "progress", "message": "Генерация обратной связи..."}
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(api_url, json=payload)
+                response.raise_for_status()
+                result = response.json()
+                if "candidates" not in result or not result["candidates"]:
+                    logger.error("Gemini response empty or blocked.")
+                    yield {"type": "error", "error": "ai_failed"}
+                    return
+                candidate = result["candidates"][0]
+                if "finishReason" in candidate and candidate["finishReason"] != "STOP":
+                    logger.warning(f"Finish reason: {candidate['finishReason']}")
+                raw_text = candidate.get("content", {}).get("parts", [])[0].get("text", "")
+
+                yield {"type": "progress", "message": "Обработка результата..."}
+                
+                json_match = re.search(r'```json\s*(\{.*\})\s*```', raw_text, re.DOTALL)
+                if json_match:
+                    cleaned = json_match.group(1)
+                else:
+                    start = raw_text.find('{')
+                    end = raw_text.rfind('}')
+                    if start != -1 and end != -1 and end > start:
+                        cleaned = raw_text[start:end + 1]
+                    else:
+                        cleaned = raw_text
+
+                try:
+                    parsed = json.loads(cleaned)
+                    # Cache the result
+                    db.save_ai_feedback_cache(operator_id, month, parsed)
+                    logger.info(f"Cached AI feedback for operator {operator_id}, month {month}")
+                    yield {"type": "progress", "message": "Сохранение в кэш..."}
+                    yield {"type": "result", "data": parsed}
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON parse error: {e}. Cleaned: {cleaned}")
+                    yield {"type": "error", "error": {"error": "json_parse_error", "raw_response": raw_text, "cleaned": cleaned}}
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error: {e.response.status_code} - {e.response.text}")
+            yield {"type": "error", "error": "ai_failed"}
+        except Exception as e:
+            logger.exception(f"Unexpected error while contacting Gemini: {e}")
+            yield {"type": "error", "error": "ai_failed"}
+
+    except Exception as e:
+        logger.exception(f"Error in streaming AI feedback generation: {e}")
+        yield {"type": "error", "error": str(e)}
