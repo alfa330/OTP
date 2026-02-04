@@ -8025,7 +8025,17 @@
                 if (fetchFeedback) {
                 data = await fetchFeedback(month);
                 } else {
-                const res = await fetch(`/api/ai/monthly?month=${month}`);
+                const res = await axios.post(`${API_BASE_URL}/api/ai/monthly_feedback`, {
+                                                        operator_id: user.id,
+                                                        month
+                                                    }, {
+                                                        headers: {
+                                                            'Content-Type': 'application/json',
+                                                            'X-API-Key': user.apiKey,
+                                                            'X-User-Id': user.id
+                                                        },
+                                                        timeout: 180000
+                                                    });
                 if (!res.ok) throw new Error(`Ошибка ${res.status}`);
                 data = await res.json();
                 }
@@ -14230,11 +14240,11 @@
                                                 
                                                 if (!res.ok) throw new Error(`Ошибка ${res.status}`);
                                                 return await res.json();
-                                            }}
-                                        />
-                                    )}
-                            </>
-                        )}
+                                                }}
+                                                />
+                                            )}
+                                        </>
+                                        )}
                                         {view === 'salary' && (
                                             <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                                 <h2 className="text-3xl font-bold mb-8 text-gray-900 flex items-center gap-2">
