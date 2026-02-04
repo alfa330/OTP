@@ -8520,27 +8520,6 @@
         );
         }
 
-        function formatMonth(ym) {
-        if (!ym) return '';
-        const [y, m] = ym.split('-');
-        if (!y || !m) return ym;
-        const monthNames = [
-            'Январь',
-            'Февраль',
-            'Март',
-            'Апрель',
-            'Май',
-            'Июнь',
-            'Июль',
-            'Август',
-            'Сентябрь',
-            'Октябрь',
-            'Ноябрь',
-            'Декабрь',
-        ];
-        return `${monthNames[Number(m) - 1] || m} ${y}`;
-        }
-
         const App = () => {
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
