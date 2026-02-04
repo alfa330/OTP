@@ -7967,6 +7967,338 @@
         );
         }
 
+    function MonthlyFeedbackSection({ title = "Обратная связь от ИИ", initialMonth: initialMonthProp, fetchFeedback, className = "" }) {
+        const now = new Date();
+        const defaultMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+        const [month, setMonth] = useState(initialMonthProp || defaultMonth);
+        const [loading, setLoading] = useState(false);
+        const [error, setError] = useState(null);
+        const [result, setResult] = useState(null);
+        const [expandedTech, setExpandedTech] = useState({});
+        const [showRaw, setShowRaw] = useState(false);
+        const [filterText, setFilterText] = useState("");
+        const [expandAll, setExpandAll] = useState(false);
+
+        const perCriterion = result?.per_criterion || [];
+        const meta = result?.meta || {};
+        const summary = result?.summary || {};
+
+        const avgScore = meta?.avg_score ?? summary?.avg_score ?? null;
+        const evaluatedCalls = meta?.evaluated_calls ?? null;
+        const direction = meta?.direction ?? null;
+
+        const scoreColor = useMemo(() => {
+            if (avgScore == null) return "bg-gray-200";
+            if (avgScore >= 90) return "bg-green-500";
+            if (avgScore >= 75) return "bg-yellow-400";
+            return "bg-red-400";
+        }, [avgScore]);
+
+        useEffect(() => {
+            // when expandAll changes, update expandedTech map
+            if (expandAll) {
+            const map = {};
+            perCriterion.forEach((_, i) => (map[i] = true));
+            setExpandedTech(map);
+            } else {
+            setExpandedTech({});
+            }
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [expandAll]);
+
+        useEffect(() => {
+            let cancelled = false;
+            async function load() {
+            setLoading(true);
+            setError(null);
+            try {
+                let data;
+                if (fetchFeedback) {
+                data = await fetchFeedback(month);
+                } else {
+                const res = await fetch(`/api/ai/monthly?month=${month}`);
+                if (!res.ok) throw new Error(`Ошибка ${res.status}`);
+                data = await res.json();
+                }
+                if (!cancelled) setResult(data);
+            } catch (err) {
+                if (!cancelled) setError(err.message || String(err));
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+            }
+            load();
+            return () => {
+            cancelled = true;
+            };
+        }, [month, fetchFeedback]);
+
+        const copyJSON = async () => {
+            try {
+            await navigator.clipboard.writeText(JSON.stringify(result, null, 2));
+            // friendly non-blocking toast replacement
+            window.dispatchEvent(new CustomEvent("toast", { detail: { text: "JSON скопирован в буфер обмена" } }));
+            } catch {
+            window.dispatchEvent(new CustomEvent("toast", { detail: { text: "Не удалось скопировать" } }));
+            }
+        };
+
+        const downloadJSON = () => {
+            const blob = new Blob([JSON.stringify(result || {}, null, 2)], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `ai_monthly_feedback_${month || "unknown"}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        };
+
+        const toggleTech = (idx) => setExpandedTech((s) => ({ ...s, [idx]: !s[idx] }));
+
+        const filteredCriteria = useMemo(() => {
+            const q = filterText.trim().toLowerCase();
+            if (!q) return perCriterion;
+            return perCriterion.filter((c) => {
+            return (
+                String(c.criterion || "").toLowerCase().includes(q) ||
+                String(c.criterion_description || "").toLowerCase().includes(q) ||
+                String(c.issues || "").toLowerCase().includes(q) ||
+                (Array.isArray(c.techniques) && c.techniques.join(" ").toLowerCase().includes(q))
+            );
+            });
+        }, [perCriterion, filterText]);
+
+        return (
+            <section className={`bg-gray-50 rounded-2xl p-4 shadow-sm ${className}`}>
+            {/* Top bar with month selector */}
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div>
+                <div className="text-xs text-gray-500">{title}</div>
+                <h2 className="text-lg font-semibold text-gray-900">Обратная связь от ИИ — сводка по месяцу</h2>
+                </div>
+
+                <div className="flex items-center gap-2">
+                <button
+                    aria-label="Предыдущий месяц"
+                    className="px-2 py-1 rounded-md hover:bg-white border bg-white/60"
+                    onClick={() => setMonth((m) => monthAdd(m, -1))}
+                    title="Предыдущий месяц"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M12.293 16.293a1 1 0 010-1.414L15.586 11H5a1 1 0 110-2h10.586l-3.293-3.293a1 1 0 011.414-1.414l5 5a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0z" clipRule="evenodd" />
+                    </svg>
+                </button>
+
+                <input
+                    type="month"
+                    value={month}
+                    onChange={(e) => setMonth(e.target.value)}
+                    className="px-3 py-1 rounded-md border bg-white"
+                    aria-label="Выберите месяц"
+                />
+
+                <button
+                    aria-label="Следующий месяц"
+                    onClick={() => setMonth((m) => monthAdd(m, +1))}
+                    className="px-2 py-1 rounded-md hover:bg-white border bg-white/60"
+                    title="Следующий месяц"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 rotate-180" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M12.293 16.293a1 1 0 010-1.414L15.586 11H5a1 1 0 110-2h10.586l-3.293-3.293a1 1 0 011.414-1.414l5 5a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0z" clipRule="evenodd" />
+                    </svg>
+                </button>
+
+                <div className="hidden sm:flex items-center gap-2 ml-3">
+                    <button onClick={copyJSON} className="text-sm px-3 py-1 border rounded-md text-gray-600 hover:bg-white">Копировать JSON</button>
+                    <button onClick={downloadJSON} className="text-sm px-3 py-1 border rounded-md text-gray-600 hover:bg-white">Скачать JSON</button>
+                </div>
+                </div>
+            </div>
+
+            {/* Main content */}
+            <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
+                {/* Left column: summary */}
+                <aside className="col-span-1 space-y-4 sticky top-6">
+                <div className="bg-white border rounded-xl p-4 shadow-sm">
+                    <div className="text-xs text-gray-500">Месяц</div>
+                    <div className="text-sm font-medium text-gray-900">{formatMonth(month) || "—"}</div>
+
+                    <div className="mt-4 grid grid-cols-2 gap-2">
+                    <div>
+                        <div className="text-xs text-gray-500">Оценено звонков</div>
+                        <div className="text-lg font-semibold">{evaluatedCalls ?? "—"}</div>
+                    </div>
+                    <div>
+                        <div className="text-xs text-gray-500">Направление</div>
+                        <div className="text-lg font-semibold">{direction ?? "—"}</div>
+                    </div>
+                    </div>
+
+                    <div className="mt-4 text-xs text-gray-500">Средний балл</div>
+                    <div className="mt-2 flex items-center gap-3">
+                    <div className={`rounded-full w-16 h-16 flex items-center justify-center text-white font-semibold ${scoreColor}`}>
+                        {avgScore != null ? `${avgScore}` : "—"}
+                    </div>
+                    <div className="text-sm text-gray-700">
+                        <div className="text-xs text-gray-500">Уровень: <span className="font-medium capitalize">{summary?.overall_level ?? "—"}</span></div>
+                        <div className="text-xs text-gray-500 mt-1">Топ приоритеты:</div>
+                        <ul className="list-disc list-inside text-sm mt-1">
+                        {(summary?.top_priorities || []).slice(0, 3).map((p, i) => <li key={i} className="text-sm text-gray-700">{p}</li>)}
+                        {(!summary?.top_priorities || !summary.top_priorities.length) && <li className="text-sm text-gray-700">—</li>}
+                        </ul>
+                    </div>
+                    </div>
+
+                    <div className="mt-4 text-xs text-gray-500">План тренировок</div>
+                    <ol className="list-decimal list-inside text-sm mt-2 space-y-1">
+                    {(summary?.training_plan || []).map((t, i) => <li key={i} className="text-sm text-gray-700">{t}</li>)}
+                    {(!summary?.training_plan || !summary.training_plan.length) && <li className="text-sm text-gray-700">Нет предложений</li>}
+                    </ol>
+                </div>
+
+                <div className="bg-white border rounded-xl p-3 shadow-sm">
+                    <div className="flex items-center justify-between">
+                    <div className="text-xs text-gray-500">Фильтр критериев</div>
+                    <div className="text-xs text-gray-500">{filteredCriteria.length} из {perCriterion.length}</div>
+                    </div>
+                    <input
+                    value={filterText}
+                    onChange={(e) => setFilterText(e.target.value)}
+                    placeholder="По названию, описанию или техникам"
+                    className="mt-2 w-full px-3 py-2 border rounded-md bg-gray-50 text-sm"
+                    aria-label="Фильтр по критериям"
+                    />
+
+                    <div className="mt-3 flex items-center gap-2">
+                    <label className="inline-flex items-center gap-2 text-sm text-gray-600">
+                        <input type="checkbox" checked={expandAll} onChange={(e) => setExpandAll(e.target.checked)} />
+                        Развернуть все
+                    </label>
+                    <label className="inline-flex items-center gap-2 text-sm text-gray-600">
+                        <input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} />
+                        Показать JSON
+                    </label>
+                    </div>
+
+                    {showRaw && (
+                    <pre className="text-xs text-gray-800 whitespace-pre-wrap bg-gray-50 border border-gray-200 rounded-xl p-2 mt-2 max-h-56 overflow-auto">
+                        {JSON.stringify(result, null, 2)}
+                    </pre>
+                    )}
+                </div>
+                </aside>
+
+                {/* Right column: details */}
+                <div className="col-span-2">
+                {/* loading / error */}
+                {loading ? (
+                    <div className="bg-white p-6 rounded-xl border shadow-sm flex items-center gap-3">
+                    <svg className="animate-spin h-6 w-6 text-gray-600" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                    </svg>
+                    <div className="text-sm text-gray-700">Генерируем обратную связь — это может занять пару секунд...</div>
+                    </div>
+                ) : error ? (
+                    <div className="bg-white p-4 rounded-xl border text-sm text-red-600">{String(error)}</div>
+                ) : !result ? (
+                    <div className="bg-white p-4 rounded-xl border text-sm text-gray-700">Нет данных за выбранный месяц.</div>
+                ) : (
+                    <div className="space-y-4">
+                    <div className="grid grid-cols-1 gap-4">
+                        {filteredCriteria.length === 0 && <div className="text-sm text-gray-600">Нет данных по критериям.</div>}
+
+                        {filteredCriteria.map((c, idx) => (
+                        <article key={idx} className="bg-white border rounded-2xl p-4 shadow-sm">
+                            <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                                <div className="flex items-center gap-3">
+                                <div className="min-w-0">
+                                    <div className="text-sm font-semibold text-gray-900 whitespace-normal break-words leading-tight" style={{ maxWidth: "min(80ch, 100%)" }} title={c.criterion || `Критерий ${idx + 1}`}>
+                                    {c.criterion || `Критерий ${idx + 1}`}
+                                    </div>
+                                    {c.criterion_description && (
+                                    <div className="text-xs text-gray-500 mt-1">{c.criterion_description}</div>
+                                    )}
+                                </div>
+
+                                <div className="flex-shrink-0">
+                                    <div className={`text-xs px-2 py-0.5 rounded-full ${priorityColor(c.priority)}`}>
+                                    {c.priority ?? "low"}
+                                    </div>
+                                </div>
+                                </div>
+                            </div>
+
+                            <div className="text-sm text-gray-500 flex-shrink-0 text-right">
+                                <div>Состояние: <span className="text-gray-700">{c.status ?? "—"}</span></div>
+                                <div className="mt-1">Баллы: <span className="text-gray-700">{c.score ?? "—"}</span></div>
+                            </div>
+                            </div>
+
+                            <div className="mt-3">
+                            <div className="text-xs text-gray-500">Ошибки</div>
+                            <div className="mt-1 text-sm text-gray-700 whitespace-pre-wrap break-words bg-gray-50 p-3 rounded-lg border border-gray-100 max-h-44 overflow-auto" title={typeof c.issues === "string" ? c.issues : ""}>
+                                {c.issues ? String(c.issues) : "—"}
+                            </div>
+                            </div>
+
+                            <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div className="col-span-1">
+                                <div className="text-xs text-gray-500">Сильные стороны</div>
+                                <div className="text-sm text-gray-700 mt-1">{c.strengths || "—"}</div>
+                            </div>
+
+                            <div className="col-span-1">
+                                <div className="text-xs text-gray-500">Рекомендация</div>
+                                <div className="text-sm text-gray-700 mt-1">{c.recommendation || "—"}</div>
+                            </div>
+
+                            <div className="col-span-1">
+                                <div className="text-xs text-gray-500 flex items-center justify-between">
+                                <span>Техники / фразы</span>
+                                {Array.isArray(c.techniques) && c.techniques.length > 0 && (
+                                    <button onClick={() => toggleTech(idx)} className="text-xs text-blue-600 hover:underline">
+                                    {expandedTech[idx] ? "Скрыть" : `Показать (${c.techniques.length})`}
+                                    </button>
+                                )}
+                                </div>
+
+                                <div className="mt-1">
+                                {Array.isArray(c.techniques) && c.techniques.length > 0 ? (
+                                    expandedTech[idx] ? (
+                                    <ul className="list-disc list-inside text-sm text-gray-700">
+                                        {c.techniques.map((t, i) => <li key={i}>{t}</li>)}
+                                    </ul>
+                                    ) : (
+                                    <div className="text-sm text-gray-600">Свернуто</div>
+                                    )
+                                ) : (
+                                    <div className="text-sm text-gray-600">Нет</div>
+                                )}
+                                </div>
+                            </div>
+                            </div>
+                        </article>
+                        ))}
+                    </div>
+                    </div>
+                )}
+                </div>
+            </div>
+
+            {/* footer small controls for mobile */}
+            <div className="mt-4 flex items-center justify-between text-xs text-gray-500">
+                <div>Данные генерируются ИИ. Проверьте точность перед применением.</div>
+                <div className="sm:hidden flex items-center gap-2">
+                <button onClick={copyJSON} className="px-2 py-1 border rounded-md">JSON</button>
+                <button onClick={downloadJSON} className="px-2 py-1 border rounded-md">Скачать</button>
+                </div>
+            </div>
+            </section>
+        );
+        }
+
         const App = () => {
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
@@ -11702,6 +12034,11 @@
                                                 <i className="fas fa-chart-bar"></i> <span className="sidebar-text">Мои оценки</span>
                                             </button>
                                         </li>
+                                        <li>
+                                            <button onClick={() => { setView('ai_feedback'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_feedback' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-robot"></i> <span className="sidebar-text">Dos AI</span>
+                                            </button>
+                                        </li>
                                     </>
                                 )}
                                 <li>
@@ -13866,6 +14203,15 @@
                                         );
                                         })()}
                                     </div>
+                                    )}
+                                    {view === 'ai_feedback' && (
+                                        <MonthlyFeedbackSection 
+                                            fetchFeedback={async (month) => {
+                                                const res = await fetch(`/api/ai/monthly_feedback?month=${month}`);
+                                                if (!res.ok) throw new Error(`Ошибка ${res.status}`);
+                                                return await res.json();
+                                            }}
+                                        />
                                     )}
                             </>
                         )}
