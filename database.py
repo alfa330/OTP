@@ -3962,13 +3962,11 @@ class Database:
                 """, (operator_id, shift_date, merged_start, merged_end))
                 new_shift_id = cursor.fetchone()[0]
                 result_ids.append(new_shift_id)
-                
-                # Сохраняем перерывы для объединенной смены
-                if merged_shift.get('breaks'):
-                    cursor.executemany("""
-                        INSERT INTO shift_breaks (shift_id, start_minutes, end_minutes)
-                        VALUES (%s, %s, %s)
-                    """, [(new_shift_id, b['start'], b['end']) for b in merged_shift['breaks']])
+
+                # NOTE: Previously code automatically inserted records into `shift_breaks` here.
+                # Automatic creation of shift_breaks is disabled — breaks are no longer
+                # created when saving/merging shifts. If breaks need to be added,
+                # they should be created explicitly via a dedicated API.
             
             # Возвращаем ID первой объединенной смены (или единственной)
             return result_ids[0] if result_ids else None
@@ -4114,12 +4112,10 @@ class Database:
                     new_shift_id = cursor.fetchone()[0]
                     result_ids.append(new_shift_id)
                     
-                    # Сохраняем перерывы для объединенной смены
-                    if merged_shift.get('breaks'):
-                        cursor.executemany("""
-                            INSERT INTO shift_breaks (shift_id, start_minutes, end_minutes)
-                            VALUES (%s, %s, %s)
-                        """, [(new_shift_id, b['start'], b['end']) for b in merged_shift['breaks']])
+                    # NOTE: Previously code automatically inserted records into `shift_breaks` here.
+                    # Automatic creation of shift_breaks is disabled — breaks are no longer
+                    # created when saving/merging shifts in bulk. If breaks need to be
+                    # added, use a dedicated API to create shift_breaks explicitly.
         
         return result_ids
 
