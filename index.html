@@ -3767,6 +3767,17 @@
                 Уволенные <span className="ml-2 inline-block px-2 py-0.5 text-xs rounded bg-white text-gray-800">{firedCount}</span>
                 </button>
 
+                {/* Directions filter (inline after tabs) */}
+                <div className="flex items-center gap-3">
+                <label className="text-sm font-medium text-gray-700">Направления</label>
+                <div className="mt-0 ml-2 flex gap-2 flex-wrap">
+                    <button onClick={()=>setSelectedDirections(['all'])} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes('all') ? 'bg-blue-600 text-white' : ''}`}>Все</button>
+                    {directionOptions.map(d => (
+                    <button key={d} onClick={()=>toggleDirectionSelection(d)} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes(String(d)) ? 'bg-blue-600 text-white' : ''}`}>{d}</button>
+                    ))}
+                </div>
+                </div>
+
                 {/* Tabs for metrics */}
                 <div className="ml-auto flex items-center gap-2">
                 {TABS.map(tab => (
@@ -3782,16 +3793,7 @@
                 </div>
             </div>
 
-            {/* Directions filter (moved here) */}
-            <div className="mb-3">
-                <label className="text-sm font-medium text-gray-700">Направления</label>
-                <div className="mt-2 flex gap-2 flex-wrap">
-                <button onClick={()=>setSelectedDirections(['all'])} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes('all') ? 'bg-blue-600 text-white' : ''}`}>Все</button>
-                {directionOptions.map(d => (
-                    <button key={d} onClick={()=>toggleDirectionSelection(d)} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes(String(d)) ? 'bg-blue-600 text-white' : ''}`}>{d}</button>
-                ))}
-                </div>
-            </div>
+            
 
             {/* Table */}
             <div className="overflow-auto border rounded-md">
