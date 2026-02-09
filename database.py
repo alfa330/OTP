@@ -1972,6 +1972,14 @@ class Database:
             """, (login,))
             return cursor.fetchone()
 
+    def get_user_by_name(self, name):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, telegram_id, name, role, direction_id, hire_date, supervisor_id, login
+                FROM users WHERE LOWER(name) = LOWER(%s) LIMIT 1
+            """, (name,))
+            return cursor.fetchone()
+
     def verify_password(self, user_id, password):
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -2224,7 +2232,7 @@ class Database:
             ]
 
     def update_user(self, user_id, field, value, changed_by=None):
-        allowed_fields = ['direction_id', 'supervisor_id', 'status', 'rate', 'hire_date']  # Add new fields
+        allowed_fields = ['direction_id', 'supervisor_id', 'status', 'rate', 'hire_date', 'name']  # Add name support
         if field not in allowed_fields:
             raise ValueError("Invalid field to update")
         
