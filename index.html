@@ -10806,6 +10806,19 @@
                 
                 try {
                     if (!editedUser.id) {
+                        // Local duplicate name check before creating
+                        const newName = (editedUser.name || '').trim();
+                        if (!newName) {
+                            showToast('Имя обязательно.', 'error');
+                            setIsLoading(false);
+                            return;
+                        }
+                        const exists = (users || []).some(u => u.id !== editedUser.id && (u.name || '').toLowerCase() === newName.toLowerCase());
+                        if (exists) {
+                            showToast('Пользователь с таким именем уже существует.', 'error');
+                            setIsLoading(false);
+                            return;
+                        }
                         // payload минимальный — дополни по API сервера
                         const payload = {
                             name: editedUser.name || "",
@@ -10847,6 +10860,23 @@
                         }
                         return;
                         }
+                    // If editing existing user, handle name change first (validate duplicate locally and request to server)
+                    if (editedUser.id && editedUser.name && editedUser.name.trim() !== userToEdit?.name) {
+                        const newName = editedUser.name.trim();
+                        const exists = (users || []).some(u => u.id !== editedUser.id && (u.name || '').toLowerCase() === newName.toLowerCase());
+                        if (exists) {
+                            showToast('Пользователь с таким именем уже существует.', 'error');
+                            setIsLoading(false);
+                            return;
+                        }
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'name',
+                            value: newName
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
                     if (editedUser.direction_id && editedUser.direction_id !== userToEdit.direction_id) {
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
                             user_id: editedUser.id,
