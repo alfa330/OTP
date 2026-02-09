@@ -2752,6 +2752,7 @@
 
         // NEW: filter active/fired + counters
         const [operatorsViewTab, setOperatorsViewTab] = useState('active'); // 'active' | 'fired'
+        const [selectedDirections, setSelectedDirections] = useState(['all']); // multi-select directions for filtering
 
         // cell modal
         const [selectedCell, setSelectedCell] = useState(null);
@@ -3199,6 +3200,32 @@
             return Math.max(1, max);
         }, [trainingsMap]);
 
+        // Direction options derived from loaded operators (for filtering)
+        const directionOptions = useMemo(() => {
+            const s = new Set();
+            for (const op of operators) {
+            const key = op.direction || op.direction_name || (op.direction_id ? String(op.direction_id) : 'Без направления');
+            if (key) s.add(key);
+            }
+            return Array.from(s).sort();
+        }, [operators]);
+
+        function toggleDirectionSelection(dirKey) {
+            const s = (selectedDirections || []).slice();
+            const key = String(dirKey);
+            if (s.includes('all')) {
+            if (key === 'all') return setSelectedDirections(['all']);
+            setSelectedDirections([key]);
+            return;
+            }
+            if (s.includes(key)) {
+            const idx = s.indexOf(key); s.splice(idx,1);
+            if (s.length === 0) setSelectedDirections(['all']); else setSelectedDirections(s);
+            } else {
+            setSelectedDirections(prev => prev.filter(Boolean).concat(key));
+            }
+        }
+
         function monthRelationToToday() {
             if (monthParts.year < todayY) return -1;
             if (monthParts.year > todayY) return 1;
@@ -3245,12 +3272,25 @@
             if (op.status === 'fired') firedList.push(op);
             else activeList.push(op);
             }
+
+            // start from active or fired list
+            let list = operatorsViewTab === 'active' ? activeList.slice() : firedList.slice();
+
+            // apply directions multi-filter when set (exclude 'all')
+            if (selectedDirections && selectedDirections.length > 0 && !selectedDirections.includes('all')) {
+            const dirSet = new Set(selectedDirections.map(s => String(s)));
+            list = list.filter(op => {
+                const key = op.direction || op.direction_name || (op.direction_id ? String(op.direction_id) : 'Без направления');
+                return dirSet.has(String(key));
+            });
+            }
+
             return {
-            filteredOperators: operatorsViewTab === 'active' ? activeList : firedList,
+            filteredOperators: list,
             activeCount: activeList.length,
             firedCount: firedList.length
             };
-        }, [operators, operatorsViewTab]);
+        }, [operators, operatorsViewTab, selectedDirections]);
 
         // Group operators by direction (key fallbacks: direction, direction_name, direction_id)
         const groupedByDirection = useMemo(() => {
@@ -3682,6 +3722,16 @@
                         );
                     })()}
                 </select>
+                </div>
+
+                <div className="flex items-center gap-3">
+                <label className="text-sm font-medium text-gray-700">Направления</label>
+                <div className="flex gap-2 flex-wrap max-w-[420px]">
+                    <button onClick={()=>setSelectedDirections(['all'])} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes('all') ? 'bg-blue-600 text-white' : ''}`}>Все</button>
+                    {directionOptions.map(d => (
+                    <button key={d} onClick={()=>toggleDirectionSelection(d)} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes(String(d)) ? 'bg-blue-600 text-white' : ''}`}>{d}</button>
+                    ))}
+                </div>
                 </div>
 
                 <button
