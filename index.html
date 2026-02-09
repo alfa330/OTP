@@ -1728,6 +1728,17 @@
                         {/* --- Режим редактирования: показываем остальные поля как раньше --- */}
                         {!isCreateMode && (
                             <>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Имя</label>
+                                <input
+                                ref={nameRef}
+                                type="text"
+                                value={editedUser?.name || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, name: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                                />
+                            </div>
                             {/* Hire date */}
                             <div>
                                 <label htmlFor="hireDate" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
@@ -1833,7 +1844,6 @@
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Новый логин</label>
                                 <input
-                                ref={nameRef}
                                 type="text"
                                 value={editedUser?.new_login || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, new_login: e.target.value })}

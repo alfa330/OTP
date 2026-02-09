@@ -268,6 +268,16 @@ def admin_update_user():
         value = data['value']
         if field in ['direction_id', 'supervisor_id']:
             value = int(value) if value else None
+        elif field == 'name':
+            # Validate name and prevent duplicates
+            if not value or not str(value).strip():
+                return jsonify({"error": "Name cannot be empty"}), 400
+            new_name = str(value).strip()
+            # check duplicate by name (case-insensitive)
+            existing = db.get_user_by_name(new_name)
+            if existing and int(existing[0]) != user_id:
+                return jsonify({"error": "Name already in use by another user"}), 400
+            value = new_name
         elif field == 'status':
             if value not in ['working', 'fired', 'unpaid_leave']:
                 return jsonify({"error": "Invalid status value"}), 400
