@@ -8696,19 +8696,30 @@
 
                 for (const op of operators) {
                     const dir = byDirectionName(op);
-                    // BAIGA
-                    const bgroup = determineBaigaGroup(op);
-                    newData.baiga.groups[bgroup].push({ name: op.name || op.login || `#${op.id}`, scores: Number(op.scores || 0), group: bgroup, direction: dir });
+                    const ndir = String(dir || '').toLowerCase();
+                    const isOsnova = ndir.includes('основ') || ndir.includes('основа');
+                    const isSmz = ndir.includes('смз') || ndir.includes('sмz') || ndir.includes('smz');
+                    const isChat = ndir.includes('чат') || ndir.includes('chat');
+                    const isModerator = ndir.includes('модер') || ndir.includes('moder');
 
-                    // QUALITY
-                    const qgroup = isNewbie(op) ? 'new' : 'experienced';
-                    newData.quality.groups[qgroup].push({ name: op.name || op.login || `#${op.id}`, score: Number(op.quality_score || op.quality || 0), group: qgroup, direction: dir });
+                    // BAIGA & QUALITY: only Основа and СМЗ
+                    if (isOsnova || isSmz) {
+                        const bgroup = determineBaigaGroup(op);
+                        newData.baiga.groups[bgroup].push({ name: op.name || op.login || `#${op.id}`, scores: Number(op.scores || 0), group: bgroup, direction: dir });
 
-                    // CHAT
-                    newData.chat.results.push({ name: op.name || op.login || `#${op.id}`, thanks: Number(op.thanks || 0), direction: dir });
+                        const qgroup = isNewbie(op) ? 'new' : 'experienced';
+                        newData.quality.groups[qgroup].push({ name: op.name || op.login || `#${op.id}`, score: Number(op.quality_score || op.quality || 0), group: qgroup, direction: dir });
+                    }
 
-                    // SMZ
-                    newData.smz.results.push({ name: op.name || op.login || `#${op.id}`, signatures: Number(op.signatures || 0), calls: Number(op.calls || 0), total: Number(op.signatures || 0) + Number(op.calls || 0), direction: dir });
+                    // CHAT contest: only Chat managers
+                    if (isChat) {
+                        newData.chat.results.push({ name: op.name || op.login || `#${op.id}`, thanks: Number(op.thanks || 0), direction: dir });
+                    }
+
+                    // SMZ contest: SMZ direction and Moderators
+                    if (isSmz || isModerator) {
+                        newData.smz.results.push({ name: op.name || op.login || `#${op.id}`, signatures: Number(op.signatures || 0), calls: Number(op.calls || 0), total: Number(op.signatures || 0) + Number(op.calls || 0), direction: dir });
+                    }
                 }
 
                 // sort groups
