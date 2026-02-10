@@ -8583,11 +8583,85 @@
         }
 
         // Contests management component (admin only)
-        const ContestsApp = ({ user: currentUser }) => {
+        const ContestsApp = ({ user: currentUser, operators = [], directions = [] }) => {
             const { useState, useEffect } = React;
             const [activeTab, setActiveTab] = useState('baiga');
             const isAdmin = currentUser?.role === 'admin';
             const [toasts, setToasts] = useState([]);
+
+            // initialize contestData from operators when provided
+            useEffect(() => {
+                if (!Array.isArray(operators) || operators.length === 0) return;
+
+                const byDirectionName = (op) => op.direction || op.direction_name || (op.direction_id ? String(op.direction_id) : 'Без направления');
+
+                const determineBaigaGroup = (op) => {
+                    const r = Number(op.rate);
+                    if (Number.isFinite(r)) {
+                        const pct = r > 1 ? r : r * 100;
+                        if (pct < 70) return '0.5';
+                        if (pct < 85) return '0.75';
+                        return '1';
+                    }
+                    return '1';
+                };
+
+                const isNewbie = (op) => {
+                    const hd = op.hire_date || op.hireDate || op.hire || '';
+                    if (!hd) return false;
+                    // try parse YYYY-MM-DD or DD-MM-YYYY
+                    let d = null;
+                    if (/^\d{4}-\d{2}-\d{2}$/.test(hd)) d = new Date(hd);
+                    else if (/^\d{2}-\d{2}-\d{4}$/.test(hd)) {
+                        const [dd, mm, yyyy] = hd.split('-'); d = new Date(`${yyyy}-${mm}-${dd}`);
+                    } else {
+                        const parsed = Date.parse(hd);
+                        if (!Number.isNaN(parsed)) d = new Date(parsed);
+                    }
+                    if (!d) return false;
+                    const msInMonth = 1000 * 60 * 60 * 24 * 30.44;
+                    const months = (Date.now() - d.getTime()) / msInMonth;
+                    return months < 2;
+                };
+
+                const newData = {
+                    baiga: { groups: { '0.5': [], '0.75': [], '1': [] }, top10: [], period: '3 дня', lastUpdate: new Date().toLocaleString('ru-RU') },
+                    quality: { groups: { new: [], experienced: [] }, period: 'неделя', lastUpdate: new Date().toLocaleString('ru-RU') },
+                    chat: { results: [], period: 'день', lastUpdate: new Date().toLocaleString('ru-RU') },
+                    smz: { results: [], period: 'период', lastUpdate: new Date().toLocaleString('ru-RU') }
+                };
+
+                for (const op of operators) {
+                    const dir = byDirectionName(op);
+                    // BAIGA
+                    const bgroup = determineBaigaGroup(op);
+                    newData.baiga.groups[bgroup].push({ name: op.name || op.login || `#${op.id}`, scores: Number(op.scores || 0), group: bgroup, direction: dir });
+
+                    // QUALITY
+                    const qgroup = isNewbie(op) ? 'new' : 'experienced';
+                    newData.quality.groups[qgroup].push({ name: op.name || op.login || `#${op.id}`, score: Number(op.quality_score || op.quality || 0), group: qgroup, direction: dir });
+
+                    // CHAT
+                    newData.chat.results.push({ name: op.name || op.login || `#${op.id}`, thanks: Number(op.thanks || 0), direction: dir });
+
+                    // SMZ
+                    newData.smz.results.push({ name: op.name || op.login || `#${op.id}`, signatures: Number(op.signatures || 0), calls: Number(op.calls || 0), total: Number(op.signatures || 0) + Number(op.calls || 0), direction: dir });
+                }
+
+                // sort groups
+                for (const g of ['0.5','0.75','1']) {
+                    newData.baiga.groups[g].sort((a,b) => (b.scores||0) - (a.scores||0));
+                }
+                newData.baiga.top10 = [...newData.baiga.groups['0.5'], ...newData.baiga.groups['0.75'], ...newData.baiga.groups['1']].sort((a,b) => (b.scores||0) - (a.scores||0)).slice(0,10);
+
+                newData.quality.groups.new.sort((a,b)=> (b.score||0)-(a.score||0));
+                newData.quality.groups.experienced.sort((a,b)=> (b.score||0)-(a.score||0));
+
+                newData.chat.results.sort((a,b)=> (b.thanks||0)-(a.thanks||0));
+                newData.smz.results.sort((a,b)=> (b.total||0)-(a.total||0));
+
+                setContestData(newData);
+            }, [operators]);
 
             const [contestData, setContestData] = useState({
                 baiga: { groups: { '0.5': [], '0.75': [], '1': [] }, top10: [], period: '3 дня', lastUpdate: null },
@@ -8658,9 +8732,10 @@
                     React.createElement(Medal,{position}),
                     React.createElement('div',{className:'flex-1'},
                         React.createElement('h4',{className:'font-semibold text-gray-800'}, participant.name),
-                        React.createElement('div',{className:'flex gap-4 mt-1'},
+                        React.createElement('div',{className:'flex gap-4 mt-1 items-center'},
                             React.createElement('p',{className:'text-sm text-gray-600'}, `${scoreLabel}: `, React.createElement('span',{className:'font-bold text-blue-600'}, participant.scores || participant.score || participant.thanks || participant.total)),
-                            showExtra && showExtra(participant)
+                            showExtra && showExtra(participant),
+                            participant.direction && React.createElement('span',{className:'text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full'}, participant.direction)
                         )
                     )
                 )
@@ -13348,7 +13423,7 @@
                                     )}
                                 </div>
                                 )}
-                                {( view === "contests" && (<ContestsApp user={user} />))}
+                                {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
