@@ -8695,6 +8695,8 @@
                 };
 
                 for (const op of operators) {
+                    const status = (op.status || op.state || '').toString().toLowerCase();
+                    if (status === 'fired') continue;
                     const dir = byDirectionName(op);
                     const ndir = String(dir || '').toLowerCase();
                     const isOsnova = ndir.includes('основ') || ndir.includes('основа');
