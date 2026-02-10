@@ -8583,12 +8583,10 @@
         }
 
         // Contests management component (admin only)
-        const ContestsApp = () => {
+        const ContestsApp = ({ user: currentUser }) => {
             const { useState, useEffect } = React;
             const [activeTab, setActiveTab] = useState('baiga');
-            const [isAdmin, setIsAdmin] = useState(false);
-            const [adminPassword, setAdminPassword] = useState('');
-            const [showAdminModal, setShowAdminModal] = useState(false);
+            const isAdmin = currentUser?.role === 'admin';
             const [toasts, setToasts] = useState([]);
 
             const [contestData, setContestData] = useState({
@@ -8611,13 +8609,7 @@
 
             const removeToast = (id) => setToasts(prev => prev.filter(t => t.id !== id));
 
-            const handleAdminLogin = () => {
-                if (adminPassword === 'admin123') {
-                    setIsAdmin(true);
-                    setShowAdminModal(false);
-                    addToast('Вход в админ-панель выполнен');
-                } else addToast('Неверный пароль', 'error');
-            };
+            // admin status is determined from `currentUser.role` (passed as prop)
 
             const addBaigaResult = () => {
                 if (!baigaForm.name || !baigaForm.scores) { addToast('Заполните все поля', 'error'); return; }
@@ -8718,12 +8710,11 @@
             return (
                 React.createElement('div',{className:'min-h-screen p-4 md:p-8'},
                     React.createElement('div',{className:'max-w-7xl mx-auto'},
-                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-6 mb-6'}, React.createElement('div',{className:'flex flex-col md:flex-row justify-between items-start md:items-center gap-4'}, React.createElement('div',null, React.createElement('h1',{className:'text-3xl font-bold text-gray-800 mb-2'}, React.createElement('i',{className:'fas fa-trophy text-yellow-500 mr-3'}), 'Конкурсы'), React.createElement('p',{className:'text-gray-600'}, 'Отслеживайте результаты и лидеров')), React.createElement('button',{onClick:()=>setShowAdminModal(true), className:`px-6 py-3 rounded-xl font-semibold transition-all ${isAdmin ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}, React.createElement('i',{className:`fas ${isAdmin ? 'fa-user-check' : 'fa-lock'} mr-2`} ), isAdmin ? 'Админ-режим' : 'Вход для админа'))),
+                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-6 mb-6'}, React.createElement('div',{className:'flex flex-col md:flex-row justify-between items-start md:items-center gap-4'}, React.createElement('div',null, React.createElement('h1',{className:'text-3xl font-bold text-gray-800 mb-2'}, React.createElement('i',{className:'fas fa-trophy text-yellow-500 mr-3'}), 'Конкурсы'), React.createElement('p',{className:'text-gray-600'}, 'Отслеживайте результаты и лидеров')), isAdmin ? React.createElement('div',{className:'px-6 py-3 rounded-xl font-semibold bg-green-500 text-white flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-check mr-2'}), 'Админ-режим') : null)),
                         React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-4 mb-6 overflow-x-auto scrollbar-hide'}, React.createElement('div',{className:'flex gap-2 min-w-max'}, [{ id: 'baiga', label: 'Байга ОТП', icon: 'fa-running' },{ id: 'quality', label: 'Качество', icon: 'fa-star' },{ id: 'chat', label: 'Чат', icon: 'fa-comments' },{ id: 'smz', label: 'СМЗ', icon: 'fa-chart-bar' }].map(tab=> React.createElement('button',{key:tab.id, onClick:()=>setActiveTab(tab.id), className:`px-6 py-3 rounded-xl font-semibold transition-all whitespace-nowrap ${activeTab===tab.id ? 'tab-active shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}, React.createElement('i',{className:`fas ${tab.icon} mr-2`}), tab.label)) )),
                         React.createElement('div',null, activeTab==='baiga' && renderBaiga(), activeTab==='quality' && renderQuality(), activeTab==='chat' && renderChat(), activeTab==='smz' && renderSmz())
                     ),
 
-                    showAdminModal && React.createElement('div',{className:'fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4'}, React.createElement('div',{className:'bg-white rounded-2xl p-8 max-w-md w-full shadow-2xl'}, React.createElement('h3',{className:'text-2xl font-bold text-gray-800 mb-6'}, React.createElement('i',{className:'fas fa-shield-alt text-blue-600 mr-2'}), 'Вход в админ-панель'), React.createElement('input',{type:'password', placeholder:'Введите пароль', value:adminPassword, onChange:(e)=>setAdminPassword(e.target.value), onKeyPress:(e)=>e.key==='Enter' && handleAdminLogin(), className:'w-full px-4 py-3 rounded-xl border-2 border-gray-300 focus:border-blue-500 outline-none mb-4'}), React.createElement('div',{className:'flex gap-3'}, React.createElement('button',{onClick:handleAdminLogin, className:'flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl transition-all'}, 'Войти'), React.createElement('button',{onClick:()=>{ setShowAdminModal(false); setAdminPassword(''); }, className:'flex-1 bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold py-3 rounded-xl transition-all'}, 'Отмена')), React.createElement('p',{className:'text-xs text-gray-500 mt-4 text-center'}, 'Пароль по умолчанию: admin123'))),
 
                     React.createElement(ToastContainer,{toasts:toasts, removeToast:removeToast})
                 )
@@ -13357,7 +13348,7 @@
                                     )}
                                 </div>
                                 )}
-                                {( view === "contests" && (<ContestsApp />))}
+                                {( view === "contests" && (<ContestsApp user={user} />))}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
