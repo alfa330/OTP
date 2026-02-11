@@ -8777,16 +8777,20 @@
                 const weeks = [];
                 const today = new Date();
                 const day = today.getDay(); // 0 Sun .. 6 Sat
-                let end = new Date(today);
-                end.setDate(today.getDate() - day); // last Sunday (or today if Sunday)
+                // set end to upcoming Sunday (this week's end) so current week is included
+                const end = new Date(today);
+                const offsetToSunday = (7 - day) % 7; // 0 if Sunday
+                end.setDate(today.getDate() + offsetToSunday);
+                let cursor = end;
                 for (let i = 0; i < count; i++) {
-                    const start = new Date(end);
-                    start.setDate(end.getDate() - 6);
-                    const label = `${start.getDate()} ${monthNamesShort[start.getMonth()]} - ${end.getDate()} ${monthNamesShort[end.getMonth()]}`;
-                    weeks.push({ start: start.toISOString().slice(0,10), end: end.toISOString().slice(0,10), label });
-                    // move end to day before start for previous week
-                    end = new Date(start);
-                    end.setDate(start.getDate() - 1);
+                    const start = new Date(cursor);
+                    start.setDate(cursor.getDate() - 6);
+                    const label = `${start.getDate()} ${monthNamesShort[start.getMonth()]} - ${cursor.getDate()} ${monthNamesShort[cursor.getMonth()]}`;
+                    weeks.push({ start: start.toISOString().slice(0,10), end: cursor.toISOString().slice(0,10), label });
+                    // move cursor to the previous week's end (day before start)
+                    const prev = new Date(start);
+                    prev.setDate(start.getDate() - 1);
+                    cursor = prev;
                 }
                 return weeks;
             };
