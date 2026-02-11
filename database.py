@@ -2300,6 +2300,70 @@ class Database:
             avg = result[1] or 0.0
             return count, avg
 
+    def get_average_scores_for_period(self, start_date, end_date, operator_ids: Optional[List[int]] = None):
+        """
+        Возвращает среднюю оценку и количество оценок по операторам за выбранный период.
+
+        Параметры:
+        - start_date: начало периода (datetime или строка в формате SQL-совместимом, напр. 'YYYY-MM-DD' или full timestamp)
+        - end_date: конец периода (inclusive)
+        - operator_ids: опциональный список id операторов для фильтрации (если None — по всем операторам)
+
+        Возвращает словарь:
+        {
+            "operators": { operator_id: {"count": int, "avg_score": float}, ... },
+            "overall": {"count": total_count, "avg_score": overall_avg}
+        }
+
+        Реализация основана на логике последних версий оценок (по phone_number/operator_id/month)
+        аналогично `get_week_call_stats`, но аггрегирует по операторам за период.
+        """
+        # normalize dates if strings were provided (leave as-is otherwise)
+        sd = start_date
+        ed = end_date
+        params = [sd, ed]
+
+        query = """
+            WITH latest_versions AS (
+                SELECT phone_number, operator_id, month, MAX(created_at) AS latest_date
+                FROM calls
+                WHERE is_draft = FALSE
+                  AND created_at >= %s AND created_at <= %s
+                GROUP BY phone_number, operator_id, month
+            )
+            SELECT c.operator_id, COUNT(*) AS cnt, AVG(c.score)::float AS avg_score
+            FROM calls c
+            JOIN latest_versions lv
+              ON c.phone_number = lv.phone_number
+             AND c.operator_id = lv.operator_id
+             AND c.month = lv.month
+             AND c.created_at = lv.latest_date
+        """
+
+        if operator_ids:
+            query += "\nWHERE c.operator_id = ANY(%s)"
+            params.append(operator_ids)
+
+        query += "\nGROUP BY c.operator_id"
+
+        with self._get_cursor() as cursor:
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+
+        operators = {}
+        total_count = 0
+        total_weighted = 0.0
+        for op_id, cnt, avg in rows:
+            c = int(cnt or 0)
+            a = float(avg) if avg is not None else 0.0
+            operators[int(op_id)] = {"count": c, "avg_score": round(a, 2)}
+            total_count += c
+            total_weighted += a * c
+
+        overall_avg = round((total_weighted / total_count), 2) if total_count > 0 else 0.0
+
+        return {"operators": operators, "overall": {"count": total_count, "avg_score": overall_avg}}
+
     def set_user_active(self, user_id, status):
         # допустимые статусы
         allowed_statuses = {"active", "break", "training", "inactive", "tech", "iesigning"}

@@ -8710,7 +8710,7 @@
                         newData.baiga.groups[bgroup].push({ name: op.name || op.login || `#${op.id}`, scores: Number(op.scores || 0), group: bgroup, direction: dir });
 
                         const qgroup = isNewbie(op) ? 'new' : 'experienced';
-                        newData.quality.groups[qgroup].push({ name: op.name || op.login || `#${op.id}`, score: Number(op.quality_score || op.quality || 0), group: qgroup, direction: dir });
+                        newData.quality.groups[qgroup].push({ id: op.id, name: op.name || op.login || `#${op.id}`, score: Number(op.quality_score || op.quality || 0), group: qgroup, direction: dir });
                     }
 
                     // CHAT contest: only Chat managers
@@ -8732,6 +8732,48 @@
 
                 newData.quality.groups.new.sort((a,b)=> (b.score||0)-(a.score||0));
                 newData.quality.groups.experienced.sort((a,b)=> (b.score||0)-(a.score||0));
+
+                // Fetch average scores for quality participants from server
+                const fetchQualityAverages = async (opIds) => {
+                    if (!opIds || opIds.length === 0) return;
+                    try {
+                        const sd = new Date(); sd.setDate(sd.getDate() - 7); // last week by default
+                        const ed = new Date();
+                        const start = sd.toISOString().slice(0,10);
+                        const end = ed.toISOString().slice(0,10);
+                        const params = { start, end, operator_ids: opIds.join(',') };
+                        const resp = await axios.get(`${API_BASE_URL}/api/average_scores`, { params, headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
+                        const data = resp?.data?.data?.operators || {};
+                        if (!data) return;
+                        setContestData(prev => {
+                            const updated = { ...prev };
+                            for (const grp of ['new','experienced']) {
+                                updated.quality.groups[grp] = (updated.quality.groups[grp] || []).map(p => {
+                                    const info = data[p.id];
+                                    if (info) {
+                                        return { ...p, score: info.avg_score, eval_count: info.count };
+                                    }
+                                    return p;
+                                }).sort((a,b)=> (b.score||0)-(a.score||0));
+                            }
+                            updated.quality.lastUpdate = new Date().toLocaleString('ru-RU');
+                            return updated;
+                        });
+                    } catch (err) {
+                        console.error('Error fetching quality averages', err);
+                        addToast('Не удалось загрузить средние оценки качества', 'error');
+                    }
+                };
+
+                // collect operator ids for quality participants
+                const qualityIds = [];
+                for (const g of ['new','experienced']) {
+                    for (const p of newData.quality.groups[g]) {
+                        if (p.id) qualityIds.push(p.id);
+                    }
+                }
+                // call fetch but don't block UI
+                fetchQualityAverages(Array.from(new Set(qualityIds)));
 
                 newData.chat.results.sort((a,b)=> (b.thanks||0)-(a.thanks||0));
                 newData.smz.results.sort((a,b)=> (b.total||0)-(a.total||0));
