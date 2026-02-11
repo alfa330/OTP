@@ -8733,37 +8733,7 @@
                 newData.quality.groups.new.sort((a,b)=> (b.score||0)-(a.score||0));
                 newData.quality.groups.experienced.sort((a,b)=> (b.score||0)-(a.score||0));
 
-                // Fetch average scores for quality participants from server
-                const fetchQualityAverages = async (opIds) => {
-                    if (!opIds || opIds.length === 0) return;
-                    try {
-                        const sd = new Date(); sd.setDate(sd.getDate() - 7); // last week by default
-                        const ed = new Date();
-                        const start = sd.toISOString().slice(0,10);
-                        const end = ed.toISOString().slice(0,10);
-                        const params = { start, end, operator_ids: opIds.join(',') };
-                        const resp = await axios.get(`${API_BASE_URL}/api/average_scores`, { params, headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
-                        const data = resp?.data?.data?.operators || {};
-                        if (!data) return;
-                        setContestData(prev => {
-                            const updated = { ...prev };
-                            for (const grp of ['new','experienced']) {
-                                updated.quality.groups[grp] = (updated.quality.groups[grp] || []).map(p => {
-                                    const info = data[p.id];
-                                    if (info) {
-                                        return { ...p, score: info.avg_score, eval_count: info.count };
-                                    }
-                                    return p;
-                                }).sort((a,b)=> (b.score||0)-(a.score||0));
-                            }
-                            updated.quality.lastUpdate = new Date().toLocaleString('ru-RU');
-                            return updated;
-                        });
-                    } catch (err) {
-                        console.error('Error fetching quality averages', err);
-                        addToast('Не удалось загрузить средние оценки качества', 'error');
-                    }
-                };
+                // Fetch average scores for quality participants from server (uses shared fetchQualityAveragesForPeriod)
 
                 // collect operator ids for quality participants
                 const qualityIds = [];
@@ -8772,8 +8742,8 @@
                         if (p.id) qualityIds.push(p.id);
                     }
                 }
-                // call fetch but don't block UI
-                fetchQualityAverages(Array.from(new Set(qualityIds)));
+                // call fetch but don't block UI (use shared fetch function)
+                fetchQualityAveragesForPeriod(Array.from(new Set(qualityIds)));
 
                 newData.chat.results.sort((a,b)=> (b.thanks||0)-(a.thanks||0));
                 newData.smz.results.sort((a,b)=> (b.total||0)-(a.total||0));
@@ -8800,6 +8770,68 @@
             };
 
             const removeToast = (id) => setToasts(prev => prev.filter(t => t.id !== id));
+
+            // helper: recent week ranges and selection for Quality
+            const monthNamesShort = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
+            const getRecentWeeks = (count = 12) => {
+                const weeks = [];
+                const today = new Date();
+                const day = today.getDay(); // 0 Sun .. 6 Sat
+                let end = new Date(today);
+                end.setDate(today.getDate() - day); // last Sunday (or today if Sunday)
+                for (let i = 0; i < count; i++) {
+                    const start = new Date(end);
+                    start.setDate(end.getDate() - 6);
+                    const label = `${start.getDate()} ${monthNamesShort[start.getMonth()]} - ${end.getDate()} ${monthNamesShort[end.getMonth()]}`;
+                    weeks.push({ start: start.toISOString().slice(0,10), end: end.toISOString().slice(0,10), label });
+                    // move end to day before start for previous week
+                    end = new Date(start);
+                    end.setDate(start.getDate() - 1);
+                }
+                return weeks;
+            };
+
+            const [qualityWeekOptions, setQualityWeekOptions] = useState([]);
+            const [selectedQualityWeek, setSelectedQualityWeek] = useState(0);
+
+            useEffect(()=>{
+                setQualityWeekOptions(getRecentWeeks(12));
+                setSelectedQualityWeek(0);
+            }, []);
+
+            // Fetch average scores for quality participants for a specific period
+            const fetchQualityAveragesForPeriod = async (opIds, start=null, end=null) => {
+                if (!opIds || opIds.length === 0) return;
+                try {
+                    if (!start || !end) {
+                        const sd = new Date(); sd.setDate(sd.getDate() - 7);
+                        const ed = new Date();
+                        start = sd.toISOString().slice(0,10);
+                        end = ed.toISOString().slice(0,10);
+                    }
+                    const params = { start, end, operator_ids: opIds.join(',') };
+                    const resp = await axios.get(`${API_BASE_URL}/api/average_scores`, { params, headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
+                    const data = resp?.data?.data?.operators || {};
+                    if (!data) return;
+                    setContestData(prev => {
+                        const updated = { ...prev };
+                        for (const grp of ['new','experienced']) {
+                            updated.quality.groups[grp] = (updated.quality.groups[grp] || []).map(p => {
+                                const info = data[p.id];
+                                if (info) {
+                                    return { ...p, score: info.avg_score, eval_count: info.count };
+                                }
+                                return p;
+                            }).sort((a,b)=> (b.score||0)-(a.score||0));
+                        }
+                        updated.quality.lastUpdate = new Date().toLocaleString('ru-RU');
+                        return updated;
+                    });
+                } catch (err) {
+                    console.error('Error fetching quality averages', err);
+                    addToast('Не удалось загрузить средние оценки качества', 'error');
+                }
+            };
 
             // admin status is determined from `currentUser.role` (passed as prop)
 
@@ -8861,15 +8893,6 @@
 
             const renderBaiga = () => (
                 React.createElement('div',{className:'space-y-6'},
-                    isAdmin && React.createElement('div',{className:'bg-blue-50 rounded-2xl p-6 border-2 border-blue-200'},
-                        React.createElement('h3',{className:'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-shield text-blue-600'}), 'Добавить результат'),
-                        React.createElement('div',{className:'grid grid-cols-1 md:grid-cols-4 gap-4'},
-                            React.createElement('input',{type:'text', placeholder:'Имя участника', value:baigaForm.name, onChange:(e)=>setBaigaForm({...baigaForm, name:e.target.value}), className:'px-4 py-3 rounded-xl border-2 border-gray-300 focus:border-blue-500 outline-none'}),
-                            React.createElement('select',{value:baigaForm.group, onChange:(e)=>setBaigaForm({...baigaForm, group:e.target.value}), className:'px-4 py-3 rounded-xl border-2 border-gray-300 focus:border-blue-500 outline-none'}, React.createElement('option',{value:'0.5'}, 'Группа 0.5'), React.createElement('option',{value:'0.75'}, 'Группа 0.75'), React.createElement('option',{value:'1'}, 'Группа 1.0')),
-                            React.createElement('input',{type:'number', placeholder:'Количество оценок 5', value:baigaForm.scores, onChange:(e)=>setBaigaForm({...baigaForm, scores:e.target.value}), className:'px-4 py-3 rounded-xl border-2 border-gray-300 focus:border-blue-500 outline-none'}),
-                            React.createElement('button',{onClick:addBaigaResult, className:'bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl transition-all active:scale-95'}, React.createElement('i',{className:'fas fa-plus mr-2'}), 'Добавить')
-                        )
-                    ),
                     React.createElement('div',{className:'bg-gradient-to-br from-blue-500 to-blue-700 rounded-2xl p-6 text-white'}, React.createElement('h3',{className:'text-2xl font-bold mb-2'}, 'Байга ОТП'), React.createElement('p',{className:'opacity-90'}, `Направление: Основа • Период: ${contestData.baiga.period}`), contestData.baiga.lastUpdate && React.createElement('p',{className:'text-sm opacity-75 mt-2'}, `Последнее обновление: ${contestData.baiga.lastUpdate}`)),
                     React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-star text-yellow-500'}), 'Топ-10 общий рейтинг'), React.createElement('div',{className:'space-y-3'}, contestData.baiga.top10.length>0 ? contestData.baiga.top10.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Оценки', showExtra:(p)=> React.createElement('span',{className:'text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full'}, `Группа ${p.group}`) })) : React.createElement('p',{className:'text-center text-gray-500 py-8'}, 'Нет данных'))),
                     React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-3 gap-6'}, ['0.5','0.75','1'].map(group=> React.createElement('div',{key:group, className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-users text-blue-600'}), `Группа ${group}`), React.createElement('div',{className:'space-y-3'}, contestData.baiga.groups[group].length>0 ? contestData.baiga.groups[group].map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Оценки'})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных')))))
@@ -8878,15 +8901,25 @@
 
             const renderQuality = () => (
                 React.createElement('div',{className:'space-y-6'},
-                    isAdmin && React.createElement('div',{className:'bg-green-50 rounded-2xl p-6 border-2 border-green-200'}, React.createElement('h3',{className:'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-shield text-green-600'}), 'Добавить результат'), React.createElement('div',{className:'grid grid-cols-1 md:grid-cols-4 gap-4'}, React.createElement('input',{type:'text', placeholder:'Имя участника', value:qualityForm.name, onChange:(e)=>setQualityForm({...qualityForm, name:e.target.value}), className:'px-4 py-3 rounded-xl border-2 border-gray-300 focus:border-green-500 outline-none'}), React.createElement('select',{value:qualityForm.group, onChange:(e)=>setQualityForm({...qualityForm, group:e.target.value}), className:'px-4 py-3 rounded-xl border-2 border-gray-300 focus:border-green-500 outline-none'}, React.createElement('option',{value:'new'}, 'До 2 месяцев'), React.createElement('option',{value:'experienced'}, 'От 2 месяцев')), React.createElement('input',{type:'number', step:'0.01', placeholder:'Оценка качества', value:qualityForm.score, onChange:(e)=>setQualityForm({...qualityForm, score:e.target.value}), className:'px-4 py-3 rounded-xl border-2 border-gray-300 focus:border-green-500 outline-none'}), React.createElement('button',{onClick:addQualityResult, className:'bg-green-600 hover:bg-green-700 text-white font-semibold py-3 rounded-xl transition-all active:scale-95'}, React.createElement('i',{className:'fas fa-plus mr-2'}), 'Добавить'))),
-                    React.createElement('div',{className:'bg-gradient-to-br from-green-500 to-green-700 rounded-2xl p-6 text-white'}, React.createElement('h3',{className:'text-2xl font-bold mb-2'}, 'Качество'), React.createElement('p',{className:'opacity-90'}, `Направление: Основа • Период: ${contestData.quality.period}`), contestData.quality.lastUpdate && React.createElement('p',{className:'text-sm opacity-75 mt-2'}, `Последнее обновление: ${contestData.quality.lastUpdate}`)),
-                    React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-2 gap-6'}, React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-seedling text-green-600'}), 'Новички (до 2 месяцев)'), React.createElement('div',{className:'space-y-3'}, contestData.quality.groups.new.length>0 ? contestData.quality.groups.new.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Качество'})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных'))), React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-graduate text-green-600'}), 'Опытные (от 2 месяцев)'), React.createElement('div',{className:'space-y-3'}, contestData.quality.groups.experienced.length>0 ? contestData.quality.groups.experienced.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Качество'})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных'))))
+                    React.createElement('div',{className:'bg-gradient-to-br from-green-500 to-green-700 rounded-2xl p-6 text-white'}, React.createElement('div',{className:'flex items-center justify-between'}, React.createElement('h3',{className:'text-2xl font-bold mb-2'}, 'Качество'), React.createElement('div',{className:'flex items-center gap-3'},
+                            React.createElement('label',{className:'text-sm opacity-90 mr-2'}, 'Период:'),
+                            React.createElement('select',{value:selectedQualityWeek, onChange:(e)=>{
+                                const idx = Number(e.target.value); setSelectedQualityWeek(idx);
+                                const opt = qualityWeekOptions[idx];
+                                const qualityIds = [];
+                                for (const g of ['new','experienced']) { for (const p of (contestData.quality.groups[g]||[])) { if (p.id) qualityIds.push(p.id); } }
+                                if (opt && qualityIds.length>0) fetchQualityAveragesForPeriod(Array.from(new Set(qualityIds)), opt.start, opt.end);
+                            }, className:'px-3 py-2 rounded-xl border-2 border-green-300 bg-white text-sm'},
+                                (qualityWeekOptions || []).map((w,i)=> React.createElement('option',{key:i, value:i}, w.label))
+                            )
+                        )
+                    ), React.createElement('p',{className:'opacity-90'}, `Направление: Основа • Период: ${contestData.quality.period}`), contestData.quality.lastUpdate && React.createElement('p',{className:'text-sm opacity-75 mt-2'}, `Последнее обновление: ${contestData.quality.lastUpdate}`)),
+                        React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-2 gap-6'}, React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-seedling text-green-600'}), 'Новички (до 2 месяцев)'), React.createElement('div',{className:'space-y-3'}, contestData.quality.groups.new.length>0 ? contestData.quality.groups.new.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Качество', showExtra:(p)=> React.createElement('span',{className:'text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full'}, `Оценок: ${p.eval_count || 0}`)})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных'))), React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-graduate text-green-600'}), 'Опытные (от 2 месяцев)'), React.createElement('div',{className:'space-y-3'}, contestData.quality.groups.experienced.length>0 ? contestData.quality.groups.experienced.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Качество', showExtra:(p)=> React.createElement('span',{className:'text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full'}, `Оценок: ${p.eval_count || 0}`)})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных'))))
                 )
             );
 
             const renderChat = () => (
                 React.createElement('div',{className:'space-y-6'},
-                    isAdmin && React.createElement('div',{className:'bg-purple-50 rounded-2xl p-6 border-2 border-purple-200'}, React.createElement('h3',{className:'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-shield text-purple-600'}), 'Добавить результат'), React.createElement('div',{className:'grid grid-cols-1 md:grid-cols-3 gap-4'}, React.createElement('input',{type:'text', placeholder:'Имя чат-менеджера', value:chatForm.name, onChange:(e)=>setChatForm({...chatForm, name:e.target.value}), className:'px-4 py-3 rounded-xl border-2 border-gray-300 focus:border-purple-500 outline-none'}), React.createElement('input',{type:'number', placeholder:'Количество благодарностей', value:chatForm.thanks, onChange:(e)=>setChatForm({...chatForm, thanks:e.target.value}), className:'px-4 py-3 rounded-xl border-2 border-gray-300 focus:border-purple-500 outline-none'}), React.createElement('button',{onClick:addChatResult, className:'bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 rounded-xl transition-all active:scale-95'}, React.createElement('i',{className:'fas fa-plus mr-2'}), 'Добавить'))),
                     React.createElement('div',{className:'bg-gradient-to-br from-purple-500 to-purple-700 rounded-2xl p-6 text-white'}, React.createElement('h3',{className:'text-2xl font-bold mb-2'}, 'Чат-менеджеры'), React.createElement('p',{className:'opacity-90'}, `Направление: Чат • Период: ${contestData.chat.period}`), contestData.chat.lastUpdate && React.createElement('p',{className:'text-sm opacity-75 mt-2'}, `Последнее обновление: ${contestData.chat.lastUpdate}`)),
                     React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-heart text-purple-600'}), 'Рейтинг по благодарностям'), React.createElement('div',{className:'space-y-3'}, contestData.chat.results.length>0 ? contestData.chat.results.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Благодарности'})) : React.createElement('p',{className:'text-center text-gray-500 py-8'}, 'Нет данных')))
                 )
@@ -8894,7 +8927,6 @@
 
             const renderSmz = () => (
                 React.createElement('div',{className:'space-y-6'},
-                    isAdmin && React.createElement('div',{className:'bg-orange-50 rounded-2xl p-6 border-2 border-orange-200'}, React.createElement('h3',{className:'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-shield text-orange-600'}), 'Добавить результат'), React.createElement('div',{className:'grid grid-cols-1 md:grid-cols-4 gap-4'}, React.createElement('input',{type:'text', placeholder:'Имя сотрудника', value:smzForm.name, onChange:(e)=>setSmzForm({...smzForm, name:e.target.value}), className:'px-4 py-3 rounded-xl border-2 border-gray-300 focus:border-orange-500 outline-none'}), React.createElement('input',{type:'number', placeholder:'Подписания', value:smzForm.signatures, onChange:(e)=>setSmzForm({...smzForm, signatures:e.target.value}), className:'px-4 py-3 rounded-xl border-2 border-gray-300 focus:border-orange-500 outline-none'}), React.createElement('input',{type:'number', placeholder:'Обработки базы', value:smzForm.calls, onChange:(e)=>setSmzForm({...smzForm, calls:e.target.value}), className:'px-4 py-3 rounded-xl border-2 border-gray-300 focus:border-orange-500 outline-none'}), React.createElement('button',{onClick:addSmzResult, className:'bg-orange-600 hover:bg-orange-700 text-white font-semibold py-3 rounded-xl transition-all active:scale-95'}, React.createElement('i',{className:'fas fa-plus mr-2'}), 'Добавить'))),
                     React.createElement('div',{className:'bg-gradient-to-br from-orange-500 to-orange-700 rounded-2xl p-6 text-white'}, React.createElement('h3',{className:'text-2xl font-bold mb-2'}, 'СМЗ'), React.createElement('p',{className:'opacity-90'}, `Направление: СМЗ • Период: ${contestData.smz.period}`), contestData.smz.lastUpdate && React.createElement('p',{className:'text-sm opacity-75 mt-2'}, `Последнее обновление: ${contestData.smz.lastUpdate}`)),
                     React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-chart-line text-orange-600'}), 'Рейтинг по результатам'), React.createElement('div',{className:'space-y-3'}, contestData.smz.results.length>0 ? contestData.smz.results.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Всего', showExtra:(p)=> React.createElement(React.Fragment,null, React.createElement('span',{className:'text-xs text-gray-600'}, `Подписания: ${p.signatures}`), React.createElement('span',{className:'text-xs text-gray-600'}, `Обработки: ${p.calls}`)) })) : React.createElement('p',{className:'text-center text-gray-500 py-8'}, 'Нет данных')))
                 )
