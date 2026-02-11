@@ -220,6 +220,54 @@ def get_user_profile():
         logging.error(f"Error fetching user profile for user_id {user_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
+
+@app.route('/api/average_scores', methods=['GET'])
+@require_api_key
+def api_average_scores():
+    """Endpoint: /api/average_scores?start=YYYY-MM-DD&end=YYYY-MM-DD&operator_ids=1,2,3
+
+    Returns per-operator average score and overall average for the period.
+    """
+    try:
+        start = request.args.get('start')
+        end = request.args.get('end')
+        op_ids_raw = request.args.get('operator_ids')
+
+        if not start or not end:
+            return jsonify({"error": "Missing required parameters 'start' and 'end'"}), 400
+
+        # parse optional operator ids
+        operator_ids = None
+        if op_ids_raw:
+            try:
+                operator_ids = [int(x) for x in re.split(r'\s*,\s*', op_ids_raw.strip()) if x]
+            except Exception:
+                return jsonify({"error": "Invalid operator_ids format; expected comma-separated integers"}), 400
+
+        # normalize dates: accept YYYY-MM-DD or full ISO timestamps
+        def _parse_date_param(s, end_of_day=False):
+            try:
+                if re.match(r'^\d{4}-\d{2}-\d{2}$', s):
+                    dt = datetime.strptime(s, '%Y-%m-%d')
+                    if end_of_day:
+                        return datetime.combine(dt.date(), datetime.max.time())
+                    return datetime.combine(dt.date(), datetime.min.time())
+                # try ISO parse
+                return datetime.fromisoformat(s)
+            except Exception:
+                return None
+
+        sd = _parse_date_param(start, end_of_day=False)
+        ed = _parse_date_param(end, end_of_day=True)
+        if not sd or not ed:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD or ISO format."}), 400
+
+        result = db.get_average_scores_for_period(sd, ed, operator_ids)
+        return jsonify({"status": "success", "data": result}), 200
+    except Exception as e:
+        logging.exception("Error in /api/average_scores: %s", e)
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/admin/users', methods=['GET'])
 @require_api_key
 def get_admin_users():
