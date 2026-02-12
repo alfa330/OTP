@@ -8657,7 +8657,7 @@
             
             const getRecentPeriods = (count = 12, days = 3) => {
                 const periods = [];
-                const today = new Date('2026-02-12'); // Current date
+                const today = new Date('2026-02-11'); // Current date
                 for (let i = 0; i < count; i++) {
                     const end = new Date(today);
                     end.setDate(today.getDate() - (i * days));
@@ -8890,18 +8890,52 @@
                 }
             };
 
-            // Handle Excel file upload for baiga day data
+            // Parse CSV and count FIO occurrences in column F (index 5)
+            const parseCSVAndCountScores = (csvText) => {
+                const lines = csvText.split('\n').filter(line => line.trim());
+                const scoreCounts = {};
+                
+                // Skip header row (index 0), start from 1
+                for (let i = 1; i < lines.length; i++) {
+                    const line = lines[i];
+                    // Parse CSV line considering quoted fields
+                    const fields = [];
+                    let current = '';
+                    let inQuotes = false;
+                    
+                    for (let j = 0; j < line.length; j++) {
+                        const char = line[j];
+                        if (char === '"') {
+                            inQuotes = !inQuotes;
+                        } else if (char === ',' && !inQuotes) {
+                            fields.push(current.trim());
+                            current = '';
+                        } else {
+                            current += char;
+                        }
+                    }
+                    fields.push(current.trim()); // Add last field
+                    
+                    // Column F is index 5 (A=0, B=1, C=2, D=3, E=4, F=5)
+                    if (fields.length > 5) {
+                        const fio = fields[5].replace(/"/g, '').trim();
+                        if (fio) {
+                            scoreCounts[fio] = (scoreCounts[fio] || 0) + 1;
+                        }
+                    }
+                }
+                
+                return scoreCounts;
+            };
+
+            // Handle CSV file upload for baiga day data
             const handleBaigaDayUpload = async (dayIndex, file) => {
                 if (!file) return;
                 
                 try {
-                    const data = await file.arrayBuffer();
-                    const workbook = XLSX.read(data, { type: 'array' });
-                    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-                    const jsonData = XLSX.utils.sheet_to_json(firstSheet);
+                    const text = await file.text();
+                    const scoreCounts = parseCSVAndCountScores(text);
                     
-                    // Expected format: name column and score column
-                    // Adjust column names based on your Excel structure
                     const dayKey = `day${dayIndex + 1}`;
                     
                     setContestData(prev => {
@@ -8910,19 +8944,31 @@
                         // Update all groups
                         for (const group of ['0.5', '0.75', '1']) {
                             updated.baiga.groups[group] = updated.baiga.groups[group].map(participant => {
-                                // Find matching entry in Excel data (case-insensitive name match)
-                                const excelEntry = jsonData.find(row => {
-                                    const excelName = (row.name || row['Имя'] || row['Name'] || '').toString().toLowerCase().trim();
-                                    const participantName = participant.name.toLowerCase().trim();
-                                    return excelName === participantName;
-                                });
+                                // Try to match participant name with FIO from CSV
+                                const participantName = participant.name.toLowerCase().trim();
                                 
-                                if (excelEntry) {
-                                    const score = Number(excelEntry.score || excelEntry['Оценки'] || excelEntry['Score'] || 0);
+                                // Find matching entry in scoreCounts (try exact match and partial match)
+                                let matchedScore = 0;
+                                for (const [fio, count] of Object.entries(scoreCounts)) {
+                                    const fioLower = fio.toLowerCase().trim();
+                                    // Exact match or if participant name is contained in FIO or vice versa
+                                    if (fioLower === participantName || 
+                                        fioLower.includes(participantName) || 
+                                        participantName.includes(fioLower)) {
+                                        matchedScore = count;
+                                        break;
+                                    }
+                                }
+                                
+                                if (matchedScore > 0) {
+                                    // Calculate new total scores
+                                    const currentDayScore = participant[dayKey] || 0;
+                                    const newTotalScores = (participant.scores || 0) - currentDayScore + matchedScore;
+                                    
                                     return {
                                         ...participant,
-                                        [dayKey]: score,
-                                        scores: (participant.day1 || 0) + (participant.day2 || 0) + (participant.day3 || 0) + (dayKey === 'day1' ? score : 0) + (dayKey === 'day2' ? score : 0) + (dayKey === 'day3' ? score : 0) - (participant[dayKey] || 0)
+                                        [dayKey]: matchedScore,
+                                        scores: newTotalScores
                                     };
                                 }
                                 return participant;
@@ -8937,9 +8983,9 @@
                         return updated;
                     });
                     
-                    addToast(`Данные за ${contestData.baiga.periodDays[dayIndex]?.label} загружены успешно`);
+                    addToast(`Данные за ${contestData.baiga.periodDays[dayIndex]?.label} загружены успешно. Найдено оценок: ${Object.keys(scoreCounts).length} операторов.`);
                 } catch (err) {
-                    console.error('Error parsing Excel file:', err);
+                    console.error('Error parsing CSV file:', err);
                     addToast('Ошибка при загрузке файла', 'error');
                 }
             };
@@ -9021,7 +9067,7 @@
                                         onClick: isAdmin ? () => {
                                             const input = document.createElement('input');
                                             input.type = 'file';
-                                            input.accept = '.xlsx,.xls';
+                                            input.accept = '.csv';
                                             input.onchange = (e) => handleBaigaDayUpload(idx, e.target.files[0]);
                                             input.click();
                                         } : null
@@ -9029,7 +9075,7 @@
                                         day.label,
                                         isAdmin && React.createElement('div', {
                                             className: 'absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 bg-blue-600 bg-opacity-90 text-white text-xs transition-opacity'
-                                        }, React.createElement('i', { className: 'fas fa-upload mr-1' }), 'Загрузить')
+                                        }, React.createElement('i', { className: 'fas fa-upload mr-1' }), 'Загрузить CSV')
                                     )
                                 ),
                                 React.createElement('th', { className: 'px-4 py-3 text-center text-sm font-semibold text-gray-700 bg-yellow-50 border-2 border-yellow-400' }, 'Итого')
