@@ -8652,6 +8652,44 @@
             const isAdmin = currentUser?.role === 'admin';
             const [toasts, setToasts] = useState([]);
 
+            // Baiga period management
+            const monthNamesShort = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
+            
+            const getRecentPeriods = (count = 12, days = 3) => {
+                const periods = [];
+                const today = new Date('2026-02-12'); // Current date
+                for (let i = 0; i < count; i++) {
+                    const end = new Date(today);
+                    end.setDate(today.getDate() - (i * days));
+                    const start = new Date(end);
+                    start.setDate(end.getDate() - (days - 1));
+                    
+                    const label = `${start.getDate()} ${monthNamesShort[start.getMonth()]} - ${end.getDate()} ${monthNamesShort[end.getMonth()]} (${days} дня)`;
+                    periods.push({ 
+                        start: start.toISOString().slice(0,10), 
+                        end: end.toISOString().slice(0,10), 
+                        label,
+                        days: Array.from({length: days}, (_, idx) => {
+                            const d = new Date(start);
+                            d.setDate(start.getDate() + idx);
+                            return {
+                                date: d.toISOString().slice(0,10),
+                                label: `${d.getDate()} ${monthNamesShort[d.getMonth()]}`
+                            };
+                        })
+                    });
+                }
+                return periods;
+            };
+
+            const [baigaPeriodOptions, setBaigaPeriodOptions] = useState([]);
+            const [selectedBaigaPeriod, setSelectedBaigaPeriod] = useState(0);
+
+            useEffect(() => {
+                setBaigaPeriodOptions(getRecentPeriods(12, 3));
+                setSelectedBaigaPeriod(0);
+            }, []);
+
             // initialize contestData from operators when provided
             useEffect(() => {
                 if (!Array.isArray(operators) || operators.length === 0) return;
@@ -8672,7 +8710,6 @@
                 const isNewbie = (op) => {
                     const hd = op.hire_date || op.hireDate || op.hire || '';
                     if (!hd) return false;
-                    // try parse YYYY-MM-DD or DD-MM-YYYY
                     let d = null;
                     if (/^\d{4}-\d{2}-\d{2}$/.test(hd)) d = new Date(hd);
                     else if (/^\d{2}-\d{2}-\d{4}$/.test(hd)) {
@@ -8688,7 +8725,14 @@
                 };
 
                 const newData = {
-                    baiga: { groups: { '0.5': [], '0.75': [], '1': [] }, top10: [], period: '3 дня', lastUpdate: new Date().toLocaleString('ru-RU') },
+                    baiga: { 
+                        groups: { '0.5': [], '0.75': [], '1': [] }, 
+                        top10: [], 
+                        period: '3 дня', 
+                        periodStart: '2026-02-10',
+                        periodDays: [],
+                        lastUpdate: new Date().toLocaleString('ru-RU') 
+                    },
                     quality: { groups: { new: [], experienced: [] }, period: 'неделя', lastUpdate: new Date().toLocaleString('ru-RU') },
                     chat: { results: [], period: 'день', lastUpdate: new Date().toLocaleString('ru-RU') },
                     smz: { results: [], period: 'период', lastUpdate: new Date().toLocaleString('ru-RU') }
@@ -8704,55 +8748,69 @@
                     const isChat = ndir.includes('чат') || ndir.includes('chat');
                     const isModerator = ndir.includes('модер') || ndir.includes('moder');
 
-                    // BAIGA & QUALITY: only Основа and СМЗ
                     if (isOsnova || isSmz) {
                         const bgroup = determineBaigaGroup(op);
-                        newData.baiga.groups[bgroup].push({ name: op.name || op.login || `#${op.id}`, scores: Number(op.scores || 0), group: bgroup, direction: dir });
+                        newData.baiga.groups[bgroup].push({ 
+                            name: op.name || op.login || `#${op.id}`, 
+                            scores: Number(op.scores || 0), 
+                            group: bgroup, 
+                            direction: dir,
+                            day1: 0,
+                            day2: 0,
+                            day3: 0
+                        });
 
                         const qgroup = isNewbie(op) ? 'new' : 'experienced';
                         newData.quality.groups[qgroup].push({ id: op.id, name: op.name || op.login || `#${op.id}`, score: Number(op.quality_score || op.quality || 0), group: qgroup, direction: dir });
                     }
 
-                    // CHAT contest: only Chat managers
                     if (isChat) {
                         newData.chat.results.push({ name: op.name || op.login || `#${op.id}`, thanks: Number(op.thanks || 0), direction: dir });
                     }
 
-                    // SMZ contest: SMZ direction and Moderators
                     if (isSmz || isModerator) {
                         newData.smz.results.push({ name: op.name || op.login || `#${op.id}`, signatures: Number(op.signatures || 0), calls: Number(op.calls || 0), total: Number(op.signatures || 0) + Number(op.calls || 0), direction: dir });
                     }
                 }
 
-                // sort groups
                 for (const g of ['0.5','0.75','1']) {
                     newData.baiga.groups[g].sort((a,b) => (b.scores||0) - (a.scores||0));
                 }
-                newData.baiga.top10 = [...newData.baiga.groups['0.5'], ...newData.baiga.groups['0.75'], ...newData.baiga.groups['1']].sort((a,b) => (b.scores||0) - (a.scores||0)).slice(0,10);
+                
+                const allBaigaEntries = [...newData.baiga.groups['0.5'], ...newData.baiga.groups['0.75'], ...newData.baiga.groups['1']];
+                newData.baiga.top10 = allBaigaEntries.sort((a,b) => (b.scores||0) - (a.scores||0)).slice(0,10);
+
+                // Set initial period days
+                if (baigaPeriodOptions.length > 0) {
+                    newData.baiga.periodDays = baigaPeriodOptions[0].days;
+                }
 
                 newData.quality.groups.new.sort((a,b)=> (b.score||0)-(a.score||0));
                 newData.quality.groups.experienced.sort((a,b)=> (b.score||0)-(a.score||0));
 
-                // Fetch average scores for quality participants from server (uses shared fetchQualityAveragesForPeriod)
-
-                // collect operator ids for quality participants
                 const qualityIds = [];
                 for (const g of ['new','experienced']) {
                     for (const p of newData.quality.groups[g]) {
                         if (p.id) qualityIds.push(p.id);
                     }
                 }
-                // call fetch but don't block UI (use shared fetch function)
                 fetchQualityAveragesForPeriod(Array.from(new Set(qualityIds)));
 
                 newData.chat.results.sort((a,b)=> (b.thanks||0)-(a.thanks||0));
                 newData.smz.results.sort((a,b)=> (b.total||0)-(a.total||0));
 
                 setContestData(newData);
-            }, [operators]);
+            }, [operators, baigaPeriodOptions]);
 
             const [contestData, setContestData] = useState({
-                baiga: { groups: { '0.5': [], '0.75': [], '1': [] }, top10: [], period: '3 дня', lastUpdate: null },
+                baiga: { 
+                    groups: { '0.5': [], '0.75': [], '1': [] }, 
+                    top10: [], 
+                    period: '3 дня',
+                    periodStart: '2026-02-10',
+                    periodDays: [],
+                    lastUpdate: null 
+                },
                 quality: { groups: { new: [], experienced: [] }, period: 'неделя', lastUpdate: null },
                 chat: { results: [], period: 'день', lastUpdate: null },
                 smz: { results: [], period: 'период', lastUpdate: null }
@@ -8763,9 +8821,6 @@
             const [chatForm, setChatForm] = useState({ name: '', thanks: '' });
             const [smzForm, setSmzForm] = useState({ name: '', signatures: '', calls: '' });
 
-            // Baiga 3-day window start (day 1 = 2026-02-10 by default)
-            const [baigaStartDate, setBaigaStartDate] = useState('2026-02-10');
-
             const addToast = (message, type = 'success') => {
                 const id = Date.now();
                 setToasts(prev => [...prev, { id, message, type }]);
@@ -8774,15 +8829,15 @@
 
             const removeToast = (id) => setToasts(prev => prev.filter(t => t.id !== id));
 
-            // helper: recent week ranges and selection for Quality
-            const monthNamesShort = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
+            const [qualityWeekOptions, setQualityWeekOptions] = useState([]);
+            const [selectedQualityWeek, setSelectedQualityWeek] = useState(0);
+
             const getRecentWeeks = (count = 12) => {
                 const weeks = [];
                 const today = new Date();
-                const day = today.getDay(); // 0 Sun .. 6 Sat
-                // set end to upcoming Sunday (this week's end) so current week is included
+                const day = today.getDay();
                 const end = new Date(today);
-                const offsetToSunday = (7 - day) % 7; // 0 if Sunday
+                const offsetToSunday = (7 - day) % 7;
                 end.setDate(today.getDate() + offsetToSunday);
                 let cursor = end;
                 for (let i = 0; i < count; i++) {
@@ -8790,7 +8845,6 @@
                     start.setDate(cursor.getDate() - 6);
                     const label = `${start.getDate()} ${monthNamesShort[start.getMonth()]} - ${cursor.getDate()} ${monthNamesShort[cursor.getMonth()]}`;
                     weeks.push({ start: start.toISOString().slice(0,10), end: cursor.toISOString().slice(0,10), label });
-                    // move cursor to the previous week's end (day before start)
                     const prev = new Date(start);
                     prev.setDate(start.getDate() - 1);
                     cursor = prev;
@@ -8798,15 +8852,11 @@
                 return weeks;
             };
 
-            const [qualityWeekOptions, setQualityWeekOptions] = useState([]);
-            const [selectedQualityWeek, setSelectedQualityWeek] = useState(0);
-
             useEffect(()=>{
                 setQualityWeekOptions(getRecentWeeks(12));
                 setSelectedQualityWeek(0);
             }, []);
 
-            // Fetch average scores for quality participants for a specific period
             const fetchQualityAveragesForPeriod = async (opIds, start=null, end=null) => {
                 if (!opIds || opIds.length === 0) return;
                 try {
@@ -8840,11 +8890,63 @@
                 }
             };
 
-            // admin status is determined from `currentUser.role` (passed as prop)
+            // Handle Excel file upload for baiga day data
+            const handleBaigaDayUpload = async (dayIndex, file) => {
+                if (!file) return;
+                
+                try {
+                    const data = await file.arrayBuffer();
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const jsonData = XLSX.utils.sheet_to_json(firstSheet);
+                    
+                    // Expected format: name column and score column
+                    // Adjust column names based on your Excel structure
+                    const dayKey = `day${dayIndex + 1}`;
+                    
+                    setContestData(prev => {
+                        const updated = { ...prev };
+                        
+                        // Update all groups
+                        for (const group of ['0.5', '0.75', '1']) {
+                            updated.baiga.groups[group] = updated.baiga.groups[group].map(participant => {
+                                // Find matching entry in Excel data (case-insensitive name match)
+                                const excelEntry = jsonData.find(row => {
+                                    const excelName = (row.name || row['Имя'] || row['Name'] || '').toString().toLowerCase().trim();
+                                    const participantName = participant.name.toLowerCase().trim();
+                                    return excelName === participantName;
+                                });
+                                
+                                if (excelEntry) {
+                                    const score = Number(excelEntry.score || excelEntry['Оценки'] || excelEntry['Score'] || 0);
+                                    return {
+                                        ...participant,
+                                        [dayKey]: score,
+                                        scores: (participant.day1 || 0) + (participant.day2 || 0) + (participant.day3 || 0) + (dayKey === 'day1' ? score : 0) + (dayKey === 'day2' ? score : 0) + (dayKey === 'day3' ? score : 0) - (participant[dayKey] || 0)
+                                    };
+                                }
+                                return participant;
+                            }).sort((a, b) => (b.scores || 0) - (a.scores || 0));
+                        }
+                        
+                        // Recalculate top10
+                        const allEntries = [...updated.baiga.groups['0.5'], ...updated.baiga.groups['0.75'], ...updated.baiga.groups['1']];
+                        updated.baiga.top10 = allEntries.sort((a, b) => (b.scores || 0) - (a.scores || 0)).slice(0, 10);
+                        updated.baiga.lastUpdate = new Date().toLocaleString('ru-RU');
+                        
+                        return updated;
+                    });
+                    
+                    addToast(`Данные за ${contestData.baiga.periodDays[dayIndex]?.label} загружены успешно`);
+                } catch (err) {
+                    console.error('Error parsing Excel file:', err);
+                    addToast('Ошибка при загрузке файла', 'error');
+                }
+            };
 
             const addBaigaResult = () => {
                 if (!baigaForm.name || !baigaForm.scores) { addToast('Заполните все поля', 'error'); return; }
-                const newEntry = { name: baigaForm.name, scores: parseInt(baigaForm.scores), group: baigaForm.group };
+                const newEntry = { name: baigaForm.name, scores: parseInt(baigaForm.scores), group: baigaForm.group, day1: 0, day2: 0, day3: 0 };
                 setContestData(prev => {
                     const updated = { ...prev };
                     updated.baiga.groups[baigaForm.group] = [...updated.baiga.groups[baigaForm.group], newEntry].sort((a, b) => b.scores - a.scores);
@@ -8898,88 +9000,134 @@
                 )
             );
 
-            const getBaigaWindowDates = (start) => {
-                const s = new Date(start + 'T00:00:00');
-                const arr = [];
-                for (let i=0;i<3;i++){
-                    const d = new Date(s);
-                    d.setDate(s.getDate()+i);
-                    arr.push(d);
-                }
-                return arr;
-            };
-
-            const formatDayShort = (d) => {
-                const monthNamesShort = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
-                return `${d.getDate()} ${monthNamesShort[d.getMonth()]}`;
-            };
-
-            const shiftBaigaStart = (deltaDays) => {
-                const cur = new Date(baigaStartDate + 'T00:00:00');
-                cur.setDate(cur.getDate() + deltaDays);
-                const iso = cur.toISOString().slice(0,10);
-                setBaigaStartDate(iso);
-            };
-
-            const ParticipantRow = ({ participant, position }) => {
-                const days = getBaigaWindowDates(baigaStartDate);
-                const dvals = days.map((d, idx) => {
-                    // accept fields like day1/day2/day3 or scores_day1 etc.
-                    const keys = [`day${idx+1}`, `scores_day${idx+1}`, `scores_day_${idx+1}`];
-                    for (const k of keys){ if (participant[k] != null) return Number(participant[k]); }
-                    return null;
-                });
-                const totalFromDays = dvals.reduce((s,v)=> s + (Number(v)||0), 0);
-                const fallbackTotal = Number(participant.scores||participant.score||0);
-                const total = (dvals.some(v=>v!=null) ? totalFromDays : fallbackTotal);
-
-                return React.createElement('div',{className:'contest-card bg-white rounded-xl p-4 shadow-md hover:shadow-lg flex items-center gap-4'},
-                    React.createElement(Medal,{position}),
-                    React.createElement('div',{className:'flex-1 flex items-center gap-4'},
-                        React.createElement('div',{className:'flex-1'}, React.createElement('h4',{className:'font-semibold text-gray-800'}, participant.name), React.createElement('div',{className:'text-sm text-gray-600'}, participant.direction || '')),
-                        days.map((d,i)=> React.createElement('div',{key:i, className:'text-center w-20'}, dvals[i]!=null ? React.createElement('div',{className:'font-bold text-blue-600'}, dvals[i]) : React.createElement('div',{className:'text-gray-400'}, '-'))),
-                        React.createElement('div',{className:'text-center w-20 font-bold text-gray-800'}, total)
-                    )
-                );
-            };
-
-            const renderBaiga = () => {
-                const days = getBaigaWindowDates(baigaStartDate);
-                return React.createElement('div',{className:'space-y-6'},
-                    React.createElement('div',{className:'bg-gradient-to-br from-blue-500 to-blue-700 rounded-2xl p-6 text-white'},
-                        React.createElement('div',{className:'flex items-center justify-between'},
-                            React.createElement('h3',{className:'text-2xl font-bold mb-2'}, 'Байга ОТП'),
-                            React.createElement('div',{className:'flex items-center gap-2'},
-                                React.createElement('button',{className:'px-3 py-2 rounded-xl bg-blue-600 bg-opacity-30 hover:bg-opacity-40', onClick:()=>shiftBaigaStart(-3)}, '← 3 дня'),
-                                React.createElement('input',{type:'date', value:baigaStartDate, onChange:(e)=>setBaigaStartDate(e.target.value), className:'px-3 py-2 rounded-xl bg-white text-gray-800'}),
-                                React.createElement('button',{className:'px-3 py-2 rounded-xl bg-blue-600 bg-opacity-30 hover:bg-opacity-40', onClick:()=>shiftBaigaStart(3)}, '3 дня →')
+            const renderBaigaTable = () => {
+                const periodDays = contestData.baiga.periodDays || [];
+                
+                return React.createElement('div', { className: 'bg-white rounded-2xl p-6 shadow-lg overflow-x-auto' },
+                    React.createElement('h3', { className: 'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2' },
+                        React.createElement('i', { className: 'fas fa-star text-yellow-500' }),
+                        'Топ-10 общий рейтинг'
+                    ),
+                    React.createElement('table', { className: 'w-full min-w-max' },
+                        React.createElement('thead', null,
+                            React.createElement('tr', { className: 'border-b-2 border-gray-200' },
+                                React.createElement('th', { className: 'px-4 py-3 text-left text-sm font-semibold text-gray-700' }, '№'),
+                                React.createElement('th', { className: 'px-4 py-3 text-left text-sm font-semibold text-gray-700' }, 'Имя'),
+                                React.createElement('th', { className: 'px-4 py-3 text-left text-sm font-semibold text-gray-700' }, 'Группа'),
+                                ...periodDays.map((day, idx) =>
+                                    React.createElement('th', {
+                                        key: idx,
+                                        className: `px-4 py-3 text-center text-sm font-semibold text-gray-700 border-2 border-blue-400 bg-blue-50 cursor-pointer hover:bg-blue-100 transition-colors ${isAdmin ? 'relative group' : ''}`,
+                                        onClick: isAdmin ? () => {
+                                            const input = document.createElement('input');
+                                            input.type = 'file';
+                                            input.accept = '.xlsx,.xls';
+                                            input.onchange = (e) => handleBaigaDayUpload(idx, e.target.files[0]);
+                                            input.click();
+                                        } : null
+                                    },
+                                        day.label,
+                                        isAdmin && React.createElement('div', {
+                                            className: 'absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 bg-blue-600 bg-opacity-90 text-white text-xs transition-opacity'
+                                        }, React.createElement('i', { className: 'fas fa-upload mr-1' }), 'Загрузить')
+                                    )
+                                ),
+                                React.createElement('th', { className: 'px-4 py-3 text-center text-sm font-semibold text-gray-700 bg-yellow-50 border-2 border-yellow-400' }, 'Итого')
                             )
                         ),
-                        React.createElement('p',{className:'opacity-90'}, `Направление: Основа • Период: ${contestData.baiga.period}`),
-                        contestData.baiga.lastUpdate && React.createElement('p',{className:'text-sm opacity-75 mt-2'}, `Последнее обновление: ${contestData.baiga.lastUpdate}`)
-                    ),
-
-                    React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'},
-                        React.createElement('h3',{className:'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-star text-yellow-500'}), 'Топ-10 общий рейтинг'),
-                        React.createElement('div',{className:'space-y-3'},
-                            contestData.baiga.top10.length>0 ? (
-                                contestData.baiga.top10.map((p,i)=> React.createElement(ParticipantRow,{key:i, participant:p, position:i+1}))
-                            ) : React.createElement('p',{className:'text-center text-gray-500 py-8'}, 'Нет данных')
-                        )
-                    ),
-
-                    React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-3 gap-6'},
-                        ['0.5','0.75','1'].map(group=> React.createElement('div',{key:group, className:'bg-white rounded-2xl p-6 shadow-lg'},
-                            React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-users text-blue-600'}), `Группа ${group}`),
-                            React.createElement('div',{className:'space-y-3'},
-                                contestData.baiga.groups[group].length>0 ? (
-                                    contestData.baiga.groups[group].map((p,i)=> React.createElement(ParticipantRow,{key:i, participant:p, position:i+1}))
-                                ) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных')
+                        React.createElement('tbody', null,
+                            contestData.baiga.top10.length > 0 ? contestData.baiga.top10.map((p, i) =>
+                                React.createElement('tr', {
+                                    key: i,
+                                    className: `border-b border-gray-100 hover:bg-gray-50 transition-colors ${i < 3 ? 'bg-gradient-to-r from-yellow-50 to-transparent' : ''}`
+                                },
+                                    React.createElement('td', { className: 'px-4 py-4' },
+                                        React.createElement(Medal, { position: i + 1 })
+                                    ),
+                                    React.createElement('td', { className: 'px-4 py-4' },
+                                        React.createElement('div', null,
+                                            React.createElement('div', { className: 'font-semibold text-gray-800' }, p.name),
+                                            p.direction && React.createElement('div', { className: 'text-xs text-gray-500 mt-1' }, p.direction)
+                                        )
+                                    ),
+                                    React.createElement('td', { className: 'px-4 py-4' },
+                                        React.createElement('span', { className: 'text-xs bg-blue-100 text-blue-700 px-3 py-1 rounded-full font-medium' }, `Группа ${p.group}`)
+                                    ),
+                                    ...periodDays.map((day, idx) =>
+                                        React.createElement('td', {
+                                            key: idx,
+                                            className: 'px-4 py-4 text-center border-l border-r border-blue-200'
+                                        },
+                                            React.createElement('span', { className: 'font-bold text-gray-700' }, p[`day${idx + 1}`] || 0)
+                                        )
+                                    ),
+                                    React.createElement('td', { className: 'px-4 py-4 text-center bg-yellow-50 border-l border-r border-yellow-200' },
+                                        React.createElement('span', { className: 'font-bold text-lg text-blue-600' }, p.scores || 0)
+                                    )
+                                )
+                            ) : React.createElement('tr', null,
+                                React.createElement('td', { colSpan: 4 + periodDays.length + 1, className: 'text-center text-gray-500 py-8' }, 'Нет данных')
                             )
-                        ))
+                        )
                     )
                 );
             };
+
+            const renderBaiga = () => (
+                React.createElement('div',{className:'space-y-6'},
+                    React.createElement('div',{className:'bg-gradient-to-br from-blue-500 to-blue-700 rounded-2xl p-6 text-white'}, 
+                        React.createElement('div', { className: 'flex items-center justify-between mb-2' },
+                            React.createElement('h3',{className:'text-2xl font-bold'}, 'Байга ОТП'),
+                            React.createElement('div', { className: 'flex items-center gap-3' },
+                                React.createElement('label', { className: 'text-sm opacity-90 mr-2' }, 'Период:'),
+                                React.createElement('select', {
+                                    value: selectedBaigaPeriod,
+                                    onChange: (e) => {
+                                        const idx = Number(e.target.value);
+                                        setSelectedBaigaPeriod(idx);
+                                        const period = baigaPeriodOptions[idx];
+                                        if (period) {
+                                            setContestData(prev => ({
+                                                ...prev,
+                                                baiga: {
+                                                    ...prev.baiga,
+                                                    periodDays: period.days,
+                                                    periodStart: period.start
+                                                }
+                                            }));
+                                        }
+                                    },
+                                    className: 'px-4 py-2 rounded-xl border-2 border-blue-300 bg-white text-gray-800 font-medium shadow-sm text-sm focus:outline-none focus:ring-2 focus:ring-blue-300'
+                                },
+                                    (baigaPeriodOptions || []).map((p, i) => 
+                                        React.createElement('option', { key: i, value: i }, p.label)
+                                    )
+                                )
+                            )
+                        ),
+                        React.createElement('p',{className:'opacity-90'}, `Направление: Основа • Период: ${contestData.baiga.period}`), 
+                        contestData.baiga.lastUpdate && React.createElement('p',{className:'text-sm opacity-75 mt-2'}, `Последнее обновление: ${contestData.baiga.lastUpdate}`)
+                    ),
+                    renderBaigaTable(),
+                    React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-3 gap-6'}, 
+                        ['0.5','0.75','1'].map(group=> 
+                            React.createElement('div',{key:group, className:'bg-white rounded-2xl p-6 shadow-lg'}, 
+                                React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, 
+                                    React.createElement('i',{className:'fas fa-users text-blue-600'}), 
+                                    `Группа ${group}`
+                                ), 
+                                React.createElement('div',{className:'space-y-3'}, 
+                                    contestData.baiga.groups[group].length>0 ? 
+                                        contestData.baiga.groups[group].map((p,i)=> 
+                                            React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Оценки'})
+                                        ) : 
+                                        React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных')
+                                )
+                            )
+                        )
+                    )
+                )
+            );
 
             const renderQuality = () => (
                 React.createElement('div',{className:'space-y-6'},
@@ -9021,8 +9169,6 @@
                         React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-4 mb-6 overflow-x-auto scrollbar-hide'}, React.createElement('div',{className:'flex gap-2 min-w-max'}, [{ id: 'baiga', label: 'Байга ОТП', icon: 'fa-running' },{ id: 'quality', label: 'Качество', icon: 'fa-star' },{ id: 'chat', label: 'Чат', icon: 'fa-comments' },{ id: 'smz', label: 'СМЗ', icon: 'fa-chart-bar' }].map(tab=> React.createElement('button',{key:tab.id, onClick:()=>setActiveTab(tab.id), className:`px-6 py-3 rounded-xl font-semibold transition-all whitespace-nowrap ${activeTab===tab.id ? 'tab-active shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}, React.createElement('i',{className:`fas ${tab.icon} mr-2`}), tab.label)) )),
                         React.createElement('div',null, activeTab==='baiga' && renderBaiga(), activeTab==='quality' && renderQuality(), activeTab==='chat' && renderChat(), activeTab==='smz' && renderSmz())
                     ),
-
-
                     React.createElement(ToastContainer,{toasts:toasts, removeToast:removeToast})
                 )
             );
