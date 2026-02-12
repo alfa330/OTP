@@ -8892,39 +8892,51 @@
 
             // Parse CSV and count FIO occurrences in column F (index 5)
             const parseCSVAndCountScores = (csvText) => {
-                const lines = csvText.split('\n').filter(line => line.trim());
+                const lines = csvText.split('\n').map(l => l.replace(/\r$/, '')).filter(line => line.trim());
                 const scoreCounts = {};
-                
+
+                // robust CSV line parser: handles quoted fields and double-quote escapes
+                const parseLine = (line) => {
+                    const fields = [];
+                    let cur = '';
+                    let inQuotes = false;
+                    for (let i = 0; i < line.length; i++) {
+                        const ch = line[i];
+                        if (ch === '"') {
+                            if (inQuotes && i + 1 < line.length && line[i + 1] === '"') {
+                                cur += '"';
+                                i++; // skip escaped quote
+                            } else {
+                                inQuotes = !inQuotes;
+                            }
+                        } else if (ch === ',' && !inQuotes) {
+                            fields.push(cur.trim());
+                            cur = '';
+                        } else {
+                            cur += ch;
+                        }
+                    }
+                    fields.push(cur.trim());
+                    return fields;
+                };
+
+                // normalize FIO for storage key
+                const normalizeFioKey = (s) => s.replace(/"/g, '').replace(/\s+/g, ' ').trim();
+
                 // Skip header row (index 0), start from 1
                 for (let i = 1; i < lines.length; i++) {
                     const line = lines[i];
-                    // Parse CSV line considering quoted fields
-                    const fields = [];
-                    let current = '';
-                    let inQuotes = false;
-                    
-                    for (let j = 0; j < line.length; j++) {
-                        const char = line[j];
-                        if (char === '"') {
-                            inQuotes = !inQuotes;
-                        } else if (char === ',' && !inQuotes) {
-                            fields.push(current.trim());
-                            current = '';
-                        } else {
-                            current += char;
-                        }
-                    }
-                    fields.push(current.trim()); // Add last field
-                    
+                    const fields = parseLine(line);
                     // Column F is index 5 (A=0, B=1, C=2, D=3, E=4, F=5)
                     if (fields.length > 5) {
-                        const fio = fields[5].replace(/"/g, '').trim();
+                        const fioRaw = fields[5];
+                        const fio = normalizeFioKey(fioRaw);
                         if (fio) {
                             scoreCounts[fio] = (scoreCounts[fio] || 0) + 1;
                         }
                     }
                 }
-                
+
                 return scoreCounts;
             };
 
@@ -8941,35 +8953,84 @@
                     setContestData(prev => {
                         const updated = { ...prev };
                         
+                        // helper: produce normalized tokens from a name
+                        const tokensFrom = (s) => {
+                            if (!s) return [];
+                            let t = s.replace(/"/g, '').replace(/\./g, ' ').replace(/[,()]/g, ' ').toLowerCase();
+                            t = t.replace(/[^a-zA-Z\u0400-\u04FF\s\-]/g, ' '); // keep letters, cyrillic, hyphen
+                            t = t.replace(/\s+/g, ' ').trim();
+                            if (!t) return [];
+                            return t.split(' ').filter(Boolean);
+                        };
+
+                        const strNormalize = (s) => (s || '').replace(/"/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+                        const nameMatches = (participantNameRaw, fioRaw) => {
+                            const a = tokensFrom(participantNameRaw);
+                            const b = tokensFrom(fioRaw);
+                            if (a.length === 0 || b.length === 0) return false;
+                            const an = a.join(' ');
+                            const bn = b.join(' ');
+                            if (an === bn) return true;
+
+                            // sets and intersection
+                            const setA = new Set(a);
+                            const setB = new Set(b);
+                            let intersection = 0;
+                            for (const x of setA) if (setB.has(x)) intersection++;
+                            if (intersection >= 2) return true;
+                            // subset checks
+                            const allAinB = a.every(x => setB.has(x));
+                            const allBinA = b.every(x => setA.has(x));
+                            if (allAinB || allBinA) return true;
+
+                            // surname + initial matching: check if first token (likely surname) equals and initials match
+                            if (a.length >= 2 && b.length >= 2) {
+                                const surnameA = a[0];
+                                const surnameB = b[0];
+                                if (surnameA === surnameB) {
+                                    const initA = a[1][0];
+                                    const initB = b[1][0];
+                                    if (initA && initB && initA === initB) return true;
+                                }
+                            }
+
+                            // one strong token match (long token)
+                            if (intersection === 1) {
+                                const common = [...setA].filter(x => setB.has(x))[0];
+                                if ((common || '').length > 3) return true;
+                            }
+
+                            return false;
+                        };
+
                         // Update all groups
                         for (const group of ['0.5', '0.75', '1']) {
                             updated.baiga.groups[group] = updated.baiga.groups[group].map(participant => {
                                 // Try to match participant name with FIO from CSV
-                                const participantName = participant.name.toLowerCase().trim();
-                                
-                                // Find matching entry in scoreCounts (try exact match and partial match)
+                                const participantName = participant.name || '';
                                 let matchedScore = 0;
-                                for (const [fio, count] of Object.entries(scoreCounts)) {
-                                    const fioLower = fio.toLowerCase().trim();
-                                    // Exact match or if participant name is contained in FIO or vice versa
-                                    if (fioLower === participantName || 
-                                        fioLower.includes(participantName) || 
-                                        participantName.includes(fioLower)) {
+
+                                // First try direct exact key match from parsed CSV keys
+                                const normalizedParticipantKey = strNormalize(participantName);
+                                for (const [fioKey, count] of Object.entries(scoreCounts)) {
+                                    if (strNormalize(fioKey) === normalizedParticipantKey) {
                                         matchedScore = count;
                                         break;
                                     }
                                 }
-                                
+
+                                // If no exact, try fuzzy/token matching
+                                if (matchedScore === 0) {
+                                    for (const [fio, count] of Object.entries(scoreCounts)) {
+                                        if (nameMatches(participantName, fio)) { matchedScore = count; break; }
+                                    }
+                                }
+
                                 if (matchedScore > 0) {
-                                    // Calculate new total scores
                                     const currentDayScore = participant[dayKey] || 0;
                                     const newTotalScores = (participant.scores || 0) - currentDayScore + matchedScore;
-                                    
-                                    return {
-                                        ...participant,
-                                        [dayKey]: matchedScore,
-                                        scores: newTotalScores
-                                    };
+                                    return { ...participant, [dayKey]: matchedScore, scores: newTotalScores };
                                 }
                                 return participant;
                             }).sort((a, b) => (b.scores || 0) - (a.scores || 0));
