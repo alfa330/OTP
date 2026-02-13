@@ -8763,7 +8763,6 @@
                         newData.baiga.groups[bgroup].push({ 
                             id: op.id,
                             name: op.name || op.login || `#${op.id}`, 
-                            baseScores: Number(op.scores || 0),
                             scores: Number(op.scores || 0), 
                             group: bgroup, 
                             direction: dir,
@@ -8980,7 +8979,6 @@
                     setContestData(prev => {
                         const updated = { ...prev };
                         const dayKey = `day${dayIndex + 1}`;
-                        const daysCount = (updated.baiga && Array.isArray(updated.baiga.periodDays)) ? updated.baiga.periodDays.length : 3;
 
                         // Map by operator id for quick lookup
                         const mapById = {};
@@ -8990,6 +8988,7 @@
 
                         for (const group of ['0.5', '0.75', '1']) {
                             updated.baiga.groups[group] = (updated.baiga.groups[group] || []).map(participant => {
+                                const currentDayScore = participant[dayKey] || 0;
                                 let matchedScore = 0;
                                 if (participant.id && mapById[String(participant.id)] != null) {
                                     matchedScore = mapById[String(participant.id)];
@@ -9001,18 +9000,9 @@
                                     }
                                 }
 
-                                // set day value (even if zero)
-                                const updatedParticipant = { ...participant, [dayKey]: matchedScore };
-
-                                // Recalculate total from baseScores + sum of dayX fields
-                                const base = Number(updatedParticipant.baseScores || 0);
-                                let daySum = 0;
-                                for (let j = 1; j <= daysCount; j++) {
-                                    daySum += Number(updatedParticipant[`day${j}`] || 0);
-                                }
-                                updatedParticipant.scores = base + daySum;
-
-                                return updatedParticipant;
+                                // set day value (matched or 0) and recalc total scores
+                                const newTotalScores = (participant.scores || 0) - currentDayScore + matchedScore;
+                                return { ...participant, [dayKey]: matchedScore, scores: newTotalScores };
                             }).sort((a, b) => (b.scores || 0) - (a.scores || 0));
                         }
 
@@ -9062,11 +9052,9 @@
                                         }
                                     }
 
-                                    if (matchedScore > 0) {
-                                        const newTotalScores = (participant.scores || 0) - currentDayScore + matchedScore;
-                                        return { ...participant, [dayKey]: matchedScore, scores: newTotalScores };
-                                    }
-                                    return { ...participant, [dayKey]: participant[dayKey] || 0 };
+                                    // always set day value (matched or 0) and recalc total
+                                    const newTotalScores = (participant.scores || 0) - currentDayScore + matchedScore;
+                                    return { ...participant, [dayKey]: matchedScore, scores: newTotalScores };
                                 }).sort((a, b) => (b.scores || 0) - (a.scores || 0));
                             }
                         }
