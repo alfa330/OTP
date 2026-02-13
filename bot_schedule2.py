@@ -361,6 +361,42 @@ def api_baiga_day_scores():
         logging.exception("Error in /api/baiga/day_scores: %s", e)
         return jsonify({"error": str(e)}), 500
 
+
+@app.route('/api/baiga/period_scores', methods=['GET'])
+@require_api_key
+def api_baiga_period_scores():
+    try:
+        # expects start and end in YYYY-MM-DD
+        start = request.args.get('start')
+        end = request.args.get('end')
+        if not start or not end:
+            return jsonify({"error": "Missing 'start' and 'end' parameters (YYYY-MM-DD)"}), 400
+
+        # validate dates loosely
+        try:
+            from datetime import datetime as _dt
+            _dt.strptime(start, '%Y-%m-%d')
+            _dt.strptime(end, '%Y-%m-%d')
+        except Exception:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+
+        data = db.get_baiga_scores_for_range(start, end)
+        # Transform into array of days preserving order from start to end
+        from datetime import datetime as _dt, timedelta as _td
+        s = _dt.strptime(start, '%Y-%m-%d').date()
+        e = _dt.strptime(end, '%Y-%m-%d').date()
+        days = []
+        cur = s
+        while cur <= e:
+            ds = cur.isoformat()
+            days.append({ 'date': ds, 'scores': data.get(ds, []) })
+            cur = cur + _td(days=1)
+
+        return jsonify({"status": "success", "days": days}), 200
+    except Exception as e:
+        logging.exception("Error in /api/baiga/period_scores: %s", e)
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/admin/users', methods=['GET'])
 @require_api_key
 def get_admin_users():

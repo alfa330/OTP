@@ -4295,6 +4295,40 @@ class Database:
             rows = cursor.fetchall()
         return [ { 'operator_id': r[0], 'points': int(r[1] or 0), 'name': r[2] } for r in rows ]
 
+    def get_baiga_scores_for_range(self, start_day, end_day):
+        """Return mapping of day (YYYY-MM-DD) -> list of {operator_id, points, name} for days in [start_day, end_day]."""
+        if isinstance(start_day, str):
+            try:
+                start_date = datetime.strptime(start_day, "%Y-%m-%d").date()
+            except Exception:
+                raise ValueError("Invalid start_day format, expected YYYY-MM-DD")
+        else:
+            start_date = start_day
+
+        if isinstance(end_day, str):
+            try:
+                end_date = datetime.strptime(end_day, "%Y-%m-%d").date()
+            except Exception:
+                raise ValueError("Invalid end_day format, expected YYYY-MM-DD")
+        else:
+            end_date = end_day
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT to_char(b.day, 'YYYY-MM-DD') as day_str, b.operator_id, b.points, u.name
+                FROM baiga_daily_scores b
+                LEFT JOIN users u ON u.id = b.operator_id
+                WHERE b.day >= %s AND b.day <= %s
+                ORDER BY b.day, b.operator_id
+            """, (start_date, end_date))
+            rows = cursor.fetchall()
+
+        result = {}
+        for day_str, op_id, pts, name in rows:
+            entry = { 'operator_id': op_id, 'points': int(pts or 0), 'name': name }
+            result.setdefault(day_str, []).append(entry)
+        return result
+
     def save_ai_feedback_cache(self, operator_id: int, month: str, feedback_data: dict):
         """Сохранить или обновить AI фидбэк в кэше"""
         with self._get_cursor() as cursor:
