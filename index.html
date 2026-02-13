@@ -8942,9 +8942,37 @@
                 }
             };
 
+            const createBaigaPeriod = async (start, end, label) => {
+                try {
+                    const payload = { start_date: start, end_date: end, label };
+                    const resp = await axios.post(`${API_BASE_URL}/api/baiga/periods`, payload, { headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
+                    const periodId = resp?.data?.period_id || null;
+                    if (periodId) {
+                        // attach id to currently selected option
+                        setBaigaPeriodOptions(prev => {
+                            const copy = Array.isArray(prev) ? [...prev] : [];
+                            const idx = selectedBaigaPeriod || 0;
+                            if (!copy[idx]) return copy;
+                            copy[idx] = { ...copy[idx], id: periodId };
+                            return copy;
+                        });
+                    }
+                    return periodId;
+                } catch (err) {
+                    console.error('Failed to create baiga period', err);
+                    return null;
+                }
+            };
+
             const persistBaigaEntry = async (entry) => {
                 try {
-                    const periodId = baigaPeriodOptions[selectedBaigaPeriod]?.id;
+                    let periodId = baigaPeriodOptions[selectedBaigaPeriod]?.id;
+                    if (!periodId) {
+                        const opt = baigaPeriodOptions[selectedBaigaPeriod];
+                        if (opt) {
+                            periodId = await createBaigaPeriod(opt.start, opt.end, opt.label);
+                        }
+                    }
                     if (!periodId) return null;
                     const payload = { period_id: periodId, name: entry.name, group_id: entry.group, scores: entry.scores || 0, day1: entry.day1||0, day2: entry.day2||0, day3: entry.day3||0, direction: entry.direction };
                     const resp = await axios.post(`${API_BASE_URL}/api/baiga/entries`, payload, { headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
@@ -9123,10 +9151,17 @@
                     });
 
                     // Persist matched updates to server if we have a period id
-                    const periodId = baigaPeriodOptions[selectedBaigaPeriod]?.id;
+                    let periodId = baigaPeriodOptions[selectedBaigaPeriod]?.id;
+                    if (!periodId && matchedUpdates.length > 0) {
+                        // try creating period
+                        const opt = baigaPeriodOptions[selectedBaigaPeriod];
+                        if (opt) {
+                            periodId = await createBaigaPeriod(opt.start, opt.end, opt.label);
+                        }
+                    }
                     if (periodId && matchedUpdates.length > 0) {
                         for (const mu of matchedUpdates) {
-                            try { persistBaigaDayUpdate(periodId, mu.name, dayIndex + 1, mu.value); } catch (e) { console.error(e); }
+                            try { await persistBaigaDayUpdate(periodId, mu.name, dayIndex + 1, mu.value); } catch (e) { console.error(e); }
                         }
                     }
 
@@ -9312,7 +9347,15 @@
                                                     periodStart: period.start
                                                 }
                                             }));
-                                            if (period.id) fetchBaigaEntries(period.id);
+                                            if (period.id) {
+                                                fetchBaigaEntries(period.id);
+                                            } else {
+                                                // create period on demand, then fetch entries
+                                                (async () => {
+                                                    const pid = await createBaigaPeriod(period.start, period.end, period.label);
+                                                    if (pid) fetchBaigaEntries(pid);
+                                                })();
+                                            }
                                         }
                                     },
                                     className: 'px-4 py-2 rounded-xl border-2 border-blue-300 bg-white text-gray-800 font-medium shadow-sm text-sm focus:outline-none focus:ring-2 focus:ring-blue-300'
