@@ -467,6 +467,38 @@ class Database:
                 );
             """)
 
+            # Baiga (contest) periods and entries
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS baiga_periods (
+                    id SERIAL PRIMARY KEY,
+                    start_date DATE NOT NULL,
+                    end_date DATE NOT NULL,
+                    label VARCHAR(255),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(start_date, end_date)
+                );
+
+                CREATE TABLE IF NOT EXISTS baiga_entries (
+                    id SERIAL PRIMARY KEY,
+                    period_id INTEGER NOT NULL REFERENCES baiga_periods(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    operator_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    group_id VARCHAR(10) NOT NULL,
+                    scores INTEGER NOT NULL DEFAULT 0,
+                    day1 INTEGER NOT NULL DEFAULT 0,
+                    day2 INTEGER NOT NULL DEFAULT 0,
+                    day3 INTEGER NOT NULL DEFAULT 0,
+                    direction TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(period_id, name)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_baiga_periods_start_end ON baiga_periods(start_date, end_date);
+                CREATE INDEX IF NOT EXISTS idx_baiga_entries_period_id ON baiga_entries(period_id);
+                CREATE INDEX IF NOT EXISTS idx_baiga_entries_operator_id ON baiga_entries(operator_id);
+                CREATE INDEX IF NOT EXISTS idx_baiga_entries_group_id ON baiga_entries(group_id);
+            """)
+
             # Optimized Indexes (added more based on query patterns)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
@@ -1169,6 +1201,110 @@ class Database:
             processed = cursor.rowcount if cursor.rowcount is not None else 0
 
         return {"month": month, "work_days": work_days, "processed": int(processed)}
+
+# --- Baiga (OTP contests) helpers -----------------
+    def create_or_get_baiga_period(self, start_date, end_date, label=None):
+        """Create a baiga period if not exists, return period id.
+
+        start_date/end_date: date or YYYY-MM-DD string
+        """
+        if isinstance(start_date, str):
+            start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+        if isinstance(end_date, str):
+            end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO baiga_periods (start_date, end_date, label)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (start_date, end_date) DO UPDATE SET label = COALESCE(EXCLUDED.label, baiga_periods.label)
+                RETURNING id
+                """,
+                (start_date, end_date, label),
+            )
+            return cursor.fetchone()[0]
+
+    def get_baiga_periods(self, limit=20):
+        """Return recent baiga periods ordered by start_date desc."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, start_date::text, end_date::text, label, created_at
+                FROM baiga_periods
+                ORDER BY start_date DESC
+                LIMIT %s
+                """,
+                (limit,)
+            )
+            return [
+                {"id": r[0], "start": r[1], "end": r[2], "label": r[3], "created_at": r[4]} for r in cursor.fetchall()
+            ]
+
+    def get_baiga_entries_for_period(self, period_id):
+        """Return all entries for a given baiga period id."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, name, operator_id, group_id, scores, day1, day2, day3, direction, updated_at
+                FROM baiga_entries
+                WHERE period_id = %s
+                ORDER BY scores DESC, name
+                """,
+                (period_id,)
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "id": r[0], "name": r[1], "operator_id": r[2], "group": r[3], "scores": r[4],
+                    "day1": r[5], "day2": r[6], "day3": r[7], "direction": r[8], "updated_at": r[9]
+                } for r in rows
+            ]
+
+    def upsert_baiga_entry(self, period_id, name, group_id='1', scores=0, day1=0, day2=0, day3=0, direction=None, operator_id=None):
+        """Insert or update a baiga entry (identified by period_id + name). Returns entry id."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO baiga_entries (period_id, name, operator_id, group_id, scores, day1, day2, day3, direction, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (period_id, name) DO UPDATE SET
+                    operator_id = COALESCE(EXCLUDED.operator_id, baiga_entries.operator_id),
+                    group_id = EXCLUDED.group_id,
+                    scores = EXCLUDED.scores,
+                    day1 = EXCLUDED.day1,
+                    day2 = EXCLUDED.day2,
+                    day3 = EXCLUDED.day3,
+                    direction = COALESCE(EXCLUDED.direction, baiga_entries.direction),
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING id
+                """,
+                (period_id, name, operator_id, group_id, int(scores or 0), int(day1 or 0), int(day2 or 0), int(day3 or 0), direction),
+            )
+            res = cursor.fetchone()
+            return res[0] if res else None
+
+    def update_baiga_entry_day(self, period_id, name, day_index, value):
+        """Update specific day (1..3) for an entry and recalc scores as sum of days.
+
+        day_index: 1,2 or 3
+        value: integer
+        """
+        if day_index not in (1,2,3):
+            raise ValueError('day_index must be 1,2 or 3')
+        day_col = f"day{day_index}"
+        with self._get_cursor() as cursor:
+            # update the day column
+            cursor.execute(
+                f"""
+                UPDATE baiga_entries
+                SET {day_col} = %s, scores = COALESCE(day1,0) + COALESCE(day2,0) + COALESCE(day3,0), updated_at = CURRENT_TIMESTAMP
+                WHERE period_id = %s AND name = %s
+                RETURNING id
+                """,
+                (int(value or 0), period_id, name)
+            )
+            r = cursor.fetchone()
+            return r[0] if r else None
 
     def save_directions(self, directions):
         """Сохранить направления в таблицу directions, создавая новые версии при изменениях."""

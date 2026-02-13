@@ -3157,6 +3157,114 @@ def save_shifts_bulk():
         logging.error(f"Error saving shifts bulk: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/baiga/periods', methods=['GET'])
+@require_api_key
+def api_baiga_get_periods():
+    try:
+        periods = db.get_baiga_periods(limit=100)
+        result = [
+            {
+                'id': p[0],
+                'start_date': p[1],
+                'end_date': p[2],
+                'label': p[3]
+            }
+            for p in periods
+        ]
+        return jsonify({'periods': result}), 200
+    except Exception as e:
+        logging.error(f"Error fetching baiga periods: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/baiga/periods', methods=['POST'])
+@require_api_key
+def api_baiga_create_period():
+    try:
+        data = request.get_json() or {}
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        label = data.get('label')
+
+        if not all([start_date, end_date]):
+            return jsonify({'error': 'Missing start_date or end_date'}), 400
+
+        period_id = db.create_or_get_baiga_period(start_date, end_date, label)
+        return jsonify({'period_id': period_id}), 200
+    except Exception as e:
+        logging.error(f"Error creating baiga period: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/baiga/periods/<int:period_id>/entries', methods=['GET'])
+@require_api_key
+def api_baiga_get_entries(period_id):
+    try:
+        entries = db.get_baiga_entries_for_period(period_id)
+        result = [
+            {
+                'id': e[0],
+                'period_id': e[1],
+                'name': e[2],
+                'group_id': e[3],
+                'scores': e[4],
+                'day1': e[5],
+                'day2': e[6],
+                'day3': e[7],
+                'direction': e[8],
+                'operator_id': e[9]
+            }
+            for e in entries
+        ]
+        return jsonify({'entries': result}), 200
+    except Exception as e:
+        logging.error(f"Error fetching baiga entries: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/baiga/entries', methods=['POST'])
+@require_api_key
+def api_baiga_upsert_entry():
+    try:
+        data = request.get_json() or {}
+        period_id = data.get('period_id')
+        name = data.get('name')
+        group_id = data.get('group_id', '1')
+        scores = data.get('scores', 0)
+        day1 = data.get('day1', 0)
+        day2 = data.get('day2', 0)
+        day3 = data.get('day3', 0)
+        direction = data.get('direction')
+        operator_id = data.get('operator_id')
+
+        if not all([period_id, name]):
+            return jsonify({'error': 'Missing period_id or name'}), 400
+
+        entry_id = db.upsert_baiga_entry(period_id, name, group_id, scores, day1, day2, day3, direction, operator_id)
+        return jsonify({'entry_id': entry_id}), 200
+    except Exception as e:
+        logging.error(f"Error upserting baiga entry: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/baiga/entries/update_day', methods=['POST'])
+@require_api_key
+def api_baiga_update_entry_day():
+    try:
+        data = request.get_json() or {}
+        period_id = data.get('period_id')
+        name = data.get('name')
+        day_index = data.get('day_index')
+        value = data.get('value')
+
+        if not all([period_id, name, day_index is not None, value is not None]):
+            return jsonify({'error': 'Missing fields'}), 400
+
+        success = db.update_baiga_entry_day(period_id, name, int(day_index), int(value))
+        return jsonify({'success': bool(success)}), 200
+    except Exception as e:
+        logging.error(f"Error updating baiga entry day: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False, use_reloader=False)
