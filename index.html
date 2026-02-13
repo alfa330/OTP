@@ -9125,6 +9125,23 @@
                 )
             );
 
+            const renderGroupLeaders = () => {
+                const groups = ['0.5','0.75','1'];
+                const leaders = groups.map(g => (contestData.baiga.groups[g] && contestData.baiga.groups[g].length>0) ? contestData.baiga.groups[g][0] : null);
+                return React.createElement('div', { className: 'grid grid-cols-1 md:grid-cols-3 gap-4 mb-6' },
+                    leaders.map((p, i) => p ? React.createElement('div', { key: i, className: 'bg-white rounded-2xl p-4 shadow-lg flex items-center gap-4' },
+                        React.createElement(Medal, { position: 1 }),
+                        React.createElement('div', { className: 'flex-1' },
+                            React.createElement('h4', { className: 'font-semibold text-gray-800' }, p.name),
+                            React.createElement('div', { className: 'text-sm text-gray-600 mt-1 flex items-center gap-3' },
+                                React.createElement('span', null, `Группа ${p.group}`),
+                                React.createElement('span', { className: 'font-bold text-blue-600' }, p.scores || 0)
+                            )
+                        )
+                    ) : React.createElement('div', { key: i, className: 'bg-white rounded-2xl p-4 shadow-lg text-center text-gray-500' }, 'Нет данных') )
+                );
+            };
+
             const renderBaigaTable = () => {
                 const periodDays = contestData.baiga.periodDays || [];
                 
@@ -9233,6 +9250,7 @@
                         React.createElement('p',{className:'opacity-90'}, `Направление: Основа • Период: ${contestData.baiga.period}`), 
                         contestData.baiga.lastUpdate && React.createElement('p',{className:'text-sm opacity-75 mt-2'}, `Последнее обновление: ${contestData.baiga.lastUpdate}`)
                     ),
+                    renderGroupLeaders(),
                     renderBaigaTable(),
                     React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-3 gap-6'}, 
                         ['0.5','0.75','1'].map(group=> 
