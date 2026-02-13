@@ -8763,6 +8763,7 @@
                         newData.baiga.groups[bgroup].push({ 
                             id: op.id,
                             name: op.name || op.login || `#${op.id}`, 
+                            baseScores: Number(op.scores || 0),
                             scores: Number(op.scores || 0), 
                             group: bgroup, 
                             direction: dir,
@@ -8979,6 +8980,7 @@
                     setContestData(prev => {
                         const updated = { ...prev };
                         const dayKey = `day${dayIndex + 1}`;
+                        const daysCount = (updated.baiga && Array.isArray(updated.baiga.periodDays)) ? updated.baiga.periodDays.length : 3;
 
                         // Map by operator id for quick lookup
                         const mapById = {};
@@ -8988,7 +8990,6 @@
 
                         for (const group of ['0.5', '0.75', '1']) {
                             updated.baiga.groups[group] = (updated.baiga.groups[group] || []).map(participant => {
-                                const currentDayScore = participant[dayKey] || 0;
                                 let matchedScore = 0;
                                 if (participant.id && mapById[String(participant.id)] != null) {
                                     matchedScore = mapById[String(participant.id)];
@@ -9000,11 +9001,18 @@
                                     }
                                 }
 
-                                if (matchedScore > 0) {
-                                    const newTotalScores = (participant.scores || 0) - currentDayScore + matchedScore;
-                                    return { ...participant, [dayKey]: matchedScore, scores: newTotalScores };
+                                // set day value (even if zero)
+                                const updatedParticipant = { ...participant, [dayKey]: matchedScore };
+
+                                // Recalculate total from baseScores + sum of dayX fields
+                                const base = Number(updatedParticipant.baseScores || 0);
+                                let daySum = 0;
+                                for (let j = 1; j <= daysCount; j++) {
+                                    daySum += Number(updatedParticipant[`day${j}`] || 0);
                                 }
-                                return participant;
+                                updatedParticipant.scores = base + daySum;
+
+                                return updatedParticipant;
                             }).sort((a, b) => (b.scores || 0) - (a.scores || 0));
                         }
 
@@ -9244,6 +9252,17 @@
                                     onChange: (e) => {
                                         const idx = Number(e.target.value);
                                         setSelectedBaigaPeriod(idx);
+                                        const period = baigaPeriodOptions[idx];
+                                        if (period) {
+                                            setContestData(prev => ({
+                                                ...prev,
+                                                baiga: {
+                                                    ...prev.baiga,
+                                                    periodDays: period.days,
+                                                    periodStart: period.start
+                                                }
+                                            }));
+                                        }
                                     },
                                     className: 'px-4 py-2 rounded-xl border-2 border-blue-300 bg-white text-gray-800 font-medium shadow-sm text-sm focus:outline-none focus:ring-2 focus:ring-blue-300'
                                 },
