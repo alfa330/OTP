@@ -495,6 +495,19 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_shifts_date ON work_shifts(shift_date);
                 CREATE INDEX IF NOT EXISTS idx_days_off_operator_date ON days_off(operator_id, day_off_date);
                 CREATE INDEX IF NOT EXISTS idx_ai_feedback_cache_operator_month ON ai_feedback_cache(operator_id, month);
+                
+                    -- Table for Baiga daily scores (points per operator per day)
+                    CREATE TABLE IF NOT EXISTS baiga_daily_scores (
+                        id SERIAL PRIMARY KEY,
+                        operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        day DATE NOT NULL,
+                        points INTEGER NOT NULL DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(operator_id, day)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_baiga_daily_scores_day ON baiga_daily_scores(day);
+                    CREATE INDEX IF NOT EXISTS idx_baiga_daily_scores_operator ON baiga_daily_scores(operator_id);
             """)
 
     def create_user(self, telegram_id, name, role, direction_id=None, rate=None, hire_date=None, supervisor_id=None, login=None, password=None, hours_table_url=None):
@@ -4199,6 +4212,88 @@ class Database:
                     'updated_at': result[2]
                 }
             return None
+
+    def find_operator_by_name_fuzzy(self, name: str):
+        """Попытаться найти оператора по ФИО. Сначала точное совпадение (case-insensitive),
+        затем попытка по фамилии (ILIKE '%surname%'). Возвращает запись пользователя или None.
+        """
+        if not name:
+            return None
+        name = name.strip()
+        with self._get_cursor() as cursor:
+            # exact case-insensitive match
+            cursor.execute("""
+                SELECT id, telegram_id, name, role, direction_id, hire_date, supervisor_id, login
+                FROM users WHERE LOWER(name) = LOWER(%s) AND role = 'operator' LIMIT 1
+            """, (name,))
+            row = cursor.fetchone()
+            if row:
+                return row
+
+            # try surname match: take first token as likely surname
+            tokens = re.split(r'\s+', name)
+            if tokens:
+                surname = tokens[0]
+                cursor.execute("""
+                    SELECT id, telegram_id, name, role, direction_id, hire_date, supervisor_id, login
+                    FROM users WHERE name ILIKE %s AND role = 'operator' LIMIT 1
+                """, (f"%{surname}%",))
+                row = cursor.fetchone()
+                if row:
+                    return row
+
+        return None
+
+    def replace_baiga_scores_for_day(self, day, scores_map: dict):
+        """Replace all baiga_daily_scores for given day.
+        scores_map: { operator_id (int) : points (int) }
+        If operator_id keys are not ints, they will be skipped.
+        """
+        if isinstance(day, str):
+            try:
+                day_date = datetime.strptime(day, "%Y-%m-%d").date()
+            except Exception:
+                raise ValueError("Invalid day format, expected YYYY-MM-DD")
+        else:
+            day_date = day
+
+        with self._get_cursor() as cursor:
+            # remove all existing for day
+            cursor.execute("DELETE FROM baiga_daily_scores WHERE day = %s", (day_date,))
+            insert_vals = []
+            for op_id, pts in (scores_map or {}).items():
+                try:
+                    oid = int(op_id)
+                    pts_i = int(pts) if pts is not None else 0
+                    insert_vals.append((oid, day_date, pts_i))
+                except Exception:
+                    continue
+
+            if insert_vals:
+                cursor.executemany(
+                    "INSERT INTO baiga_daily_scores (operator_id, day, points) VALUES (%s, %s, %s)",
+                    insert_vals
+                )
+
+    def get_baiga_scores_for_day(self, day):
+        """Return list of {operator_id, name, points} for given day."""
+        if isinstance(day, str):
+            try:
+                day_date = datetime.strptime(day, "%Y-%m-%d").date()
+            except Exception:
+                raise ValueError("Invalid day format, expected YYYY-MM-DD")
+        else:
+            day_date = day
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT b.operator_id, b.points, u.name
+                FROM baiga_daily_scores b
+                LEFT JOIN users u ON u.id = b.operator_id
+                WHERE b.day = %s
+            """, (day_date,))
+            rows = cursor.fetchall()
+        return [ { 'operator_id': r[0], 'points': int(r[1] or 0), 'name': r[2] } for r in rows ]
 
     def save_ai_feedback_cache(self, operator_id: int, month: str, feedback_data: dict):
         """Сохранить или обновить AI фидбэк в кэше"""

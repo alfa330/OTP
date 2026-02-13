@@ -8761,6 +8761,7 @@
                     if (isOsnova || isSmz) {
                         const bgroup = determineBaigaGroup(op);
                         newData.baiga.groups[bgroup].push({ 
+                            id: op.id,
                             name: op.name || op.login || `#${op.id}`, 
                             scores: Number(op.scores || 0), 
                             group: bgroup, 
@@ -8957,114 +8958,65 @@
                 return scoreCounts;
             };
 
-            // Handle CSV file upload for baiga day data
+            // Handle CSV file upload for baiga day data — upload file to backend for processing
             const handleBaigaDayUpload = async (dayIndex, file) => {
                 if (!file) return;
-                
                 try {
-                    const text = await file.text();
-                    const scoreCounts = parseCSVAndCountScores(text, ';');
-                    
-                    const dayKey = `day${dayIndex + 1}`;
-                    
+                    const periodDay = contestData.baiga.periodDays && contestData.baiga.periodDays[dayIndex] && contestData.baiga.periodDays[dayIndex].date;
+                    if (!periodDay) { addToast('Неизвестная дата периода', 'error'); return; }
+
+                    const form = new FormData();
+                    form.append('file', file);
+                    form.append('day', periodDay);
+
+                    const headers = { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id };
+                    await axios.post(`${API_BASE_URL}/api/baiga/upload_day_csv`, form, { headers });
+
+                    // Fetch saved scores for the day and apply to UI
+                    const resp = await axios.get(`${API_BASE_URL}/api/baiga/day_scores`, { params: { day: periodDay }, headers });
+                    const scores = (resp && resp.data && resp.data.scores) ? resp.data.scores : [];
+
                     setContestData(prev => {
                         const updated = { ...prev };
-                        
-                        // helper: produce normalized tokens from a name
-                        const tokensFrom = (s) => {
-                            if (!s) return [];
-                            let t = s.replace(/"/g, '').replace(/\./g, ' ').replace(/[,()]/g, ' ').toLowerCase();
-                            t = t.replace(/[^a-zA-Z\u0400-\u04FF\s\-]/g, ' '); // keep letters, cyrillic, hyphen
-                            t = t.replace(/\s+/g, ' ').trim();
-                            if (!t) return [];
-                            return t.split(' ').filter(Boolean);
-                        };
+                        const dayKey = `day${dayIndex + 1}`;
 
-                        const strNormalize = (s) => (s || '').replace(/"/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+                        // Map by operator id for quick lookup
+                        const mapById = {};
+                        for (const r of scores) {
+                            if (r && r.operator_id != null) mapById[String(r.operator_id)] = Number(r.points || 0);
+                        }
 
-                        const nameMatches = (participantNameRaw, fioRaw) => {
-                            const a = tokensFrom(participantNameRaw);
-                            const b = tokensFrom(fioRaw);
-                            if (a.length === 0 || b.length === 0) return false;
-                            const an = a.join(' ');
-                            const bn = b.join(' ');
-                            if (an === bn) return true;
-
-                            // sets and intersection
-                            const setA = new Set(a);
-                            const setB = new Set(b);
-                            let intersection = 0;
-                            for (const x of setA) if (setB.has(x)) intersection++;
-                            if (intersection >= 2) return true;
-                            // subset checks
-                            const allAinB = a.every(x => setB.has(x));
-                            const allBinA = b.every(x => setA.has(x));
-                            if (allAinB || allBinA) return true;
-
-                            // surname + initial matching: check if first token (likely surname) equals and initials match
-                            if (a.length >= 2 && b.length >= 2) {
-                                const surnameA = a[0];
-                                const surnameB = b[0];
-                                if (surnameA === surnameB) {
-                                    const initA = a[1][0];
-                                    const initB = b[1][0];
-                                    if (initA && initB && initA === initB) return true;
-                                }
-                            }
-
-                            // one strong token match (long token)
-                            if (intersection === 1) {
-                                const common = [...setA].filter(x => setB.has(x))[0];
-                                if ((common || '').length > 3) return true;
-                            }
-
-                            return false;
-                        };
-
-                        // Update all groups
                         for (const group of ['0.5', '0.75', '1']) {
-                            updated.baiga.groups[group] = updated.baiga.groups[group].map(participant => {
-                                // Try to match participant name with FIO from CSV
-                                const participantName = participant.name || '';
+                            updated.baiga.groups[group] = (updated.baiga.groups[group] || []).map(participant => {
+                                const currentDayScore = participant[dayKey] || 0;
                                 let matchedScore = 0;
-
-                                // First try direct exact key match from parsed CSV keys
-                                const normalizedParticipantKey = strNormalize(participantName);
-                                for (const [fioKey, count] of Object.entries(scoreCounts)) {
-                                    if (strNormalize(fioKey) === normalizedParticipantKey) {
-                                        matchedScore = count;
-                                        break;
-                                    }
-                                }
-
-                                // If no exact, try fuzzy/token matching
-                                if (matchedScore === 0) {
-                                    for (const [fio, count] of Object.entries(scoreCounts)) {
-                                        if (nameMatches(participantName, fio)) { matchedScore = count; break; }
+                                if (participant.id && mapById[String(participant.id)] != null) {
+                                    matchedScore = mapById[String(participant.id)];
+                                } else {
+                                    // fallback: match by exact name (case-insensitive)
+                                    const normalizedParticipant = (participant.name || '').replace(/"/g, '').trim().toLowerCase();
+                                    for (const r of scores) {
+                                        if (r && r.name && r.name.trim().toLowerCase() === normalizedParticipant) { matchedScore = Number(r.points || 0); break; }
                                     }
                                 }
 
                                 if (matchedScore > 0) {
-                                    const currentDayScore = participant[dayKey] || 0;
                                     const newTotalScores = (participant.scores || 0) - currentDayScore + matchedScore;
                                     return { ...participant, [dayKey]: matchedScore, scores: newTotalScores };
                                 }
                                 return participant;
                             }).sort((a, b) => (b.scores || 0) - (a.scores || 0));
                         }
-                        
-                        // Recalculate top10
+
                         const allEntries = [...updated.baiga.groups['0.5'], ...updated.baiga.groups['0.75'], ...updated.baiga.groups['1']];
                         updated.baiga.top10 = allEntries.sort((a, b) => (b.scores || 0) - (a.scores || 0)).slice(0, 10);
                         updated.baiga.lastUpdate = new Date().toLocaleString('ru-RU');
-                        
                         return updated;
                     });
-                    
-                    const totalFound = Object.values(scoreCounts).reduce((s, v) => s + v, 0);
-                    addToast(`Данные за ${contestData.baiga.periodDays[dayIndex]?.label} загружены успешно. Найдено оценок: ${totalFound} (по ${Object.keys(scoreCounts).length} ФИО).`);
+
+                    addToast(`Данные за ${contestData.baiga.periodDays[dayIndex]?.label} загружены успешно.`);
                 } catch (err) {
-                    console.error('Error parsing CSV file:', err);
+                    console.error('Error uploading CSV file:', err);
                     addToast('Ошибка при загрузке файла', 'error');
                 }
             };
