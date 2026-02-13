@@ -9021,6 +9021,80 @@
                 }
             };
 
+            // Fetch baiga scores for a whole period and apply to UI
+            const fetchBaigaPeriod = async (period) => {
+                if (!period || !Array.isArray(period.days) || period.days.length === 0) return;
+                try {
+                    const headers = { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id };
+                    // For each day, fetch scores
+                    const dayScoresArray = [];
+                    for (let i = 0; i < period.days.length; i++) {
+                        const day = period.days[i].date;
+                        try {
+                            const resp = await axios.get(`${API_BASE_URL}/api/baiga/day_scores`, { params: { day }, headers });
+                            const scores = (resp && resp.data && resp.data.scores) ? resp.data.scores : [];
+                            dayScoresArray.push(scores);
+                        } catch (e) {
+                            console.error('Error fetching day scores for', day, e);
+                            dayScoresArray.push([]);
+                        }
+                    }
+
+                    // Apply fetched scores to contestData
+                    setContestData(prev => {
+                        const updated = { ...prev };
+                        for (let dayIndex = 0; dayIndex < period.days.length; dayIndex++) {
+                            const scores = dayScoresArray[dayIndex] || [];
+                            const dayKey = `day${dayIndex + 1}`;
+                            const mapById = {};
+                            for (const r of scores) if (r && r.operator_id != null) mapById[String(r.operator_id)] = Number(r.points || 0);
+
+                            for (const group of ['0.5', '0.75', '1']) {
+                                updated.baiga.groups[group] = (updated.baiga.groups[group] || []).map(participant => {
+                                    const currentDayScore = participant[dayKey] || 0;
+                                    let matchedScore = 0;
+                                    if (participant.id && mapById[String(participant.id)] != null) {
+                                        matchedScore = mapById[String(participant.id)];
+                                    } else {
+                                        const normalizedParticipant = (participant.name || '').replace(/"/g, '').trim().toLowerCase();
+                                        for (const r of scores) {
+                                            if (r && r.name && r.name.trim().toLowerCase() === normalizedParticipant) { matchedScore = Number(r.points || 0); break; }
+                                        }
+                                    }
+
+                                    if (matchedScore > 0) {
+                                        const newTotalScores = (participant.scores || 0) - currentDayScore + matchedScore;
+                                        return { ...participant, [dayKey]: matchedScore, scores: newTotalScores };
+                                    }
+                                    // ensure dayKey exists and set to 0 if missing
+                                    return { ...participant, [dayKey]: participant[dayKey] || 0 };
+                                }).sort((a, b) => (b.scores || 0) - (a.scores || 0));
+                            }
+                        }
+
+                        const allEntries = [...updated.baiga.groups['0.5'], ...updated.baiga.groups['0.75'], ...updated.baiga.groups['1']];
+                        updated.baiga.top10 = allEntries.sort((a, b) => (b.scores || 0) - (a.scores || 0)).slice(0, 10);
+                        updated.baiga.lastUpdate = new Date().toLocaleString('ru-RU');
+                        return updated;
+                    });
+                } catch (err) {
+                    console.error('Error fetching baiga period data', err);
+                    addToast('Ошибка при загрузке данных периода', 'error');
+                }
+            };
+
+            // When selected period changes, set periodDays and fetch data for that period
+            useEffect(() => {
+                if (!Array.isArray(baigaPeriodOptions) || baigaPeriodOptions.length === 0) return;
+                const idx = Number(selectedBaigaPeriod) || 0;
+                const period = baigaPeriodOptions[idx];
+                if (!period) return;
+                // update contestData with period days
+                setContestData(prev => ({ ...prev, baiga: { ...prev.baiga, periodDays: period.days, periodStart: period.start } }));
+                // fetch scores for this period
+                fetchBaigaPeriod(period);
+            }, [selectedBaigaPeriod, baigaPeriodOptions]);
+
             const addBaigaResult = () => {
                 if (!baigaForm.name || !baigaForm.scores) { addToast('Заполните все поля', 'error'); return; }
                 const newEntry = { name: baigaForm.name, scores: parseInt(baigaForm.scores), group: baigaForm.group, day1: 0, day2: 0, day3: 0 };
