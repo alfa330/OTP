@@ -8657,13 +8657,14 @@
             
             const getRecentPeriods = (count = 12, days = 3) => {
                 const periods = [];
-                const today = new Date(); // current date
-                // Generate periods starting from the current period (that ends on `today`) and forward
+                // fixed base date: 2026-02-09 (first day should be 09.02.2026)
+                const today = new Date(2026, 1, 9);
+                // Generate periods starting from `today` as the start of the first period and move forward
                 for (let i = 0; i < count; i++) {
-                    const end = new Date(today);
-                    end.setDate(today.getDate() + (i * days));
-                    const start = new Date(end);
-                    start.setDate(end.getDate() - (days - 1));
+                    const start = new Date(today);
+                    start.setDate(today.getDate() + (i * days));
+                    const end = new Date(start);
+                    end.setDate(start.getDate() + (days - 1));
 
                     const label = `${start.getDate()} ${monthNamesShort[start.getMonth()]} - ${end.getDate()} ${monthNamesShort[end.getMonth()]} (${days} дня)`;
                     periods.push({
