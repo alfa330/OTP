@@ -8657,12 +8657,13 @@
             
             const getRecentPeriods = (count = 12, days = 3) => {
                 const periods = [];
-                // fixed base date: 2026-02-09 (first day should be 09.02.2026)
-                const today = new Date(2026, 1, 9);
-                // Generate periods starting from `today` as the start of the first period and move forward
+                // fixed base date: 2026-02-09 (first possible period start)
+                const base = new Date(2026, 1, 9);
+                const now = new Date();
+                // Generate periods starting from `base` forward; collect up to `count` periods
                 for (let i = 0; i < count; i++) {
-                    const start = new Date(today);
-                    start.setDate(today.getDate() + (i * days));
+                    const start = new Date(base);
+                    start.setDate(base.getDate() + (i * days));
                     const end = new Date(start);
                     end.setDate(start.getDate() + (days - 1));
 
@@ -8681,7 +8682,14 @@
                         })
                     });
                 }
-                return periods;
+
+                // Keep only periods whose start is <= today (include current period), then reverse so newest first
+                const valid = periods.filter(p => new Date(p.start) <= now);
+                if (valid.length === 0) {
+                    // if none valid (base in future), include first period
+                    return [periods[0]];
+                }
+                return valid.reverse();
             };
 
             const [baigaPeriodOptions, setBaigaPeriodOptions] = useState([]);
