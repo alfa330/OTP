@@ -9026,25 +9026,17 @@
                 if (!period || !Array.isArray(period.days) || period.days.length === 0) return;
                 try {
                     const headers = { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id };
-                    // For each day, fetch scores
-                    const dayScoresArray = [];
-                    for (let i = 0; i < period.days.length; i++) {
-                        const day = period.days[i].date;
-                        try {
-                            const resp = await axios.get(`${API_BASE_URL}/api/baiga/day_scores`, { params: { day }, headers });
-                            const scores = (resp && resp.data && resp.data.scores) ? resp.data.scores : [];
-                            dayScoresArray.push(scores);
-                        } catch (e) {
-                            console.error('Error fetching day scores for', day, e);
-                            dayScoresArray.push([]);
-                        }
-                    }
+                    const params = { start: period.start, end: period.end };
+                    const resp = await axios.get(`${API_BASE_URL}/api/baiga/period_scores`, { params, headers });
+                    const days = (resp && resp.data && resp.data.days) ? resp.data.days : [];
 
                     // Apply fetched scores to contestData
                     setContestData(prev => {
                         const updated = { ...prev };
+
                         for (let dayIndex = 0; dayIndex < period.days.length; dayIndex++) {
-                            const scores = dayScoresArray[dayIndex] || [];
+                            const dayObj = days[dayIndex] || { date: period.days[dayIndex].date, scores: [] };
+                            const scores = dayObj.scores || [];
                             const dayKey = `day${dayIndex + 1}`;
                             const mapById = {};
                             for (const r of scores) if (r && r.operator_id != null) mapById[String(r.operator_id)] = Number(r.points || 0);
@@ -9066,7 +9058,6 @@
                                         const newTotalScores = (participant.scores || 0) - currentDayScore + matchedScore;
                                         return { ...participant, [dayKey]: matchedScore, scores: newTotalScores };
                                     }
-                                    // ensure dayKey exists and set to 0 if missing
                                     return { ...participant, [dayKey]: participant[dayKey] || 0 };
                                 }).sort((a, b) => (b.scores || 0) - (a.scores || 0));
                             }
