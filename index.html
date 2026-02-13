@@ -8879,15 +8879,30 @@
                     }
                     const params = { start, end, operator_ids: opIds.join(',') };
                     const resp = await axios.get(`${API_BASE_URL}/api/average_scores`, { params, headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
-                    const data = resp?.data?.data?.operators || {};
-                    if (!data) return;
+                    // API can return operators as an object keyed by id or as an array.
+                    // Normalize response into a lookup map by operator id for reliable merging.
+                    const raw = resp?.data?.data;
+                    let opMap = {};
+                    if (!raw) return;
+                    const operatorsField = raw.operators || raw;
+                    if (Array.isArray(operatorsField)) {
+                        for (const item of operatorsField) {
+                            const key = item.operator_id ?? item.id ?? item.operatorId ?? item.operator;
+                            if (key != null) opMap[String(key)] = item;
+                        }
+                    } else if (typeof operatorsField === 'object') {
+                        opMap = operatorsField;
+                    }
+
                     setContestData(prev => {
                         const updated = { ...prev };
                         for (const grp of ['new','experienced']) {
                             updated.quality.groups[grp] = (updated.quality.groups[grp] || []).map(p => {
-                                const info = data[p.id];
+                                const info = opMap[String(p.id)];
                                 if (info) {
-                                    return { ...p, score: info.avg_score, eval_count: info.count };
+                                    const avg = info.avg_score != null ? Number(info.avg_score) : (info.avg || info.score || 0);
+                                    const count = info.count != null ? Number(info.count) : (info.eval_count || 0);
+                                    return { ...p, score: avg, eval_count: count };
                                 }
                                 return p;
                             }).sort((a,b)=> (b.score||0)-(a.score||0));
