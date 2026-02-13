@@ -268,6 +268,99 @@ def api_average_scores():
         logging.exception("Error in /api/average_scores: %s", e)
         return jsonify({"error": str(e)}), 500
 
+
+@app.route('/api/baiga/upload_day_csv', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_baiga_upload_day_csv():
+    # Upload CSV file for a specific day, process server-side and save counts.
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
+        # expected: form-data with file field 'file' and 'day' in YYYY-MM-DD
+        day = request.form.get('day') or request.args.get('day')
+        if not day:
+            return jsonify({"error": "Missing 'day' parameter (YYYY-MM-DD)"}), 400
+
+        if 'file' not in request.files:
+            return jsonify({"error": "Missing file field"}), 400
+
+        f = request.files['file']
+        raw = f.read()
+        try:
+            text = raw.decode('utf-8')
+        except Exception:
+            try:
+                text = raw.decode('cp1251')
+            except Exception:
+                text = raw.decode('utf-8', errors='ignore')
+
+        # parse CSV robustly using csv module with ';' as delimiter
+        sio = BytesIO(text.encode('utf-8'))
+        # Use text IO wrapper
+        import io, csv
+        si = io.StringIO(text)
+        reader = csv.reader(si, delimiter=';', quotechar='"')
+
+        rows = list(reader)
+        if not rows:
+            return jsonify({"error": "Empty CSV"}), 400
+
+        # Skip header (first row)
+        score_counts = {}
+        for i in range(1, len(rows)):
+            row = rows[i]
+            if len(row) <= 7:
+                continue
+            fio_raw = row[5]
+            score_raw = row[7]
+            fio = (fio_raw or '').strip().strip('"')
+            score_val = (score_raw or '').strip().strip('"')
+            if not fio:
+                continue
+            try:
+                num = float(score_val.replace(',', '.'))
+                is_five = (int(round(num)) == 5)
+            except Exception:
+                is_five = (score_val == '5')
+
+            if is_five:
+                score_counts[fio] = score_counts.get(fio, 0) + 1
+
+        # Resolve to operators
+        operator_scores = {}
+        unmatched = []
+        total_found = sum(score_counts.values())
+        for fio, cnt in score_counts.items():
+            user = db.find_operator_by_name_fuzzy(fio)
+            if user and user[0]:
+                op_id = int(user[0])
+                operator_scores[op_id] = operator_scores.get(op_id, 0) + int(cnt)
+            else:
+                unmatched.append({"fio": fio, "count": int(cnt)})
+
+        # Replace day's baiga scores
+        db.replace_baiga_scores_for_day(day, operator_scores)
+
+        return jsonify({"status": "success", "totalFound": total_found, "matched": len(operator_scores), "unmatched": unmatched}), 200
+    except Exception as e:
+        logging.exception("Error in /api/baiga/upload_day_csv: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/baiga/day_scores', methods=['GET'])
+@require_api_key
+def api_baiga_day_scores():
+    try:
+        day = request.args.get('day')
+        if not day:
+            return jsonify({"error": "Missing 'day' parameter"}), 400
+        rows = db.get_baiga_scores_for_day(day)
+        return jsonify({"status": "success", "scores": rows}), 200
+    except Exception as e:
+        logging.exception("Error in /api/baiga/day_scores: %s", e)
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/admin/users', methods=['GET'])
 @require_api_key
 def get_admin_users():
