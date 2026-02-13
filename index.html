@@ -8696,8 +8696,7 @@
             const [selectedBaigaPeriod, setSelectedBaigaPeriod] = useState(0);
 
             useEffect(() => {
-                setBaigaPeriodOptions(getRecentPeriods(12, 3));
-                setSelectedBaigaPeriod(0);
+                fetchBaigaPeriods();
             }, []);
 
             // initialize contestData from operators when provided
@@ -8900,6 +8899,74 @@
                 }
             };
 
+            // Baiga API integration
+            const fetchBaigaPeriods = async () => {
+                try {
+                    const resp = await axios.get(`${API_BASE_URL}/api/baiga/periods`, { headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
+                    const periods = resp?.data?.periods || [];
+                    if (periods.length > 0) {
+                        setBaigaPeriodOptions(periods);
+                        setSelectedBaigaPeriod(0);
+                        const p = periods[0];
+                        setContestData(prev => ({ ...prev, baiga: { ...prev.baiga, periodDays: p.days || prev.baiga.periodDays, periodStart: p.start || prev.baiga.periodStart } }));
+                        if (p.id) fetchBaigaEntries(p.id);
+                        return;
+                    }
+                } catch (err) {
+                    console.error('Failed to fetch baiga periods from API', err);
+                }
+                // fallback to local generator
+                const local = getRecentPeriods(12, 3);
+                setBaigaPeriodOptions(local);
+                setSelectedBaigaPeriod(0);
+                if (local.length > 0) setContestData(prev => ({ ...prev, baiga: { ...prev.baiga, periodDays: local[0].days, periodStart: local[0].start } }));
+            };
+
+            const fetchBaigaEntries = async (periodId) => {
+                if (!periodId) return;
+                try {
+                    const resp = await axios.get(`${API_BASE_URL}/api/baiga/periods/${periodId}/entries`, { headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
+                    const entries = resp?.data?.entries || [];
+                    const groups = { '0.5': [], '0.75': [], '1': [] };
+                    for (const e of entries) {
+                        const g = e.group_id || '1';
+                        groups[g] = groups[g] || [];
+                        groups[g].push({ name: e.name, scores: Number(e.scores||0), group: g, direction: e.direction, day1: Number(e.day1||0), day2: Number(e.day2||0), day3: Number(e.day3||0) });
+                    }
+                    for (const g of ['0.5','0.75','1']) groups[g].sort((a,b)=>(b.scores||0)-(a.scores||0));
+                    const all = [...groups['0.5'], ...groups['0.75'], ...groups['1']];
+                    const top10 = all.sort((a,b)=>(b.scores||0)-(a.scores||0)).slice(0,10);
+                    setContestData(prev => ({ ...prev, baiga: { ...prev.baiga, groups, top10, lastUpdate: new Date().toLocaleString('ru-RU') } }));
+                } catch (err) {
+                    console.error('Failed to fetch baiga entries', err);
+                }
+            };
+
+            const persistBaigaEntry = async (entry) => {
+                try {
+                    const periodId = baigaPeriodOptions[selectedBaigaPeriod]?.id;
+                    if (!periodId) return null;
+                    const payload = { period_id: periodId, name: entry.name, group_id: entry.group, scores: entry.scores || 0, day1: entry.day1||0, day2: entry.day2||0, day3: entry.day3||0, direction: entry.direction };
+                    const resp = await axios.post(`${API_BASE_URL}/api/baiga/entries`, payload, { headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
+                    return resp?.data?.entry_id || null;
+                } catch (err) {
+                    console.error('Failed to persist baiga entry', err);
+                    return null;
+                }
+            };
+
+            const persistBaigaDayUpdate = async (periodId, name, dayIndex, value) => {
+                try {
+                    if (!periodId) return null;
+                    const payload = { period_id: periodId, name, day_index: dayIndex, value };
+                    const resp = await axios.post(`${API_BASE_URL}/api/baiga/entries/update_day`, payload, { headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
+                    return resp?.data?.success || false;
+                } catch (err) {
+                    console.error('Failed to persist baiga day update', err);
+                    return false;
+                }
+            };
+
             // Parse CSV and count occurrences of score==5 by FIO (F column index 5, H column index 7)
             const parseCSVAndCountScores = (csvText, sep = ';') => {
                 const lines = csvText.split('\n').map(l => l.replace(/\r$/, '')).filter(line => line.trim());
@@ -8960,107 +9027,109 @@
             // Handle CSV file upload for baiga day data
             const handleBaigaDayUpload = async (dayIndex, file) => {
                 if (!file) return;
-                
+
                 try {
                     const text = await file.text();
                     const scoreCounts = parseCSVAndCountScores(text, ';');
-                    
+
                     const dayKey = `day${dayIndex + 1}`;
-                    
+
+                    // helper: produce normalized tokens from a name
+                    const tokensFrom = (s) => {
+                        if (!s) return [];
+                        let t = s.replace(/"/g, '').replace(/\./g, ' ').replace(/[,()]/g, ' ').toLowerCase();
+                        t = t.replace(/[^a-zA-Z\u0400-\u04FF\s\-]/g, ' '); // keep letters, cyrillic, hyphen
+                        t = t.replace(/\s+/g, ' ').trim();
+                        if (!t) return [];
+                        return t.split(' ').filter(Boolean);
+                    };
+
+                    const strNormalize = (s) => (s || '').replace(/"/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+                    const nameMatches = (participantNameRaw, fioRaw) => {
+                        const a = tokensFrom(participantNameRaw);
+                        const b = tokensFrom(fioRaw);
+                        if (a.length === 0 || b.length === 0) return false;
+                        const an = a.join(' ');
+                        const bn = b.join(' ');
+                        if (an === bn) return true;
+
+                        const setA = new Set(a);
+                        const setB = new Set(b);
+                        let intersection = 0;
+                        for (const x of setA) if (setB.has(x)) intersection++;
+                        if (intersection >= 2) return true;
+                        const allAinB = a.every(x => setB.has(x));
+                        const allBinA = b.every(x => setA.has(x));
+                        if (allAinB || allBinA) return true;
+
+                        if (a.length >= 2 && b.length >= 2) {
+                            const surnameA = a[0];
+                            const surnameB = b[0];
+                            if (surnameA === surnameB) {
+                                const initA = a[1][0];
+                                const initB = b[1][0];
+                                if (initA && initB && initA === initB) return true;
+                            }
+                        }
+
+                        if (intersection === 1) {
+                            const common = [...setA].filter(x => setB.has(x))[0];
+                            if ((common || '').length > 3) return true;
+                        }
+
+                        return false;
+                    };
+
+                    // Precompute matched updates so we can persist them after updating state
+                    const matchedUpdates = [];
+                    for (const group of ['0.5', '0.75', '1']) {
+                        for (const participant of (contestData.baiga.groups[group] || [])) {
+                            const participantName = participant.name || '';
+                            let matchedScore = 0;
+                            const normalizedParticipantKey = strNormalize(participantName);
+                            for (const [fioKey, count] of Object.entries(scoreCounts)) {
+                                if (strNormalize(fioKey) === normalizedParticipantKey) { matchedScore = count; break; }
+                            }
+                            if (matchedScore === 0) {
+                                for (const [fio, count] of Object.entries(scoreCounts)) {
+                                    if (nameMatches(participantName, fio)) { matchedScore = count; break; }
+                                }
+                            }
+                            if (matchedScore > 0) matchedUpdates.push({ name: participantName, group, value: matchedScore });
+                        }
+                    }
+
+                    // Update local state based on matchedUpdates
                     setContestData(prev => {
                         const updated = { ...prev };
-                        
-                        // helper: produce normalized tokens from a name
-                        const tokensFrom = (s) => {
-                            if (!s) return [];
-                            let t = s.replace(/"/g, '').replace(/\./g, ' ').replace(/[,()]/g, ' ').toLowerCase();
-                            t = t.replace(/[^a-zA-Z\u0400-\u04FF\s\-]/g, ' '); // keep letters, cyrillic, hyphen
-                            t = t.replace(/\s+/g, ' ').trim();
-                            if (!t) return [];
-                            return t.split(' ').filter(Boolean);
-                        };
-
-                        const strNormalize = (s) => (s || '').replace(/"/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
-
-                        const nameMatches = (participantNameRaw, fioRaw) => {
-                            const a = tokensFrom(participantNameRaw);
-                            const b = tokensFrom(fioRaw);
-                            if (a.length === 0 || b.length === 0) return false;
-                            const an = a.join(' ');
-                            const bn = b.join(' ');
-                            if (an === bn) return true;
-
-                            // sets and intersection
-                            const setA = new Set(a);
-                            const setB = new Set(b);
-                            let intersection = 0;
-                            for (const x of setA) if (setB.has(x)) intersection++;
-                            if (intersection >= 2) return true;
-                            // subset checks
-                            const allAinB = a.every(x => setB.has(x));
-                            const allBinA = b.every(x => setA.has(x));
-                            if (allAinB || allBinA) return true;
-
-                            // surname + initial matching: check if first token (likely surname) equals and initials match
-                            if (a.length >= 2 && b.length >= 2) {
-                                const surnameA = a[0];
-                                const surnameB = b[0];
-                                if (surnameA === surnameB) {
-                                    const initA = a[1][0];
-                                    const initB = b[1][0];
-                                    if (initA && initB && initA === initB) return true;
-                                }
+                        for (const mu of matchedUpdates) {
+                            const grp = updated.baiga.groups[mu.group] || [];
+                            const idx = grp.findIndex(p => (p.name || '').toLowerCase() === (mu.name || '').toLowerCase());
+                            if (idx !== -1) {
+                                const participant = grp[idx];
+                                const currentDayScore = participant[dayKey] || 0;
+                                const newTotalScores = (participant.scores || 0) - currentDayScore + mu.value;
+                                grp[idx] = { ...participant, [dayKey]: mu.value, scores: newTotalScores };
+                            } else {
+                                grp.push({ name: mu.name, group: mu.group, day1: 0, day2: 0, day3: 0, [dayKey]: mu.value, scores: mu.value });
                             }
-
-                            // one strong token match (long token)
-                            if (intersection === 1) {
-                                const common = [...setA].filter(x => setB.has(x))[0];
-                                if ((common || '').length > 3) return true;
-                            }
-
-                            return false;
-                        };
-
-                        // Update all groups
-                        for (const group of ['0.5', '0.75', '1']) {
-                            updated.baiga.groups[group] = updated.baiga.groups[group].map(participant => {
-                                // Try to match participant name with FIO from CSV
-                                const participantName = participant.name || '';
-                                let matchedScore = 0;
-
-                                // First try direct exact key match from parsed CSV keys
-                                const normalizedParticipantKey = strNormalize(participantName);
-                                for (const [fioKey, count] of Object.entries(scoreCounts)) {
-                                    if (strNormalize(fioKey) === normalizedParticipantKey) {
-                                        matchedScore = count;
-                                        break;
-                                    }
-                                }
-
-                                // If no exact, try fuzzy/token matching
-                                if (matchedScore === 0) {
-                                    for (const [fio, count] of Object.entries(scoreCounts)) {
-                                        if (nameMatches(participantName, fio)) { matchedScore = count; break; }
-                                    }
-                                }
-
-                                if (matchedScore > 0) {
-                                    const currentDayScore = participant[dayKey] || 0;
-                                    const newTotalScores = (participant.scores || 0) - currentDayScore + matchedScore;
-                                    return { ...participant, [dayKey]: matchedScore, scores: newTotalScores };
-                                }
-                                return participant;
-                            }).sort((a, b) => (b.scores || 0) - (a.scores || 0));
+                            updated.baiga.groups[mu.group] = grp.sort((a, b) => (b.scores || 0) - (a.scores || 0));
                         }
-                        
-                        // Recalculate top10
                         const allEntries = [...updated.baiga.groups['0.5'], ...updated.baiga.groups['0.75'], ...updated.baiga.groups['1']];
                         updated.baiga.top10 = allEntries.sort((a, b) => (b.scores || 0) - (a.scores || 0)).slice(0, 10);
                         updated.baiga.lastUpdate = new Date().toLocaleString('ru-RU');
-                        
                         return updated;
                     });
-                    
+
+                    // Persist matched updates to server if we have a period id
+                    const periodId = baigaPeriodOptions[selectedBaigaPeriod]?.id;
+                    if (periodId && matchedUpdates.length > 0) {
+                        for (const mu of matchedUpdates) {
+                            try { persistBaigaDayUpdate(periodId, mu.name, dayIndex + 1, mu.value); } catch (e) { console.error(e); }
+                        }
+                    }
+
                     const totalFound = Object.values(scoreCounts).reduce((s, v) => s + v, 0);
                     addToast(`Данные за ${contestData.baiga.periodDays[dayIndex]?.label} загружены успешно. Найдено оценок: ${totalFound} (по ${Object.keys(scoreCounts).length} ФИО).`);
                 } catch (err) {
@@ -9082,6 +9151,12 @@
                 });
                 setBaigaForm({ name: '', group: '0.5', scores: '' });
                 addToast('Результат добавлен');
+                // persist to backend if period selected
+                (async () => {
+                    try {
+                        await persistBaigaEntry(newEntry);
+                    } catch (err) { console.error('Failed to persist new baiga entry', err); }
+                })();
             };
 
             const addQualityResult = () => {
@@ -9237,6 +9312,7 @@
                                                     periodStart: period.start
                                                 }
                                             }));
+                                            if (period.id) fetchBaigaEntries(period.id);
                                         }
                                     },
                                     className: 'px-4 py-2 rounded-xl border-2 border-blue-300 bg-white text-gray-800 font-medium shadow-sm text-sm focus:outline-none focus:ring-2 focus:ring-blue-300'
