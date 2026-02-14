@@ -13153,11 +13153,6 @@
                                                 <i className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
                                             </button>
                                         </li>
-                                        <li>
-                                            <button onClick={() => { setView('contests'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-award"></i> <span className="sidebar-text">Конкурсы</span>
-                                            </button>
-                                        </li>
                                     </>
                                 )}
                                 {user.role === 'operator' && (
@@ -13180,11 +13175,6 @@
                                         <li>
                                             <button onClick={() => { setView('ai_feedback'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_feedback' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fa-solid fa-fan"></i> <span className="sidebar-text">Dos AI</span>
-                                            </button>
-                                        </li>
-                                        <li>
-                                            <button onClick={() => { setView('contests'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-award"></i> <span className="sidebar-text">Конкурсы</span>
                                             </button>
                                         </li>
                                     </>
@@ -14560,7 +14550,6 @@
                                 </div>
                                 )}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
-                                {( view === "contests" && (<ContestsApp user={user} operators={svOperators} directions={directions} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
@@ -14568,7 +14557,6 @@
                         )}
                         {user.role === 'operator' && (
                             <>
-                                {( view === "contests" && (<ContestsApp user={user} operators={[user]} directions={directions} />))}
                                 {view === 'profile' && ( 
                                   <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 lg:mb-8 text-gray-900 flex items-center gap-2">
