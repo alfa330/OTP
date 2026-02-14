@@ -14545,8 +14545,9 @@
                                     <p className="text-center text-gray-600 py-8">Операторы не найдены.</p>
                                     )}
                                 </div>
-                                )}
+                                )} 
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
+                                {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
@@ -14725,6 +14726,7 @@
                                 {view === 'ai_feedback' && (
                                   <MonthlyFeedbackPage user={user} />
                                 )}
+                                {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 
                                 {view === 'hours' && (
                                     <div className="workhours-section workhours-container bg-white p-4 sm:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
