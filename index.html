@@ -8650,6 +8650,7 @@
             const { useState, useEffect } = React;
             const [activeTab, setActiveTab] = useState('baiga');
             const isAdmin = currentUser?.role === 'admin';
+            const isOperatorOrSv = currentUser?.role === 'operator' || currentUser?.role === 'sv';
             const [toasts, setToasts] = useState([]);
 
             // Baiga period management
@@ -8657,13 +8658,11 @@
             
             const getRecentPeriods = (count = 12, days = 3) => {
                 const periods = [];
-                // fixed base date: 2026-02-09 (first possible period start)
-                const base = new Date('2026-02-09'); // Используем ISO строку
+                const base = new Date('2026-02-09');
                 const now = new Date();
-                // Generate periods starting from `base` forward; collect up to `count` periods
                 for (let i = 0; i < count; i++) {
                     const start = new Date(base);
-                    start.setUTCDate(base.getUTCDate() + (i * days)); // Используем UTC методы
+                    start.setUTCDate(base.getUTCDate() + (i * days));
                     const end = new Date(start);
                     end.setUTCDate(start.getUTCDate() + (days - 1));
 
@@ -8688,10 +8687,8 @@
                     });
                 }
 
-                // Keep only periods whose start is <= today (include current period), then reverse so newest first
                 const valid = periods.filter(p => new Date(p.start) <= now);
                 if (valid.length === 0) {
-                    // if none valid (base in future), include first period
                     return [periods[0]];
                 }
                 return valid.reverse();
@@ -8712,7 +8709,7 @@
             const getRecentWeeks = (count = 12) => {
                 const weeks = [];
                 const today = new Date();
-                const day = today.getUTCDay(); // Используем UTC
+                const day = today.getUTCDay();
                 const end = new Date(today);
                 const offsetToSunday = (7 - day) % 7;
                 end.setUTCDate(today.getUTCDate() + offsetToSunday);
@@ -8729,7 +8726,6 @@
                 return weeks;
             };
 
-            // ИСПРАВЛЕНИЕ 1: Инициализируем недели ПЕРЕД использованием
             useEffect(()=>{
                 const weeks = getRecentWeeks(12);
                 setQualityWeekOptions(weeks);
@@ -8827,7 +8823,6 @@
                 const allBaigaEntries = [...newData.baiga.groups['0.5'], ...newData.baiga.groups['0.75'], ...newData.baiga.groups['1']];
                 newData.baiga.top10 = allBaigaEntries.sort((a,b) => (b.scores||0) - (a.scores||0)).slice(0,10);
 
-                // Set initial period days
                 if (baigaPeriodOptions.length > 0) {
                     newData.baiga.periodDays = baigaPeriodOptions[0].days;
                 }
@@ -8842,7 +8837,6 @@
                     }
                 }
                 
-                // ИСПРАВЛЕНИЕ 2: Передаем правильные даты текущей недели
                 if (qualityIds.length > 0 && qualityWeekOptions.length > 0) {
                     const currentWeek = qualityWeekOptions[0];
                     fetchQualityAveragesForPeriod(Array.from(new Set(qualityIds)), currentWeek.start, currentWeek.end);
@@ -8873,6 +8867,7 @@
             const [chatForm, setChatForm] = useState({ name: '', thanks: '' });
             const [smzForm, setSmzForm] = useState({ name: '', signatures: '', calls: '' });
             const [qualityLoading, setQualityLoading] = useState(false);
+            const [baigaLoading, setBaigaLoading] = useState(false);
 
             const addToast = (message, type = 'success') => {
                 const id = Date.now();
@@ -8889,13 +8884,11 @@
                 
                 try {
                     if (!start || !end) {
-                        // ИСПРАВЛЕНИЕ 3: Используем текущую неделю вместо "сегодня - 7 дней"
                         if (qualityWeekOptions.length > 0) {
                             const currentWeek = qualityWeekOptions[selectedQualityWeek || 0];
                             start = currentWeek.start;
                             end = currentWeek.end;
                         } else {
-                            // Fallback на последние 7 дней только если нет данных о неделях
                             const sd = new Date();
                             sd.setUTCDate(sd.getUTCDate() - 7);
                             const ed = new Date();
@@ -8905,8 +8898,6 @@
                     }
                     const params = { start, end, operator_ids: opIds.join(',') };
                     const resp = await axios.get(`${API_BASE_URL}/api/average_scores`, { params, headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
-                    // API can return operators as an object keyed by id or as an array.
-                    // Normalize response into a lookup map by operator id for reliable merging.
                     const raw = resp?.data?.data;
                     let opMap = {};
                     if (!raw) return;
@@ -8920,7 +8911,6 @@
                         opMap = operatorsField;
                     }
 
-                    // ИСПРАВЛЕНИЕ 4: Полностью перестраиваем таблицу - сбрасываем все данные перед обновлением
                     setContestData(prev => {
                         const updated = {
                             ...prev,
@@ -8937,10 +8927,8 @@
                         for (const grp of ['new','experienced']) {
                             const originalGroup = prev.quality.groups[grp] || [];
                             updated.quality.groups[grp] = originalGroup.map(p => {
-                                // КРИТИЧНО: Сначала сбрасываем данные на 0
                                 const resetParticipant = { ...p, score: 0, eval_count: 0 };
                                 
-                                // Потом применяем новые данные если они есть
                                 const info = opMap[String(p.id)];
                                 if (info) {
                                     const avg = info.avg_score != null ? Number(info.avg_score) : (info.avg || 0);
@@ -8948,7 +8936,6 @@
                                     return { ...resetParticipant, score: avg, eval_count: count };
                                 }
                                 
-                                // Если данных нет - возвращаем участника с нулевыми значениями
                                 return resetParticipant;
                             }).sort((a,b)=> (b.score||0)-(a.score||0));
                         }
@@ -8963,12 +8950,10 @@
                 }
             };
 
-            // Parse CSV and count occurrences of score==5 by FIO (F column index 5, H column index 7)
             const parseCSVAndCountScores = (csvText, sep = ';') => {
                 const lines = csvText.split('\n').map(l => l.replace(/\r$/, '')).filter(line => line.trim());
                 const scoreCounts = {};
 
-                // robust CSV line parser: handles quoted fields and double-quote escapes and custom separator
                 const parseLine = (line) => {
                     const fields = [];
                     let cur = '';
@@ -8978,7 +8963,7 @@
                         if (ch === '"') {
                             if (inQuotes && i + 1 < line.length && line[i + 1] === '"') {
                                 cur += '"';
-                                i++; // skip escaped quote
+                                i++;
                             } else {
                                 inQuotes = !inQuotes;
                             }
@@ -8993,21 +8978,16 @@
                     return fields;
                 };
 
-                // normalize FIO for storage key
                 const normalizeFioKey = (s) => (s || '').replace(/"/g, '').replace(/\s+/g, ' ').trim();
 
-                // Skip header row (index 0), start from 1
                 for (let i = 1; i < lines.length; i++) {
                     const line = lines[i];
                     const fields = parseLine(line);
-                    // Column F is index 5 (A=0, B=1, C=2, D=3, E=4, F=5)
-                    // Column H is index 7 (score column)
                     if (fields.length > 7) {
                         const fioRaw = fields[5];
                         const scoreRaw = fields[7];
                         const fio = normalizeFioKey(fioRaw);
                         const scoreVal = (scoreRaw || '').replace(/"/g, '').trim();
-                        // count only score == 5 (allow numeric or string '5')
                         if (fio) {
                             const num = Number(scoreVal.replace(',', '.'));
                             if (!Number.isNaN(num) ? num === 5 : scoreVal === '5') {
@@ -9020,7 +9000,6 @@
                 return scoreCounts;
             };
 
-            // Handle CSV file upload for baiga day data — upload file to backend for processing
             const handleBaigaDayUpload = async (dayIndex, file) => {
                 if (!file) return;
                 try {
@@ -9034,7 +9013,6 @@
                     const headers = { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id };
                     await axios.post(`${API_BASE_URL}/api/baiga/upload_day_csv`, form, { headers });
 
-                    // Fetch saved scores for the day and apply to UI
                     const resp = await axios.get(`${API_BASE_URL}/api/baiga/day_scores`, { params: { day: periodDay }, headers });
                     const scores = (resp && resp.data && resp.data.scores) ? resp.data.scores : [];
 
@@ -9042,7 +9020,6 @@
                         const updated = { ...prev };
                         const dayKey = `day${dayIndex + 1}`;
 
-                        // Map by operator id for quick lookup
                         const mapById = {};
                         for (const r of scores) {
                             if (r && r.operator_id != null) mapById[String(r.operator_id)] = Number(r.points || 0);
@@ -9055,14 +9032,12 @@
                                 if (participant.id && mapById[String(participant.id)] != null) {
                                     matchedScore = mapById[String(participant.id)];
                                 } else {
-                                    // fallback: match by exact name (case-insensitive)
                                     const normalizedParticipant = (participant.name || '').replace(/"/g, '').trim().toLowerCase();
                                     for (const r of scores) {
                                         if (r && r.name && r.name.trim().toLowerCase() === normalizedParticipant) { matchedScore = Number(r.points || 0); break; }
                                     }
                                 }
 
-                                // set day value (matched or 0) and recalc total scores
                                 const newTotalScores = (participant.scores || 0) - currentDayScore + matchedScore;
                                 return { ...participant, [dayKey]: matchedScore, scores: newTotalScores };
                             }).sort((a, b) => (b.scores || 0) - (a.scores || 0));
@@ -9081,16 +9056,17 @@
                 }
             };
 
-            // Fetch baiga scores for a whole period and apply to UI
             const fetchBaigaPeriod = async (period) => {
                 if (!period || !Array.isArray(period.days) || period.days.length === 0) return;
+                
+                setBaigaLoading(true);
+                
                 try {
                     const headers = { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id };
                     const params = { start: period.start, end: period.end };
                     const resp = await axios.get(`${API_BASE_URL}/api/baiga/period_scores`, { params, headers });
                     const days = (resp && resp.data && resp.data.days) ? resp.data.days : [];
 
-                    // Apply fetched scores to contestData
                     setContestData(prev => {
                         const updated = { ...prev };
 
@@ -9114,7 +9090,6 @@
                                         }
                                     }
 
-                                    // always set day value (matched or 0) and recalc total
                                     const newTotalScores = (participant.scores || 0) - currentDayScore + matchedScore;
                                     return { ...participant, [dayKey]: matchedScore, scores: newTotalScores };
                                 }).sort((a, b) => (b.scores || 0) - (a.scores || 0));
@@ -9129,18 +9104,17 @@
                 } catch (err) {
                     console.error('Error fetching baiga period data', err);
                     addToast('Ошибка при загрузке данных периода', 'error');
+                } finally {
+                    setBaigaLoading(false);
                 }
             };
 
-            // When selected period changes, set periodDays and fetch data for that period
             useEffect(() => {
                 if (!Array.isArray(baigaPeriodOptions) || baigaPeriodOptions.length === 0) return;
                 const idx = Number(selectedBaigaPeriod) || 0;
                 const period = baigaPeriodOptions[idx];
                 if (!period) return;
-                // update contestData with period days
                 setContestData(prev => ({ ...prev, baiga: { ...prev.baiga, periodDays: period.days, periodStart: period.start } }));
-                // fetch scores for this period
                 fetchBaigaPeriod(period);
             }, [selectedBaigaPeriod, baigaPeriodOptions]);
 
@@ -9325,21 +9299,28 @@
                         React.createElement('p',{className:'opacity-90'}, `Направление: Основа • Период: ${contestData.baiga.period}`), 
                         contestData.baiga.lastUpdate && React.createElement('p',{className:'text-sm opacity-75 mt-2'}, `Последнее обновление: ${contestData.baiga.lastUpdate}`)
                     ),
-                    renderGroupLeaders(),
-                    renderBaigaTable(),
-                    React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-3 gap-6'}, 
-                        ['0.5','0.75','1'].map(group=> 
-                            React.createElement('div',{key:group, className:'bg-white rounded-2xl p-6 shadow-lg'}, 
-                                React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, 
-                                    React.createElement('i',{className:'fas fa-users text-blue-600'}), 
-                                    `Группа ${group}`
-                                ), 
-                                React.createElement('div',{className:'space-y-3'}, 
-                                    contestData.baiga.groups[group].length>0 ? 
-                                        contestData.baiga.groups[group].map((p,i)=> 
-                                            React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Оценки'})
-                                        ) : 
-                                        React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных')
+                    baigaLoading ? React.createElement('div',{className:'flex items-center justify-center py-12'}, 
+                        React.createElement('div',{className:'flex flex-col items-center gap-3'}, 
+                            React.createElement('div',{className:'animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600'}),
+                            React.createElement('p',{className:'text-gray-600 font-medium'}, 'Загрузка данных...')
+                        )
+                    ) : React.createElement(React.Fragment, null,
+                        renderGroupLeaders(),
+                        renderBaigaTable(),
+                        React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-3 gap-6'}, 
+                            ['0.5','0.75','1'].map(group=> 
+                                React.createElement('div',{key:group, className:'bg-white rounded-2xl p-6 shadow-lg'}, 
+                                    React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, 
+                                        React.createElement('i',{className:'fas fa-users text-blue-600'}), 
+                                        `Группа ${group}`
+                                    ), 
+                                    React.createElement('div',{className:'space-y-3'}, 
+                                        contestData.baiga.groups[group].length>0 ? 
+                                            contestData.baiga.groups[group].map((p,i)=> 
+                                                React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Оценки'})
+                                            ) : 
+                                            React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных')
+                                    )
                                 )
                             )
                         )
@@ -9385,11 +9366,29 @@
                 )
             );
 
+            // Определяем доступные табы в зависимости от роли
+            const getAvailableTabs = () => {
+                if (isOperatorOrSv) {
+                    return [
+                        { id: 'baiga', label: 'Байга ОТП', icon: 'fa-running' },
+                        { id: 'quality', label: 'Качество', icon: 'fa-star' }
+                    ];
+                }
+                return [
+                    { id: 'baiga', label: 'Байга ОТП', icon: 'fa-running' },
+                    { id: 'quality', label: 'Качество', icon: 'fa-star' },
+                    { id: 'chat', label: 'Чат', icon: 'fa-comments' },
+                    { id: 'smz', label: 'СМЗ', icon: 'fa-chart-bar' }
+                ];
+            };
+
+            const availableTabs = getAvailableTabs();
+
             return (
                 React.createElement('div',{className:'min-h-screen p-4 md:p-8'},
                     React.createElement('div',{className:'max-w-7xl mx-auto'},
                         React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-6 mb-6'}, React.createElement('div',{className:'flex flex-col md:flex-row justify-between items-start md:items-center gap-4'}, React.createElement('div',null, React.createElement('h1',{className:'text-3xl font-bold text-gray-800 mb-2'}, React.createElement('i',{className:'fas fa-trophy text-yellow-500 mr-3'}), 'Конкурсы'), React.createElement('p',{className:'text-gray-600'}, 'Отслеживайте результаты и лидеров')), isAdmin ? React.createElement('div',{className:'px-6 py-3 rounded-xl font-semibold bg-green-500 text-white flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-check mr-2'}), 'Админ-режим') : null)),
-                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-4 mb-6 overflow-x-auto scrollbar-hide'}, React.createElement('div',{className:'flex gap-2 min-w-max'}, [{ id: 'baiga', label: 'Байга ОТП', icon: 'fa-running' },{ id: 'quality', label: 'Качество', icon: 'fa-star' },{ id: 'chat', label: 'Чат', icon: 'fa-comments' },{ id: 'smz', label: 'СМЗ', icon: 'fa-chart-bar' }].map(tab=> React.createElement('button',{key:tab.id, onClick:()=>setActiveTab(tab.id), className:`px-6 py-3 rounded-xl font-semibold transition-all whitespace-nowrap ${activeTab===tab.id ? 'tab-active shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}, React.createElement('i',{className:`fas ${tab.icon} mr-2`}), tab.label)) )),
+                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-4 mb-6 overflow-x-auto scrollbar-hide'}, React.createElement('div',{className:'flex gap-2 min-w-max'}, availableTabs.map(tab=> React.createElement('button',{key:tab.id, onClick:()=>setActiveTab(tab.id), className:`px-6 py-3 rounded-xl font-semibold transition-all whitespace-nowrap ${activeTab===tab.id ? 'tab-active shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}, React.createElement('i',{className:`fas ${tab.icon} mr-2`}), tab.label)) )),
                         React.createElement('div',null, activeTab==='baiga' && renderBaiga(), activeTab==='quality' && renderQuality(), activeTab==='chat' && renderChat(), activeTab==='smz' && renderSmz())
                     ),
                     React.createElement(ToastContainer,{toasts:toasts, removeToast:removeToast})
