@@ -8872,6 +8872,7 @@
             const [qualityForm, setQualityForm] = useState({ name: '', group: 'new', score: '' });
             const [chatForm, setChatForm] = useState({ name: '', thanks: '' });
             const [smzForm, setSmzForm] = useState({ name: '', signatures: '', calls: '' });
+            const [qualityLoading, setQualityLoading] = useState(false);
 
             const addToast = (message, type = 'success') => {
                 const id = Date.now();
@@ -8883,6 +8884,9 @@
 
             const fetchQualityAveragesForPeriod = async (opIds, start=null, end=null) => {
                 if (!opIds || opIds.length === 0) return;
+                
+                setQualityLoading(true);
+                
                 try {
                     if (!start || !end) {
                         // ИСПРАВЛЕНИЕ 3: Используем текущую неделю вместо "сегодня - 7 дней"
@@ -8916,7 +8920,7 @@
                         opMap = operatorsField;
                     }
 
-                    // ИСПРАВЛЕНИЕ 4: Глубокое копирование для правильной отрисовки
+                    // ИСПРАВЛЕНИЕ 4: Полностью перестраиваем таблицу - сбрасываем все данные перед обновлением
                     setContestData(prev => {
                         const updated = {
                             ...prev,
@@ -8933,13 +8937,19 @@
                         for (const grp of ['new','experienced']) {
                             const originalGroup = prev.quality.groups[grp] || [];
                             updated.quality.groups[grp] = originalGroup.map(p => {
+                                // КРИТИЧНО: Сначала сбрасываем данные на 0
+                                const resetParticipant = { ...p, score: 0, eval_count: 0 };
+                                
+                                // Потом применяем новые данные если они есть
                                 const info = opMap[String(p.id)];
                                 if (info) {
-                                    const avg = info.avg_score != null ? Number(info.avg_score) : (info.avg || info.score || 0);
+                                    const avg = info.avg_score != null ? Number(info.avg_score) : (info.avg || 0);
                                     const count = info.count != null ? Number(info.count) : (info.eval_count || 0);
-                                    return { ...p, score: avg, eval_count: count };
+                                    return { ...resetParticipant, score: avg, eval_count: count };
                                 }
-                                return { ...p };
+                                
+                                // Если данных нет - возвращаем участника с нулевыми значениями
+                                return resetParticipant;
                             }).sort((a,b)=> (b.score||0)-(a.score||0));
                         }
                         
@@ -8948,6 +8958,8 @@
                 } catch (err) {
                     console.error('Error fetching quality averages', err);
                     addToast('Не удалось загрузить средние оценки качества', 'error');
+                } finally {
+                    setQualityLoading(false);
                 }
             };
 
@@ -9350,7 +9362,12 @@
                             )
                         )
                     ), React.createElement('p',{className:'opacity-90'}, `Направление: Основа • Период: ${contestData.quality.period}`), contestData.quality.lastUpdate && React.createElement('p',{className:'text-sm opacity-75 mt-2'}, `Последнее обновление: ${contestData.quality.lastUpdate}`)),
-                        React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-2 gap-6'}, React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-seedling text-green-600'}), 'Новички (до 2 месяцев)'), React.createElement('div',{className:'space-y-3'}, contestData.quality.groups.new.length>0 ? contestData.quality.groups.new.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Качество', showExtra:(p)=> React.createElement('span',{className:'text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full'}, `Оценок: ${p.eval_count || 0}`)})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных'))), React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-graduate text-green-600'}), 'Опытные (от 2 месяцев)'), React.createElement('div',{className:'space-y-3'}, contestData.quality.groups.experienced.length>0 ? contestData.quality.groups.experienced.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Качество', showExtra:(p)=> React.createElement('span',{className:'text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full'}, `Оценок: ${p.eval_count || 0}`)})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных'))))
+                        qualityLoading ? React.createElement('div',{className:'flex items-center justify-center py-12'}, 
+                            React.createElement('div',{className:'flex flex-col items-center gap-3'}, 
+                                React.createElement('div',{className:'animate-spin rounded-full h-12 w-12 border-b-2 border-green-600'}),
+                                React.createElement('p',{className:'text-gray-600 font-medium'}, 'Загрузка данных...')
+                            )
+                        ) : React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-2 gap-6'}, React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-seedling text-green-600'}), 'Новички (до 2 месяцев)'), React.createElement('div',{className:'space-y-3'}, contestData.quality.groups.new.length>0 ? contestData.quality.groups.new.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Качество', showExtra:(p)=> React.createElement('span',{className:'text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full'}, `Оценок: ${p.eval_count || 0}`)})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных'))), React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-graduate text-green-600'}), 'Опытные (от 2 месяцев)'), React.createElement('div',{className:'space-y-3'}, contestData.quality.groups.experienced.length>0 ? contestData.quality.groups.experienced.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Качество', showExtra:(p)=> React.createElement('span',{className:'text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full'}, `Оценок: ${p.eval_count || 0}`)})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных'))))
                 )
             );
 
