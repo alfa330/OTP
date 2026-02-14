@@ -8656,41 +8656,40 @@
             const monthNamesShort = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
             
             const getRecentPeriods = (count = 12, days = 3) => {
-                const periods = [];
-                // fixed base date: 2026-02-09 (first possible period start)
-                const base = new Date(2026, 1, 9);
-                const now = new Date();
-                // Generate periods starting from `base` forward; collect up to `count` periods
-                for (let i = 0; i < count; i++) {
-                    const start = new Date(base);
-                    start.setDate(base.getDate() + (i * days));
-                    const end = new Date(start);
-                    end.setDate(start.getDate() + (days - 1));
+            const periods = [];
+            const base = new Date(2026, 1, 9); // 2026-02-09 local
+            const now = new Date();
 
-                    const label = `${start.getDate()} ${monthNamesShort[start.getMonth()]} - ${end.getDate()} ${monthNamesShort[end.getMonth()]} (${days} дня)`;
-                    periods.push({
-                        start: start.toISOString().slice(0,10),
-                        end: end.toISOString().slice(0,10),
-                        label,
-                        days: Array.from({length: days}, (_, idx) => {
-                            const d = new Date(start);
-                            d.setDate(start.getDate() + idx);
-                            return {
-                                date: d.toISOString().slice(0,10),
-                                label: `${d.getDate()} ${monthNamesShort[d.getMonth()]}`
-                            };
-                        })
-                    });
-                }
+            for (let i = 0; i < count; i++) {
+                const start = new Date(base);
+                start.setDate(base.getDate() + (i * days));
 
-                // Keep only periods whose start is <= today (include current period), then reverse so newest first
-                const valid = periods.filter(p => new Date(p.start) <= now);
-                if (valid.length === 0) {
-                    // if none valid (base in future), include first period
-                    return [periods[0]];
-                }
-                return valid.reverse();
+                const end = new Date(start);
+                end.setDate(start.getDate() + (days - 1));
+
+                const label = `${start.getDate()} ${monthNamesShort[start.getMonth()]} - ${end.getDate()} ${monthNamesShort[end.getMonth()]} (${days} дня)`;
+
+                periods.push({
+                start: toYMDLocal(start),
+                end: toYMDLocal(end),
+                label,
+                days: Array.from({ length: days }, (_, idx) => {
+                    const d = new Date(start);
+                    d.setDate(start.getDate() + idx);
+                    return {
+                    date: toYMDLocal(d),
+                    label: `${d.getDate()} ${monthNamesShort[d.getMonth()]}`
+                    };
+                })
+                });
+            }
+
+            // ВАЖНО: сравниваем локально, не через new Date('YYYY-MM-DD')
+            const valid = periods.filter(p => parseYMDLocal(p.start) <= now);
+            if (valid.length === 0) return [periods[0]];
+            return valid.reverse();
             };
+
 
             const [baigaPeriodOptions, setBaigaPeriodOptions] = useState([]);
             const [selectedBaigaPeriod, setSelectedBaigaPeriod] = useState(0);
@@ -8844,24 +8843,35 @@
             const [selectedQualityWeek, setSelectedQualityWeek] = useState(0);
 
             const getRecentWeeks = (count = 12) => {
-                const weeks = [];
-                const today = new Date();
-                const day = today.getDay();
-                const end = new Date(today);
-                const offsetToSunday = (7 - day) % 7;
-                end.setDate(today.getDate() + offsetToSunday);
-                let cursor = end;
-                for (let i = 0; i < count; i++) {
-                    const start = new Date(cursor);
-                    start.setDate(cursor.getDate() - 6);
-                    const label = `${start.getDate()} ${monthNamesShort[start.getMonth()]} - ${cursor.getDate()} ${monthNamesShort[cursor.getMonth()]}`;
-                    weeks.push({ start: start.toISOString().slice(0,10), end: cursor.toISOString().slice(0,10), label });
-                    const prev = new Date(start);
-                    prev.setDate(start.getDate() - 1);
-                    cursor = prev;
-                }
-                return weeks;
+            const weeks = [];
+            const today = new Date();
+            const day = today.getDay();
+            const end = new Date(today);
+            const offsetToSunday = (7 - day) % 7;
+            end.setDate(today.getDate() + offsetToSunday);
+
+            let cursor = end;
+
+            for (let i = 0; i < count; i++) {
+                const start = new Date(cursor);
+                start.setDate(cursor.getDate() - 6);
+
+                const label = `${start.getDate()} ${monthNamesShort[start.getMonth()]} - ${cursor.getDate()} ${monthNamesShort[cursor.getMonth()]}`;
+
+                weeks.push({
+                start: toYMDLocal(start),
+                end: toYMDLocal(cursor),
+                label
+                });
+
+                const prev = new Date(start);
+                prev.setDate(start.getDate() - 1);
+                cursor = prev;
+            }
+
+            return weeks;
             };
+
 
             useEffect(()=>{
                 setQualityWeekOptions(getRecentWeeks(12));
