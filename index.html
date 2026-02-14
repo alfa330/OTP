@@ -9154,6 +9154,90 @@
                 setSmzForm({ name: '', signatures: '', calls: '' }); addToast('Результат добавлен');
             };
 
+            // Функция для поиска позиции оператора в Байга
+            const getBaigaUserStats = () => {
+                if (!currentUser?.id && !currentUser?.name) return null;
+                
+                const allEntries = [...contestData.baiga.groups['0.5'], ...contestData.baiga.groups['0.75'], ...contestData.baiga.groups['1']];
+                
+                let userEntry = null;
+                let overallPosition = -1;
+                let groupPosition = -1;
+                
+                // Поиск по ID
+                if (currentUser.id) {
+                    userEntry = allEntries.find(p => p.id === currentUser.id);
+                }
+                
+                // Если не нашли по ID, ищем по имени
+                if (!userEntry && currentUser.name) {
+                    const normalizedUserName = (currentUser.name || '').toLowerCase().trim();
+                    userEntry = allEntries.find(p => (p.name || '').toLowerCase().trim() === normalizedUserName);
+                }
+                
+                if (!userEntry) return null;
+                
+                // Находим позицию в общем рейтинге
+                const sortedAll = [...allEntries].sort((a, b) => (b.scores || 0) - (a.scores || 0));
+                overallPosition = sortedAll.findIndex(p => p.id === userEntry.id || (p.name || '').toLowerCase() === (userEntry.name || '').toLowerCase()) + 1;
+                
+                // Находим позицию в группе
+                const groupEntries = contestData.baiga.groups[userEntry.group] || [];
+                groupPosition = groupEntries.findIndex(p => p.id === userEntry.id || (p.name || '').toLowerCase() === (userEntry.name || '').toLowerCase()) + 1;
+                
+                return {
+                    entry: userEntry,
+                    overallPosition,
+                    groupPosition,
+                    totalInGroup: groupEntries.length,
+                    totalOverall: allEntries.length
+                };
+            };
+
+            // Функция для поиска позиции оператора в Качестве
+            const getQualityUserStats = () => {
+                if (!currentUser?.id && !currentUser?.name) return null;
+                
+                const allEntries = [...contestData.quality.groups.new, ...contestData.quality.groups.experienced];
+                
+                let userEntry = null;
+                let overallPosition = -1;
+                let groupPosition = -1;
+                let userGroup = null;
+                
+                // Поиск по ID
+                if (currentUser.id) {
+                    userEntry = allEntries.find(p => p.id === currentUser.id);
+                }
+                
+                // Если не нашли по ID, ищем по имени
+                if (!userEntry && currentUser.name) {
+                    const normalizedUserName = (currentUser.name || '').toLowerCase().trim();
+                    userEntry = allEntries.find(p => (p.name || '').toLowerCase().trim() === normalizedUserName);
+                }
+                
+                if (!userEntry) return null;
+                
+                userGroup = userEntry.group; // 'new' или 'experienced'
+                
+                // Находим позицию в общем рейтинге
+                const sortedAll = [...allEntries].sort((a, b) => (b.score || 0) - (a.score || 0));
+                overallPosition = sortedAll.findIndex(p => p.id === userEntry.id || (p.name || '').toLowerCase() === (userEntry.name || '').toLowerCase()) + 1;
+                
+                // Находим позицию в группе
+                const groupEntries = contestData.quality.groups[userGroup] || [];
+                groupPosition = groupEntries.findIndex(p => p.id === userEntry.id || (p.name || '').toLowerCase() === (userEntry.name || '').toLowerCase()) + 1;
+                
+                return {
+                    entry: userEntry,
+                    overallPosition,
+                    groupPosition,
+                    totalInGroup: groupEntries.length,
+                    totalOverall: allEntries.length,
+                    groupName: userGroup === 'new' ? 'Новички' : 'Опытные'
+                };
+            };
+
             const Medal = ({ position }) => {
                 const medals = {1:{class:'medal-gold', icon:'fa-trophy'},2:{class:'medal-silver', icon:'fa-medal'},3:{class:'medal-bronze', icon:'fa-medal'}};
                 const medal = medals[position]; if(!medal) return React.createElement('span',{className:'text-gray-500 font-semibold'}, `#${position}`);
@@ -9173,6 +9257,109 @@
                     )
                 )
             );
+
+            // Компонент для отображения личной статистики оператора в Байга
+            const renderBaigaUserStats = () => {
+                if (isAdmin) return null;
+                
+                const stats = getBaigaUserStats();
+                if (!stats) return null;
+                
+                const isFirst = stats.overallPosition === 1 || stats.groupPosition === 1;
+                
+                return React.createElement('div', { className: `bg-gradient-to-br ${isFirst ? 'from-yellow-400 via-yellow-500 to-yellow-600' : 'from-blue-400 to-blue-600'} rounded-2xl p-6 shadow-2xl mb-6 text-white` },
+                    isFirst && React.createElement('div', { className: 'flex items-center justify-center mb-4' },
+                        React.createElement('div', { className: 'text-center' },
+                            React.createElement('i', { className: 'fas fa-crown text-5xl mb-2 animate-bounce' }),
+                            React.createElement('h3', { className: 'text-3xl font-bold' }, '🎉 ПОЗДРАВЛЯЕМ! 🎉'),
+                            React.createElement('p', { className: 'text-xl mt-2 opacity-90' }, 
+                                stats.overallPosition === 1 ? 'Вы лидер общего рейтинга!' : 'Вы лидер в своей группе!'
+                            )
+                        )
+                    ),
+                    React.createElement('div', { className: 'grid grid-cols-1 md:grid-cols-3 gap-4' },
+                        React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-xl p-4 backdrop-blur-sm' },
+                            React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
+                                React.createElement('i', { className: 'fas fa-chart-line text-2xl' }),
+                                React.createElement('h4', { className: 'text-lg font-bold' }, 'Ваше место')
+                            ),
+                            React.createElement('p', { className: 'text-4xl font-bold' }, `#${stats.overallPosition}`),
+                            React.createElement('p', { className: 'text-sm opacity-90 mt-1' }, `из ${stats.totalOverall} операторов`)
+                        ),
+                        React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-xl p-4 backdrop-blur-sm' },
+                            React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
+                                React.createElement('i', { className: 'fas fa-users text-2xl' }),
+                                React.createElement('h4', { className: 'text-lg font-bold' }, 'В группе ' + stats.entry.group)
+                            ),
+                            React.createElement('p', { className: 'text-4xl font-bold' }, `#${stats.groupPosition}`),
+                            React.createElement('p', { className: 'text-sm opacity-90 mt-1' }, `из ${stats.totalInGroup} операторов`)
+                        ),
+                        React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-xl p-4 backdrop-blur-sm' },
+                            React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
+                                React.createElement('i', { className: 'fas fa-star text-2xl' }),
+                                React.createElement('h4', { className: 'text-lg font-bold' }, 'Ваши оценки')
+                            ),
+                            React.createElement('p', { className: 'text-4xl font-bold' }, stats.entry.scores || 0),
+                            React.createElement('div', { className: 'flex gap-2 mt-2' },
+                                ...((contestData.baiga.periodDays || []).map((day, idx) =>
+                                    React.createElement('div', { key: idx, className: 'text-center' },
+                                        React.createElement('p', { className: 'text-xs opacity-75' }, day.label.split(' ')[0]),
+                                        React.createElement('p', { className: 'text-sm font-bold' }, stats.entry[`day${idx + 1}`] || 0)
+                                    )
+                                ))
+                            )
+                        )
+                    )
+                );
+            };
+
+            // Компонент для отображения личной статистики оператора в Качестве
+            const renderQualityUserStats = () => {
+                if (isAdmin) return null;
+                
+                const stats = getQualityUserStats();
+                if (!stats) return null;
+                
+                const isFirst = stats.overallPosition === 1 || stats.groupPosition === 1;
+                
+                return React.createElement('div', { className: `bg-gradient-to-br ${isFirst ? 'from-yellow-400 via-yellow-500 to-yellow-600' : 'from-green-400 to-green-600'} rounded-2xl p-6 shadow-2xl mb-6 text-white` },
+                    isFirst && React.createElement('div', { className: 'flex items-center justify-center mb-4' },
+                        React.createElement('div', { className: 'text-center' },
+                            React.createElement('i', { className: 'fas fa-crown text-5xl mb-2 animate-bounce' }),
+                            React.createElement('h3', { className: 'text-3xl font-bold' }, '🎉 ПОЗДРАВЛЯЕМ! 🎉'),
+                            React.createElement('p', { className: 'text-xl mt-2 opacity-90' }, 
+                                stats.overallPosition === 1 ? 'Вы лидер общего рейтинга!' : 'Вы лидер в своей группе!'
+                            )
+                        )
+                    ),
+                    React.createElement('div', { className: 'grid grid-cols-1 md:grid-cols-3 gap-4' },
+                        React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-xl p-4 backdrop-blur-sm' },
+                            React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
+                                React.createElement('i', { className: 'fas fa-chart-line text-2xl' }),
+                                React.createElement('h4', { className: 'text-lg font-bold' }, 'Ваше место')
+                            ),
+                            React.createElement('p', { className: 'text-4xl font-bold' }, `#${stats.overallPosition}`),
+                            React.createElement('p', { className: 'text-sm opacity-90 mt-1' }, `из ${stats.totalOverall} операторов`)
+                        ),
+                        React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-xl p-4 backdrop-blur-sm' },
+                            React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
+                                React.createElement('i', { className: 'fas fa-users text-2xl' }),
+                                React.createElement('h4', { className: 'text-lg font-bold' }, stats.groupName)
+                            ),
+                            React.createElement('p', { className: 'text-4xl font-bold' }, `#${stats.groupPosition}`),
+                            React.createElement('p', { className: 'text-sm opacity-90 mt-1' }, `из ${stats.totalInGroup} операторов`)
+                        ),
+                        React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-xl p-4 backdrop-blur-sm' },
+                            React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
+                                React.createElement('i', { className: 'fas fa-award text-2xl' }),
+                                React.createElement('h4', { className: 'text-lg font-bold' }, 'Качество')
+                            ),
+                            React.createElement('p', { className: 'text-4xl font-bold' }, (stats.entry.score || 0).toFixed(2)),
+                            React.createElement('p', { className: 'text-sm opacity-90 mt-1' }, `Оценок: ${stats.entry.eval_count || 0}`)
+                        )
+                    )
+                );
+            };
 
             const renderGroupLeaders = () => {
                 const groups = ['0.5','0.75','1'];
@@ -9305,6 +9492,7 @@
                             React.createElement('p',{className:'text-gray-600 font-medium'}, 'Загрузка данных...')
                         )
                     ) : React.createElement(React.Fragment, null,
+                        renderBaigaUserStats(),
                         renderGroupLeaders(),
                         renderBaigaTable(),
                         React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-3 gap-6'}, 
@@ -9348,7 +9536,29 @@
                                 React.createElement('div',{className:'animate-spin rounded-full h-12 w-12 border-b-2 border-green-600'}),
                                 React.createElement('p',{className:'text-gray-600 font-medium'}, 'Загрузка данных...')
                             )
-                        ) : React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-2 gap-6'}, React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-seedling text-green-600'}), 'Новички (до 2 месяцев)'), React.createElement('div',{className:'space-y-3'}, contestData.quality.groups.new.length>0 ? contestData.quality.groups.new.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Качество', showExtra:(p)=> React.createElement('span',{className:'text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full'}, `Оценок: ${p.eval_count || 0}`)})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных'))), React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-graduate text-green-600'}), 'Опытные (от 2 месяцев)'), React.createElement('div',{className:'space-y-3'}, contestData.quality.groups.experienced.length>0 ? contestData.quality.groups.experienced.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Качество', showExtra:(p)=> React.createElement('span',{className:'text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full'}, `Оценок: ${p.eval_count || 0}`)})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных'))))
+                        ) : React.createElement(React.Fragment, null,
+                            renderQualityUserStats(),
+                            React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-2 gap-6'}, 
+                                React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, 
+                                    React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, 
+                                        React.createElement('i',{className:'fas fa-seedling text-green-600'}), 
+                                        'Новички (до 2 месяцев)'
+                                    ), 
+                                    React.createElement('div',{className:'space-y-3'}, 
+                                        contestData.quality.groups.new.length>0 ? contestData.quality.groups.new.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Качество', showExtra:(p)=> React.createElement('span',{className:'text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full'}, `Оценок: ${p.eval_count || 0}`)})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных')
+                                    )
+                                ), 
+                                React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, 
+                                    React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, 
+                                        React.createElement('i',{className:'fas fa-user-graduate text-green-600'}), 
+                                        'Опытные (от 2 месяцев)'
+                                    ), 
+                                    React.createElement('div',{className:'space-y-3'}, 
+                                        contestData.quality.groups.experienced.length>0 ? contestData.quality.groups.experienced.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Качество', showExtra:(p)=> React.createElement('span',{className:'text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full'}, `Оценок: ${p.eval_count || 0}`)})) : React.createElement('p',{className:'text-center text-gray-500 py-4'}, 'Нет данных')
+                                    )
+                                )
+                            )
+                        )
                 )
             );
 
@@ -9366,7 +9576,6 @@
                 )
             );
 
-            // Определяем доступные табы в зависимости от роли
             const getAvailableTabs = () => {
                 if (isOperatorOrSv) {
                     return [
