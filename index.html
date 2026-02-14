@@ -630,6 +630,15 @@
             const [newDeficiencyDescription, setNewDeficiencyDescription] = useState('');
             const [toasts, setToasts] = useState([]);
 
+            const isRestrictedUser = currentUser?.role === 'operator' || currentUser?.role === 'sv';
+            const ALL_TABS = [
+                { id: 'baiga', label: 'Байга ОТП', icon: 'fa-running' },
+                { id: 'quality', label: 'Качество', icon: 'fa-star' },
+                { id: 'chat', label: 'Чат', icon: 'fa-comments' },
+                { id: 'smz', label: 'СМЗ', icon: 'fa-chart-bar' }
+            ];
+            const visibleTabs = isRestrictedUser ? ALL_TABS.filter(t => ['baiga','quality'].includes(t.id)) : ALL_TABS;
+
             const showToast = (message, type = 'success') => {
                 const id = Date.now();
                 setToasts(prev => [...prev, { id, message, type, closing: false }]);
@@ -9389,7 +9398,7 @@
                 React.createElement('div',{className:'min-h-screen p-4 md:p-8'},
                     React.createElement('div',{className:'max-w-7xl mx-auto'},
                         React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-6 mb-6'}, React.createElement('div',{className:'flex flex-col md:flex-row justify-between items-start md:items-center gap-4'}, React.createElement('div',null, React.createElement('h1',{className:'text-3xl font-bold text-gray-800 mb-2'}, React.createElement('i',{className:'fas fa-trophy text-yellow-500 mr-3'}), 'Конкурсы'), React.createElement('p',{className:'text-gray-600'}, 'Отслеживайте результаты и лидеров')), isAdmin ? React.createElement('div',{className:'px-6 py-3 rounded-xl font-semibold bg-green-500 text-white flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-check mr-2'}), 'Админ-режим') : null)),
-                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-4 mb-6 overflow-x-auto scrollbar-hide'}, React.createElement('div',{className:'flex gap-2 min-w-max'}, [{ id: 'baiga', label: 'Байга ОТП', icon: 'fa-running' },{ id: 'quality', label: 'Качество', icon: 'fa-star' },{ id: 'chat', label: 'Чат', icon: 'fa-comments' },{ id: 'smz', label: 'СМЗ', icon: 'fa-chart-bar' }].map(tab=> React.createElement('button',{key:tab.id, onClick:()=>setActiveTab(tab.id), className:`px-6 py-3 rounded-xl font-semibold transition-all whitespace-nowrap ${activeTab===tab.id ? 'tab-active shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}, React.createElement('i',{className:`fas ${tab.icon} mr-2`}), tab.label)) )),
+                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-4 mb-6 overflow-x-auto scrollbar-hide'}, React.createElement('div',{className:'flex gap-2 min-w-max'}, visibleTabs.map(tab=> React.createElement('button',{key:tab.id, onClick:()=>setActiveTab(tab.id), className:`px-6 py-3 rounded-xl font-semibold transition-all whitespace-nowrap ${activeTab===tab.id ? 'tab-active shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}, React.createElement('i',{className:`fas ${tab.icon} mr-2`}), tab.label)) )),
                         React.createElement('div',null, activeTab==='baiga' && renderBaiga(), activeTab==='quality' && renderQuality(), activeTab==='chat' && renderChat(), activeTab==='smz' && renderSmz())
                     ),
                     React.createElement(ToastContainer,{toasts:toasts, removeToast:removeToast})
