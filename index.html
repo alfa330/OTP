@@ -8705,6 +8705,37 @@
                 setSelectedBaigaPeriod(0);
             }, []);
 
+            // Quality weeks management
+            const [qualityWeekOptions, setQualityWeekOptions] = useState([]);
+            const [selectedQualityWeek, setSelectedQualityWeek] = useState(0);
+
+            const getRecentWeeks = (count = 12) => {
+                const weeks = [];
+                const today = new Date();
+                const day = today.getUTCDay(); // Используем UTC
+                const end = new Date(today);
+                const offsetToSunday = (7 - day) % 7;
+                end.setUTCDate(today.getUTCDate() + offsetToSunday);
+                let cursor = end;
+                for (let i = 0; i < count; i++) {
+                    const start = new Date(cursor);
+                    start.setUTCDate(cursor.getUTCDate() - 6);
+                    const label = `${start.getUTCDate()} ${monthNamesShort[start.getUTCMonth()]} - ${cursor.getUTCDate()} ${monthNamesShort[cursor.getUTCMonth()]}`;
+                    weeks.push({ start: start.toISOString().slice(0,10), end: cursor.toISOString().slice(0,10), label });
+                    const prev = new Date(start);
+                    prev.setUTCDate(start.getUTCDate() - 1);
+                    cursor = prev;
+                }
+                return weeks;
+            };
+
+            // ИСПРАВЛЕНИЕ 1: Инициализируем недели ПЕРЕД использованием
+            useEffect(()=>{
+                const weeks = getRecentWeeks(12);
+                setQualityWeekOptions(weeks);
+                setSelectedQualityWeek(0);
+            }, []);
+
             // initialize contestData from operators when provided
             useEffect(() => {
                 if (!Array.isArray(operators) || operators.length === 0) return;
@@ -8810,13 +8841,18 @@
                         if (p.id) qualityIds.push(p.id);
                     }
                 }
-                fetchQualityAveragesForPeriod(Array.from(new Set(qualityIds)));
+                
+                // ИСПРАВЛЕНИЕ 2: Передаем правильные даты текущей недели
+                if (qualityIds.length > 0 && qualityWeekOptions.length > 0) {
+                    const currentWeek = qualityWeekOptions[0];
+                    fetchQualityAveragesForPeriod(Array.from(new Set(qualityIds)), currentWeek.start, currentWeek.end);
+                }
 
                 newData.chat.results.sort((a,b)=> (b.thanks||0)-(a.thanks||0));
                 newData.smz.results.sort((a,b)=> (b.total||0)-(a.total||0));
 
                 setContestData(newData);
-            }, [operators, baigaPeriodOptions]);
+            }, [operators, baigaPeriodOptions, qualityWeekOptions]);
 
             const [contestData, setContestData] = useState({
                 baiga: { 
@@ -8845,43 +8881,23 @@
 
             const removeToast = (id) => setToasts(prev => prev.filter(t => t.id !== id));
 
-            const [qualityWeekOptions, setQualityWeekOptions] = useState([]);
-            const [selectedQualityWeek, setSelectedQualityWeek] = useState(0);
-
-            const getRecentWeeks = (count = 12) => {
-                const weeks = [];
-                const today = new Date();
-                const day = today.getUTCDay(); // Используем UTC
-                const end = new Date(today);
-                const offsetToSunday = (7 - day) % 7;
-                end.setUTCDate(today.getUTCDate() + offsetToSunday);
-                let cursor = end;
-                for (let i = 0; i < count; i++) {
-                    const start = new Date(cursor);
-                    start.setUTCDate(cursor.getUTCDate() - 6);
-                    const label = `${start.getUTCDate()} ${monthNamesShort[start.getUTCMonth()]} - ${cursor.getUTCDate()} ${monthNamesShort[cursor.getUTCMonth()]}`;
-                    weeks.push({ start: start.toISOString().slice(0,10), end: cursor.toISOString().slice(0,10), label });
-                    const prev = new Date(start);
-                    prev.setUTCDate(start.getUTCDate() - 1);
-                    cursor = prev;
-                }
-                return weeks;
-            };
-
-            useEffect(()=>{
-                setQualityWeekOptions(getRecentWeeks(12));
-                setSelectedQualityWeek(0);
-            }, []);
-
             const fetchQualityAveragesForPeriod = async (opIds, start=null, end=null) => {
                 if (!opIds || opIds.length === 0) return;
                 try {
                     if (!start || !end) {
-                        const sd = new Date();
-                        sd.setUTCDate(sd.getUTCDate() - 7); // UTC метод
-                        const ed = new Date();
-                        start = sd.toISOString().slice(0,10);
-                        end = ed.toISOString().slice(0,10);
+                        // ИСПРАВЛЕНИЕ 3: Используем текущую неделю вместо "сегодня - 7 дней"
+                        if (qualityWeekOptions.length > 0) {
+                            const currentWeek = qualityWeekOptions[selectedQualityWeek || 0];
+                            start = currentWeek.start;
+                            end = currentWeek.end;
+                        } else {
+                            // Fallback на последние 7 дней только если нет данных о неделях
+                            const sd = new Date();
+                            sd.setUTCDate(sd.getUTCDate() - 7);
+                            const ed = new Date();
+                            start = sd.toISOString().slice(0,10);
+                            end = ed.toISOString().slice(0,10);
+                        }
                     }
                     const params = { start, end, operator_ids: opIds.join(',') };
                     const resp = await axios.get(`${API_BASE_URL}/api/average_scores`, { params, headers: { 'X-API-Key': currentUser?.apiKey, 'X-User-Id': currentUser?.id } });
@@ -8900,20 +8916,33 @@
                         opMap = operatorsField;
                     }
 
+                    // ИСПРАВЛЕНИЕ 4: Глубокое копирование для правильной отрисовки
                     setContestData(prev => {
-                        const updated = { ...prev };
+                        const updated = {
+                            ...prev,
+                            quality: {
+                                ...prev.quality,
+                                groups: {
+                                    new: [],
+                                    experienced: []
+                                },
+                                lastUpdate: new Date().toLocaleString('ru-RU')
+                            }
+                        };
+                        
                         for (const grp of ['new','experienced']) {
-                            updated.quality.groups[grp] = (updated.quality.groups[grp] || []).map(p => {
+                            const originalGroup = prev.quality.groups[grp] || [];
+                            updated.quality.groups[grp] = originalGroup.map(p => {
                                 const info = opMap[String(p.id)];
                                 if (info) {
                                     const avg = info.avg_score != null ? Number(info.avg_score) : (info.avg || info.score || 0);
                                     const count = info.count != null ? Number(info.count) : (info.eval_count || 0);
                                     return { ...p, score: avg, eval_count: count };
                                 }
-                                return p;
+                                return { ...p };
                             }).sort((a,b)=> (b.score||0)-(a.score||0));
                         }
-                        updated.quality.lastUpdate = new Date().toLocaleString('ru-RU');
+                        
                         return updated;
                     });
                 } catch (err) {
