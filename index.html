@@ -8877,7 +8877,8 @@
                 if (!opIds || opIds.length === 0) return;
                 try {
                     if (!start || !end) {
-                        const sd = new Date(); sd.setDate(sd.getDate() - 7);
+                        const sd = new Date();
+                        sd.setUTCDate(sd.getUTCDate() - 7); // UTC метод
                         const ed = new Date();
                         start = sd.toISOString().slice(0,10);
                         end = ed.toISOString().slice(0,10);
