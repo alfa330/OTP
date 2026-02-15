@@ -3099,7 +3099,8 @@ def save_work_shift():
         "shift_date": "YYYY-MM-DD",
         "start_time": "HH:MM",
         "end_time": "HH:MM",
-        "breaks": [{"start": minutes, "end": minutes}, ...]  // optional
+        "breaks": [{"start": minutes, "end": minutes}, ...],  // optional
+        "shift_id": int  // optional, for exact update of existing shift
     }
     """
     try:
@@ -3123,13 +3124,24 @@ def save_work_shift():
         start_time = data.get('start_time')
         end_time = data.get('end_time')
         breaks = data.get('breaks')
+        shift_id = data.get('shift_id')
         
         if not all([operator_id, shift_date, start_time, end_time]):
             return jsonify({"error": "Missing required fields"}), 400
+
+        if breaks is not None and not isinstance(breaks, list):
+            return jsonify({"error": "breaks must be a list"}), 400
         
-        shift_id = db.save_shift(operator_id, shift_date, start_time, end_time, breaks)
+        saved_shift_id = db.save_shift(
+            operator_id=operator_id,
+            shift_date=shift_date,
+            start_time=start_time,
+            end_time=end_time,
+            breaks=breaks,
+            shift_id=shift_id
+        )
         
-        return jsonify({"message": "Shift saved successfully", "shift_id": shift_id}), 200
+        return jsonify({"message": "Shift saved successfully", "shift_id": saved_shift_id}), 200
     
     except Exception as e:
         logging.error(f"Error saving shift: {e}", exc_info=True)
@@ -3240,7 +3252,8 @@ def save_shifts_bulk():
                 "date": "YYYY-MM-DD",
                 "start": "HH:MM",
                 "end": "HH:MM",
-                "breaks": [{"start": minutes, "end": minutes}, ...]  // optional
+                "breaks": [{"start": minutes, "end": minutes}, ...],  // optional
+                "shift_id": int  // optional, for exact update
             },
             ...
         ]
@@ -3270,6 +3283,14 @@ def save_shifts_bulk():
         
         if not shifts:
             return jsonify({"error": "No shifts provided"}), 400
+
+        for item in shifts:
+            if not isinstance(item, dict):
+                return jsonify({"error": "Each shift must be an object"}), 400
+            if not all([item.get('date'), item.get('start'), item.get('end')]):
+                return jsonify({"error": "Each shift must include date, start and end"}), 400
+            if item.get('breaks') is not None and not isinstance(item.get('breaks'), list):
+                return jsonify({"error": "Each shift.breaks must be a list"}), 400
         
         shift_ids = db.save_shifts_bulk(operator_id, shifts)
         
