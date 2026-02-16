@@ -3,6 +3,8 @@ import os
 import threading
 import asyncio
 import requests
+import hashlib
+import jwt
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -12,7 +14,7 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.dispatcher import FSMContext
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, g
 from flask_cors import CORS
 from functools import wraps
 from openpyxl import load_workbook
@@ -60,12 +62,44 @@ executor_pool = ThreadPoolExecutor(max_workers=4)
 
 # === Flask-сервер ================================================================================================
 app = Flask(__name__)
+JWT_SECRET = os.getenv('JWT_SECRET') or FLASK_API_KEY
+JWT_ALGORITHM = "HS256"
+JWT_ACCESS_TOKEN_MINUTES = int(os.getenv('JWT_ACCESS_TOKEN_MINUTES', '30'))
+JWT_REFRESH_TOKEN_DAYS = int(os.getenv('JWT_REFRESH_TOKEN_DAYS', '30'))
+JWT_ACCESS_COOKIE_NAME = os.getenv('JWT_ACCESS_COOKIE_NAME', 'otp_access_token')
+JWT_REFRESH_COOKIE_NAME = os.getenv('JWT_REFRESH_COOKIE_NAME', 'otp_refresh_token')
+JWT_COOKIE_DOMAIN = os.getenv('JWT_COOKIE_DOMAIN', None)
+JWT_COOKIE_SAMESITE = os.getenv('JWT_COOKIE_SAMESITE', 'None')
+JWT_COOKIE_SECURE = os.getenv('JWT_COOKIE_SECURE', 'true').lower() == 'true'
+JWT_TOKEN_PEPPER = os.getenv('JWT_TOKEN_PEPPER', JWT_SECRET)
+
+ALLOWED_ORIGINS = {
+    "https://alfa330.github.io",
+    "https://call-evalution.pages.dev",
+    "https://szov.pages.dev",
+    "https://moders.pages.dev",
+    "https://table-7kx.pages.dev",
+    "https://base-pmy9.onrender.com"
+}
+
+if not os.getenv('JWT_SECRET'):
+    logging.warning("JWT_SECRET is not set. Falling back to FLASK_API_KEY for signing tokens.")
+
+
+def _is_allowed_origin(origin):
+    if not origin:
+        return False
+    if origin in ALLOWED_ORIGINS:
+        return True
+    return origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:")
+
+
 CORS(app, resources={
     r"/api/*": {
-        "origins": ["https://alfa330.github.io", "http://localhost:*", "https://call-evalution.pages.dev", "https://szov.pages.dev", "https://moders.pages.dev", "https://table-7kx.pages.dev", "https://base-pmy9.onrender.com"],
+        "origins": list(ALLOWED_ORIGINS) + [r"http://localhost:\d+", r"http://127\.0\.0\.1:\d+"],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "X-API-Key", "X-User-Id"],
-        "supports_credentials": False,
+        "allow_headers": ["Content-Type", "X-API-Key", "X-User-Id", "Authorization"],
+        "supports_credentials": True,
         "max_age": 86400
     }
 })
@@ -81,36 +115,220 @@ def get_gcs_client():
         return gcs_storage.Client(credentials=credentials)
     return gcs_storage.Client()
 
+
+class AuthError(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _client_ip():
+    xff = request.headers.get('X-Forwarded-For', '')
+    if xff:
+        return xff.split(',')[0].strip()
+    return request.remote_addr
+
+
+def _hash_token(raw_token):
+    value = f"{raw_token}:{JWT_TOKEN_PEPPER}"
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def _get_user_payload(user):
+    return {
+        "role": user[3],
+        "id": user[0],
+        "name": user[2],
+        "telegram_id": user[1]
+    }
+
+
+def _set_request_auth_context(user_id):
+    request.environ['HTTP_X_USER_ID'] = str(user_id)
+    request.environ['HTTP_X_API_KEY'] = FLASK_API_KEY
+    request.user_id = int(user_id)
+    g.user_id = int(user_id)
+
+
+def _decode_token(token, expected_type, verify_exp=True):
+    try:
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=[JWT_ALGORITHM],
+            options={"verify_exp": verify_exp}
+        )
+    except jwt.ExpiredSignatureError as e:
+        raise AuthError("TOKEN_EXPIRED", "JWT token expired") from e
+    except jwt.InvalidTokenError as e:
+        raise AuthError("INVALID_TOKEN", "Invalid JWT token") from e
+
+    token_type = payload.get("type")
+    if token_type != expected_type:
+        raise AuthError("INVALID_TOKEN_TYPE", "Invalid token type")
+    if not payload.get("sub") or not payload.get("sid"):
+        raise AuthError("INVALID_TOKEN", "Malformed JWT token")
+    return payload
+
+
+def _build_access_token(user, session_id):
+    now = datetime.utcnow()
+    payload = {
+        "sub": str(user[0]),
+        "role": user[3],
+        "name": user[2],
+        "sid": str(session_id),
+        "type": "access",
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=JWT_ACCESS_TOKEN_MINUTES)).timestamp())
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _build_refresh_token(user_id, session_id):
+    now = datetime.utcnow()
+    payload = {
+        "sub": str(user_id),
+        "sid": str(session_id),
+        "type": "refresh",
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(days=JWT_REFRESH_TOKEN_DAYS)).timestamp())
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _cookie_options():
+    secure = JWT_COOKIE_SECURE
+    origin = request.headers.get('Origin', '')
+    if origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:"):
+        secure = False
+
+    samesite = JWT_COOKIE_SAMESITE
+    if not secure and str(samesite).lower() == 'none':
+        samesite = 'Lax'
+
+    return {
+        "httponly": True,
+        "secure": secure,
+        "samesite": samesite,
+        "domain": JWT_COOKIE_DOMAIN,
+        "path": "/"
+    }
+
+
+def _set_auth_cookies(response, access_token, refresh_token):
+    cookie_kwargs = _cookie_options()
+    response.set_cookie(
+        JWT_ACCESS_COOKIE_NAME,
+        access_token,
+        max_age=JWT_ACCESS_TOKEN_MINUTES * 60,
+        **cookie_kwargs
+    )
+    response.set_cookie(
+        JWT_REFRESH_COOKIE_NAME,
+        refresh_token,
+        max_age=JWT_REFRESH_TOKEN_DAYS * 24 * 60 * 60,
+        **cookie_kwargs
+    )
+
+
+def _clear_auth_cookies(response):
+    cookie_kwargs = _cookie_options()
+    response.set_cookie(JWT_ACCESS_COOKIE_NAME, '', expires=0, max_age=0, **cookie_kwargs)
+    response.set_cookie(JWT_REFRESH_COOKIE_NAME, '', expires=0, max_age=0, **cookie_kwargs)
+
+
+def _authenticate_access_cookie(optional=True, touch_session=True):
+    access_token = request.cookies.get(JWT_ACCESS_COOKIE_NAME)
+    if not access_token:
+        if optional:
+            return None
+        raise AuthError("MISSING_TOKEN", "Missing access token cookie")
+
+    payload = _decode_token(access_token, expected_type="access", verify_exp=True)
+    user_id = int(payload["sub"])
+    session_id = str(payload["sid"])
+    session = db.get_user_session(session_id=session_id, user_id=user_id)
+    if not session:
+        raise AuthError("SESSION_NOT_FOUND", "Session not found")
+    if session["revoked_at"] is not None:
+        raise AuthError("SESSION_REVOKED", "Session revoked")
+    if session["expires_at"] and session["expires_at"] < datetime.utcnow():
+        raise AuthError("SESSION_EXPIRED", "Session expired")
+
+    if touch_session:
+        db.touch_user_session(
+            session_id=session_id,
+            user_id=user_id,
+            ip_address=_client_ip(),
+            user_agent=request.headers.get('User-Agent')
+        )
+
+    _set_request_auth_context(user_id)
+    return payload
+
+
+def _current_session_id_from_access_token():
+    access_token = request.cookies.get(JWT_ACCESS_COOKIE_NAME)
+    if not access_token:
+        return None
+    try:
+        payload = _decode_token(access_token, expected_type="access", verify_exp=False)
+        return str(payload.get("sid"))
+    except AuthError:
+        return None
+
+
+@app.before_request
+def hydrate_user_context_from_jwt():
+    if not request.path.startswith('/api/'):
+        return None
+    if request.method == 'OPTIONS':
+        return None
+    try:
+        _authenticate_access_cookie(optional=True)
+    except AuthError as auth_error:
+        request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
+    return None
+
 def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if request.method == 'OPTIONS':
             return _build_cors_preflight_response()
-        api_key = request.headers.get('X-API-Key')
-        if api_key and api_key == FLASK_API_KEY:
+
+        if getattr(g, 'user_id', None):
             return f(*args, **kwargs)
-        else:
-            logging.warning(f"Invalid or missing API key: {api_key}")
-            return jsonify({"error": "Invalid or missing API key", "provided_key": api_key}), 401
+
+        try:
+            if _authenticate_access_cookie(optional=True):
+                return f(*args, **kwargs)
+        except AuthError as auth_error:
+            request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
+
+        auth_error_code = request.environ.get('JWT_AUTH_ERROR_CODE')
+        if auth_error_code:
+            return jsonify({"error": "JWT authentication failed", "code": auth_error_code}), 401
+
+        if request.cookies.get(JWT_REFRESH_COOKIE_NAME):
+            return jsonify({"error": "Access token required", "code": "TOKEN_EXPIRED"}), 401
+
+        logging.warning("Unauthorized request: no valid JWT cookie")
+        return jsonify({"error": "Unauthorized"}), 401
     return decorated
 
 def _build_cors_preflight_response():
-    allowed_origins = {
-        "https://alfa330.github.io",
-        "https://call-evalution.pages.dev",
-        "https://szov.pages.dev",
-        "https://moders.pages.dev", 
-        "https://table-7kx.pages.dev"
-    }
-
     origin = request.headers.get("Origin")
     response = jsonify({"status": "ok"})
 
-    if origin in allowed_origins:
+    if _is_allowed_origin(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Vary"] = "Origin"
 
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, X-User-Id"
-    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, X-User-Id, Authorization"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     return response
 
 @app.route('/')
@@ -119,19 +337,13 @@ def index():
 
 @app.after_request
 def after_request(response):
-    allowed_origins = {
-        "https://alfa330.github.io",
-        "https://call-evalution.pages.dev",
-        "https://szov.pages.dev",
-        "https://moders.pages.dev", 
-        "https://table-7kx.pages.dev"
-    }
-
     origin = request.headers.get('Origin')
-    if origin in allowed_origins:
+    if _is_allowed_origin(origin):
         response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Vary'] = 'Origin'
 
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-User-Id'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-User-Id, Authorization'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, DELETE, PUT'
     return response
 
@@ -149,29 +361,194 @@ def health_check():
 @app.route('/api/login', methods=['POST'])
 def login():
     try:
-        data = request.get_json()
-        if not data or ('key' not in data and ('login' not in data or 'password' not in data)):
+        data = request.get_json() or {}
+        login_value = data.get('login', '').strip()
+        password = data.get('password', '')
+        if not login_value or not password:
             return jsonify({"error": "Missing credentials"}), 400
-        
-        if 'login' in data and 'password' in data:
-            # Аутентификация по логину/паролю
-            login = data['login']
-            password = data['password']
-            user = db.get_user_by_login(login)
-            if user and db.verify_password(user[0], password):
-                return jsonify({
-                    "status": "success", 
-                    "role": user[3],
-                    "id": user[0],
-                    "name": user[2],
-                    "telegram_id": user[1],
-                    "apiKey": FLASK_API_KEY  # Return API key for frontend
-                })
-        
+
+        user = db.get_user_by_login(login_value)
+        if user and db.verify_password(user[0], password):
+            session_id = str(uuid.uuid4())
+            access_token = _build_access_token(user, session_id)
+            refresh_token = _build_refresh_token(user[0], session_id)
+            db.create_user_session(
+                session_id=session_id,
+                user_id=user[0],
+                refresh_token_hash=_hash_token(refresh_token),
+                expires_at=datetime.utcnow() + timedelta(days=JWT_REFRESH_TOKEN_DAYS),
+                user_agent=request.headers.get('User-Agent'),
+                ip_address=_client_ip()
+            )
+            _set_request_auth_context(user[0])
+            payload = _get_user_payload(user)
+            response = jsonify({"status": "success", "user": payload, **payload})
+            _set_auth_cookies(response, access_token, refresh_token)
+            return response, 200
+
         return jsonify({"error": "Invalid credentials"}), 401
     except Exception as e:
         logging.error(f"Login error: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/auth/me', methods=['GET'])
+@require_api_key
+def auth_me():
+    try:
+        user_id = getattr(g, 'user_id', None)
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        user = db.get_user(id=user_id)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        payload = _get_user_payload(user)
+        return jsonify({"status": "success", "user": payload, **payload}), 200
+    except Exception as e:
+        logging.error(f"auth_me error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/auth/refresh', methods=['POST'])
+def refresh_auth():
+    try:
+        refresh_token = request.cookies.get(JWT_REFRESH_COOKIE_NAME)
+        if not refresh_token:
+            response = jsonify({"error": "Missing refresh token", "code": "MISSING_REFRESH_TOKEN"})
+            _clear_auth_cookies(response)
+            return response, 401
+
+        payload = _decode_token(refresh_token, expected_type="refresh", verify_exp=True)
+        user_id = int(payload["sub"])
+        session_id = str(payload["sid"])
+
+        session = db.get_user_session(session_id=session_id, user_id=user_id)
+        if not session:
+            raise AuthError("SESSION_NOT_FOUND", "Session not found")
+        if session["revoked_at"] is not None:
+            raise AuthError("SESSION_REVOKED", "Session revoked")
+        if session["expires_at"] and session["expires_at"] < datetime.utcnow():
+            raise AuthError("SESSION_EXPIRED", "Session expired")
+        if session["refresh_token_hash"] != _hash_token(refresh_token):
+            raise AuthError("REFRESH_TOKEN_MISMATCH", "Refresh token mismatch")
+
+        user = db.get_user(id=user_id)
+        if not user:
+            raise AuthError("USER_NOT_FOUND", "User not found")
+
+        new_access_token = _build_access_token(user, session_id)
+        new_refresh_token = _build_refresh_token(user_id, session_id)
+        db.rotate_user_session_token(
+            session_id=session_id,
+            user_id=user_id,
+            refresh_token_hash=_hash_token(new_refresh_token),
+            expires_at=datetime.utcnow() + timedelta(days=JWT_REFRESH_TOKEN_DAYS)
+        )
+        db.touch_user_session(
+            session_id=session_id,
+            user_id=user_id,
+            ip_address=_client_ip(),
+            user_agent=request.headers.get('User-Agent')
+        )
+        _set_request_auth_context(user_id)
+
+        payload_user = _get_user_payload(user)
+        response = jsonify({"status": "success", "user": payload_user, **payload_user})
+        _set_auth_cookies(response, new_access_token, new_refresh_token)
+        return response, 200
+    except AuthError as auth_error:
+        response = jsonify({"error": auth_error.message, "code": auth_error.code})
+        _clear_auth_cookies(response)
+        return response, 401
+    except Exception as e:
+        logging.error(f"refresh_auth error: {e}", exc_info=True)
+        response = jsonify({"error": "Internal server error"})
+        _clear_auth_cookies(response)
+        return response, 500
+
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    try:
+        session_id = _current_session_id_from_access_token()
+        user_id = getattr(g, 'user_id', None)
+        if session_id and user_id:
+            db.revoke_user_session(session_id=session_id, user_id=user_id)
+        elif session_id:
+            db.revoke_user_session(session_id=session_id)
+
+        response = jsonify({"status": "success"})
+        _clear_auth_cookies(response)
+        return response, 200
+    except Exception as e:
+        logging.error(f"logout error: {e}", exc_info=True)
+        response = jsonify({"status": "success"})
+        _clear_auth_cookies(response)
+        return response, 200
+
+
+@app.route('/api/auth/logout_all', methods=['POST'])
+@require_api_key
+def logout_all():
+    try:
+        user_id = getattr(g, 'user_id', None)
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        db.revoke_all_user_sessions(user_id=user_id)
+        response = jsonify({"status": "success"})
+        _clear_auth_cookies(response)
+        return response, 200
+    except Exception as e:
+        logging.error(f"logout_all error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/auth/sessions', methods=['GET'])
+@require_api_key
+def list_auth_sessions():
+    try:
+        user_id = getattr(g, 'user_id', None)
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        current_session_id = _current_session_id_from_access_token()
+        sessions = db.list_user_sessions(user_id=user_id)
+        serialized = []
+        for item in sessions:
+            serialized.append({
+                "session_id": item["session_id"],
+                "is_current": item["session_id"] == current_session_id,
+                "user_agent": item["user_agent"],
+                "ip_address": item["ip_address"],
+                "created_at": item["created_at"].isoformat() if item["created_at"] else None,
+                "last_seen_at": item["last_seen_at"].isoformat() if item["last_seen_at"] else None,
+                "expires_at": item["expires_at"].isoformat() if item["expires_at"] else None,
+                "revoked_at": item["revoked_at"].isoformat() if item["revoked_at"] else None
+            })
+        return jsonify({"status": "success", "sessions": serialized}), 200
+    except Exception as e:
+        logging.error(f"list_auth_sessions error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/auth/sessions/<session_id>/revoke', methods=['POST'])
+@require_api_key
+def revoke_auth_session(session_id):
+    try:
+        user_id = getattr(g, 'user_id', None)
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        revoked = db.revoke_user_session(session_id=session_id, user_id=user_id)
+        if not revoked:
+            return jsonify({"error": "Session not found"}), 404
+
+        response = jsonify({"status": "success"})
+        if _current_session_id_from_access_token() == session_id:
+            _clear_auth_cookies(response)
+        return response, 200
+    except Exception as e:
+        logging.error(f"revoke_auth_session error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
 
 @app.route('/api/user/profile', methods=['GET'])
 @require_api_key
@@ -5314,3 +5691,4 @@ if __name__ == '__main__':
     
     # Запускаем бота
     executor.start_polling(dp, skip_updates=True)
+
