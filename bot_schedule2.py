@@ -246,38 +246,127 @@ def _clear_auth_cookies(response):
     response.set_cookie(JWT_REFRESH_COOKIE_NAME, '', expires=0, max_age=0, **cookie_kwargs)
 
 
+def _get_cookie_values(cookie_name):
+    # request.cookies may behave inconsistently if duplicate cookie names exist.
+    # Parse raw Cookie header and keep all occurrences.
+    raw_cookie = request.headers.get('Cookie', '') or ''
+    values = []
+    for chunk in raw_cookie.split(';'):
+        part = chunk.strip()
+        if not part or '=' not in part:
+            continue
+        key, val = part.split('=', 1)
+        if key.strip() == cookie_name:
+            values.append(val.strip())
+    if not values:
+        fallback = request.cookies.get(cookie_name)
+        if fallback:
+            values.append(fallback)
+    return values
+
+
+def _get_cookie_value(cookie_name):
+    values = _get_cookie_values(cookie_name)
+    if not values:
+        return None
+    return values[-1]
+
+
 def _authenticate_access_cookie(optional=True, touch_session=True):
-    access_token = request.cookies.get(JWT_ACCESS_COOKIE_NAME)
-    if not access_token:
+    access_tokens = _get_cookie_values(JWT_ACCESS_COOKIE_NAME)
+    if not access_tokens:
         if optional:
             return None
         raise AuthError("MISSING_TOKEN", "Missing access token cookie")
 
-    payload = _decode_token(access_token, expected_type="access", verify_exp=True)
-    user_id = int(payload["sub"])
-    session_id = str(payload["sid"])
-    session = db.get_user_session(session_id=session_id, user_id=user_id)
-    if not session:
-        raise AuthError("SESSION_NOT_FOUND", "Session not found")
-    if session["revoked_at"] is not None:
-        raise AuthError("SESSION_REVOKED", "Session revoked")
-    if session["expires_at"] and session["expires_at"] < datetime.utcnow():
-        raise AuthError("SESSION_EXPIRED", "Session expired")
+    last_error = AuthError("INVALID_TOKEN", "Invalid access token")
+    for access_token in reversed(access_tokens):
+        try:
+            payload = _decode_token(access_token, expected_type="access", verify_exp=True)
+            user_id = int(payload["sub"])
+            session_id = str(payload["sid"])
+            session = db.get_user_session(session_id=session_id, user_id=user_id)
+            if not session:
+                raise AuthError("SESSION_NOT_FOUND", "Session not found")
+            if session["revoked_at"] is not None:
+                raise AuthError("SESSION_REVOKED", "Session revoked")
+            if session["expires_at"] and session["expires_at"] < datetime.utcnow():
+                raise AuthError("SESSION_EXPIRED", "Session expired")
 
-    if touch_session:
-        db.touch_user_session(
-            session_id=session_id,
-            user_id=user_id,
-            ip_address=_client_ip(),
-            user_agent=request.headers.get('User-Agent')
-        )
+            if touch_session:
+                db.touch_user_session(
+                    session_id=session_id,
+                    user_id=user_id,
+                    ip_address=_client_ip(),
+                    user_agent=request.headers.get('User-Agent')
+                )
 
-    _set_request_auth_context(user_id)
-    return payload
+            _set_request_auth_context(user_id)
+            return payload
+        except AuthError as auth_error:
+            last_error = auth_error
+            continue
+
+    raise last_error
+
+
+def _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
+    refresh_tokens = _get_cookie_values(JWT_REFRESH_COOKIE_NAME)
+    if not refresh_tokens:
+        if optional:
+            return None
+        raise AuthError("MISSING_REFRESH_TOKEN", "Missing refresh token cookie")
+
+    last_error = AuthError("INVALID_TOKEN", "Invalid refresh token")
+    for refresh_token in reversed(refresh_tokens):
+        try:
+            payload = _decode_token(refresh_token, expected_type="refresh", verify_exp=True)
+            user_id = int(payload["sub"])
+            session_id = str(payload["sid"])
+
+            session = db.get_user_session(session_id=session_id, user_id=user_id)
+            if not session:
+                raise AuthError("SESSION_NOT_FOUND", "Session not found")
+            if session["revoked_at"] is not None:
+                raise AuthError("SESSION_REVOKED", "Session revoked")
+            if session["expires_at"] and session["expires_at"] < datetime.utcnow():
+                raise AuthError("SESSION_EXPIRED", "Session expired")
+            if session["refresh_token_hash"] != _hash_token(refresh_token):
+                raise AuthError("REFRESH_TOKEN_MISMATCH", "Refresh token mismatch")
+
+            user = db.get_user(id=user_id)
+            if not user:
+                raise AuthError("USER_NOT_FOUND", "User not found")
+
+            if rotate_tokens:
+                new_access_token = _build_access_token(user, session_id)
+                new_refresh_token = _build_refresh_token(user_id, session_id)
+                db.rotate_user_session_token(
+                    session_id=session_id,
+                    user_id=user_id,
+                    refresh_token_hash=_hash_token(new_refresh_token),
+                    expires_at=datetime.utcnow() + timedelta(days=JWT_REFRESH_TOKEN_DAYS)
+                )
+                g.pending_auth_tokens = (new_access_token, new_refresh_token)
+            else:
+                db.touch_user_session(
+                    session_id=session_id,
+                    user_id=user_id,
+                    ip_address=_client_ip(),
+                    user_agent=request.headers.get('User-Agent')
+                )
+
+            _set_request_auth_context(user_id)
+            return payload
+        except AuthError as auth_error:
+            last_error = auth_error
+            continue
+
+    raise last_error
 
 
 def _current_session_id_from_access_token():
-    access_token = request.cookies.get(JWT_ACCESS_COOKIE_NAME)
+    access_token = _get_cookie_value(JWT_ACCESS_COOKIE_NAME)
     if not access_token:
         return None
     try:
@@ -293,10 +382,21 @@ def hydrate_user_context_from_jwt():
         return None
     if request.method == 'OPTIONS':
         return None
+
+    if request.path == '/api/auth/refresh':
+        return None
+
     try:
-        _authenticate_access_cookie(optional=True)
+        payload = _authenticate_access_cookie(optional=True)
+        if payload:
+            return None
     except AuthError as auth_error:
         request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
+
+    try:
+        _authenticate_refresh_cookie(optional=True, rotate_tokens=True)
+    except AuthError as refresh_auth_error:
+        request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
     return None
 
 def require_api_key(f):
@@ -314,11 +414,17 @@ def require_api_key(f):
         except AuthError as auth_error:
             request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
+        try:
+            if _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
+                return f(*args, **kwargs)
+        except AuthError as refresh_auth_error:
+            request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
+
         auth_error_code = request.environ.get('JWT_AUTH_ERROR_CODE')
         if auth_error_code:
             return jsonify({"error": "JWT authentication failed", "code": auth_error_code}), 401
 
-        if request.cookies.get(JWT_REFRESH_COOKIE_NAME):
+        if _get_cookie_value(JWT_REFRESH_COOKIE_NAME):
             return jsonify({"error": "Access token required", "code": "TOKEN_EXPIRED"}), 401
 
         logging.warning("Unauthorized request: no valid JWT cookie")
@@ -353,6 +459,12 @@ def after_request(response):
 
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-User-Id, Authorization'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, DELETE, PUT'
+
+    pending_tokens = getattr(g, 'pending_auth_tokens', None)
+    if pending_tokens:
+        access_token, refresh_token = pending_tokens
+        _set_auth_cookies(response, access_token, refresh_token)
+
     return response
 
 @app.route('/api/health', methods=['GET'])
@@ -426,49 +538,16 @@ def refresh_auth():
         if request.method == 'OPTIONS':
             return _build_cors_preflight_response()
 
-        refresh_token = request.cookies.get(JWT_REFRESH_COOKIE_NAME)
-        if not refresh_token:
-            response = jsonify({"error": "Missing refresh token", "code": "MISSING_REFRESH_TOKEN"})
-            _clear_auth_cookies(response)
-            return response, 401
-
-        payload = _decode_token(refresh_token, expected_type="refresh", verify_exp=True)
-        user_id = int(payload["sub"])
-        session_id = str(payload["sid"])
-
-        session = db.get_user_session(session_id=session_id, user_id=user_id)
-        if not session:
-            raise AuthError("SESSION_NOT_FOUND", "Session not found")
-        if session["revoked_at"] is not None:
-            raise AuthError("SESSION_REVOKED", "Session revoked")
-        if session["expires_at"] and session["expires_at"] < datetime.utcnow():
-            raise AuthError("SESSION_EXPIRED", "Session expired")
-        if session["refresh_token_hash"] != _hash_token(refresh_token):
-            raise AuthError("REFRESH_TOKEN_MISMATCH", "Refresh token mismatch")
-
+        _authenticate_refresh_cookie(optional=False, rotate_tokens=True)
+        user_id = getattr(g, 'user_id', None)
+        if not user_id:
+            raise AuthError("UNAUTHORIZED", "Unauthorized")
         user = db.get_user(id=user_id)
         if not user:
             raise AuthError("USER_NOT_FOUND", "User not found")
 
-        new_access_token = _build_access_token(user, session_id)
-        new_refresh_token = _build_refresh_token(user_id, session_id)
-        db.rotate_user_session_token(
-            session_id=session_id,
-            user_id=user_id,
-            refresh_token_hash=_hash_token(new_refresh_token),
-            expires_at=datetime.utcnow() + timedelta(days=JWT_REFRESH_TOKEN_DAYS)
-        )
-        db.touch_user_session(
-            session_id=session_id,
-            user_id=user_id,
-            ip_address=_client_ip(),
-            user_agent=request.headers.get('User-Agent')
-        )
-        _set_request_auth_context(user_id)
-
         payload_user = _get_user_payload(user)
         response = jsonify({"status": "success", "user": payload_user, **payload_user})
-        _set_auth_cookies(response, new_access_token, new_refresh_token)
         return response, 200
     except AuthError as auth_error:
         response = jsonify({"error": auth_error.message, "code": auth_error.code})
