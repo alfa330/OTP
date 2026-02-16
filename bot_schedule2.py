@@ -699,6 +699,8 @@ def list_admin_sessions():
                 "user_name": item["user_name"],
                 "user_role": item["user_role"],
                 "user_login": item["user_login"],
+                "supervisor_id": item["supervisor_id"],
+                "supervisor_name": item["supervisor_name"],
                 "is_current": item["session_id"] == current_session_id,
                 "user_agent": item["user_agent"],
                 "ip_address": item["ip_address"],

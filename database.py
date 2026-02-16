@@ -2212,6 +2212,8 @@ class Database:
                     u.name,
                     u.role,
                     u.login,
+                    u.supervisor_id,
+                    sv.name AS supervisor_name,
                     us.user_agent,
                     us.ip_address,
                     us.created_at,
@@ -2219,6 +2221,7 @@ class Database:
                     us.expires_at
                 FROM user_sessions us
                 JOIN users u ON u.id = us.user_id
+                LEFT JOIN users sv ON sv.id = u.supervisor_id
                 WHERE us.revoked_at IS NULL
                   AND us.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
                 ORDER BY u.name ASC, us.last_seen_at DESC, us.created_at DESC
@@ -2231,11 +2234,13 @@ class Database:
                     "user_name": row[2],
                     "user_role": row[3],
                     "user_login": row[4],
-                    "user_agent": row[5],
-                    "ip_address": row[6],
-                    "created_at": row[7],
-                    "last_seen_at": row[8],
-                    "expires_at": row[9]
+                    "supervisor_id": row[5],
+                    "supervisor_name": row[6],
+                    "user_agent": row[7],
+                    "ip_address": row[8],
+                    "created_at": row[9],
+                    "last_seen_at": row[10],
+                    "expires_at": row[11]
                 }
                 for row in rows
             ]
