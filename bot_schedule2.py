@@ -31,6 +31,7 @@ import tempfile
 from datetime import datetime, timedelta
 import time
 import math
+from urllib.parse import quote
 from ai_feed_back_service import generate_monthly_feedback_with_ai
 
 os.environ['TZ'] = 'Asia/Almaty'
@@ -71,6 +72,7 @@ JWT_REFRESH_COOKIE_NAME = os.getenv('JWT_REFRESH_COOKIE_NAME', 'otp_refresh_toke
 JWT_COOKIE_DOMAIN = os.getenv('JWT_COOKIE_DOMAIN', None)
 JWT_COOKIE_SAMESITE = os.getenv('JWT_COOKIE_SAMESITE', 'None')
 JWT_COOKIE_SECURE = os.getenv('JWT_COOKIE_SECURE', 'true').lower() == 'true'
+JWT_COOKIE_PARTITIONED = os.getenv('JWT_COOKIE_PARTITIONED', 'true').lower() == 'true'
 JWT_TOKEN_PEPPER = os.getenv('JWT_TOKEN_PEPPER', JWT_SECRET)
 
 ALLOWED_ORIGINS = {
@@ -215,35 +217,64 @@ def _cookie_options():
     if not secure and str(samesite).lower() == 'none':
         samesite = 'Lax'
 
+    partitioned = bool(JWT_COOKIE_PARTITIONED and secure and str(samesite).lower() == 'none')
+
     return {
         "httponly": True,
         "secure": secure,
         "samesite": samesite,
         "domain": JWT_COOKIE_DOMAIN,
-        "path": "/"
+        "path": "/",
+        "partitioned": partitioned
     }
 
 
-def _set_auth_cookies(response, access_token, refresh_token):
+def _serialize_cookie(name, value, max_age, cookie_kwargs, expires=None):
+    safe_value = quote(value, safe="!#$%&'()*+-./:<=>?@[]^_`{|}~")
+    parts = [f"{name}={safe_value}"]
+    parts.append(f"Path={cookie_kwargs['path']}")
+    parts.append(f"Max-Age={int(max_age)}")
+    if cookie_kwargs.get('domain'):
+        parts.append(f"Domain={cookie_kwargs['domain']}")
+    if expires:
+        parts.append(f"Expires={expires}")
+    if cookie_kwargs.get('httponly'):
+        parts.append("HttpOnly")
+    if cookie_kwargs.get('secure'):
+        parts.append("Secure")
+    if cookie_kwargs.get('samesite'):
+        parts.append(f"SameSite={cookie_kwargs['samesite']}")
+    if cookie_kwargs.get('partitioned'):
+        parts.append("Partitioned")
+    return "; ".join(parts)
+
+
+def _set_cookie_header(response, name, value, max_age):
     cookie_kwargs = _cookie_options()
-    response.set_cookie(
-        JWT_ACCESS_COOKIE_NAME,
-        access_token,
-        max_age=JWT_ACCESS_TOKEN_MINUTES * 60,
-        **cookie_kwargs
+    cookie_header = _serialize_cookie(name, value, max_age=max_age, cookie_kwargs=cookie_kwargs)
+    response.headers.add("Set-Cookie", cookie_header)
+
+
+def _clear_cookie_header(response, name):
+    cookie_kwargs = _cookie_options()
+    cookie_header = _serialize_cookie(
+        name,
+        '',
+        max_age=0,
+        cookie_kwargs=cookie_kwargs,
+        expires="Thu, 01 Jan 1970 00:00:00 GMT"
     )
-    response.set_cookie(
-        JWT_REFRESH_COOKIE_NAME,
-        refresh_token,
-        max_age=JWT_REFRESH_TOKEN_DAYS * 24 * 60 * 60,
-        **cookie_kwargs
-    )
+    response.headers.add("Set-Cookie", cookie_header)
+
+
+def _set_auth_cookies(response, access_token, refresh_token):
+    _set_cookie_header(response, JWT_ACCESS_COOKIE_NAME, access_token, JWT_ACCESS_TOKEN_MINUTES * 60)
+    _set_cookie_header(response, JWT_REFRESH_COOKIE_NAME, refresh_token, JWT_REFRESH_TOKEN_DAYS * 24 * 60 * 60)
 
 
 def _clear_auth_cookies(response):
-    cookie_kwargs = _cookie_options()
-    response.set_cookie(JWT_ACCESS_COOKIE_NAME, '', expires=0, max_age=0, **cookie_kwargs)
-    response.set_cookie(JWT_REFRESH_COOKIE_NAME, '', expires=0, max_age=0, **cookie_kwargs)
+    _clear_cookie_header(response, JWT_ACCESS_COOKIE_NAME)
+    _clear_cookie_header(response, JWT_REFRESH_COOKIE_NAME)
 
 
 def _get_cookie_values(cookie_name):
@@ -394,7 +425,7 @@ def hydrate_user_context_from_jwt():
         request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
     try:
-        _authenticate_refresh_cookie(optional=True, rotate_tokens=True)
+        _authenticate_refresh_cookie(optional=True, rotate_tokens=False)
     except AuthError as refresh_auth_error:
         request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
     return None
@@ -415,7 +446,7 @@ def require_api_key(f):
             request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
         try:
-            if _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
+            if _authenticate_refresh_cookie(optional=True, rotate_tokens=False):
                 return f(*args, **kwargs)
         except AuthError as refresh_auth_error:
             request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
