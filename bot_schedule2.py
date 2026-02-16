@@ -86,7 +86,14 @@ if not os.getenv('JWT_SECRET'):
     logging.warning("JWT_SECRET is not set. Falling back to FLASK_API_KEY for signing tokens.")
 
 
+def _normalize_origin(origin):
+    if not origin:
+        return ""
+    return str(origin).strip().rstrip("/")
+
+
 def _is_allowed_origin(origin):
+    origin = _normalize_origin(origin)
     if not origin:
         return False
     if origin in ALLOWED_ORIGINS:
@@ -319,7 +326,7 @@ def require_api_key(f):
     return decorated
 
 def _build_cors_preflight_response():
-    origin = request.headers.get("Origin")
+    origin = _normalize_origin(request.headers.get("Origin"))
     response = jsonify({"status": "ok"})
 
     if _is_allowed_origin(origin):
@@ -329,6 +336,7 @@ def _build_cors_preflight_response():
 
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, X-User-Id, Authorization"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Max-Age"] = "86400"
     return response
 
 @app.route('/')
@@ -337,7 +345,7 @@ def index():
 
 @app.after_request
 def after_request(response):
-    origin = request.headers.get('Origin')
+    origin = _normalize_origin(request.headers.get('Origin'))
     if _is_allowed_origin(origin):
         response.headers['Access-Control-Allow-Origin'] = origin
         response.headers['Access-Control-Allow-Credentials'] = 'true'
@@ -358,9 +366,12 @@ def health_check():
         logging.error(f"Health check failed: {e}")
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
-@app.route('/api/login', methods=['POST'])
+@app.route('/api/login', methods=['POST', 'OPTIONS'])
 def login():
     try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
         data = request.get_json() or {}
         login_value = data.get('login', '').strip()
         password = data.get('password', '')
@@ -409,9 +420,12 @@ def auth_me():
         return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/auth/refresh', methods=['POST'])
+@app.route('/api/auth/refresh', methods=['POST', 'OPTIONS'])
 def refresh_auth():
     try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
         refresh_token = request.cookies.get(JWT_REFRESH_COOKIE_NAME)
         if not refresh_token:
             response = jsonify({"error": "Missing refresh token", "code": "MISSING_REFRESH_TOKEN"})
@@ -467,9 +481,12 @@ def refresh_auth():
         return response, 500
 
 
-@app.route('/api/logout', methods=['POST'])
+@app.route('/api/logout', methods=['POST', 'OPTIONS'])
 def logout():
     try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
         session_id = _current_session_id_from_access_token()
         user_id = getattr(g, 'user_id', None)
         if session_id and user_id:
@@ -487,7 +504,7 @@ def logout():
         return response, 200
 
 
-@app.route('/api/auth/logout_all', methods=['POST'])
+@app.route('/api/auth/logout_all', methods=['POST', 'OPTIONS'])
 @require_api_key
 def logout_all():
     try:
@@ -503,7 +520,7 @@ def logout_all():
         return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/auth/sessions', methods=['GET'])
+@app.route('/api/auth/sessions', methods=['GET', 'OPTIONS'])
 @require_api_key
 def list_auth_sessions():
     try:
@@ -530,7 +547,7 @@ def list_auth_sessions():
         return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/auth/sessions/<session_id>/revoke', methods=['POST'])
+@app.route('/api/auth/sessions/<session_id>/revoke', methods=['POST', 'OPTIONS'])
 @require_api_key
 def revoke_auth_session(session_id):
     try:
