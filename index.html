@@ -9717,6 +9717,9 @@
             const [directions, setDirections] = useState([]);
             const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
             const [users, setUsers] = useState([]);
+            const [adminSessions, setAdminSessions] = useState([]);
+            const [isAdminSessionsLoading, setIsAdminSessionsLoading] = useState(false);
+            const [revokingSessionId, setRevokingSessionId] = useState('');
             const [showUserEditModal, setShowUserEditModal] = useState(false);
             const [userToEdit, setUserToEdit] = useState(null);
             const [svOperators, setSvOperators] = useState([]);
@@ -11929,6 +11932,61 @@
                 }
             };
 
+            const fetchAdminSessions = async () => {
+                if (!user || user.role !== 'admin') return;
+                setIsAdminSessionsLoading(true);
+                try {
+                    const response = await axios.get(`${API_BASE_URL}/api/admin/sessions`, {
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                    });
+                    const data = response.data;
+                    if (data.status === 'success' && isMounted.current) {
+                        setAdminSessions(Array.isArray(data.sessions) ? data.sessions : []);
+                    } else {
+                        showToast(data.error || 'Failed to fetch active sessions', 'error');
+                    }
+                } catch (err) {
+                    console.error('Fetch admin sessions error:', err);
+                    showToast(err.response?.data?.error || 'Failed to fetch active sessions', 'error');
+                } finally {
+                    if (isMounted.current) setIsAdminSessionsLoading(false);
+                }
+            };
+
+            const handleRevokeAdminSession = async (session) => {
+                if (!session?.session_id) return;
+                const userLabel = session.user_name || `#${session.user_id || ''}`;
+                const confirmed = window.confirm(`Прервать сессию пользователя "${userLabel}"?`);
+                if (!confirmed) return;
+
+                setRevokingSessionId(session.session_id);
+                try {
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/admin/sessions/${encodeURIComponent(session.session_id)}/revoke`,
+                        {},
+                        {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        }
+                    );
+                    const data = response.data || {};
+                    if (data.status === 'success') {
+                        showToast('Сессия прервана', 'success');
+                        if (data.current_session_revoked) {
+                            await confirmLogout();
+                            return;
+                        }
+                        await fetchAdminSessions();
+                    } else {
+                        showToast(data.error || 'Failed to revoke session', 'error');
+                    }
+                } catch (err) {
+                    console.error('Revoke admin session error:', err);
+                    showToast(err.response?.data?.error || 'Failed to revoke session', 'error');
+                } finally {
+                    if (isMounted.current) setRevokingSessionId('');
+                }
+            };
+
             const handleGenerateReport = async () => {
                     try {
                         setIsLoading(true);
@@ -12747,6 +12805,32 @@
                 (u.supervisor_name || '').toLowerCase().includes(searchQuery.toLowerCase())
             );
 
+            const groupedAdminSessions = useMemo(() => {
+                const grouped = {};
+                (adminSessions || []).forEach((item) => {
+                    const userId = item.user_id;
+                    if (!grouped[userId]) {
+                        grouped[userId] = {
+                            user_id: userId,
+                            user_name: item.user_name,
+                            user_role: item.user_role,
+                            user_login: item.user_login,
+                            sessions: []
+                        };
+                    }
+                    grouped[userId].sessions.push(item);
+                });
+
+                return Object.values(grouped)
+                    .map((group) => ({
+                        ...group,
+                        sessions: (group.sessions || []).sort(
+                            (a, b) => new Date(b.last_seen_at || 0).getTime() - new Date(a.last_seen_at || 0).getTime()
+                        )
+                    }))
+                    .sort((a, b) => (a.user_name || '').localeCompare((b.user_name || ''), 'ru', { sensitivity: 'base' }));
+            }, [adminSessions]);
+
             const fetchProfileData = async () => {
                 setIsLoading(true);
                 
@@ -13175,6 +13259,12 @@
                 }
             }, [selectedSvId, selectedReportMonth, selectedMonth]);
 
+            useEffect(() => {
+                if (user?.role === 'admin' && view === 'admin_sessions') {
+                    fetchAdminSessions();
+                }
+            }, [user, view]);
+
             if (!user) {
                 return (
                   <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
@@ -13346,6 +13436,11 @@
                                         <li>
                                             <button onClick={() => { setView('manage_users'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_users' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-user-cog"></i> <span className="sidebar-text">Операторы</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => { setView('admin_sessions'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'admin_sessions' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-laptop-house"></i> <span className="sidebar-text">Сессии</span>
                                             </button>
                                         </li>
 
@@ -13758,6 +13853,89 @@
                                     </button>
                                     </div>
                                 </div>
+                                )}
+
+                                {view === 'admin_sessions' && (
+                                    <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+                                            <h2 className="text-2xl font-semibold text-gray-800">Активные сессии</h2>
+                                            <button
+                                                onClick={fetchAdminSessions}
+                                                disabled={isAdminSessionsLoading}
+                                                className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isAdminSessionsLoading ? 'bg-blue-300 text-blue-700 opacity-60 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+                                            >
+                                                <i className="fas fa-sync-alt"></i>
+                                                <span>{isAdminSessionsLoading ? 'Обновление...' : 'Обновить'}</span>
+                                            </button>
+                                        </div>
+
+                                        {isAdminSessionsLoading ? (
+                                            <p className="text-center text-gray-600 py-8">Загрузка сессий...</p>
+                                        ) : groupedAdminSessions.length === 0 ? (
+                                            <p className="text-center text-gray-600 py-8">Активных сессий не найдено.</p>
+                                        ) : (
+                                            <div className="space-y-6">
+                                                {groupedAdminSessions.map((group) => (
+                                                    <div key={group.user_id} className="border border-gray-200 rounded-lg overflow-hidden">
+                                                        <div className="bg-gray-50 px-4 py-3 flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+                                                            <div>
+                                                                <div className="text-base font-semibold text-gray-900">{group.user_name || `Пользователь #${group.user_id}`}</div>
+                                                                <div className="text-sm text-gray-600">
+                                                                    Роль: {group.user_role || '-'}{group.user_login ? ` | Логин: ${group.user_login}` : ''}
+                                                                </div>
+                                                            </div>
+                                                            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border border-green-300 text-green-700 bg-green-50">
+                                                                {group.sessions.length} активн.
+                                                            </span>
+                                                        </div>
+
+                                                        <div className="overflow-x-auto">
+                                                            <table className="min-w-full divide-y divide-gray-200">
+                                                                <thead className="bg-white">
+                                                                    <tr>
+                                                                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Сессия</th>
+                                                                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">IP</th>
+                                                                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Устройство</th>
+                                                                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Последняя активность</th>
+                                                                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Истекает</th>
+                                                                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Действие</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody className="bg-white divide-y divide-gray-200">
+                                                                    {group.sessions.map((session) => (
+                                                                        <tr key={session.session_id} className="hover:bg-gray-50 transition-colors">
+                                                                            <td className="px-4 py-3 align-top">
+                                                                                <div className="font-mono text-xs break-all text-gray-700">{session.session_id}</div>
+                                                                                <div className="text-xs text-gray-500 mt-1">Создана: {formatDate(session.created_at)}</div>
+                                                                                {session.is_current && (
+                                                                                    <span className="inline-flex items-center px-2 py-0.5 mt-2 rounded border border-blue-300 text-blue-700 bg-blue-50 text-xs">
+                                                                                        Текущая
+                                                                                    </span>
+                                                                                )}
+                                                                            </td>
+                                                                            <td className="px-4 py-3 align-top text-sm text-gray-700">{session.ip_address || '-'}</td>
+                                                                            <td className="px-4 py-3 align-top text-sm text-gray-700 max-w-sm break-words">{session.user_agent || '-'}</td>
+                                                                            <td className="px-4 py-3 align-top text-sm text-gray-700">{formatDate(session.last_seen_at)}</td>
+                                                                            <td className="px-4 py-3 align-top text-sm text-gray-700">{formatDate(session.expires_at)}</td>
+                                                                            <td className="px-4 py-3 align-top">
+                                                                                <button
+                                                                                    onClick={() => handleRevokeAdminSession(session)}
+                                                                                    disabled={revokingSessionId === session.session_id}
+                                                                                    className={`px-3 py-2 rounded-lg text-xs font-medium transition ${revokingSessionId === session.session_id ? 'bg-red-300 text-red-700 opacity-70 cursor-not-allowed' : 'bg-red-600 text-white hover:bg-red-700'}`}
+                                                                                >
+                                                                                    {revokingSessionId === session.session_id ? 'Прерывание...' : 'Прервать'}
+                                                                                </button>
+                                                                            </td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
                                 )}
 
                                 {view === 'view_scores' && (
