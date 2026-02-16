@@ -2203,6 +2203,43 @@ class Database:
                 for row in rows
             ]
 
+    def list_all_active_sessions(self):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    us.session_id::text,
+                    us.user_id,
+                    u.name,
+                    u.role,
+                    u.login,
+                    us.user_agent,
+                    us.ip_address,
+                    us.created_at,
+                    us.last_seen_at,
+                    us.expires_at
+                FROM user_sessions us
+                JOIN users u ON u.id = us.user_id
+                WHERE us.revoked_at IS NULL
+                  AND us.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+                ORDER BY u.name ASC, us.last_seen_at DESC, us.created_at DESC
+            """)
+            rows = cursor.fetchall()
+            return [
+                {
+                    "session_id": row[0],
+                    "user_id": row[1],
+                    "user_name": row[2],
+                    "user_role": row[3],
+                    "user_login": row[4],
+                    "user_agent": row[5],
+                    "ip_address": row[6],
+                    "created_at": row[7],
+                    "last_seen_at": row[8],
+                    "expires_at": row[9]
+                }
+                for row in rows
+            ]
+
     def get_call_evaluations(self, operator_id, month=None):
         """
         Возвращает оценки звонков (calls) + неоценённые звонки (imported_calls).

@@ -677,6 +677,74 @@ def revoke_auth_session(session_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/admin/sessions', methods=['GET', 'OPTIONS'])
+@require_api_key
+def list_admin_sessions():
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester or requester[3] != 'admin':
+            return jsonify({"error": "Forbidden: only admins can access"}), 403
+
+        current_session_id = _current_session_id_from_access_token()
+        sessions = db.list_all_active_sessions()
+        serialized = []
+        for item in sessions:
+            serialized.append({
+                "session_id": item["session_id"],
+                "user_id": item["user_id"],
+                "user_name": item["user_name"],
+                "user_role": item["user_role"],
+                "user_login": item["user_login"],
+                "is_current": item["session_id"] == current_session_id,
+                "user_agent": item["user_agent"],
+                "ip_address": item["ip_address"],
+                "created_at": item["created_at"].isoformat() if item["created_at"] else None,
+                "last_seen_at": item["last_seen_at"].isoformat() if item["last_seen_at"] else None,
+                "expires_at": item["expires_at"].isoformat() if item["expires_at"] else None
+            })
+        return jsonify({"status": "success", "sessions": serialized}), 200
+    except Exception as e:
+        logging.error(f"list_admin_sessions error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/sessions/<session_id>/revoke', methods=['POST', 'OPTIONS'])
+@require_api_key
+def revoke_admin_session(session_id):
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester or requester[3] != 'admin':
+            return jsonify({"error": "Forbidden: only admins can access"}), 403
+
+        session = db.get_user_session(session_id=session_id)
+        if not session or session["revoked_at"] is not None:
+            return jsonify({"error": "Session not found"}), 404
+
+        revoked = db.revoke_user_session(session_id=session_id)
+        if not revoked:
+            return jsonify({"error": "Session not found"}), 404
+
+        current_session_revoked = _current_session_id_from_access_token() == session_id
+        response = jsonify({
+            "status": "success",
+            "current_session_revoked": current_session_revoked
+        })
+        if current_session_revoked:
+            _clear_auth_cookies(response)
+        return response, 200
+    except Exception as e:
+        logging.error(f"revoke_admin_session error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/user/profile', methods=['GET'])
 @require_api_key
 def get_user_profile():
