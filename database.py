@@ -418,6 +418,28 @@ class Database:
                     changed_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_sessions (
+                    session_id UUID PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    refresh_token_hash TEXT NOT NULL,
+                    user_agent TEXT,
+                    ip_address VARCHAR(64),
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    last_seen_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    expires_at TIMESTAMP NOT NULL,
+                    revoked_at TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
+                ON user_sessions(user_id);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at
+                ON user_sessions(expires_at);
+            """)
             # Work schedules (shifts) table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS work_shifts (
@@ -2002,6 +2024,184 @@ class Database:
             if result and result[0]:
                 return pbkdf2_sha256.verify(password, result[0])
             return False
+
+    def create_user_session(
+        self,
+        session_id,
+        user_id,
+        refresh_token_hash,
+        expires_at,
+        user_agent=None,
+        ip_address=None
+    ):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO user_sessions (
+                    session_id,
+                    user_id,
+                    refresh_token_hash,
+                    user_agent,
+                    ip_address,
+                    expires_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (session_id, user_id, refresh_token_hash, user_agent, ip_address, expires_at))
+
+    def get_user_session(self, session_id, user_id=None):
+        with self._get_cursor() as cursor:
+            if user_id is None:
+                cursor.execute("""
+                    SELECT
+                        session_id::text,
+                        user_id,
+                        refresh_token_hash,
+                        user_agent,
+                        ip_address,
+                        created_at,
+                        last_seen_at,
+                        expires_at,
+                        revoked_at
+                    FROM user_sessions
+                    WHERE session_id = %s
+                """, (session_id,))
+            else:
+                cursor.execute("""
+                    SELECT
+                        session_id::text,
+                        user_id,
+                        refresh_token_hash,
+                        user_agent,
+                        ip_address,
+                        created_at,
+                        last_seen_at,
+                        expires_at,
+                        revoked_at
+                    FROM user_sessions
+                    WHERE session_id = %s AND user_id = %s
+                """, (session_id, user_id))
+
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "session_id": row[0],
+                "user_id": row[1],
+                "refresh_token_hash": row[2],
+                "user_agent": row[3],
+                "ip_address": row[4],
+                "created_at": row[5],
+                "last_seen_at": row[6],
+                "expires_at": row[7],
+                "revoked_at": row[8]
+            }
+
+    def rotate_user_session_token(self, session_id, user_id, refresh_token_hash, expires_at):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE user_sessions
+                SET refresh_token_hash = %s,
+                    expires_at = %s,
+                    last_seen_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                WHERE session_id = %s
+                  AND user_id = %s
+                  AND revoked_at IS NULL
+                RETURNING session_id
+            """, (refresh_token_hash, expires_at, session_id, user_id))
+            return cursor.fetchone() is not None
+
+    def touch_user_session(self, session_id, user_id=None, ip_address=None, user_agent=None):
+        with self._get_cursor() as cursor:
+            if user_id is None:
+                cursor.execute("""
+                    UPDATE user_sessions
+                    SET last_seen_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                        ip_address = COALESCE(%s, ip_address),
+                        user_agent = COALESCE(%s, user_agent)
+                    WHERE session_id = %s
+                      AND revoked_at IS NULL
+                    RETURNING session_id
+                """, (ip_address, user_agent, session_id))
+            else:
+                cursor.execute("""
+                    UPDATE user_sessions
+                    SET last_seen_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                        ip_address = COALESCE(%s, ip_address),
+                        user_agent = COALESCE(%s, user_agent)
+                    WHERE session_id = %s
+                      AND user_id = %s
+                      AND revoked_at IS NULL
+                    RETURNING session_id
+                """, (ip_address, user_agent, session_id, user_id))
+            return cursor.fetchone() is not None
+
+    def revoke_user_session(self, session_id, user_id=None):
+        with self._get_cursor() as cursor:
+            if user_id is None:
+                cursor.execute("""
+                    UPDATE user_sessions
+                    SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE session_id = %s
+                      AND revoked_at IS NULL
+                    RETURNING session_id
+                """, (session_id,))
+            else:
+                cursor.execute("""
+                    UPDATE user_sessions
+                    SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE session_id = %s
+                      AND user_id = %s
+                      AND revoked_at IS NULL
+                    RETURNING session_id
+                """, (session_id, user_id))
+            return cursor.fetchone() is not None
+
+    def revoke_all_user_sessions(self, user_id, except_session_id=None):
+        with self._get_cursor() as cursor:
+            if except_session_id:
+                cursor.execute("""
+                    UPDATE user_sessions
+                    SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE user_id = %s
+                      AND session_id <> %s
+                      AND revoked_at IS NULL
+                """, (user_id, except_session_id))
+            else:
+                cursor.execute("""
+                    UPDATE user_sessions
+                    SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE user_id = %s
+                      AND revoked_at IS NULL
+                """, (user_id,))
+            return cursor.rowcount
+
+    def list_user_sessions(self, user_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    session_id::text,
+                    user_agent,
+                    ip_address,
+                    created_at,
+                    last_seen_at,
+                    expires_at,
+                    revoked_at
+                FROM user_sessions
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+            """, (user_id,))
+            rows = cursor.fetchall()
+            return [
+                {
+                    "session_id": row[0],
+                    "user_agent": row[1],
+                    "ip_address": row[2],
+                    "created_at": row[3],
+                    "last_seen_at": row[4],
+                    "expires_at": row[5],
+                    "revoked_at": row[6]
+                }
+                for row in rows
+            ]
 
     def get_call_evaluations(self, operator_id, month=None):
         """

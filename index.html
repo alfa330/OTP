@@ -1211,6 +1211,52 @@
             );
         };
         const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
+        const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
+
+        if (typeof axios !== 'undefined') {
+            axios.defaults.withCredentials = true;
+            if (!window.__otpAxiosAuthInterceptorInstalled) {
+                window.__otpAxiosAuthInterceptorInstalled = true;
+                window.__otpRefreshPromise = null;
+
+                axios.interceptors.response.use(
+                    (response) => response,
+                    async (error) => {
+                        const status = error?.response?.status;
+                        const code = error?.response?.data?.code;
+                        const originalRequest = error?.config;
+                        const url = originalRequest?.url || '';
+                        const isRefreshCall = url.includes('/api/auth/refresh');
+                        const isLoginCall = url.includes('/api/login');
+
+                        if (
+                            status === 401 &&
+                            code === 'TOKEN_EXPIRED' &&
+                            originalRequest &&
+                            !originalRequest.__isRetryRequest &&
+                            !isRefreshCall &&
+                            !isLoginCall
+                        ) {
+                            originalRequest.__isRetryRequest = true;
+                            if (!window.__otpRefreshPromise) {
+                                window.__otpRefreshPromise = axios.post(
+                                    AUTH_REFRESH_URL,
+                                    {},
+                                    { withCredentials: true }
+                                ).finally(() => {
+                                    window.__otpRefreshPromise = null;
+                                });
+                            }
+
+                            await window.__otpRefreshPromise;
+                            return axios(originalRequest);
+                        }
+
+                        return Promise.reject(error);
+                    }
+                );
+            }
+        }
 
         // Error Boundary Component
         class ErrorBoundary extends React.Component {
@@ -3698,6 +3744,7 @@
             try {
             const resp = await fetch(url, {
                 method: 'GET',
+                credentials: 'include',
                 headers: {
                 'X-API-Key': user.apiKey || '',
                 'X-User-Id': String(user.id)
@@ -6505,6 +6552,7 @@
                     try {
                         setIsLoading(true);
                         const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators`, {
+                            credentials: 'include',
                             headers: {
                                 'X-Api-Key': user.apiKey,
                                 'X-User-Id': user.id
@@ -6653,6 +6701,7 @@
                     // Отправляем на сервер
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/day_off`, {
                         method: 'POST',
+                        credentials: 'include',
                         headers: {
                             'Content-Type': 'application/json',
                             'X-Api-Key': user.apiKey,
@@ -6777,6 +6826,7 @@
                   // Отправляем список shifts с перерывами
                   const response = await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
                     method: 'POST',
+                    credentials: 'include',
                     headers: {
                       'Content-Type': 'application/json',
                       'X-Api-Key': user.apiKey,
@@ -6854,6 +6904,7 @@
                   // Отправляем на сервер уже с breaksToSend
                   const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift`, {
                     method: 'POST',
+                    credentials: 'include',
                     headers: {
                       'Content-Type': 'application/json',
                       'X-Api-Key': user.apiKey,
@@ -6909,6 +6960,7 @@
                     // Отправляем на сервер
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift`, {
                         method: 'DELETE',
+                        credentials: 'include',
                         headers: {
                             'Content-Type': 'application/json',
                             'X-Api-Key': user.apiKey,
@@ -8116,7 +8168,7 @@
         const availableMonths = getAvailableMonths();
 
         const fetchFeedback = async (month) => {
-            if (!user?.apiKey || !user?.id || !month) return;
+            if (!user?.id || !month) return;
 
             setError('');
             setResult(null);
@@ -11028,20 +11080,46 @@
                 );
             };
             
-            // Load user from localStorage on mount
+            // Restore active JWT session on mount
             useEffect(() => {
-                const storedUser = localStorage.getItem('user');
-                if (storedUser) {
-                    try {
-                        const parsedUser = JSON.parse(storedUser);
-                        setUser(parsedUser);
-                        setLogin(false);
-                    } catch (err) {
-                        console.error('Error parsing stored user:', err);
-                        localStorage.removeItem('user');
-                        setLogin(true);
+                let cancelled = false;
+
+                const restoreSession = async () => {
+                    const storedUser = localStorage.getItem('user');
+                    if (storedUser) {
+                        try {
+                            const parsedUser = JSON.parse(storedUser);
+                            if (!cancelled) setUser(parsedUser);
+                        } catch (err) {
+                            console.error('Error parsing stored user:', err);
+                            localStorage.removeItem('user');
+                        }
                     }
-                }
+
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/api/auth/me`, {
+                            withCredentials: true
+                        });
+                        const data = response.data;
+                        if (data?.status === 'success' && !cancelled) {
+                            const sessionUser = data.user || {
+                                role: data.role,
+                                id: data.id,
+                                name: data.name,
+                                telegram_id: data.telegram_id
+                            };
+                            setUser(sessionUser);
+                        }
+                    } catch (err) {
+                        if (!cancelled) {
+                            setUser(null);
+                            localStorage.removeItem('user');
+                        }
+                    }
+                };
+
+                restoreSession();
+                return () => { cancelled = true; };
             }, []);
             
             // Save user to localStorage when it changes
@@ -12293,6 +12371,7 @@
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/audio/${evaluationId}`, {
                         method: 'GET',
+                        credentials: 'include',
                         headers: {
                             'X-API-Key': apiKey,
                             'X-User-Id': userId
@@ -12510,13 +12589,13 @@
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
-                        setUser({
+                        const sessionUser = data.user || {
                             role: data.role,
                             id: data.id,
                             name: data.name,
-                            telegram_id: data.telegram_id,
-                            apiKey: data.apiKey
-                        });
+                            telegram_id: data.telegram_id
+                        };
+                        setUser(sessionUser);
                         setLogin('');
                         setPassword('');
                         showToast('Logged in successfully', 'success');
@@ -12543,7 +12622,13 @@
                 setShowLogoutConfirm(true);
             };
 
-            const confirmLogout = () => {
+            const confirmLogout = async () => {
+                try {
+                    await axios.post(`${API_BASE_URL}/api/logout`, {}, { withCredentials: true });
+                } catch (err) {
+                    console.error('Logout error:', err);
+                }
+
                 if (isMounted.current) {
                     setUser(null);
                     setSvList([]);
@@ -12988,10 +13073,6 @@
 
             // --- Функция для получения AI-отзыва за месяц ---
             const openAiMonthlyFeedback = async (operatorId, operatorName, month) => {
-                if (!user?.apiKey) {
-                    showToast('Нет API ключа. Перелогиньтесь.', 'error');
-                    return;
-                }
                 if (!operatorId) {
                     showToast('Не удалось определить оператора', 'error');
                     return;
@@ -16337,6 +16418,6 @@
                 </div>
             `;
         }
-    </script>
+</script>
 </body>
 </html>
