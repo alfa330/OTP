@@ -10607,8 +10607,22 @@
                                     Текущая
                                     </span>
                                 )}
+                                <span
+                                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-medium ring-1 ${
+                                        row.sensitive_data_unlocked
+                                            ? 'bg-amber-100 text-amber-700 ring-amber-200'
+                                            : 'bg-gray-100 text-gray-500 ring-gray-200'
+                                    }`}
+                                >
+                                    {row.sensitive_data_unlocked ? 'Доступ к данным: открыт' : 'Доступ к данным: закрыт'}
+                                </span>
                                 </div>
                                 <div className="text-xs text-gray-400 mt-0.5 font-mono">{formatDate(row.created_at)}</div>
+                                {row.sensitive_data_unlocked_at && (
+                                    <div className="text-xs text-amber-600 mt-0.5">
+                                        Открыт: {formatDate(row.sensitive_data_unlocked_at)}
+                                    </div>
+                                )}
                             </td>
 
                             {/* IP */}
@@ -15071,12 +15085,14 @@
                                 </div>
                             </div>
                             <div className="flex items-center gap-2">
+                                {!sensitiveAccess.granted && (
                                 <button
                                     onClick={requestSensitiveQrAccess}
                                     className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium transition"
                                 >
                                     <i className="fas fa-qrcode mr-2"></i>Сгенерировать QR
                                 </button>
+                                )}
                                 {sensitiveAccess.granted && (
                                 <button
                                     onClick={revokeSensitiveAccess}

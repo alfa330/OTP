@@ -2268,7 +2268,9 @@ class Database:
                     us.ip_address,
                     us.created_at,
                     us.last_seen_at,
-                    us.expires_at
+                    us.expires_at,
+                    us.sensitive_data_unlocked,
+                    us.sensitive_data_unlocked_at
                 FROM user_sessions us
                 JOIN users u ON u.id = us.user_id
                 LEFT JOIN users sv ON sv.id = u.supervisor_id
@@ -2290,7 +2292,9 @@ class Database:
                     "ip_address": row[8],
                     "created_at": row[9],
                     "last_seen_at": row[10],
-                    "expires_at": row[11]
+                    "expires_at": row[11],
+                    "sensitive_data_unlocked": bool(row[12]),
+                    "sensitive_data_unlocked_at": row[13]
                 }
                 for row in rows
             ]
