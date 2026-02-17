@@ -1694,6 +1694,7 @@ def get_sv_list():
         return jsonify({"error": f"Failed to fetch supervisors: {str(e)}"}), 500
 
 @app.route('/api/call_evaluations', methods=['GET'])
+@require_api_key
 def get_call_evaluations():
     try:
         operator_id = request.args.get('operator_id')
