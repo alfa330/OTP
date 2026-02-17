@@ -323,8 +323,8 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
 
         const [selectedTab, setSelectedTab] = useState('work_time');
 
-        // Training modal component resolver (handles scope/hoisting)
-        const TrainingModalComponent = (typeof TrainingModal !== 'undefined' ? TrainingModal : (typeof window !== 'undefined' ? window.TrainingModal : null));
+        // Training modal component resolver: avoid direct identifier access to prevent TDZ in prod bundles
+        const TrainingModalComponent = (typeof window !== 'undefined' ? window.TrainingModal : null);
 
         // helpers: month parts
         const monthParts = useMemo(() => {
