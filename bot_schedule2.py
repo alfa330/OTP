@@ -851,7 +851,13 @@ def list_admin_sessions():
                 "ip_address": item["ip_address"],
                 "created_at": item["created_at"].isoformat() if item["created_at"] else None,
                 "last_seen_at": item["last_seen_at"].isoformat() if item["last_seen_at"] else None,
-                "expires_at": item["expires_at"].isoformat() if item["expires_at"] else None
+                "expires_at": item["expires_at"].isoformat() if item["expires_at"] else None,
+                "sensitive_data_unlocked": bool(item.get("sensitive_data_unlocked", False)),
+                "sensitive_data_unlocked_at": (
+                    item["sensitive_data_unlocked_at"].isoformat()
+                    if item.get("sensitive_data_unlocked_at")
+                    else None
+                )
             })
         return jsonify({"status": "success", "sessions": serialized}), 200
     except Exception as e:
