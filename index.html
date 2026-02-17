@@ -444,6 +444,7 @@
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     
     <!-- Additional CDNs and styles requested -->
@@ -14503,13 +14504,8 @@
                     setQrScannerError('Камера не поддерживается в этом браузере');
                     return;
                 }
-                if (!window.BarcodeDetector) {
-                    setQrScannerError('BarcodeDetector недоступен, используйте ввод кода вручную');
-                    return;
-                }
 
                 try {
-                    const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
                     const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
                     qrStreamRef.current = stream;
 
@@ -14523,19 +14519,55 @@
                     await qrVideoRef.current.play();
                     setQrScannerRunning(true);
 
-                    qrScanTimerRef.current = setInterval(async () => {
-                        if (!qrVideoRef.current) return;
+                    if (window.BarcodeDetector) {
+                        const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+                        qrScanTimerRef.current = setInterval(async () => {
+                            if (!qrVideoRef.current) return;
+                            try {
+                                const codes = await detector.detect(qrVideoRef.current);
+                                if (codes && codes.length > 0 && codes[0].rawValue) {
+                                    const rawValue = String(codes[0].rawValue);
+                                    setQrApproveInput(rawValue);
+                                    stopQrScanner();
+                                }
+                            } catch (e) {
+                                // ignore frame errors
+                            }
+                        }, 450);
+                        return;
+                    }
+
+                    if (!window.jsQR) {
+                        setQrScannerError('Сканер QR недоступен, используйте ввод кода вручную');
+                        stopQrScanner();
+                        return;
+                    }
+
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                    if (!ctx) {
+                        setQrScannerError('Не удалось запустить fallback-сканер');
+                        stopQrScanner();
+                        return;
+                    }
+
+                    qrScanTimerRef.current = setInterval(() => {
+                        const video = qrVideoRef.current;
+                        if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
                         try {
-                            const codes = await detector.detect(qrVideoRef.current);
-                            if (codes && codes.length > 0 && codes[0].rawValue) {
-                                const rawValue = String(codes[0].rawValue);
-                                setQrApproveInput(rawValue);
+                            canvas.width = video.videoWidth;
+                            canvas.height = video.videoHeight;
+                            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                            const code = window.jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+                            if (code && code.data) {
+                                setQrApproveInput(String(code.data));
                                 stopQrScanner();
                             }
                         } catch (e) {
                             // ignore frame errors
                         }
-                    }, 450);
+                    }, 350);
                 } catch (err) {
                     setQrScannerError(err.message || 'Не удалось запустить сканер');
                     stopQrScanner();
@@ -14578,21 +14610,22 @@
                     setSensitiveQrImage('');
                     return;
                 }
-                if (!window.QRCode || !window.QRCode.toDataURL) {
-                    setSensitiveQrError('QR библиотека не загружена');
+                setSensitiveQrError('');
+                if (window.QRCode && window.QRCode.toDataURL) {
+                    window.QRCode.toDataURL(
+                        sensitiveQrUrl,
+                        { width: 280, margin: 1 },
+                        (err, url) => {
+                            if (err) {
+                                setSensitiveQrImage(`https://api.qrserver.com/v1/create-qr-code/?size=280x280&data=${encodeURIComponent(sensitiveQrUrl)}`);
+                                return;
+                            }
+                            setSensitiveQrImage(url);
+                        }
+                    );
                     return;
                 }
-                window.QRCode.toDataURL(
-                    sensitiveQrUrl,
-                    { width: 280, margin: 1 },
-                    (err, url) => {
-                        if (err) {
-                            setSensitiveQrError('Не удалось сгенерировать QR');
-                            return;
-                        }
-                        setSensitiveQrImage(url);
-                    }
-                );
+                setSensitiveQrImage(`https://api.qrserver.com/v1/create-qr-code/?size=280x280&data=${encodeURIComponent(sensitiveQrUrl)}`);
             }, [showSensitiveQrModal, sensitiveQrUrl]);
 
             useEffect(() => {
@@ -18026,6 +18059,23 @@
                                             Генерация QR...
                                         </div>
                                     )}
+                                </div>
+                                <div className="mb-3">
+                                    <p className="text-xs text-gray-500 mb-1">Резервный код:</p>
+                                    <div className="flex items-center gap-2">
+                                        <input
+                                            type="text"
+                                            readOnly
+                                            value={sensitiveQrUrl}
+                                            className="flex-1 p-2 border border-gray-300 rounded-lg text-xs text-gray-700 bg-gray-50"
+                                        />
+                                        <button
+                                            onClick={() => navigator.clipboard?.writeText(sensitiveQrUrl || '')}
+                                            className="px-3 py-2 rounded-lg bg-gray-200 text-gray-800 hover:bg-gray-300 text-xs"
+                                        >
+                                            Копировать
+                                        </button>
+                                    </div>
                                 </div>
                                 {sensitiveQrExpiresAt && (
                                     <p className="text-xs text-gray-500 mb-3">
