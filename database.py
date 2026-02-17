@@ -1,4 +1,4 @@
-﻿import os
+import os
 import logging
 import psycopg2
 from contextlib import contextmanager
@@ -429,8 +429,18 @@ class Database:
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     last_seen_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     expires_at TIMESTAMP NOT NULL,
-                    revoked_at TIMESTAMP
+                    revoked_at TIMESTAMP,
+                    sensitive_data_unlocked BOOLEAN NOT NULL DEFAULT FALSE,
+                    sensitive_data_unlocked_at TIMESTAMP
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE user_sessions
+                ADD COLUMN IF NOT EXISTS sensitive_data_unlocked BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
+            cursor.execute("""
+                ALTER TABLE user_sessions
+                ADD COLUMN IF NOT EXISTS sensitive_data_unlocked_at TIMESTAMP;
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
@@ -1404,13 +1414,17 @@ class Database:
     def get_call_by_id(self, call_id):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, audio_path FROM calls WHERE id = %s
+                SELECT id, operator_id, phone_number, audio_path
+                FROM calls
+                WHERE id = %s
             """, (call_id,))
             row = cursor.fetchone()
             if row:
                 return {
                     "id": row[0],
-                    "audio_path": row[1]
+                    "operator_id": row[1],
+                    "phone_number": row[2],
+                    "audio_path": row[3]
                 }
             return None
         
@@ -2060,7 +2074,9 @@ class Database:
                         created_at,
                         last_seen_at,
                         expires_at,
-                        revoked_at
+                        revoked_at,
+                        sensitive_data_unlocked,
+                        sensitive_data_unlocked_at
                     FROM user_sessions
                     WHERE session_id = %s
                 """, (session_id,))
@@ -2075,7 +2091,9 @@ class Database:
                         created_at,
                         last_seen_at,
                         expires_at,
-                        revoked_at
+                        revoked_at,
+                        sensitive_data_unlocked,
+                        sensitive_data_unlocked_at
                     FROM user_sessions
                     WHERE session_id = %s AND user_id = %s
                 """, (session_id, user_id))
@@ -2092,7 +2110,9 @@ class Database:
                 "created_at": row[5],
                 "last_seen_at": row[6],
                 "expires_at": row[7],
-                "revoked_at": row[8]
+                "revoked_at": row[8],
+                "sensitive_data_unlocked": bool(row[9]),
+                "sensitive_data_unlocked_at": row[10]
             }
 
     def rotate_user_session_token(self, session_id, user_id, refresh_token_hash, expires_at):
@@ -2173,6 +2193,36 @@ class Database:
                       AND revoked_at IS NULL
                 """, (user_id,))
             return cursor.rowcount
+
+    def set_session_sensitive_access(self, session_id, user_id, unlocked=True):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE user_sessions
+                SET sensitive_data_unlocked = %s,
+                    sensitive_data_unlocked_at = CASE
+                        WHEN %s THEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                        ELSE NULL
+                    END
+                WHERE session_id = %s
+                  AND user_id = %s
+                  AND revoked_at IS NULL
+                RETURNING session_id
+            """, (bool(unlocked), bool(unlocked), session_id, user_id))
+            return cursor.fetchone() is not None
+
+    def is_session_sensitive_access_unlocked(self, session_id, user_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT sensitive_data_unlocked
+                FROM user_sessions
+                WHERE session_id = %s
+                  AND user_id = %s
+                  AND revoked_at IS NULL
+                  AND expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+                LIMIT 1
+            """, (session_id, user_id))
+            row = cursor.fetchone()
+            return bool(row[0]) if row else False
 
     def list_user_sessions(self, user_id):
         with self._get_cursor() as cursor:
