@@ -4731,13 +4731,10 @@
             );
             }
 
-            /* =====================================================================
-            AdminCallsUploadView — Improved UI / Ergonomic buttons
-            ===================================================================== */
+            // AdminCallsUploadView — visual / ergonomic refinement (with Shuffle / Распределить)
+            // NOTE: preserves original logic, added: "Распределить" button + preview modal + POST /api/admin/shuffle
 
-            /* ------------ utility helpers (outside component) ------------ */
             function pad(n) { return String(n).padStart(2, '0'); }
-
             function secondsToHms(sec) {
             if (sec == null || isNaN(Number(sec))) return '00:00:00';
             const s = Math.max(0, Math.floor(Number(sec)));
@@ -4746,11 +4743,12 @@
             const ss = s % 60;
             return `${pad(h)}:${pad(m)}:${pad(ss)}`;
             }
-
             function hmsToSeconds(h, m, s) {
-            return (Number(h) || 0) * 3600 + (Number(m) || 0) * 60 + (Number(s) || 0);
+            const hh = Number(h) || 0;
+            const mm = Number(m) || 0;
+            const ss = Number(s) || 0;
+            return hh * 3600 + mm * 60 + ss;
             }
-
             function parseDurationString(str) {
             if (str == null) return 0;
             let s = String(str).trim();
@@ -4763,19 +4761,22 @@
                 const hr = parts.length >= 3 ? (parseInt(parts[parts.length - 3] || '0', 10) || 0) : 0;
                 return hr * 3600 + min * 60 + sec;
             }
-            const n = parseFloat(s.replace(/\s+/g, '').replace(',', '.'));
+            const normalized = s.replace(/\s+/g, '').replace(',', '.');
+            const n = parseFloat(normalized);
             return isNaN(n) ? 0 : n;
             }
 
-            /* ---- DurationInput ---- */
             function DurationInput({ valueSec, onChange, ariaLabel }) {
             const secs = valueSec == null ? 0 : Number(valueSec) || 0;
             const hh = Math.floor(secs / 3600);
             const mm = Math.floor((secs % 3600) / 60);
             const ss = Math.floor(secs % 60);
 
-            function handlePart(part, v) {
-                if (v === '' || v == null) { if (typeof onChange === 'function') onChange(null); return; }
+            function handlePartChange(part, v) {
+                if (v === '' || v == null) {
+                if (typeof onChange === 'function') onChange(null);
+                return;
+                }
                 const nv = Number(v);
                 if (isNaN(nv) || nv < 0) return;
                 let newSec = secs;
@@ -4785,1099 +4786,1165 @@
                 if (typeof onChange === 'function') onChange(newSec);
             }
 
-            const cls = [
-                'w-14 px-2 py-1.5 border border-slate-200 rounded-lg text-sm text-center',
-                'bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent',
-                'transition-shadow'
-            ].join(' ');
-
+            const inputClass = 'w-14 p-1 border rounded text-sm text-center bg-white';
             return (
-                <div className="flex items-center gap-1.5">
-                <input aria-label={`${ariaLabel || ''} hours`} className={cls} type="number" min="0"
-                    value={hh > 0 ? hh : ''} placeholder="hh"
-                    onChange={e => handlePart('h', e.target.value)} />
-                <span className="text-slate-400 text-xs font-bold">:</span>
-                <input aria-label={`${ariaLabel || ''} minutes`} className={cls} type="number" min="0" max="59"
-                    value={mm > 0 ? mm : ''} placeholder="mm"
-                    onChange={e => handlePart('m', e.target.value)} />
-                <span className="text-slate-400 text-xs font-bold">:</span>
-                <input aria-label={`${ariaLabel || ''} seconds`} className={cls} type="number" min="0" max="59"
-                    value={ss > 0 ? ss : ''} placeholder="ss"
-                    onChange={e => handlePart('s', e.target.value)} />
+                <div className="flex items-center gap-2">
+                <input aria-label={ariaLabel ? ariaLabel + ' hours' : 'hours'} className={inputClass} type="number" min="0" value={hh > 0 ? hh : ''} placeholder="hh" onChange={e=>handlePartChange('h', e.target.value)} />
+                <div className="text-sm">:</div>
+                <input aria-label={ariaLabel ? ariaLabel + ' minutes' : 'minutes'} className={inputClass} type="number" min="0" max="59" value={mm > 0 ? mm : ''} placeholder="mm" onChange={e=>handlePartChange('m', e.target.value)} />
+                <div className="text-sm">:</div>
+                <input aria-label={ariaLabel ? ariaLabel + ' seconds' : 'seconds'} className={inputClass} type="number" min="0" max="59" value={ss > 0 ? ss : ''} placeholder="ss" onChange={e=>handlePartChange('s', e.target.value)} />
                 </div>
             );
             }
 
-            /* ================================================================
-            Main component
-            ================================================================ */
-            function AdminCallsUploadView({ onAssignSelected, user }) {
-            const [files, setFiles] = useState([]);
-            const [minDurationSec, setMinDurationSec] = useState(null);
-            const [maxDurationSec, setMaxDurationSec] = useState(null);
-            const [variationSec, setVariationSec] = useState(0);
-            const [sampleCount, setSampleCount] = useState(3);
-            const [parsing, setParsing] = useState(false);
-            const [calls, setCalls] = useState([]);
-            const [operatorMap, setOperatorMap] = useState({});
-            const [operatorParams, setOperatorParams] = useState({});
-            const [selectedOperator, setSelectedOperator] = useState(null);
-            const [selectedCalls, setSelectedCalls] = useState(new Set());
-            const [activeRange, setActiveRange] = useState(null);
-            const [editingOperator, setEditingOperator] = useState(null);
-            const [editingValues, setEditingValues] = useState({ min: null, max: null, variation: 0, sampleCount: 0 });
-            const fileInputRef = useRef(null);
+/* =====================================================================
+   AdminCallsUploadView — Improved UI / Ergonomic buttons
+   ===================================================================== */
 
-            const [pinnedOperator, setPinnedOperator] = useState(false);
-            const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
-            const [directions, setDirections] = useState([]);
-            const [svOperators, setSvOperators] = useState([]);
-            const [loadingOperators, setLoadingOperators] = useState(false);
-            const [selectedStatuses, setSelectedStatuses] = useState(['all']);
-            const [onlyWithCsv, setOnlyWithCsv] = useState(false);
-            const [selectedDirections, setSelectedDirections] = useState(['all']);
-            const [operatorView, setOperatorView] = useState({ operatorKey: null, matching: [], nonMatching: [] });
-            const [showShuffleModal, setShowShuffleModal] = useState(false);
-            const [shuffleSummary, setShuffleSummary] = useState(null);
-            const [shuffling, setShuffling] = useState(false);
-            const [shuffleResult, setShuffleResult] = useState(null);
+/* ------------ utility helpers (outside component) ------------ */
+function pad(n) { return String(n).padStart(2, '0'); }
 
-            /* ---------- helpers ---------- */
-            function getMonthOptions() {
-                const opts = [];
-                const today = new Date();
-                for (let i = 0; i < 12; i++) {
-                const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
-                const str = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-                opts.push(<option key={str} value={str}>{d.toLocaleString('default', { month: 'long', year: 'numeric' })}</option>);
+function secondsToHms(sec) {
+  if (sec == null || isNaN(Number(sec))) return '00:00:00';
+  const s = Math.max(0, Math.floor(Number(sec)));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  return `${pad(h)}:${pad(m)}:${pad(ss)}`;
+}
+
+function hmsToSeconds(h, m, s) {
+  return (Number(h) || 0) * 3600 + (Number(m) || 0) * 60 + (Number(s) || 0);
+}
+
+function parseDurationString(str) {
+  if (str == null) return 0;
+  let s = String(str).trim();
+  if (s === '') return 0;
+  if (s.includes(':')) {
+    const parts = s.split(':').map(p => p.trim());
+    const secPart = (parts[parts.length - 1] || '0').replace(',', '.');
+    const sec = parseFloat(secPart) || 0;
+    const min = parseInt(parts[parts.length - 2] || '0', 10) || 0;
+    const hr = parts.length >= 3 ? (parseInt(parts[parts.length - 3] || '0', 10) || 0) : 0;
+    return hr * 3600 + min * 60 + sec;
+  }
+  const n = parseFloat(s.replace(/\s+/g, '').replace(',', '.'));
+  return isNaN(n) ? 0 : n;
+}
+
+/* ---- DurationInput ---- */
+function DurationInput({ valueSec, onChange, ariaLabel }) {
+  const secs = valueSec == null ? 0 : Number(valueSec) || 0;
+  const hh = Math.floor(secs / 3600);
+  const mm = Math.floor((secs % 3600) / 60);
+  const ss = Math.floor(secs % 60);
+
+  function handlePart(part, v) {
+    if (v === '' || v == null) { if (typeof onChange === 'function') onChange(null); return; }
+    const nv = Number(v);
+    if (isNaN(nv) || nv < 0) return;
+    let newSec = secs;
+    if (part === 'h') newSec = hmsToSeconds(v, mm, ss);
+    if (part === 'm') newSec = hmsToSeconds(hh, v, ss);
+    if (part === 's') newSec = hmsToSeconds(hh, mm, v);
+    if (typeof onChange === 'function') onChange(newSec);
+  }
+
+  const cls = [
+    'w-14 px-2 py-1.5 border border-slate-200 rounded-lg text-sm text-center',
+    'bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent',
+    'transition-shadow'
+  ].join(' ');
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <input aria-label={`${ariaLabel || ''} hours`} className={cls} type="number" min="0"
+        value={hh > 0 ? hh : ''} placeholder="hh"
+        onChange={e => handlePart('h', e.target.value)} />
+      <span className="text-slate-400 text-xs font-bold">:</span>
+      <input aria-label={`${ariaLabel || ''} minutes`} className={cls} type="number" min="0" max="59"
+        value={mm > 0 ? mm : ''} placeholder="mm"
+        onChange={e => handlePart('m', e.target.value)} />
+      <span className="text-slate-400 text-xs font-bold">:</span>
+      <input aria-label={`${ariaLabel || ''} seconds`} className={cls} type="number" min="0" max="59"
+        value={ss > 0 ? ss : ''} placeholder="ss"
+        onChange={e => handlePart('s', e.target.value)} />
+    </div>
+  );
+}
+
+/* ================================================================
+   Main component
+   ================================================================ */
+function AdminCallsUploadView({ onAssignSelected, user }) {
+  const [files, setFiles] = useState([]);
+  const [minDurationSec, setMinDurationSec] = useState(null);
+  const [maxDurationSec, setMaxDurationSec] = useState(null);
+  const [variationSec, setVariationSec] = useState(0);
+  const [sampleCount, setSampleCount] = useState(3);
+  const [parsing, setParsing] = useState(false);
+  const [calls, setCalls] = useState([]);
+  const [operatorMap, setOperatorMap] = useState({});
+  const [operatorParams, setOperatorParams] = useState({});
+  const [selectedOperator, setSelectedOperator] = useState(null);
+  const [selectedCalls, setSelectedCalls] = useState(new Set());
+  const [activeRange, setActiveRange] = useState(null);
+  const [editingOperator, setEditingOperator] = useState(null);
+  const [editingValues, setEditingValues] = useState({ min: null, max: null, variation: 0, sampleCount: 0 });
+  const fileInputRef = useRef(null);
+
+  const [pinnedOperator, setPinnedOperator] = useState(false);
+  const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [directions, setDirections] = useState([]);
+  const [svOperators, setSvOperators] = useState([]);
+  const [loadingOperators, setLoadingOperators] = useState(false);
+  const [selectedStatuses, setSelectedStatuses] = useState(['all']);
+  const [onlyWithCsv, setOnlyWithCsv] = useState(false);
+  const [selectedDirections, setSelectedDirections] = useState(['all']);
+  const [operatorView, setOperatorView] = useState({ operatorKey: null, matching: [], nonMatching: [] });
+  const [showShuffleModal, setShowShuffleModal] = useState(false);
+  const [shuffleSummary, setShuffleSummary] = useState(null);
+  const [shuffling, setShuffling] = useState(false);
+  const [shuffleResult, setShuffleResult] = useState(null);
+
+  /* ---------- helpers ---------- */
+  function getMonthOptions() {
+    const opts = [];
+    const today = new Date();
+    for (let i = 0; i < 12; i++) {
+      const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
+      const str = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      opts.push(<option key={str} value={str}>{d.toLocaleString('default', { month: 'long', year: 'numeric' })}</option>);
+    }
+    return opts;
+  }
+
+  function parseDateDMY(str) {
+    if (!str) return null;
+    try {
+      const [datePart, timePart] = String(str).trim().split(' ');
+      const [dd, mm, yyyy] = datePart.split('.').map(s => parseInt(s, 10));
+      if (!dd || !mm || !yyyy) return null;
+      const d = new Date(`${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}T${timePart||'00:00:00'}`);
+      return isNaN(d) ? null : d;
+    } catch { return null; }
+  }
+
+  function parseCSVText(text) {
+    if (window?.Papa?.parse) return window.Papa.parse(text, { skipEmptyLines: true }).data;
+    return text.split(/\r?\n/).filter(Boolean).map(l => {
+      const parts = []; let cur = ''; let inQ = false;
+      for (const ch of l) {
+        if (ch === '"') { inQ = !inQ; continue; }
+        if (ch === ',' && !inQ) { parts.push(cur); cur = ''; continue; }
+        cur += ch;
+      }
+      parts.push(cur);
+      return parts;
+    });
+  }
+
+  function normalizeRow(row) {
+    const r = row.map(c => (c == null ? '' : String(c).trim()));
+    while (r.length < 7) r.push('');
+    const [id, dtRaw, typeRaw, phone, project, operator, durationRaw] = r;
+    return {
+      id: id || Math.random().toString(36).slice(2, 10),
+      datetime: parseDateDMY(dtRaw),
+      datetimeRaw: dtRaw,
+      type: String(typeRaw || '').toLowerCase().includes('вход') || String(typeRaw || '').toLowerCase().includes('in') ? 'in' : 'out',
+      phone: phone || '', project: project || '',
+      operator: operator || 'Неизвестный',
+      durationSec: parseDurationString(durationRaw),
+    };
+  }
+
+  async function handleFilesSelected(e) { setFiles(Array.from(e.target.files || [])); }
+
+  async function handleParseFiles() {
+    if (!files?.length) return;
+    setParsing(true);
+    try {
+      const allRows = [];
+      for (const f of files) {
+        const text = await f.text();
+        const parsed = parseCSVText(text);
+        let start = 0;
+        if (parsed.length > 0) {
+          const first = parsed[0].map(c => String(c || '').toLowerCase()).join(';');
+          if (first.includes('id') || first.includes('дата') || first.includes('date')) start = 1;
+        }
+        for (let i = start; i < parsed.length; i++) {
+          const row = parsed[i];
+          if (row?.length) allRows.push(normalizeRow(row));
+        }
+      }
+      setCalls(allRows);
+      recomputeOperatorMap(allRows, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams);
+    } catch (err) {
+      console.error('parse error', err);
+      alert('Ошибка парсинга файлов');
+    } finally { setParsing(false); }
+  }
+
+  function recomputeOperatorMap(allRows, globalMin, globalMax, globalSampleCnt, globalVar, params = {}, keepSelection = false) {
+    const raw = {};
+    for (const c of allRows) { const op = c.operator || 'Неизвестный'; if (!raw[op]) raw[op] = []; raw[op].push(c); }
+    const summary = {};
+    Object.keys(raw).forEach(op => {
+      let list = raw[op].slice().sort((a, b) => (b.datetime?.getTime() || 0) - (a.datetime?.getTime() || 0));
+      const opP = params[op] || null;
+      const minD = opP?.min != null ? opP.min : globalMin;
+      const maxD = opP?.max != null ? opP.max : globalMax;
+      const varD = opP?.variation != null ? opP.variation : globalVar;
+      const sampleCnt = opP?.sampleCount != null ? opP.sampleCount : globalSampleCnt;
+      if (minD != null || maxD != null) {
+        const baseMin = minD != null ? Number(minD) : 0;
+        const baseMax = maxD != null ? Number(maxD) : (minD != null ? Number(minD) : Infinity);
+        const cMin = Math.max(0, baseMin - (Number(varD) || 0));
+        const cMax = baseMax === Infinity ? Infinity : baseMax + (Number(varD) || 0);
+        list = list.filter(c => {
+          if (c.durationSec == null || isNaN(Number(c.durationSec))) return false;
+          const dur = Number(c.durationSec);
+          return dur >= cMin && (cMax === Infinity || dur <= cMax);
+        });
+      }
+      summary[op] = { count: list.length, samples: sampleCnt > 0 ? list.slice(0, sampleCnt) : [], all: list, custom: !!opP };
+    });
+    setOperatorMap(summary);
+    if (!keepSelection) { setSelectedOperator(null); setSelectedCalls(new Set()); }
+    if (globalMin != null || globalMax != null) {
+      const baseMin = globalMin != null ? Number(globalMin) : 0;
+      const baseMax = globalMax != null ? Number(globalMax) : (globalMin != null ? Number(globalMin) : Infinity);
+      const cMin = Math.max(0, baseMin - (Number(globalVar) || 0));
+      const cMax = baseMax === Infinity ? null : baseMax + (Number(globalVar) || 0);
+      setActiveRange({ min: cMin, max: cMax });
+    } else { setActiveRange(null); }
+  }
+
+  function countAnyCallsForDisplayName(displayName) {
+    if (!displayName || !calls?.length) return 0;
+    const norm = String(displayName).trim().toLowerCase();
+    return calls.filter(c => { const co = String(c.operator || '').trim().toLowerCase(); return co === norm || co.includes(norm) || norm.includes(co); }).length;
+  }
+
+  function findOperatorMapKeyByName(name) {
+    if (!name) return null;
+    const norm = String(name).trim().toLowerCase();
+    for (const k of Object.keys(operatorMap)) { if (String(k).trim().toLowerCase() === norm) return k; }
+    for (const k of Object.keys(operatorMap)) { const kn = String(k).trim().toLowerCase(); if (kn.includes(norm) || norm.includes(kn)) return k; }
+    return null;
+  }
+
+  function getAllCallsForDisplayName(displayName) {
+    if (!displayName || !calls) return [];
+    const norm = String(displayName).trim().toLowerCase();
+    return calls.filter(c => { const co = String(c.operator || '').trim().toLowerCase(); return co === norm || co.includes(norm) || norm.includes(co); });
+  }
+
+  function handleShowOperator(opKey) {
+    const foundKey = findOperatorMapKeyByName(opKey);
+    const keyToUse = foundKey || opKey;
+    if (!keyToUse) return;
+    const matching = (operatorMap[keyToUse]?.all || []).slice();
+    const allRelated = getAllCallsForDisplayName(opKey);
+    const matchingIds = new Set(matching.map(m => m.id));
+    const nonMatching = allRelated.filter(c => !matchingIds.has(c.id));
+    setSelectedOperator(keyToUse);
+    setPinnedOperator(true);
+    const s = new Set(selectedCalls);
+    matching.forEach(c => s.add(c.id));
+    setSelectedCalls(s);
+    setOperatorView({ operatorKey: keyToUse, matching, nonMatching });
+    setTimeout(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }), 50);
+  }
+
+  function openEditOperator(opKey) {
+    const key = findOperatorMapKeyByName(opKey) || opKey;
+    setEditingOperator(key);
+    const ex = operatorParams[key] || { min: null, max: null, variation: 0, sampleCount: 0 };
+    setEditingValues({ min: ex.min ?? null, max: ex.max ?? null, variation: ex.variation ?? 0, sampleCount: ex.sampleCount ?? 0 });
+  }
+
+  function saveOperatorParams() {
+    const op = editingOperator;
+    const cleaned = { ...editingValues, sampleCount: Number(editingValues.sampleCount) || 0 };
+    setOperatorParams(prev => {
+      const updated = { ...prev, [op]: cleaned };
+      recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, updated, true);
+      return updated;
+    });
+    setEditingOperator(null);
+  }
+
+  function resetOperatorParams(op) {
+    setOperatorParams(prev => { const c = { ...prev }; delete c[op]; return c; });
+    if (editingOperator === op) setEditingOperator(null);
+  }
+
+  async function fetchSvOperators(month = selectedMonth) {
+    try {
+      if (typeof axios === 'undefined') return;
+      setLoadingOperators(true);
+      const headers = {};
+      if (user?.apiKey) headers['X-API-Key'] = user.apiKey;
+      if (user?.id) headers['X-User-Id'] = user.id;
+      const resp = await axios.get(`${API_BASE_URL}/api/admin/operators_summary?month=${encodeURIComponent(month)}`, { headers });
+      const data = resp.data;
+      if (data?.status === 'success' && Array.isArray(data.operators)) {
+        const ops = data.operators.map(op => ({ id: op.id, name: op.name, supervisor_id: op.supervisor_id, supervisor_name: op.supervisor_name, direction_id: op.direction_id, direction_name: op.direction_name, status: op.status, call_count: op.call_count }));
+        setSvOperators(ops);
+        const dirsMap = {};
+        ops.forEach(o => { const did = o.direction_id != null ? String(o.direction_id) : 'null'; if (!dirsMap[did]) dirsMap[did] = { id: did, name: (o.direction_name || 'Без направления').trim() }; });
+        setDirections(Object.values(dirsMap).sort((a, b) => String(a.name).localeCompare(String(b.name))));
+      }
+    } catch (err) { console.error('Fetch error', err); setSvOperators([]); } finally { setLoadingOperators(false); }
+  }
+
+  async function fetchDirections() {
+    try {
+      if (typeof axios === 'undefined') return;
+      const headers = {};
+      if (user?.apiKey) headers['X-API-Key'] = user.apiKey;
+      if (user?.id) headers['X-User-Id'] = user.id;
+      const resp = await axios.get(`${API_BASE_URL}/api/admin/directions`, { headers });
+      const data = resp.data;
+      if (data?.status === 'success' && Array.isArray(data.directions)) setDirections(data.directions.filter(d => d.isActive !== false));
+    } catch (err) { console.error('Fetch directions error', err); }
+  }
+
+  const statusOptions = React.useMemo(() => {
+    const s = new Set();
+    svOperators.forEach(o => { if (o.status != null) s.add(String(o.status).toLowerCase()); });
+    return Array.from(s).filter(Boolean);
+  }, [svOperators]);
+
+  function toggleStatusSelection(status) {
+    const lower = String(status).toLowerCase();
+    if (selectedStatuses.includes('all')) { if (lower === 'all') return; setSelectedStatuses([lower]); return; }
+    if (selectedStatuses.includes(lower)) { const ns = selectedStatuses.filter(s => s !== lower); setSelectedStatuses(ns.length ? ns : ['all']); }
+    else setSelectedStatuses(prev => prev.concat(lower));
+  }
+
+  const directionOptions = React.useMemo(() => (directions || []).map(d => ({ id: d.id, name: d.name || d.title || d.direction_name || d.direction })), [directions]);
+
+  function toggleDirectionSelection(dirId) {
+    const id = String(dirId);
+    if (selectedDirections.includes('all')) { if (id === 'all') return; setSelectedDirections([id]); return; }
+    if (selectedDirections.includes(id)) { const ns = selectedDirections.filter(s => s !== id); setSelectedDirections(ns.length ? ns : ['all']); }
+    else setSelectedDirections(prev => prev.concat(id));
+  }
+
+  const filteredSvOperators = React.useMemo(() => {
+    let list = svOperators.slice();
+    if (!selectedStatuses.includes('all')) { const s = new Set(selectedStatuses.map(x => x.toLowerCase())); list = list.filter(op => s.has(String(op.status || '').toLowerCase())); }
+    if (!selectedDirections.includes('all')) { const s = new Set(selectedDirections); list = list.filter(op => s.has(String(op.direction_id))); }
+    return list;
+  }, [svOperators, selectedStatuses, selectedDirections]);
+
+  function getDesiredSampleCount(displayName, matchedKey) {
+    if (matchedKey && operatorParams[matchedKey]?.sampleCount != null) return Number(operatorParams[matchedKey].sampleCount) || 0;
+    if (displayName && operatorParams[displayName]?.sampleCount != null) return Number(operatorParams[displayName].sampleCount) || 0;
+    return Number(sampleCount) || 0;
+  }
+
+  const insufficientOperators = React.useMemo(() => {
+    const res = [];
+    const apiNameSet = new Set(svOperators.map(o => String(o.name || o.id || '').trim().toLowerCase()));
+    for (const op of filteredSvOperators) {
+      const displayName = op.name || op.login || String(op.id || '—');
+      const matchedKey = findOperatorMapKeyByName(displayName);
+      const csvCount = matchedKey ? (operatorMap[matchedKey]?.count || 0) : 0;
+      const anyCsvCount = countAnyCallsForDisplayName(displayName);
+      if (onlyWithCsv && anyCsvCount === 0) continue;
+      const desired = getDesiredSampleCount(displayName, matchedKey);
+      if (desired > 0 && csvCount < desired) res.push({ op, csvCount, desired, matchedKey });
+    }
+    if (selectedDirections.includes('all')) {
+      for (const k of Object.keys(operatorMap || {})) {
+        const info = operatorMap[k];
+        if (!info || info.count === 0) continue;
+        if (apiNameSet.has(String(k).trim().toLowerCase())) continue;
+        const desired = operatorParams[k]?.sampleCount != null ? Number(operatorParams[k].sampleCount) : Number(sampleCount) || 0;
+        if (desired > 0 && info.count < desired) res.push({ op: null, csvName: k, csvCount: info.count, desired, matchedKey: k });
+      }
+    }
+    return res.sort((a, b) => {
+      const diff = (b.desired - b.csvCount) - (a.desired - a.csvCount);
+      if (diff !== 0) return diff;
+      return String(a.op ? a.op.name : a.csvName).localeCompare(String(b.op ? b.op.name : b.csvName));
+    });
+  }, [filteredSvOperators, operatorMap, operatorParams, sampleCount, onlyWithCsv, selectedDirections, svOperators, calls]);
+
+  const groupedBySvThenDir = React.useMemo(() => {
+    const map = {};
+    const insuffNames = new Set(insufficientOperators.map(i => String(i.op ? i.op.name || i.op.id : i.csvName || '').trim().toLowerCase()));
+    filteredSvOperators.forEach(op => {
+      const displayName = op.name || op.login || String(op.id || '—');
+      if (insuffNames.has(String(displayName).trim().toLowerCase())) return;
+      const sv = op.supervisor_name || op.sv_name || 'Без SV';
+      const dir = op.direction_name || op.direction || 'Без направления';
+      if (!map[sv]) map[sv] = {};
+      if (!map[sv][dir]) map[sv][dir] = [];
+      map[sv][dir].push(op);
+    });
+    return map;
+  }, [filteredSvOperators, insufficientOperators]);
+
+  const unmatchedCsvOperators = React.useMemo(() => {
+    const apiNames = new Set(svOperators.map(o => String(o.name || o.id || '').trim().toLowerCase()));
+    return Object.keys(operatorMap || {}).filter(k => {
+      if (!operatorMap[k]?.count) return false;
+      const nk = String(k).trim().toLowerCase();
+      if (apiNames.has(nk)) return false;
+      for (const a of apiNames) { if (a.includes(nk) || nk.includes(a)) return false; }
+      return true;
+    }).sort((a, b) => String(a).localeCompare(String(b)));
+  }, [operatorMap, svOperators]);
+
+  useEffect(() => {
+    recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams, !!selectedOperator);
+  }, [operatorParams, calls, minDurationSec, maxDurationSec, sampleCount, variationSec]);
+
+  function applyFilters() { recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams); }
+
+  async function splitAll() {
+    try { await handleParseFiles(); } catch (e) { console.error(e); }
+    try { await fetchSvOperators(selectedMonth); } catch (e) { console.error(e); }
+    try { applyFilters(); } catch (e) { console.error(e); }
+  }
+
+  function handleClosePanel() { setPinnedOperator(false); setSelectedOperator(null); setOperatorView({ operatorKey: null, matching: [], nonMatching: [] }); }
+
+  function handleAssign() {
+    const picks = calls.filter(c => selectedCalls.has(c.id));
+    if (!picks.length) return alert('Выберите звонки для назначения');
+    if (typeof onAssignSelected === 'function') return onAssignSelected(picks);
+    const csv = ['id,datetime,type,phone,project,operator,durationSec', ...picks.map(p => [p.id, p.datetimeRaw || '', p.type, p.phone, p.project, p.operator, p.durationSec].map(x => `"${String(x).replace(/"/g, '""')}"`).join(','))];
+    const blob = new Blob([csv.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'selected_calls.csv'; a.click(); URL.revokeObjectURL(url);
+  }
+
+  function pickRandom(arr = [], n = 0) {
+    const src = arr.slice(); const out = [];
+    while (out.length < n && src.length > 0) { const i = Math.floor(Math.random() * src.length); out.push(src[i]); src.splice(i, 1); }
+    return out;
+  }
+
+  function handlePrepareShuffle() {
+    const toProcess = [];
+    for (const op of filteredSvOperators) {
+      const dn = op.name || op.login || String(op.id || '—');
+      const mk = findOperatorMapKeyByName(dn);
+      const available = mk ? (operatorMap[mk]?.all || []) : getAllCallsForDisplayName(dn);
+      if (onlyWithCsv && countAnyCallsForDisplayName(dn) === 0) continue;
+      const desired = getDesiredSampleCount(dn, mk);
+      if (desired > 0) toProcess.push({ operatorName: dn, matchedKey: mk, available });
+    }
+    if (selectedDirections.includes('all')) {
+      for (const csvName of unmatchedCsvOperators) {
+        const info = operatorMap[csvName];
+        if (!info?.count) continue;
+        const desired = operatorParams[csvName]?.sampleCount != null ? Number(operatorParams[csvName].sampleCount) : Number(sampleCount) || 0;
+        if (desired > 0) toProcess.push({ operatorName: csvName, matchedKey: csvName, available: info.all || [] });
+      }
+    }
+    const distribution = []; const insufficient = []; const chosenIds = new Set();
+    for (const it of toProcess) {
+      const desired = getDesiredSampleCount(it.operatorName, it.matchedKey);
+      const avail = (it.available || []).filter(c => c?.id && !chosenIds.has(c.id));
+      const picked = pickRandom(avail, Math.min(desired, avail.length));
+      picked.forEach(p => chosenIds.add(p.id));
+      distribution.push({ operator: it.operatorName, desired, available: avail.length, picked });
+      if (avail.length < desired) insufficient.push({ operator: it.operatorName, desired, available: avail.length });
+    }
+    const allPicked = distribution.flatMap(d => d.picked || []);
+    const durations = allPicked.map(p => p?.durationSec != null ? Number(p.durationSec) : null).filter(v => v != null && !isNaN(v));
+    setShuffleSummary({ distribution, totalPicked: allPicked.length, insufficient, enoughCount: distribution.length - insufficient.length, minDur: durations.length ? Math.min(...durations) : null, maxDur: durations.length ? Math.max(...durations) : null, filters: { statuses: selectedStatuses, directions: selectedDirections, onlyWithCsv, month: selectedMonth } });
+    setShowShuffleModal(true);
+  }
+
+  async function handleConfirmShuffle() {
+    if (!shuffleSummary) return;
+    setShuffling(true); setShuffleResult(null);
+    try {
+      if (typeof axios === 'undefined') { alert('axios is not available'); setShuffling(false); return; }
+      const headers = { 'Content-Type': 'application/json' };
+      if (user?.apiKey) headers['X-API-Key'] = user.apiKey;
+      if (user?.id) headers['X-User-Id'] = user.id;
+      const payload = { month: selectedMonth, filters: shuffleSummary.filters, distribution: shuffleSummary.distribution.map(d => ({ operator: d.operator, desired: d.desired, available: d.available, calls: (d.picked || []).map(c => ({ id: c.id, datetimeRaw: c.datetimeRaw, phone: c.phone, durationSec: c.durationSec, project: c.project })) })), total: shuffleSummary.totalPicked };
+      const resp = await axios.post(`${API_BASE_URL}/api/admin/shuffle`, payload, { headers });
+      const data = resp.data;
+      setShuffleResult({ ok: resp.status === 200 && (data?.status === 'ok' || data?.status === 'success' || !data?.status), httpStatus: resp.status, payload: data });
+      if (data?.status === 'success' || data?.status === 'ok' || resp.status === 200) {
+        if (typeof showToast === 'function') showToast?.('Распределение успешно отправлено', 'success');
+        const s = new Set(selectedCalls);
+        shuffleSummary.distribution.forEach(d => (d.picked || []).forEach(c => s.add(c.id)));
+        setSelectedCalls(s);
+      } else { if (typeof showToast === 'function') showToast?.(data?.error || 'Ошибка при отправке', 'error'); }
+    } catch (err) {
+      console.error('Shuffle error', err);
+      setShuffleResult({ ok: false, httpStatus: err.response?.status || 500, payload: err.response?.data || { error: err.message || 'Network error' } });
+      if (typeof showToast === 'function') showToast?.(err.response?.data?.error || 'Ошибка при отправке', 'error');
+    } finally { setShuffling(false); }
+  }
+
+  /* ---- tiny component helpers ---- */
+  function renderCircles({ apiCount = 0, csvCount = 0, desiredForOp = 0 }) {
+    const total = 18;
+    const green = Math.min(Number(apiCount || 0), total);
+    const yellow = Math.min(Math.min(Number(csvCount || 0), Number(desiredForOp || 0)), Math.max(0, total - green));
+    const grey = Math.max(0, total - green - yellow);
+    return (
+      <div className="flex gap-0.5 flex-wrap" style={{ maxWidth: 120 }}>
+        {Array.from({ length: green }).map((_, i) => <span key={`g${i}`} className="w-2.5 h-2.5 rounded-full bg-emerald-500" />)}
+        {Array.from({ length: yellow }).map((_, i) => <span key={`y${i}`} className="w-2.5 h-2.5 rounded-full bg-amber-400" />)}
+        {Array.from({ length: grey }).map((_, i) => <span key={`z${i}`} className="w-2.5 h-2.5 rounded-full bg-slate-200" />)}
+      </div>
+    );
+  }
+
+  /* ==================== DESIGN TOKENS ==================== */
+  // Shared Tailwind class shorthands
+  const btnPrimary = "inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-400";
+  const btnSecondary = "inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-lg bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors focus:outline-none focus:ring-2 focus:ring-slate-300";
+  const btnDanger = "inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-lg bg-white border border-red-200 text-red-600 hover:bg-red-50 transition-colors";
+  const btnGhost = "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-sm rounded-lg text-slate-500 hover:bg-slate-100 transition-colors";
+  const card = "bg-white rounded-xl border border-slate-200 shadow-sm";
+  const sectionTitle = "text-xs font-semibold uppercase tracking-widest text-slate-400 mb-2";
+  const filterChip = (active) => `px-3 py-1 text-xs font-medium rounded-full border transition-colors ${active ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}`;
+
+  /* ==================== RENDER ==================== */
+  return (
+    <div className="min-h-screen bg-slate-50">
+      {/* ── Top header bar ── */}
+      <div className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-slate-800">Деление звонков</h2>
+          <p className="text-xs text-slate-500 mt-0.5">Загрузка файлов, фильтрация и распределение по операторам</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-slate-500">Операторов: <strong className="text-slate-700">{svOperators.length}</strong></span>
+          <span className="text-xs text-slate-500">Направлений: <strong className="text-slate-700">{directions.length}</strong></span>
+          <button
+            onClick={() => { fetchDirections(); fetchSvOperators(selectedMonth); }}
+            className={btnSecondary}
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M13.5 2.5A6.5 6.5 0 1 0 14.5 9" strokeLinecap="round"/><path d="M11 2h3v3" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            Обновить
+          </button>
+        </div>
+      </div>
+
+      <div className="max-w-screen-xl mx-auto px-6 py-6 space-y-6">
+
+        {/* ── Row 1: Upload + Params + Filters ── */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+          {/* Upload card */}
+          <div className={`${card} p-5 flex flex-col gap-4`}>
+            <div className={sectionTitle}>Загрузка файла</div>
+
+            <label className="flex flex-col items-center justify-center gap-2 px-4 py-5 border-2 border-dashed border-slate-200 rounded-xl text-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/30 transition-colors group">
+              <svg className="w-7 h-7 text-slate-300 group-hover:text-indigo-400 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 16v-8m0 0-3 3m3-3 3 3" strokeLinecap="round" strokeLinejoin="round"/><rect x="3" y="3" width="18" height="18" rx="4" strokeLinecap="round"/></svg>
+              <span className="text-sm text-slate-500 group-hover:text-indigo-600 transition-colors">Нажмите или перетащите CSV-файлы</span>
+              <input ref={fileInputRef} type="file" accept=".csv,.xls,.xlsx" multiple onChange={handleFilesSelected} className="hidden" />
+            </label>
+
+            {files.length > 0 && (
+              <ul className="space-y-1 max-h-24 overflow-auto">
+                {files.map((f, i) => (
+                  <li key={i} className="flex items-center gap-2 text-xs text-slate-600 bg-slate-50 rounded-lg px-2.5 py-1.5">
+                    <svg className="w-3.5 h-3.5 text-slate-400 shrink-0" viewBox="0 0 16 16" fill="currentColor"><path d="M4 0h6l4 4v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2z"/><path d="M10 0v4h4" fill="none" stroke="white" strokeWidth="1"/></svg>
+                    <span className="truncate">{f.name}</span>
+                    <span className="ml-auto text-slate-400 shrink-0">{Math.round(f.size / 1024)} KB</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {/* Primary action row */}
+            <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
+              <button
+                onClick={splitAll}
+                disabled={!files.length || parsing || loadingOperators}
+                className={btnPrimary + ' flex-1 justify-center'}
+              >
+                {(parsing || loadingOperators)
+                  ? <><span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />Обработка…</>
+                  : <><svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 8h10M9 4l4 4-4 4" strokeLinecap="round" strokeLinejoin="round"/></svg>Делить</>
                 }
-                return opts;
-            }
+              </button>
+              <button
+                onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); setActiveRange(null); setOperatorParams({}); if (fileInputRef.current) fileInputRef.current.value = null; }}
+                className={btnSecondary}
+                title="Сбросить всё"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 4 4 12M4 4l8 8" strokeLinecap="round"/></svg>
+                Сброс
+              </button>
+            </div>
+          </div>
 
-            function parseDateDMY(str) {
-                if (!str) return null;
-                try {
-                const [datePart, timePart] = String(str).trim().split(' ');
-                const [dd, mm, yyyy] = datePart.split('.').map(s => parseInt(s, 10));
-                if (!dd || !mm || !yyyy) return null;
-                const d = new Date(`${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}T${timePart||'00:00:00'}`);
-                return isNaN(d) ? null : d;
-                } catch { return null; }
-            }
+          {/* Duration params card */}
+          <div className={`${card} p-5`}>
+            <div className={sectionTitle}>Параметры длительности</div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1.5">Минимум</label>
+                <DurationInput valueSec={minDurationSec} onChange={v => setMinDurationSec(v)} ariaLabel="min" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1.5">Вариация (±)</label>
+                <DurationInput valueSec={variationSec} onChange={v => setVariationSec(v)} ariaLabel="variation" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1.5">Максимум</label>
+                <DurationInput valueSec={maxDurationSec} onChange={v => setMaxDurationSec(v)} ariaLabel="max" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1.5">Звонков для выборки</label>
+                <input
+                  type="number" min="0" value={sampleCount}
+                  onChange={e => setSampleCount(e.target.value)}
+                  className="w-20 px-2 py-1.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                />
+              </div>
+            </div>
 
-            function parseCSVText(text) {
-                if (window?.Papa?.parse) return window.Papa.parse(text, { skipEmptyLines: true }).data;
-                return text.split(/\r?\n/).filter(Boolean).map(l => {
-                const parts = []; let cur = ''; let inQ = false;
-                for (const ch of l) {
-                    if (ch === '"') { inQ = !inQ; continue; }
-                    if (ch === ',' && !inQ) { parts.push(cur); cur = ''; continue; }
-                    cur += ch;
-                }
-                parts.push(cur);
-                return parts;
-                });
-            }
+            {/* Active range pill */}
+            <div className={`mt-4 px-3 py-2 rounded-lg text-xs ${activeRange ? 'bg-indigo-50 text-indigo-700 border border-indigo-100' : 'bg-slate-50 text-slate-500 border border-slate-100'}`}>
+              {activeRange
+                ? <>Диапазон: <strong>{secondsToHms(activeRange.min)}</strong> — {activeRange.max != null ? <strong>{secondsToHms(activeRange.max)}</strong> : '∞'} (с вариацией)</>
+                : 'Диапазон не задан — показываются все звонки'}
+            </div>
 
-            function normalizeRow(row) {
-                const r = row.map(c => (c == null ? '' : String(c).trim()));
-                while (r.length < 7) r.push('');
-                const [id, dtRaw, typeRaw, phone, project, operator, durationRaw] = r;
-                return {
-                id: id || Math.random().toString(36).slice(2, 10),
-                datetime: parseDateDMY(dtRaw),
-                datetimeRaw: dtRaw,
-                type: String(typeRaw || '').toLowerCase().includes('вход') || String(typeRaw || '').toLowerCase().includes('in') ? 'in' : 'out',
-                phone: phone || '', project: project || '',
-                operator: operator || 'Неизвестный',
-                durationSec: parseDurationString(durationRaw),
-                };
-            }
+            <button
+              onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); applyFilters(); }}
+              className={`${btnGhost} mt-3 text-xs`}
+            >
+              <svg className="w-3 h-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 3 3 9M3 3l6 6" strokeLinecap="round"/></svg>
+              Сбросить параметры
+            </button>
+          </div>
 
-            async function handleFilesSelected(e) { setFiles(Array.from(e.target.files || [])); }
+          {/* Filters card */}
+          <div className={`${card} p-5 flex flex-col gap-4`}>
+            <div className={sectionTitle}>Фильтры</div>
 
-            async function handleParseFiles() {
-                if (!files?.length) return;
-                setParsing(true);
-                try {
-                const allRows = [];
-                for (const f of files) {
-                    const text = await f.text();
-                    const parsed = parseCSVText(text);
-                    let start = 0;
-                    if (parsed.length > 0) {
-                    const first = parsed[0].map(c => String(c || '').toLowerCase()).join(';');
-                    if (first.includes('id') || first.includes('дата') || first.includes('date')) start = 1;
-                    }
-                    for (let i = start; i < parsed.length; i++) {
-                    const row = parsed[i];
-                    if (row?.length) allRows.push(normalizeRow(row));
-                    }
-                }
-                setCalls(allRows);
-                recomputeOperatorMap(allRows, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams);
-                } catch (err) {
-                console.error('parse error', err);
-                alert('Ошибка парсинга файлов');
-                } finally { setParsing(false); }
-            }
+            <div>
+              <div className="text-xs font-medium text-slate-600 mb-2">Статус оператора</div>
+              <div className="flex flex-wrap gap-1.5">
+                <button onClick={() => setSelectedStatuses(['all'])} className={filterChip(selectedStatuses.includes('all'))}>Все</button>
+                {statusOptions.map(st => <button key={st} onClick={() => toggleStatusSelection(st)} className={filterChip(selectedStatuses.includes(st))}>{st}</button>)}
+              </div>
+            </div>
 
-            function recomputeOperatorMap(allRows, globalMin, globalMax, globalSampleCnt, globalVar, params = {}, keepSelection = false) {
-                const raw = {};
-                for (const c of allRows) { const op = c.operator || 'Неизвестный'; if (!raw[op]) raw[op] = []; raw[op].push(c); }
-                const summary = {};
-                Object.keys(raw).forEach(op => {
-                let list = raw[op].slice().sort((a, b) => (b.datetime?.getTime() || 0) - (a.datetime?.getTime() || 0));
-                const opP = params[op] || null;
-                const minD = opP?.min != null ? opP.min : globalMin;
-                const maxD = opP?.max != null ? opP.max : globalMax;
-                const varD = opP?.variation != null ? opP.variation : globalVar;
-                const sampleCnt = opP?.sampleCount != null ? opP.sampleCount : globalSampleCnt;
-                if (minD != null || maxD != null) {
-                    const baseMin = minD != null ? Number(minD) : 0;
-                    const baseMax = maxD != null ? Number(maxD) : (minD != null ? Number(minD) : Infinity);
-                    const cMin = Math.max(0, baseMin - (Number(varD) || 0));
-                    const cMax = baseMax === Infinity ? Infinity : baseMax + (Number(varD) || 0);
-                    list = list.filter(c => {
-                    if (c.durationSec == null || isNaN(Number(c.durationSec))) return false;
-                    const dur = Number(c.durationSec);
-                    return dur >= cMin && (cMax === Infinity || dur <= cMax);
-                    });
-                }
-                summary[op] = { count: list.length, samples: sampleCnt > 0 ? list.slice(0, sampleCnt) : [], all: list, custom: !!opP };
-                });
-                setOperatorMap(summary);
-                if (!keepSelection) { setSelectedOperator(null); setSelectedCalls(new Set()); }
-                if (globalMin != null || globalMax != null) {
-                const baseMin = globalMin != null ? Number(globalMin) : 0;
-                const baseMax = globalMax != null ? Number(globalMax) : (globalMin != null ? Number(globalMin) : Infinity);
-                const cMin = Math.max(0, baseMin - (Number(globalVar) || 0));
-                const cMax = baseMax === Infinity ? null : baseMax + (Number(globalVar) || 0);
-                setActiveRange({ min: cMin, max: cMax });
-                } else { setActiveRange(null); }
-            }
+            <div>
+              <div className="text-xs font-medium text-slate-600 mb-2">Направление</div>
+              <div className="flex flex-wrap gap-1.5">
+                <button onClick={() => setSelectedDirections(['all'])} className={filterChip(selectedDirections.includes('all'))}>Все</button>
+                {directionOptions.map(d => <button key={d.id} onClick={() => toggleDirectionSelection(d.id)} className={filterChip(selectedDirections.includes(String(d.id)))}>{d.name}</button>)}
+              </div>
+            </div>
 
-            function countAnyCallsForDisplayName(displayName) {
-                if (!displayName || !calls?.length) return 0;
-                const norm = String(displayName).trim().toLowerCase();
-                return calls.filter(c => { const co = String(c.operator || '').trim().toLowerCase(); return co === norm || co.includes(norm) || norm.includes(co); }).length;
-            }
+            <div>
+              <div className="text-xs font-medium text-slate-600 mb-2">Месяц</div>
+              <select value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400">
+                {getMonthOptions()}
+              </select>
+            </div>
 
-            function findOperatorMapKeyByName(name) {
-                if (!name) return null;
-                const norm = String(name).trim().toLowerCase();
-                for (const k of Object.keys(operatorMap)) { if (String(k).trim().toLowerCase() === norm) return k; }
-                for (const k of Object.keys(operatorMap)) { const kn = String(k).trim().toLowerCase(); if (kn.includes(norm) || norm.includes(kn)) return k; }
-                return null;
-            }
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <div className={`relative w-8 h-4 rounded-full transition-colors ${onlyWithCsv ? 'bg-indigo-500' : 'bg-slate-200'}`} onClick={() => setOnlyWithCsv(v => !v)}>
+                <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-all ${onlyWithCsv ? 'left-4.5' : 'left-0.5'}`} style={{ left: onlyWithCsv ? '18px' : '2px' }} />
+              </div>
+              <input type="checkbox" checked={onlyWithCsv} onChange={e => setOnlyWithCsv(e.target.checked)} className="sr-only" />
+              <span className="text-xs text-slate-600">Только операторы с звонками в CSV</span>
+            </label>
+          </div>
+        </div>
 
-            function getAllCallsForDisplayName(displayName) {
-                if (!displayName || !calls) return [];
-                const norm = String(displayName).trim().toLowerCase();
-                return calls.filter(c => { const co = String(c.operator || '').trim().toLowerCase(); return co === norm || co.includes(norm) || norm.includes(co); });
-            }
-
-            function handleShowOperator(opKey) {
-                const foundKey = findOperatorMapKeyByName(opKey);
-                const keyToUse = foundKey || opKey;
-                if (!keyToUse) return;
-                const matching = (operatorMap[keyToUse]?.all || []).slice();
-                const allRelated = getAllCallsForDisplayName(opKey);
-                const matchingIds = new Set(matching.map(m => m.id));
-                const nonMatching = allRelated.filter(c => !matchingIds.has(c.id));
-                setSelectedOperator(keyToUse);
-                setPinnedOperator(true);
-                const s = new Set(selectedCalls);
-                matching.forEach(c => s.add(c.id));
-                setSelectedCalls(s);
-                setOperatorView({ operatorKey: keyToUse, matching, nonMatching });
-                setTimeout(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }), 50);
-            }
-
-            function openEditOperator(opKey) {
-                const key = findOperatorMapKeyByName(opKey) || opKey;
-                setEditingOperator(key);
-                const ex = operatorParams[key] || { min: null, max: null, variation: 0, sampleCount: 0 };
-                setEditingValues({ min: ex.min ?? null, max: ex.max ?? null, variation: ex.variation ?? 0, sampleCount: ex.sampleCount ?? 0 });
-            }
-
-            function saveOperatorParams() {
-                const op = editingOperator;
-                const cleaned = { ...editingValues, sampleCount: Number(editingValues.sampleCount) || 0 };
-                setOperatorParams(prev => {
-                const updated = { ...prev, [op]: cleaned };
-                recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, updated, true);
-                return updated;
-                });
-                setEditingOperator(null);
-            }
-
-            function resetOperatorParams(op) {
-                setOperatorParams(prev => { const c = { ...prev }; delete c[op]; return c; });
-                if (editingOperator === op) setEditingOperator(null);
-            }
-
-            async function fetchSvOperators(month = selectedMonth) {
-                try {
-                if (typeof axios === 'undefined') return;
-                setLoadingOperators(true);
-                const headers = {};
-                if (user?.apiKey) headers['X-API-Key'] = user.apiKey;
-                if (user?.id) headers['X-User-Id'] = user.id;
-                const resp = await axios.get(`${API_BASE_URL}/api/admin/operators_summary?month=${encodeURIComponent(month)}`, { headers });
-                const data = resp.data;
-                if (data?.status === 'success' && Array.isArray(data.operators)) {
-                    const ops = data.operators.map(op => ({ id: op.id, name: op.name, supervisor_id: op.supervisor_id, supervisor_name: op.supervisor_name, direction_id: op.direction_id, direction_name: op.direction_name, status: op.status, call_count: op.call_count }));
-                    setSvOperators(ops);
-                    const dirsMap = {};
-                    ops.forEach(o => { const did = o.direction_id != null ? String(o.direction_id) : 'null'; if (!dirsMap[did]) dirsMap[did] = { id: did, name: (o.direction_name || 'Без направления').trim() }; });
-                    setDirections(Object.values(dirsMap).sort((a, b) => String(a.name).localeCompare(String(b.name))));
-                }
-                } catch (err) { console.error('Fetch error', err); setSvOperators([]); } finally { setLoadingOperators(false); }
-            }
-
-            async function fetchDirections() {
-                try {
-                if (typeof axios === 'undefined') return;
-                const headers = {};
-                if (user?.apiKey) headers['X-API-Key'] = user.apiKey;
-                if (user?.id) headers['X-User-Id'] = user.id;
-                const resp = await axios.get(`${API_BASE_URL}/api/admin/directions`, { headers });
-                const data = resp.data;
-                if (data?.status === 'success' && Array.isArray(data.directions)) setDirections(data.directions.filter(d => d.isActive !== false));
-                } catch (err) { console.error('Fetch directions error', err); }
-            }
-
-            const statusOptions = React.useMemo(() => {
-                const s = new Set();
-                svOperators.forEach(o => { if (o.status != null) s.add(String(o.status).toLowerCase()); });
-                return Array.from(s).filter(Boolean);
-            }, [svOperators]);
-
-            function toggleStatusSelection(status) {
-                const lower = String(status).toLowerCase();
-                if (selectedStatuses.includes('all')) { if (lower === 'all') return; setSelectedStatuses([lower]); return; }
-                if (selectedStatuses.includes(lower)) { const ns = selectedStatuses.filter(s => s !== lower); setSelectedStatuses(ns.length ? ns : ['all']); }
-                else setSelectedStatuses(prev => prev.concat(lower));
-            }
-
-            const directionOptions = React.useMemo(() => (directions || []).map(d => ({ id: d.id, name: d.name || d.title || d.direction_name || d.direction })), [directions]);
-
-            function toggleDirectionSelection(dirId) {
-                const id = String(dirId);
-                if (selectedDirections.includes('all')) { if (id === 'all') return; setSelectedDirections([id]); return; }
-                if (selectedDirections.includes(id)) { const ns = selectedDirections.filter(s => s !== id); setSelectedDirections(ns.length ? ns : ['all']); }
-                else setSelectedDirections(prev => prev.concat(id));
-            }
-
-            const filteredSvOperators = React.useMemo(() => {
-                let list = svOperators.slice();
-                if (!selectedStatuses.includes('all')) { const s = new Set(selectedStatuses.map(x => x.toLowerCase())); list = list.filter(op => s.has(String(op.status || '').toLowerCase())); }
-                if (!selectedDirections.includes('all')) { const s = new Set(selectedDirections); list = list.filter(op => s.has(String(op.direction_id))); }
-                return list;
-            }, [svOperators, selectedStatuses, selectedDirections]);
-
-            function getDesiredSampleCount(displayName, matchedKey) {
-                if (matchedKey && operatorParams[matchedKey]?.sampleCount != null) return Number(operatorParams[matchedKey].sampleCount) || 0;
-                if (displayName && operatorParams[displayName]?.sampleCount != null) return Number(operatorParams[displayName].sampleCount) || 0;
-                return Number(sampleCount) || 0;
-            }
-
-            const insufficientOperators = React.useMemo(() => {
-                const res = [];
-                const apiNameSet = new Set(svOperators.map(o => String(o.name || o.id || '').trim().toLowerCase()));
-                for (const op of filteredSvOperators) {
-                const displayName = op.name || op.login || String(op.id || '—');
-                const matchedKey = findOperatorMapKeyByName(displayName);
-                const csvCount = matchedKey ? (operatorMap[matchedKey]?.count || 0) : 0;
-                const anyCsvCount = countAnyCallsForDisplayName(displayName);
-                if (onlyWithCsv && anyCsvCount === 0) continue;
-                const desired = getDesiredSampleCount(displayName, matchedKey);
-                if (desired > 0 && csvCount < desired) res.push({ op, csvCount, desired, matchedKey });
-                }
-                if (selectedDirections.includes('all')) {
-                for (const k of Object.keys(operatorMap || {})) {
-                    const info = operatorMap[k];
-                    if (!info || info.count === 0) continue;
-                    if (apiNameSet.has(String(k).trim().toLowerCase())) continue;
-                    const desired = operatorParams[k]?.sampleCount != null ? Number(operatorParams[k].sampleCount) : Number(sampleCount) || 0;
-                    if (desired > 0 && info.count < desired) res.push({ op: null, csvName: k, csvCount: info.count, desired, matchedKey: k });
-                }
-                }
-                return res.sort((a, b) => {
-                const diff = (b.desired - b.csvCount) - (a.desired - a.csvCount);
-                if (diff !== 0) return diff;
-                return String(a.op ? a.op.name : a.csvName).localeCompare(String(b.op ? b.op.name : b.csvName));
-                });
-            }, [filteredSvOperators, operatorMap, operatorParams, sampleCount, onlyWithCsv, selectedDirections, svOperators, calls]);
-
-            const groupedBySvThenDir = React.useMemo(() => {
-                const map = {};
-                const insuffNames = new Set(insufficientOperators.map(i => String(i.op ? i.op.name || i.op.id : i.csvName || '').trim().toLowerCase()));
-                filteredSvOperators.forEach(op => {
-                const displayName = op.name || op.login || String(op.id || '—');
-                if (insuffNames.has(String(displayName).trim().toLowerCase())) return;
-                const sv = op.supervisor_name || op.sv_name || 'Без SV';
-                const dir = op.direction_name || op.direction || 'Без направления';
-                if (!map[sv]) map[sv] = {};
-                if (!map[sv][dir]) map[sv][dir] = [];
-                map[sv][dir].push(op);
-                });
-                return map;
-            }, [filteredSvOperators, insufficientOperators]);
-
-            const unmatchedCsvOperators = React.useMemo(() => {
-                const apiNames = new Set(svOperators.map(o => String(o.name || o.id || '').trim().toLowerCase()));
-                return Object.keys(operatorMap || {}).filter(k => {
-                if (!operatorMap[k]?.count) return false;
-                const nk = String(k).trim().toLowerCase();
-                if (apiNames.has(nk)) return false;
-                for (const a of apiNames) { if (a.includes(nk) || nk.includes(a)) return false; }
-                return true;
-                }).sort((a, b) => String(a).localeCompare(String(b)));
-            }, [operatorMap, svOperators]);
-
-            useEffect(() => {
-                recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams, !!selectedOperator);
-            }, [operatorParams, calls, minDurationSec, maxDurationSec, sampleCount, variationSec]);
-
-            function applyFilters() { recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams); }
-
-            async function splitAll() {
-                try { await handleParseFiles(); } catch (e) { console.error(e); }
-                try { await fetchSvOperators(selectedMonth); } catch (e) { console.error(e); }
-                try { applyFilters(); } catch (e) { console.error(e); }
-            }
-
-            function handleClosePanel() { setPinnedOperator(false); setSelectedOperator(null); setOperatorView({ operatorKey: null, matching: [], nonMatching: [] }); }
-
-            function handleAssign() {
-                const picks = calls.filter(c => selectedCalls.has(c.id));
-                if (!picks.length) return alert('Выберите звонки для назначения');
-                if (typeof onAssignSelected === 'function') return onAssignSelected(picks);
-                const csv = ['id,datetime,type,phone,project,operator,durationSec', ...picks.map(p => [p.id, p.datetimeRaw || '', p.type, p.phone, p.project, p.operator, p.durationSec].map(x => `"${String(x).replace(/"/g, '""')}"`).join(','))];
-                const blob = new Blob([csv.join('\n')], { type: 'text/csv;charset=utf-8;' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a'); a.href = url; a.download = 'selected_calls.csv'; a.click(); URL.revokeObjectURL(url);
-            }
-
-            function pickRandom(arr = [], n = 0) {
-                const src = arr.slice(); const out = [];
-                while (out.length < n && src.length > 0) { const i = Math.floor(Math.random() * src.length); out.push(src[i]); src.splice(i, 1); }
-                return out;
-            }
-
-            function handlePrepareShuffle() {
-                const toProcess = [];
-                for (const op of filteredSvOperators) {
-                const dn = op.name || op.login || String(op.id || '—');
-                const mk = findOperatorMapKeyByName(dn);
-                const available = mk ? (operatorMap[mk]?.all || []) : getAllCallsForDisplayName(dn);
-                if (onlyWithCsv && countAnyCallsForDisplayName(dn) === 0) continue;
-                const desired = getDesiredSampleCount(dn, mk);
-                if (desired > 0) toProcess.push({ operatorName: dn, matchedKey: mk, available });
-                }
-                if (selectedDirections.includes('all')) {
-                for (const csvName of unmatchedCsvOperators) {
-                    const info = operatorMap[csvName];
-                    if (!info?.count) continue;
-                    const desired = operatorParams[csvName]?.sampleCount != null ? Number(operatorParams[csvName].sampleCount) : Number(sampleCount) || 0;
-                    if (desired > 0) toProcess.push({ operatorName: csvName, matchedKey: csvName, available: info.all || [] });
-                }
-                }
-                const distribution = []; const insufficient = []; const chosenIds = new Set();
-                for (const it of toProcess) {
-                const desired = getDesiredSampleCount(it.operatorName, it.matchedKey);
-                const avail = (it.available || []).filter(c => c?.id && !chosenIds.has(c.id));
-                const picked = pickRandom(avail, Math.min(desired, avail.length));
-                picked.forEach(p => chosenIds.add(p.id));
-                distribution.push({ operator: it.operatorName, desired, available: avail.length, picked });
-                if (avail.length < desired) insufficient.push({ operator: it.operatorName, desired, available: avail.length });
-                }
-                const allPicked = distribution.flatMap(d => d.picked || []);
-                const durations = allPicked.map(p => p?.durationSec != null ? Number(p.durationSec) : null).filter(v => v != null && !isNaN(v));
-                setShuffleSummary({ distribution, totalPicked: allPicked.length, insufficient, enoughCount: distribution.length - insufficient.length, minDur: durations.length ? Math.min(...durations) : null, maxDur: durations.length ? Math.max(...durations) : null, filters: { statuses: selectedStatuses, directions: selectedDirections, onlyWithCsv, month: selectedMonth } });
-                setShowShuffleModal(true);
-            }
-
-            async function handleConfirmShuffle() {
-                if (!shuffleSummary) return;
-                setShuffling(true); setShuffleResult(null);
-                try {
-                if (typeof axios === 'undefined') { alert('axios is not available'); setShuffling(false); return; }
-                const headers = { 'Content-Type': 'application/json' };
-                if (user?.apiKey) headers['X-API-Key'] = user.apiKey;
-                if (user?.id) headers['X-User-Id'] = user.id;
-                const payload = { month: selectedMonth, filters: shuffleSummary.filters, distribution: shuffleSummary.distribution.map(d => ({ operator: d.operator, desired: d.desired, available: d.available, calls: (d.picked || []).map(c => ({ id: c.id, datetimeRaw: c.datetimeRaw, phone: c.phone, durationSec: c.durationSec, project: c.project })) })), total: shuffleSummary.totalPicked };
-                const resp = await axios.post(`${API_BASE_URL}/api/admin/shuffle`, payload, { headers });
-                const data = resp.data;
-                setShuffleResult({ ok: resp.status === 200 && (data?.status === 'ok' || data?.status === 'success' || !data?.status), httpStatus: resp.status, payload: data });
-                if (data?.status === 'success' || data?.status === 'ok' || resp.status === 200) {
-                    if (typeof showToast === 'function') showToast?.('Распределение успешно отправлено', 'success');
-                    const s = new Set(selectedCalls);
-                    shuffleSummary.distribution.forEach(d => (d.picked || []).forEach(c => s.add(c.id)));
-                    setSelectedCalls(s);
-                } else { if (typeof showToast === 'function') showToast?.(data?.error || 'Ошибка при отправке', 'error'); }
-                } catch (err) {
-                console.error('Shuffle error', err);
-                setShuffleResult({ ok: false, httpStatus: err.response?.status || 500, payload: err.response?.data || { error: err.message || 'Network error' } });
-                if (typeof showToast === 'function') showToast?.(err.response?.data?.error || 'Ошибка при отправке', 'error');
-                } finally { setShuffling(false); }
-            }
-
-            /* ---- tiny component helpers ---- */
-            function renderCircles({ apiCount = 0, csvCount = 0, desiredForOp = 0 }) {
-                const total = 18;
-                const green = Math.min(Number(apiCount || 0), total);
-                const yellow = Math.min(Math.min(Number(csvCount || 0), Number(desiredForOp || 0)), Math.max(0, total - green));
-                const grey = Math.max(0, total - green - yellow);
+        {/* ── Insufficient block ── */}
+        {insufficientOperators.length > 0 && (
+          <div className="bg-rose-50 border border-rose-200 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <svg className="w-4 h-4 text-rose-500" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 10.5a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zM7.5 4.5h1v5h-1V4.5z"/></svg>
+                <span className="text-sm font-semibold text-rose-700">Недостаточно звонков</span>
+              </div>
+              <span className="text-xs font-medium text-rose-600 bg-rose-100 px-2 py-0.5 rounded-full">{insufficientOperators.length}</span>
+            </div>
+            <div className="space-y-2">
+              {insufficientOperators.map((it, idx) => {
+                const name = it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName;
                 return (
-                <div className="flex gap-0.5 flex-wrap" style={{ maxWidth: 120 }}>
-                    {Array.from({ length: green }).map((_, i) => <span key={`g${i}`} className="w-2.5 h-2.5 rounded-full bg-emerald-500" />)}
-                    {Array.from({ length: yellow }).map((_, i) => <span key={`y${i}`} className="w-2.5 h-2.5 rounded-full bg-amber-400" />)}
-                    {Array.from({ length: grey }).map((_, i) => <span key={`z${i}`} className="w-2.5 h-2.5 rounded-full bg-slate-200" />)}
-                </div>
+                  <div key={String(name) + idx} className="flex items-center gap-3 bg-white rounded-xl px-4 py-3 border border-rose-100 shadow-sm">
+                    <div className="w-8 h-8 rounded-lg bg-rose-100 flex items-center justify-center shrink-0">
+                      <svg className="w-4 h-4 text-rose-500" viewBox="0 0 16 16" fill="currentColor"><path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm-5 6s-1 0-1-1 1-4 6-4 6 3 6 4-1 1-1 1H3z"/></svg>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-semibold text-slate-800 truncate">{name}</div>
+                      <div className="text-xs text-slate-500">{it.op ? (it.op.direction_name || 'CSV-only') : 'CSV-only'}</div>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-xs shrink-0">
+                      <span className="bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full font-medium">{it.csvCount}/{it.desired} звонков</span>
+                      {it.op && <span className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full font-medium">Оценки: {it.op.call_count ?? 0}</span>}
+                    </div>
+                    {/* Action buttons — tightly grouped at end */}
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button onClick={() => openEditOperator(it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName)} className={btnGhost} title="Настройки">
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"/><path d="M13.3 6.7a1 1 0 0 0 .2-1.1L12 3.3a1 1 0 0 0-1-.5l-1.1.2a4.5 4.5 0 0 0-.8-.5L9 1.5A1 1 0 0 0 8 1H7a1 1 0 0 0-1 .5l-.1 1a4.5 4.5 0 0 0-.8.5l-1.1-.2a1 1 0 0 0-1 .5L1.5 5.6a1 1 0 0 0 .2 1.1L2.7 7.5A4.5 4.5 0 0 0 2.7 8.5l-1 .9a1 1 0 0 0-.2 1.1l1.5 2.3a1 1 0 0 0 1 .5l1.1-.2a4.5 4.5 0 0 0 .8.5l.1 1A1 1 0 0 0 7 15h2a1 1 0 0 0 1-.5l.1-1a4.5 4.5 0 0 0 .8-.5l1.1.2a1 1 0 0 0 1-.5l1.5-2.3a1 1 0 0 0-.2-1.1l-1-.9a4.5 4.5 0 0 0 0-1z" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                      </button>
+                      <button onClick={() => handleShowOperator(it.op ? (it.op.name || it.op.id) : it.matchedKey || it.csvName)} className={btnGhost} title="Просмотр">
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" strokeLinecap="round"/><circle cx="8" cy="8" r="2"/></svg>
+                      </button>
+                    </div>
+                  </div>
                 );
-            }
+              })}
+            </div>
+          </div>
+        )}
 
-            /* ==================== DESIGN TOKENS ==================== */
-            // Shared Tailwind class shorthands
-            const btnPrimary = "inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-400";
-            const btnSecondary = "inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-lg bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors focus:outline-none focus:ring-2 focus:ring-slate-300";
-            const btnDanger = "inline-flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-lg bg-white border border-red-200 text-red-600 hover:bg-red-50 transition-colors";
-            const btnGhost = "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-sm rounded-lg text-slate-500 hover:bg-slate-100 transition-colors";
-            const card = "bg-white rounded-xl border border-slate-200 shadow-sm";
-            const sectionTitle = "text-xs font-semibold uppercase tracking-widest text-slate-400 mb-2";
-            const filterChip = (active) => `px-3 py-1 text-xs font-medium rounded-full border transition-colors ${active ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'}`;
+        {/* ── Operators grouped by SV + Direction ── */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="text-sm font-semibold text-slate-700">Операторы по супервизорам</h4>
+            {loadingOperators && <span className="text-xs text-slate-400 flex items-center gap-1"><span className="w-3 h-3 border-2 border-slate-300 border-t-indigo-500 rounded-full animate-spin" />Загрузка…</span>}
+          </div>
 
-            /* ==================== RENDER ==================== */
-            return (
-                <div className="min-h-screen bg-slate-50">
-                {/* ── Top header bar ── */}
-                <div className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
-                    <div>
-                    <h2 className="text-base font-semibold text-slate-800">Деление звонков</h2>
-                    <p className="text-xs text-slate-500 mt-0.5">Загрузка файлов, фильтрация и распределение по операторам</p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                    <span className="text-xs text-slate-500">Операторов: <strong className="text-slate-700">{svOperators.length}</strong></span>
-                    <span className="text-xs text-slate-500">Направлений: <strong className="text-slate-700">{directions.length}</strong></span>
-                    <button
-                        onClick={() => { fetchDirections(); fetchSvOperators(selectedMonth); }}
-                        className={btnSecondary}
-                    >
-                        <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M13.5 2.5A6.5 6.5 0 1 0 14.5 9" strokeLinecap="round"/><path d="M11 2h3v3" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                        Обновить
-                    </button>
-                    </div>
-                </div>
+          {!loadingOperators && Object.keys(groupedBySvThenDir).length === 0 && unmatchedCsvOperators.length === 0 && (
+            <div className={`${card} p-8 text-center text-sm text-slate-400`}>
+              <svg className="w-8 h-8 mx-auto mb-2 text-slate-200" viewBox="0 0 24 24" fill="currentColor"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              Нет данных операторов
+            </div>
+          )}
 
-                <div className="max-w-screen-xl mx-auto px-6 py-6 space-y-6">
+          <div className="space-y-2">
+            {Object.entries(groupedBySvThenDir).map(([svName, dirs]) => (
+              <details key={svName} className={`${card} group`}>
+                <summary className="flex items-center justify-between px-4 py-3 cursor-pointer list-none hover:bg-slate-50 rounded-xl transition-colors">
+                  <div className="flex items-center gap-2">
+                    <svg className="w-3.5 h-3.5 text-slate-400 transition-transform group-open:rotate-90" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 2l4 4-4 4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                    <span className="text-sm font-medium text-slate-700">{svName}</span>
+                  </div>
+                  <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">{Object.values(dirs).reduce((s, a) => s + a.length, 0)}</span>
+                </summary>
 
-                    {/* ── Row 1: Upload + Params + Filters ── */}
-                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-
-                    {/* Upload card */}
-                    <div className={`${card} p-5 flex flex-col gap-4`}>
-                        <div className={sectionTitle}>Загрузка файла</div>
-
-                        <label className="flex flex-col items-center justify-center gap-2 px-4 py-5 border-2 border-dashed border-slate-200 rounded-xl text-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/30 transition-colors group">
-                        <svg className="w-7 h-7 text-slate-300 group-hover:text-indigo-400 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 16v-8m0 0-3 3m3-3 3 3" strokeLinecap="round" strokeLinejoin="round"/><rect x="3" y="3" width="18" height="18" rx="4" strokeLinecap="round"/></svg>
-                        <span className="text-sm text-slate-500 group-hover:text-indigo-600 transition-colors">Нажмите или перетащите CSV-файлы</span>
-                        <input ref={fileInputRef} type="file" accept=".csv,.xls,.xlsx" multiple onChange={handleFilesSelected} className="hidden" />
-                        </label>
-
-                        {files.length > 0 && (
-                        <ul className="space-y-1 max-h-24 overflow-auto">
-                            {files.map((f, i) => (
-                            <li key={i} className="flex items-center gap-2 text-xs text-slate-600 bg-slate-50 rounded-lg px-2.5 py-1.5">
-                                <svg className="w-3.5 h-3.5 text-slate-400 shrink-0" viewBox="0 0 16 16" fill="currentColor"><path d="M4 0h6l4 4v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2z"/><path d="M10 0v4h4" fill="none" stroke="white" strokeWidth="1"/></svg>
-                                <span className="truncate">{f.name}</span>
-                                <span className="ml-auto text-slate-400 shrink-0">{Math.round(f.size / 1024)} KB</span>
-                            </li>
-                            ))}
-                        </ul>
-                        )}
-
-                        {/* Primary action row */}
-                        <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
-                        <button
-                            onClick={splitAll}
-                            disabled={!files.length || parsing || loadingOperators}
-                            className={btnPrimary + ' flex-1 justify-center'}
-                        >
-                            {(parsing || loadingOperators)
-                            ? <><span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />Обработка…</>
-                            : <><svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 8h10M9 4l4 4-4 4" strokeLinecap="round" strokeLinejoin="round"/></svg>Делить</>
-                            }
-                        </button>
-                        <button
-                            onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); setActiveRange(null); setOperatorParams({}); if (fileInputRef.current) fileInputRef.current.value = null; }}
-                            className={btnSecondary}
-                            title="Сбросить всё"
-                        >
-                            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 4 4 12M4 4l8 8" strokeLinecap="round"/></svg>
-                            Сброс
-                        </button>
-                        </div>
-                    </div>
-
-                    {/* Duration params card */}
-                    <div className={`${card} p-5`}>
-                        <div className={sectionTitle}>Параметры длительности</div>
-                        <div className="grid grid-cols-2 gap-x-4 gap-y-4">
-                        <div>
-                            <label className="block text-xs font-medium text-slate-600 mb-1.5">Минимум</label>
-                            <DurationInput valueSec={minDurationSec} onChange={v => setMinDurationSec(v)} ariaLabel="min" />
-                        </div>
-                        <div>
-                            <label className="block text-xs font-medium text-slate-600 mb-1.5">Вариация (±)</label>
-                            <DurationInput valueSec={variationSec} onChange={v => setVariationSec(v)} ariaLabel="variation" />
-                        </div>
-                        <div>
-                            <label className="block text-xs font-medium text-slate-600 mb-1.5">Максимум</label>
-                            <DurationInput valueSec={maxDurationSec} onChange={v => setMaxDurationSec(v)} ariaLabel="max" />
-                        </div>
-                        <div>
-                            <label className="block text-xs font-medium text-slate-600 mb-1.5">Звонков для выборки</label>
-                            <input
-                            type="number" min="0" value={sampleCount}
-                            onChange={e => setSampleCount(e.target.value)}
-                            className="w-20 px-2 py-1.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                            />
-                        </div>
-                        </div>
-
-                        {/* Active range pill */}
-                        <div className={`mt-4 px-3 py-2 rounded-lg text-xs ${activeRange ? 'bg-indigo-50 text-indigo-700 border border-indigo-100' : 'bg-slate-50 text-slate-500 border border-slate-100'}`}>
-                        {activeRange
-                            ? <>Диапазон: <strong>{secondsToHms(activeRange.min)}</strong> — {activeRange.max != null ? <strong>{secondsToHms(activeRange.max)}</strong> : '∞'} (с вариацией)</>
-                            : 'Диапазон не задан — показываются все звонки'}
-                        </div>
-
-                        <button
-                        onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); applyFilters(); }}
-                        className={`${btnGhost} mt-3 text-xs`}
-                        >
-                        <svg className="w-3 h-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 3 3 9M3 3l6 6" strokeLinecap="round"/></svg>
-                        Сбросить параметры
-                        </button>
-                    </div>
-
-                    {/* Filters card */}
-                    <div className={`${card} p-5 flex flex-col gap-4`}>
-                        <div className={sectionTitle}>Фильтры</div>
-
-                        <div>
-                        <div className="text-xs font-medium text-slate-600 mb-2">Статус оператора</div>
-                        <div className="flex flex-wrap gap-1.5">
-                            <button onClick={() => setSelectedStatuses(['all'])} className={filterChip(selectedStatuses.includes('all'))}>Все</button>
-                            {statusOptions.map(st => <button key={st} onClick={() => toggleStatusSelection(st)} className={filterChip(selectedStatuses.includes(st))}>{st}</button>)}
-                        </div>
-                        </div>
-
-                        <div>
-                        <div className="text-xs font-medium text-slate-600 mb-2">Направление</div>
-                        <div className="flex flex-wrap gap-1.5">
-                            <button onClick={() => setSelectedDirections(['all'])} className={filterChip(selectedDirections.includes('all'))}>Все</button>
-                            {directionOptions.map(d => <button key={d.id} onClick={() => toggleDirectionSelection(d.id)} className={filterChip(selectedDirections.includes(String(d.id)))}>{d.name}</button>)}
-                        </div>
-                        </div>
-
-                        <div>
-                        <div className="text-xs font-medium text-slate-600 mb-2">Месяц</div>
-                        <select value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400">
-                            {getMonthOptions()}
-                        </select>
-                        </div>
-
-                        <label className="flex items-center gap-2 cursor-pointer select-none">
-                        <div className={`relative w-8 h-4 rounded-full transition-colors ${onlyWithCsv ? 'bg-indigo-500' : 'bg-slate-200'}`} onClick={() => setOnlyWithCsv(v => !v)}>
-                            <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-all ${onlyWithCsv ? 'left-4.5' : 'left-0.5'}`} style={{ left: onlyWithCsv ? '18px' : '2px' }} />
-                        </div>
-                        <input type="checkbox" checked={onlyWithCsv} onChange={e => setOnlyWithCsv(e.target.checked)} className="sr-only" />
-                        <span className="text-xs text-slate-600">Только операторы с звонками в CSV</span>
-                        </label>
-                    </div>
-                    </div>
-
-                    {/* ── Insufficient block ── */}
-                    {insufficientOperators.length > 0 && (
-                    <div className="bg-rose-50 border border-rose-200 rounded-xl p-4">
-                        <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2">
-                            <svg className="w-4 h-4 text-rose-500" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 10.5a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zM7.5 4.5h1v5h-1V4.5z"/></svg>
-                            <span className="text-sm font-semibold text-rose-700">Недостаточно звонков</span>
-                        </div>
-                        <span className="text-xs font-medium text-rose-600 bg-rose-100 px-2 py-0.5 rounded-full">{insufficientOperators.length}</span>
-                        </div>
-                        <div className="space-y-2">
-                        {insufficientOperators.map((it, idx) => {
-                            const name = it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName;
-                            return (
-                            <div key={String(name) + idx} className="flex items-center gap-3 bg-white rounded-xl px-4 py-3 border border-rose-100 shadow-sm">
-                                <div className="w-8 h-8 rounded-lg bg-rose-100 flex items-center justify-center shrink-0">
-                                <svg className="w-4 h-4 text-rose-500" viewBox="0 0 16 16" fill="currentColor"><path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm-5 6s-1 0-1-1 1-4 6-4 6 3 6 4-1 1-1 1H3z"/></svg>
+                <div className="px-4 pb-4 pt-1 space-y-3">
+                  {Object.entries(dirs).map(([dirName, ops]) => (
+                    <div key={dirName}>
+                      <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1.5 px-1">{dirName}</div>
+                      <div className="space-y-1">
+                        {ops.map(op => {
+                          const displayName = op.name || op.login || String(op.id || '—');
+                          const matchedKey = findOperatorMapKeyByName(displayName);
+                          const info = matchedKey ? operatorMap[matchedKey] : null;
+                          const csvCount = info ? info.count : 0;
+                          const anyCsvCount = countAnyCallsForDisplayName(displayName);
+                          if (onlyWithCsv && anyCsvCount === 0) return null;
+                          const desired = getDesiredSampleCount(displayName, matchedKey);
+                          return (
+                            <div key={op.id || displayName} className="flex items-center gap-3 px-3 py-2.5 rounded-xl border border-slate-100 bg-slate-50/60 hover:bg-white hover:shadow-sm transition-all">
+                              {/* Name + meta */}
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <span className="text-sm font-medium text-slate-800 truncate">{displayName}</span>
+                                  {info?.custom && <span className="shrink-0 text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-md font-medium">Custom</span>}
                                 </div>
-                                <div className="flex-1 min-w-0">
-                                <div className="text-sm font-semibold text-slate-800 truncate">{name}</div>
-                                <div className="text-xs text-slate-500">{it.op ? (it.op.direction_name || 'CSV-only') : 'CSV-only'}</div>
+                                <div className="flex items-center gap-2 mt-0.5">
+                                  {op.status && <span className="text-xs text-slate-500 bg-slate-100 px-1.5 py-0 rounded-md">{op.status}</span>}
+                                  {anyCsvCount > 0 && csvCount === 0 && <span className="text-xs text-amber-600">⚠ {anyCsvCount} звонков не сопоставлены</span>}
                                 </div>
-                                <div className="flex items-center gap-1.5 text-xs shrink-0">
-                                <span className="bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full font-medium">{it.csvCount}/{it.desired} звонков</span>
-                                {it.op && <span className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full font-medium">Оценки: {it.op.call_count ?? 0}</span>}
-                                </div>
-                                {/* Action buttons — tightly grouped at end */}
-                                <div className="flex items-center gap-1 shrink-0">
-                                <button onClick={() => openEditOperator(it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName)} className={btnGhost} title="Настройки">
-                                    <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"/><path d="M13.3 6.7a1 1 0 0 0 .2-1.1L12 3.3a1 1 0 0 0-1-.5l-1.1.2a4.5 4.5 0 0 0-.8-.5L9 1.5A1 1 0 0 0 8 1H7a1 1 0 0 0-1 .5l-.1 1a4.5 4.5 0 0 0-.8.5l-1.1-.2a1 1 0 0 0-1 .5L1.5 5.6a1 1 0 0 0 .2 1.1L2.7 7.5A4.5 4.5 0 0 0 2.7 8.5l-1 .9a1 1 0 0 0-.2 1.1l1.5 2.3a1 1 0 0 0 1 .5l1.1-.2a4.5 4.5 0 0 0 .8.5l.1 1A1 1 0 0 0 7 15h2a1 1 0 0 0 1-.5l.1-1a4.5 4.5 0 0 0 .8-.5l1.1.2a1 1 0 0 0 1-.5l1.5-2.3a1 1 0 0 0-.2-1.1l-1-.9a4.5 4.5 0 0 0 0-1z" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                              </div>
+                              {/* Circles */}
+                              <div className="shrink-0">{renderCircles({ apiCount: Number(op.call_count || 0), csvCount, desiredForOp: desired })}</div>
+                              {/* Counters */}
+                              <div className="shrink-0 flex items-center gap-1.5 text-xs">
+                                <span className="bg-blue-50 text-blue-700 border border-blue-100 px-2 py-0.5 rounded-full font-medium">{op.call_count ?? 0}</span>
+                                <span className="bg-emerald-50 text-emerald-700 border border-emerald-100 px-2 py-0.5 rounded-full font-medium">{csvCount}</span>
+                              </div>
+                              {/* Actions */}
+                              <div className="shrink-0 flex items-center gap-1">
+                                <button onClick={() => openEditOperator(displayName)} className={btnGhost} title="Настройки">
+                                  <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="8" cy="8" r="2"/><path d="M13.3 6.7a5 5 0 0 0 .2-1.1l-1.5-1.5a1 1 0 0 0-1-.5l-1.1.2A5 5 0 0 0 9 3.3l-.1-1A1 1 0 0 0 8 1.5H7a1 1 0 0 0-1 .8l-.1 1A5 5 0 0 0 4.1 4.8l-1.1-.2a1 1 0 0 0-1 .5L.5 6.6a1 1 0 0 0 .2 1.1L1.7 8.5A5 5 0 0 0 1.7 9.5l-1 .9a1 1 0 0 0-.2 1.1L2 13.8a1 1 0 0 0 1 .5l1.1-.2A5 5 0 0 0 4.9 15l.1 1A1 1 0 0 0 6 16.5h2a1 1 0 0 0 1-.8l.1-1A5 5 0 0 0 10.9 13.8l1.1.2a1 1 0 0 0 1-.5l1.5-1.5a1 1 0 0 0-.2-1.1l-1-.9A5 5 0 0 0 13.3 6.7z" strokeLinecap="round" strokeLinejoin="round"/></svg>
                                 </button>
-                                <button onClick={() => handleShowOperator(it.op ? (it.op.name || it.op.id) : it.matchedKey || it.csvName)} className={btnGhost} title="Просмотр">
-                                    <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" strokeLinecap="round"/><circle cx="8" cy="8" r="2"/></svg>
+                                <button onClick={() => handleShowOperator(displayName)} className={btnGhost} title="Просмотр">
+                                  <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" strokeLinecap="round"/><circle cx="8" cy="8" r="2"/></svg>
                                 </button>
-                                </div>
+                              </div>
                             </div>
-                            );
+                          );
                         })}
-                        </div>
+                      </div>
                     </div>
-                    )}
-
-                    {/* ── Operators grouped by SV + Direction ── */}
-                    <div>
-                    <div className="flex items-center justify-between mb-3">
-                        <h4 className="text-sm font-semibold text-slate-700">Операторы по супервизорам</h4>
-                        {loadingOperators && <span className="text-xs text-slate-400 flex items-center gap-1"><span className="w-3 h-3 border-2 border-slate-300 border-t-indigo-500 rounded-full animate-spin" />Загрузка…</span>}
-                    </div>
-
-                    {!loadingOperators && Object.keys(groupedBySvThenDir).length === 0 && unmatchedCsvOperators.length === 0 && (
-                        <div className={`${card} p-8 text-center text-sm text-slate-400`}>
-                        <svg className="w-8 h-8 mx-auto mb-2 text-slate-200" viewBox="0 0 24 24" fill="currentColor"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-                        Нет данных операторов
-                        </div>
-                    )}
-
-                    <div className="space-y-2">
-                        {Object.entries(groupedBySvThenDir).map(([svName, dirs]) => (
-                        <details key={svName} className={`${card} group`}>
-                            <summary className="flex items-center justify-between px-4 py-3 cursor-pointer list-none hover:bg-slate-50 rounded-xl transition-colors">
-                            <div className="flex items-center gap-2">
-                                <svg className="w-3.5 h-3.5 text-slate-400 transition-transform group-open:rotate-90" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 2l4 4-4 4" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                                <span className="text-sm font-medium text-slate-700">{svName}</span>
-                            </div>
-                            <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">{Object.values(dirs).reduce((s, a) => s + a.length, 0)}</span>
-                            </summary>
-
-                            <div className="px-4 pb-4 pt-1 space-y-3">
-                            {Object.entries(dirs).map(([dirName, ops]) => (
-                                <div key={dirName}>
-                                <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-1.5 px-1">{dirName}</div>
-                                <div className="space-y-1">
-                                    {ops.map(op => {
-                                    const displayName = op.name || op.login || String(op.id || '—');
-                                    const matchedKey = findOperatorMapKeyByName(displayName);
-                                    const info = matchedKey ? operatorMap[matchedKey] : null;
-                                    const csvCount = info ? info.count : 0;
-                                    const anyCsvCount = countAnyCallsForDisplayName(displayName);
-                                    if (onlyWithCsv && anyCsvCount === 0) return null;
-                                    const desired = getDesiredSampleCount(displayName, matchedKey);
-                                    return (
-                                        <div key={op.id || displayName} className="flex items-center gap-3 px-3 py-2.5 rounded-xl border border-slate-100 bg-slate-50/60 hover:bg-white hover:shadow-sm transition-all">
-                                        {/* Name + meta */}
-                                        <div className="flex-1 min-w-0">
-                                            <div className="flex items-center gap-1.5 min-w-0">
-                                            <span className="text-sm font-medium text-slate-800 truncate">{displayName}</span>
-                                            {info?.custom && <span className="shrink-0 text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-md font-medium">Custom</span>}
-                                            </div>
-                                            <div className="flex items-center gap-2 mt-0.5">
-                                            {op.status && <span className="text-xs text-slate-500 bg-slate-100 px-1.5 py-0 rounded-md">{op.status}</span>}
-                                            {anyCsvCount > 0 && csvCount === 0 && <span className="text-xs text-amber-600">⚠ {anyCsvCount} звонков не сопоставлены</span>}
-                                            </div>
-                                        </div>
-                                        {/* Circles */}
-                                        <div className="shrink-0">{renderCircles({ apiCount: Number(op.call_count || 0), csvCount, desiredForOp: desired })}</div>
-                                        {/* Counters */}
-                                        <div className="shrink-0 flex items-center gap-1.5 text-xs">
-                                            <span className="bg-blue-50 text-blue-700 border border-blue-100 px-2 py-0.5 rounded-full font-medium">{op.call_count ?? 0}</span>
-                                            <span className="bg-emerald-50 text-emerald-700 border border-emerald-100 px-2 py-0.5 rounded-full font-medium">{csvCount}</span>
-                                        </div>
-                                        {/* Actions */}
-                                        <div className="shrink-0 flex items-center gap-1">
-                                            <button onClick={() => openEditOperator(displayName)} className={btnGhost} title="Настройки">
-                                            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="8" cy="8" r="2"/><path d="M13.3 6.7a5 5 0 0 0 .2-1.1l-1.5-1.5a1 1 0 0 0-1-.5l-1.1.2A5 5 0 0 0 9 3.3l-.1-1A1 1 0 0 0 8 1.5H7a1 1 0 0 0-1 .8l-.1 1A5 5 0 0 0 4.1 4.8l-1.1-.2a1 1 0 0 0-1 .5L.5 6.6a1 1 0 0 0 .2 1.1L1.7 8.5A5 5 0 0 0 1.7 9.5l-1 .9a1 1 0 0 0-.2 1.1L2 13.8a1 1 0 0 0 1 .5l1.1-.2A5 5 0 0 0 4.9 15l.1 1A1 1 0 0 0 6 16.5h2a1 1 0 0 0 1-.8l.1-1A5 5 0 0 0 10.9 13.8l1.1.2a1 1 0 0 0 1-.5l1.5-1.5a1 1 0 0 0-.2-1.1l-1-.9A5 5 0 0 0 13.3 6.7z" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                                            </button>
-                                            <button onClick={() => handleShowOperator(displayName)} className={btnGhost} title="Просмотр">
-                                            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" strokeLinecap="round"/><circle cx="8" cy="8" r="2"/></svg>
-                                            </button>
-                                        </div>
-                                        </div>
-                                    );
-                                    })}
-                                </div>
-                                </div>
-                            ))}
-                            </div>
-                        </details>
-                        ))}
-
-                        {/* Unmatched CSV operators */}
-                        {unmatchedCsvOperators.length > 0 && selectedDirections.includes('all') && (
-                        <details className={`${card}`}>
-                            <summary className="flex items-center justify-between px-4 py-3 cursor-pointer list-none hover:bg-slate-50 rounded-xl transition-colors">
-                            <div className="flex items-center gap-2">
-                                <svg className="w-3.5 h-3.5 text-amber-400" viewBox="0 0 12 12" fill="currentColor"><path d="M6 1a5 5 0 1 0 0 10A5 5 0 0 0 6 1zm0 7.5a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1zM5.75 3h.5v4h-.5V3z"/></svg>
-                                <span className="text-sm font-medium text-slate-700">Только из CSV — без сопоставления</span>
-                            </div>
-                            <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">{unmatchedCsvOperators.length}</span>
-                            </summary>
-                            <div className="px-4 pb-4 pt-1 space-y-1">
-                            {unmatchedCsvOperators.map(k => {
-                                const csvOnly = Number(operatorMap[k]?.count || 0);
-                                const desired = operatorParams[k]?.sampleCount != null ? Number(operatorParams[k].sampleCount) : Number(sampleCount) || 0;
-                                const insuf = csvOnly < desired;
-                                if (onlyWithCsv && csvOnly === 0) return null;
-                                return (
-                                <div key={k} className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border ${insuf ? 'border-rose-200 bg-rose-50' : 'border-slate-100 bg-slate-50'} transition-all hover:shadow-sm`}>
-                                    <div className="flex-1 min-w-0">
-                                    <div className="text-sm font-medium text-slate-800 truncate flex items-center gap-1.5">
-                                        {k}
-                                        {operatorMap[k]?.custom && <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0 rounded-md font-medium">Custom</span>}
-                                    </div>
-                                    {insuf && <div className="text-xs text-rose-600">Недостаточно: {csvOnly}/{desired}</div>}
-                                    </div>
-                                    <div className="shrink-0">{renderCircles({ apiCount: 0, csvCount: csvOnly, desiredForOp: desired })}</div>
-                                    <div className="flex items-center gap-1 shrink-0">
-                                    <button onClick={() => openEditOperator(k)} className={btnGhost} title="Настройки">
-                                        <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" strokeLinecap="round"/></svg>
-                                    </button>
-                                    <button onClick={() => handleShowOperator(k)} className={btnGhost} title="Просмотр">
-                                        <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" strokeLinecap="round"/><circle cx="8" cy="8" r="2"/></svg>
-                                    </button>
-                                    </div>
-                                </div>
-                                );
-                            })}
-                            </div>
-                        </details>
-                        )}
-                    </div>
-                    </div>
-
-                    {/* ── Footer action bar ── */}
-                    <div className="flex items-center justify-between py-4 px-5 bg-white rounded-xl border border-slate-200 shadow-sm">
-                    <div className="text-sm text-slate-600">
-                        <span className="font-medium text-slate-800">{calls.length}</span> звонков загружено
-                        {selectedCalls.size > 0 && <> · <span className="font-medium text-indigo-600">{selectedCalls.size}</span> выбрано</>}
-                    </div>
-                    <div className="flex items-center gap-2">
-                        {selectedCalls.size > 0 && (
-                        <button onClick={handleAssign} className={btnSecondary}>
-                            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M2 8h12M8 2v12" strokeLinecap="round"/></svg>
-                            Экспортировать выбранные
-                        </button>
-                        )}
-                        <button
-                        onClick={handlePrepareShuffle}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-violet-600 text-white hover:bg-violet-700 transition-colors focus:outline-none focus:ring-2 focus:ring-violet-400"
-                        >
-                        <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M1 3h14M3 8h10M6 13h4" strokeLinecap="round"/></svg>
-                        Распределить
-                        </button>
-                    </div>
-                    </div>
+                  ))}
                 </div>
+              </details>
+            ))}
 
-                {/* ══════════════════════════════════════════════════════
-                    OPERATOR DETAIL PANEL (fixed bottom-right)
-                ══════════════════════════════════════════════════════ */}
-                {selectedOperator && (
-                    <div className="fixed right-5 bottom-5 w-[min(900px,95vw)] max-h-[75vh] bg-white rounded-2xl border border-slate-200 shadow-2xl z-50 flex flex-col overflow-hidden">
-                    {/* Panel header */}
-                    <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-100 bg-slate-50/80 backdrop-blur-sm shrink-0">
-                        <div>
-                        <div className="text-sm font-semibold text-slate-800">{selectedOperator}</div>
-                        <div className="text-xs text-slate-500">Подходящих: {operatorMap[selectedOperator]?.count ?? operatorView.matching.length}</div>
+            {/* Unmatched CSV operators */}
+            {unmatchedCsvOperators.length > 0 && selectedDirections.includes('all') && (
+              <details className={`${card}`}>
+                <summary className="flex items-center justify-between px-4 py-3 cursor-pointer list-none hover:bg-slate-50 rounded-xl transition-colors">
+                  <div className="flex items-center gap-2">
+                    <svg className="w-3.5 h-3.5 text-amber-400" viewBox="0 0 12 12" fill="currentColor"><path d="M6 1a5 5 0 1 0 0 10A5 5 0 0 0 6 1zm0 7.5a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1zM5.75 3h.5v4h-.5V3z"/></svg>
+                    <span className="text-sm font-medium text-slate-700">Только из CSV — без сопоставления</span>
+                  </div>
+                  <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">{unmatchedCsvOperators.length}</span>
+                </summary>
+                <div className="px-4 pb-4 pt-1 space-y-1">
+                  {unmatchedCsvOperators.map(k => {
+                    const csvOnly = Number(operatorMap[k]?.count || 0);
+                    const desired = operatorParams[k]?.sampleCount != null ? Number(operatorParams[k].sampleCount) : Number(sampleCount) || 0;
+                    const insuf = csvOnly < desired;
+                    if (onlyWithCsv && csvOnly === 0) return null;
+                    return (
+                      <div key={k} className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border ${insuf ? 'border-rose-200 bg-rose-50' : 'border-slate-100 bg-slate-50'} transition-all hover:shadow-sm`}>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium text-slate-800 truncate flex items-center gap-1.5">
+                            {k}
+                            {operatorMap[k]?.custom && <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0 rounded-md font-medium">Custom</span>}
+                          </div>
+                          {insuf && <div className="text-xs text-rose-600">Недостаточно: {csvOnly}/{desired}</div>}
                         </div>
-                        <div className="flex items-center gap-2">
-                        <button onClick={handleAssign} className={btnPrimary}>
-                            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M2 3h12v2L8 10 2 5V3z"/><path d="M2 5v8h12V5" strokeLinecap="round"/></svg>
-                            Экспорт
-                        </button>
-                        <button onClick={() => openEditOperator(selectedOperator)} className={btnSecondary} title="Настройки">
-                            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2" strokeLinecap="round"/></svg>
-                            Настройки
-                        </button>
-                        <button onClick={handleClosePanel} className={btnGhost} title="Закрыть">
-                            <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3l10 10M13 3 3 13" strokeLinecap="round"/></svg>
-                        </button>
+                        <div className="shrink-0">{renderCircles({ apiCount: 0, csvCount: csvOnly, desiredForOp: desired })}</div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button onClick={() => openEditOperator(k)} className={btnGhost} title="Настройки">
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" strokeLinecap="round"/></svg>
+                          </button>
+                          <button onClick={() => handleShowOperator(k)} className={btnGhost} title="Просмотр">
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" strokeLinecap="round"/><circle cx="8" cy="8" r="2"/></svg>
+                          </button>
                         </div>
-                    </div>
-
-                    {/* Panel body */}
-                    <div className="flex-1 overflow-auto p-5 space-y-5">
-                        {/* Matching */}
-                        <div>
-                        <div className="flex items-center justify-between mb-2">
-                            <span className="text-xs font-semibold uppercase tracking-widest text-emerald-600">Подходящие</span>
-                            <span className="text-xs text-slate-400">{(operatorView.operatorKey === selectedOperator ? operatorView.matching : (operatorMap[selectedOperator]?.all || [])).length} звонков</span>
-                        </div>
-                        <div className="overflow-auto rounded-lg border border-slate-100">
-                            <table className="w-full text-sm">
-                            <thead className="bg-slate-50 sticky top-0">
-                                <tr className="text-xs text-slate-500 uppercase tracking-wide">
-                                <th className="px-3 py-2 text-left w-8">#</th>
-                                <th className="px-3 py-2 text-left">ID</th>
-                                <th className="px-3 py-2 text-left">Дата / Время</th>
-                                <th className="px-3 py-2 text-left">Телефон</th>
-                                <th className="px-3 py-2 text-right">Длит.</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {(operatorView.operatorKey === selectedOperator ? operatorView.matching : (operatorMap[selectedOperator]?.all || [])).map((c, i) => (
-                                <tr key={c.id} className="border-t border-slate-50 hover:bg-slate-50/60">
-                                    <td className="px-3 py-2 text-slate-400">{i + 1}</td>
-                                    <td className="px-3 py-2 font-mono text-xs text-slate-500">{c.id}</td>
-                                    <td className="px-3 py-2 text-slate-700">{c.datetime ? c.datetime.toLocaleString() : c.datetimeRaw}</td>
-                                    <td className="px-3 py-2 text-slate-700">{c.phone}</td>
-                                    <td className="px-3 py-2 text-right font-mono text-slate-600">{secondsToHms(c.durationSec)}</td>
-                                </tr>
-                                ))}
-                            </tbody>
-                            </table>
-                        </div>
-                        </div>
-
-                        {/* Non-matching */}
-                        {operatorView.operatorKey === selectedOperator && operatorView.nonMatching.length > 0 && (
-                        <div>
-                            <div className="flex items-center justify-between mb-2">
-                            <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">Не подходящие</span>
-                            <span className="text-xs text-slate-400">{operatorView.nonMatching.length} звонков</span>
-                            </div>
-                            <div className="overflow-auto rounded-lg border border-slate-100">
-                            <table className="w-full text-sm">
-                                <thead className="bg-slate-50 sticky top-0">
-                                <tr className="text-xs text-slate-500 uppercase tracking-wide">
-                                    <th className="px-3 py-2 text-left w-8">#</th>
-                                    <th className="px-3 py-2 text-left">ID</th>
-                                    <th className="px-3 py-2 text-left">Дата / Время</th>
-                                    <th className="px-3 py-2 text-left">Телефон</th>
-                                    <th className="px-3 py-2 text-right">Длит.</th>
-                                    <th className="px-3 py-2 text-left">Причина</th>
-                                </tr>
-                                </thead>
-                                <tbody>
-                                {operatorView.nonMatching.map((c, i) => {
-                                    const reason = activeRange
-                                    ? (c.durationSec < activeRange.min ? 'короче min' : activeRange.max != null && c.durationSec > activeRange.max ? 'длиннее max' : 'не прошёл фильтр')
-                                    : 'Не подходит';
-                                    return (
-                                    <tr key={c.id} className="border-t border-slate-50">
-                                        <td className="px-3 py-2 text-slate-400">{i + 1}</td>
-                                        <td className="px-3 py-2 font-mono text-xs text-slate-500">{c.id}</td>
-                                        <td className="px-3 py-2 text-slate-700">{c.datetime ? c.datetime.toLocaleString() : c.datetimeRaw}</td>
-                                        <td className="px-3 py-2 text-slate-700">{c.phone}</td>
-                                        <td className="px-3 py-2 text-right font-mono text-slate-600">{secondsToHms(c.durationSec)}</td>
-                                        <td className="px-3 py-2 text-xs text-rose-500">{reason}</td>
-                                    </tr>
-                                    );
-                                })}
-                                </tbody>
-                            </table>
-                            </div>
-                        </div>
-                        )}
-
-                        {operatorView.operatorKey === selectedOperator && operatorView.nonMatching.length === 0 && (
-                        <div className="text-xs text-slate-400 text-center py-2">Нет дополнительных звонков</div>
-                        )}
-                    </div>
-                    </div>
-                )}
-
-                {/* ══════════════════════════════════════════════════════
-                    EDIT OPERATOR MODAL
-                ══════════════════════════════════════════════════════ */}
-                {editingOperator && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
-                    <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => setEditingOperator(null)} />
-                    <div className="relative z-10 w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden">
-                        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
-                        <div>
-                            <div className="text-sm font-semibold text-slate-800">Параметры оператора</div>
-                            <div className="text-xs text-slate-500 truncate">{editingOperator}</div>
-                        </div>
-                        <button onClick={() => setEditingOperator(null)} className={btnGhost}>
-                            <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3l10 10M13 3 3 13" strokeLinecap="round"/></svg>
-                        </button>
-                        </div>
-                        <div className="p-5 space-y-4">
-                        <div className="grid grid-cols-2 gap-4">
-                            <div>
-                            <label className="block text-xs font-medium text-slate-600 mb-1.5">Мин. длительность</label>
-                            <DurationInput valueSec={editingValues.min || 0} onChange={v => setEditingValues(e => ({ ...e, min: v }))} />
-                            </div>
-                            <div>
-                            <label className="block text-xs font-medium text-slate-600 mb-1.5">Макс. длительность</label>
-                            <DurationInput valueSec={editingValues.max || 0} onChange={v => setEditingValues(e => ({ ...e, max: v }))} />
-                            </div>
-                            <div>
-                            <label className="block text-xs font-medium text-slate-600 mb-1.5">Вариация (±)</label>
-                            <DurationInput valueSec={editingValues.variation || 0} onChange={v => setEditingValues(e => ({ ...e, variation: v }))} />
-                            </div>
-                            <div>
-                            <label className="block text-xs font-medium text-slate-600 mb-1.5">Выборка (кол-во)</label>
-                            <input type="number" min="0" value={editingValues.sampleCount}
-                                onChange={e => setEditingValues(ev => ({ ...ev, sampleCount: e.target.value }))}
-                                className="w-24 px-2 py-1.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-                            </div>
-                        </div>
-                        </div>
-                        <div className="px-5 py-4 border-t border-slate-100 flex items-center justify-between">
-                        <button onClick={() => resetOperatorParams(editingOperator)} className={btnDanger}>
-                            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 8a6 6 0 1 0 1-3" strokeLinecap="round"/><path d="M2 2v4h4" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                            Сбросить
-                        </button>
-                        <div className="flex gap-2">
-                            <button onClick={() => setEditingOperator(null)} className={btnSecondary}>Отмена</button>
-                            <button onClick={saveOperatorParams} className={btnPrimary}>
-                            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 8l4 4 6-7" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                            Сохранить
-                            </button>
-                        </div>
-                        </div>
-                    </div>
-                    </div>
-                )}
-
-                {/* ══════════════════════════════════════════════════════
-                    SHUFFLE PREVIEW MODAL
-                ══════════════════════════════════════════════════════ */}
-                {showShuffleModal && shuffleSummary && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
-                    <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => { setShowShuffleModal(false); setShuffleResult(null); }} />
-                    <div className="relative z-10 w-full max-w-4xl bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-
-                        {/* Header */}
-                        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
-                        <div className="flex items-center gap-3">
-                            <div className="w-9 h-9 rounded-xl bg-violet-100 flex items-center justify-center">
-                            <svg className="w-5 h-5 text-violet-600" viewBox="0 0 20 20" fill="currentColor"><path d="M5 3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H5zm5 6a1 1 0 0 1 1 1v3a1 1 0 1 1-2 0v-3a1 1 0 0 1 1-1zm0-3a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>
-                            </div>
-                            <div>
-                            <div className="text-sm font-semibold text-slate-800">Предпросмотр распределения</div>
-                            <div className="text-xs text-slate-500">Проверьте до отправки</div>
-                            </div>
-                        </div>
-                        <button onClick={() => { setShowShuffleModal(false); setShuffleResult(null); }} className={btnGhost}>
-                            <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3l10 10M13 3 3 13" strokeLinecap="round"/></svg>
-                        </button>
-                        </div>
-
-                        {/* Body */}
-                        <div className="flex-1 overflow-auto p-6 space-y-5">
-                        {/* Summary cards */}
-                        <div className="grid grid-cols-3 gap-3">
-                            {[
-                            { label: 'Всего звонков', value: shuffleSummary.totalPicked, color: 'bg-slate-50 border-slate-200', vColor: 'text-slate-800' },
-                            { label: 'Операторов с нехваткой', value: shuffleSummary.insufficient.length, color: 'bg-rose-50 border-rose-100', vColor: 'text-rose-700' },
-                            { label: 'Диапазон длительностей', value: `${shuffleSummary.minDur != null ? secondsToHms(shuffleSummary.minDur) : '—'} — ${shuffleSummary.maxDur != null ? secondsToHms(shuffleSummary.maxDur) : '—'}`, color: 'bg-blue-50 border-blue-100', vColor: 'text-blue-800' },
-                            ].map(c => (
-                            <div key={c.label} className={`${c.color} border rounded-xl p-3.5`}>
-                                <div className="text-xs text-slate-500 mb-1">{c.label}</div>
-                                <div className={`text-base font-semibold ${c.vColor}`}>{c.value}</div>
-                            </div>
-                            ))}
-                        </div>
-
-                        {/* Per-operator cards */}
-                        <div>
-                            <div className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-3">По операторам</div>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                            {shuffleSummary.distribution.map((d, idx) => {
-                                const picked = d.picked || [];
-                                const totalSec = picked.reduce((s, p) => s + (p.durationSec || 0), 0);
-                                const avgSec = picked.length ? Math.round(totalSec / picked.length) : 0;
-                                const ok = d.available >= d.desired;
-                                return (
-                                <div key={d.operator + idx} className={`flex items-start gap-3 p-3.5 rounded-xl border ${ok ? 'border-slate-100 bg-white' : 'border-rose-100 bg-rose-50'}`}>
-                                    <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-1.5">
-                                        <span className="text-sm font-medium text-slate-800 truncate">{d.operator}</span>
-                                        <span className={`shrink-0 text-xs px-1.5 py-0.5 rounded-full font-medium ${ok ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{ok ? 'ОК' : 'Нехватка'}</span>
-                                    </div>
-                                    <div className="text-xs text-slate-500 mt-0.5">подано {picked.length} / нужно {d.desired} / доступно {d.available}</div>
-                                    </div>
-                                    <div className="text-right text-xs shrink-0">
-                                    <div className="text-slate-500">Сумма</div>
-                                    <div className="font-medium text-slate-700">{picked.length ? secondsToHms(totalSec) : '—'}</div>
-                                    <div className="text-slate-400">ср. {picked.length ? secondsToHms(avgSec) : '—'}</div>
-                                    </div>
-                                </div>
-                                );
-                            })}
-                            </div>
-                        </div>
-
-                        {/* Server response */}
-                        {shuffleResult && (
-                            <div className={`rounded-xl border p-4 ${shuffleResult.ok ? 'bg-emerald-50 border-emerald-100' : 'bg-rose-50 border-rose-100'}`}>
-                            <div className="flex items-start gap-3">
-                                <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${shuffleResult.ok ? 'bg-emerald-100' : 'bg-rose-100'}`}>
-                                {shuffleResult.ok
-                                    ? <svg className="w-4 h-4 text-emerald-600" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M2.5 8.5l4 4 7-8" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                                    : <svg className="w-4 h-4 text-rose-600" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 3l10 10M13 3 3 13" strokeLinecap="round"/></svg>}
-                                </div>
-                                <div className="flex-1">
-                                <div className={`text-sm font-semibold ${shuffleResult.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
-                                    {shuffleResult.ok ? 'Отправлено успешно' : `Ошибка (HTTP ${shuffleResult.httpStatus ?? '—'})`}
-                                </div>
-                                {shuffleResult.payload && (
-                                    <div className="mt-2 text-xs text-slate-600 space-y-1.5">
-                                    <div className="flex gap-4">
-                                        {typeof shuffleResult.payload.imported !== 'undefined' && <span>Импортировано: <strong>{shuffleResult.payload.imported}</strong></span>}
-                                        {typeof shuffleResult.payload.updated !== 'undefined' && <span>Обновлено: <strong>{shuffleResult.payload.updated}</strong></span>}
-                                        {typeof shuffleResult.payload.skipped !== 'undefined' && <span>Пропущено: <strong>{shuffleResult.payload.skipped}</strong></span>}
-                                    </div>
-                                    {Array.isArray(shuffleResult.payload.missing_operators) && shuffleResult.payload.missing_operators.length > 0 && (
-                                        <div>Не найдены: <strong>{shuffleResult.payload.missing_operators.join(', ')}</strong></div>
-                                    )}
-                                    <details className="mt-1">
-                                        <summary className="cursor-pointer text-slate-400 hover:text-slate-600">Полный ответ JSON</summary>
-                                        <pre className="mt-1.5 text-xs bg-white/60 rounded-lg p-2.5 overflow-auto max-h-40 whitespace-pre-wrap">{JSON.stringify(shuffleResult.payload, null, 2)}</pre>
-                                    </details>
-                                    </div>
-                                )}
-                                </div>
-                            </div>
-                            </div>
-                        )}
-                        </div>
-
-                        {/* Footer */}
-                        <div className="px-6 py-4 border-t border-slate-100 bg-slate-50/80 flex items-center justify-between shrink-0">
-                        <div className="text-xs text-slate-500">Будет затронуто <strong>{shuffleSummary.totalPicked}</strong> звонков</div>
-                        <div className="flex items-center gap-2">
-                            <button onClick={() => { setShowShuffleModal(false); setShuffleResult(null); }} className={btnSecondary}>Отмена</button>
-                            {!shuffleResult && (
-                            <button
-                                onClick={handleConfirmShuffle}
-                                disabled={shuffling}
-                                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                            >
-                                {shuffling
-                                ? <><span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />Отправка…</>
-                                : <><svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2.5 8.5l4 4 7-8" strokeLinecap="round" strokeLinejoin="round"/></svg>Подтвердить</>}
-                            </button>
-                            )}
-                        </div>
-                        </div>
-                    </div>
-                    </div>
-                )}
+                      </div>
+                    );
+                  })}
                 </div>
-            );
-            }
+              </details>
+            )}
+          </div>
+        </div>
+
+        {/* ── Footer action bar ── */}
+        <div className="flex items-center justify-between py-4 px-5 bg-white rounded-xl border border-slate-200 shadow-sm">
+          <div className="text-sm text-slate-600">
+            <span className="font-medium text-slate-800">{calls.length}</span> звонков загружено
+            {selectedCalls.size > 0 && <> · <span className="font-medium text-indigo-600">{selectedCalls.size}</span> выбрано</>}
+          </div>
+          <div className="flex items-center gap-2">
+            {selectedCalls.size > 0 && (
+              <button onClick={handleAssign} className={btnSecondary}>
+                <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M2 8h12M8 2v12" strokeLinecap="round"/></svg>
+                Экспортировать выбранные
+              </button>
+            )}
+            <button
+              onClick={handlePrepareShuffle}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-violet-600 text-white hover:bg-violet-700 transition-colors focus:outline-none focus:ring-2 focus:ring-violet-400"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M1 3h14M3 8h10M6 13h4" strokeLinecap="round"/></svg>
+              Распределить
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ══════════════════════════════════════════════════════
+          OPERATOR DETAIL PANEL (fixed bottom-right)
+      ══════════════════════════════════════════════════════ */}
+      {selectedOperator && (
+        <div className="fixed right-5 bottom-5 w-[min(900px,95vw)] max-h-[75vh] bg-white rounded-2xl border border-slate-200 shadow-2xl z-50 flex flex-col overflow-hidden">
+          {/* Panel header */}
+          <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-100 bg-slate-50/80 backdrop-blur-sm shrink-0">
+            <div>
+              <div className="text-sm font-semibold text-slate-800">{selectedOperator}</div>
+              <div className="text-xs text-slate-500">Подходящих: {operatorMap[selectedOperator]?.count ?? operatorView.matching.length}</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={handleAssign} className={btnPrimary}>
+                <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M2 3h12v2L8 10 2 5V3z"/><path d="M2 5v8h12V5" strokeLinecap="round"/></svg>
+                Экспорт
+              </button>
+              <button onClick={() => openEditOperator(selectedOperator)} className={btnSecondary} title="Настройки">
+                <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2" strokeLinecap="round"/></svg>
+                Настройки
+              </button>
+              <button onClick={handleClosePanel} className={btnGhost} title="Закрыть">
+                <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3l10 10M13 3 3 13" strokeLinecap="round"/></svg>
+              </button>
+            </div>
+          </div>
+
+          {/* Panel body */}
+          <div className="flex-1 overflow-auto p-5 space-y-5">
+            {/* Matching */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold uppercase tracking-widest text-emerald-600">Подходящие</span>
+                <span className="text-xs text-slate-400">{(operatorView.operatorKey === selectedOperator ? operatorView.matching : (operatorMap[selectedOperator]?.all || [])).length} звонков</span>
+              </div>
+              <div className="overflow-auto rounded-lg border border-slate-100">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 sticky top-0">
+                    <tr className="text-xs text-slate-500 uppercase tracking-wide">
+                      <th className="px-3 py-2 text-left w-8">#</th>
+                      <th className="px-3 py-2 text-left">ID</th>
+                      <th className="px-3 py-2 text-left">Дата / Время</th>
+                      <th className="px-3 py-2 text-left">Телефон</th>
+                      <th className="px-3 py-2 text-right">Длит.</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(operatorView.operatorKey === selectedOperator ? operatorView.matching : (operatorMap[selectedOperator]?.all || [])).map((c, i) => (
+                      <tr key={c.id} className="border-t border-slate-50 hover:bg-slate-50/60">
+                        <td className="px-3 py-2 text-slate-400">{i + 1}</td>
+                        <td className="px-3 py-2 font-mono text-xs text-slate-500">{c.id}</td>
+                        <td className="px-3 py-2 text-slate-700">{c.datetime ? c.datetime.toLocaleString() : c.datetimeRaw}</td>
+                        <td className="px-3 py-2 text-slate-700">{c.phone}</td>
+                        <td className="px-3 py-2 text-right font-mono text-slate-600">{secondsToHms(c.durationSec)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Non-matching */}
+            {operatorView.operatorKey === selectedOperator && operatorView.nonMatching.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">Не подходящие</span>
+                  <span className="text-xs text-slate-400">{operatorView.nonMatching.length} звонков</span>
+                </div>
+                <div className="overflow-auto rounded-lg border border-slate-100">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50 sticky top-0">
+                      <tr className="text-xs text-slate-500 uppercase tracking-wide">
+                        <th className="px-3 py-2 text-left w-8">#</th>
+                        <th className="px-3 py-2 text-left">ID</th>
+                        <th className="px-3 py-2 text-left">Дата / Время</th>
+                        <th className="px-3 py-2 text-left">Телефон</th>
+                        <th className="px-3 py-2 text-right">Длит.</th>
+                        <th className="px-3 py-2 text-left">Причина</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {operatorView.nonMatching.map((c, i) => {
+                        const reason = activeRange
+                          ? (c.durationSec < activeRange.min ? 'короче min' : activeRange.max != null && c.durationSec > activeRange.max ? 'длиннее max' : 'не прошёл фильтр')
+                          : 'Не подходит';
+                        return (
+                          <tr key={c.id} className="border-t border-slate-50">
+                            <td className="px-3 py-2 text-slate-400">{i + 1}</td>
+                            <td className="px-3 py-2 font-mono text-xs text-slate-500">{c.id}</td>
+                            <td className="px-3 py-2 text-slate-700">{c.datetime ? c.datetime.toLocaleString() : c.datetimeRaw}</td>
+                            <td className="px-3 py-2 text-slate-700">{c.phone}</td>
+                            <td className="px-3 py-2 text-right font-mono text-slate-600">{secondsToHms(c.durationSec)}</td>
+                            <td className="px-3 py-2 text-xs text-rose-500">{reason}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {operatorView.operatorKey === selectedOperator && operatorView.nonMatching.length === 0 && (
+              <div className="text-xs text-slate-400 text-center py-2">Нет дополнительных звонков</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════════
+          EDIT OPERATOR MODAL
+      ══════════════════════════════════════════════════════ */}
+      {editingOperator && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+          <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => setEditingOperator(null)} />
+          <div className="relative z-10 w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <div className="text-sm font-semibold text-slate-800">Параметры оператора</div>
+                <div className="text-xs text-slate-500 truncate">{editingOperator}</div>
+              </div>
+              <button onClick={() => setEditingOperator(null)} className={btnGhost}>
+                <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3l10 10M13 3 3 13" strokeLinecap="round"/></svg>
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1.5">Мин. длительность</label>
+                  <DurationInput valueSec={editingValues.min || 0} onChange={v => setEditingValues(e => ({ ...e, min: v }))} />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1.5">Макс. длительность</label>
+                  <DurationInput valueSec={editingValues.max || 0} onChange={v => setEditingValues(e => ({ ...e, max: v }))} />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1.5">Вариация (±)</label>
+                  <DurationInput valueSec={editingValues.variation || 0} onChange={v => setEditingValues(e => ({ ...e, variation: v }))} />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1.5">Выборка (кол-во)</label>
+                  <input type="number" min="0" value={editingValues.sampleCount}
+                    onChange={e => setEditingValues(ev => ({ ...ev, sampleCount: e.target.value }))}
+                    className="w-24 px-2 py-1.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+                </div>
+              </div>
+            </div>
+            <div className="px-5 py-4 border-t border-slate-100 flex items-center justify-between">
+              <button onClick={() => resetOperatorParams(editingOperator)} className={btnDanger}>
+                <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 8a6 6 0 1 0 1-3" strokeLinecap="round"/><path d="M2 2v4h4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                Сбросить
+              </button>
+              <div className="flex gap-2">
+                <button onClick={() => setEditingOperator(null)} className={btnSecondary}>Отмена</button>
+                <button onClick={saveOperatorParams} className={btnPrimary}>
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 8l4 4 6-7" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                  Сохранить
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════════
+          SHUFFLE PREVIEW MODAL
+      ══════════════════════════════════════════════════════ */}
+      {showShuffleModal && shuffleSummary && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+          <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => { setShowShuffleModal(false); setShuffleResult(null); }} />
+          <div className="relative z-10 w-full max-w-4xl bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-violet-100 flex items-center justify-center">
+                  <svg className="w-5 h-5 text-violet-600" viewBox="0 0 20 20" fill="currentColor"><path d="M5 3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H5zm5 6a1 1 0 0 1 1 1v3a1 1 0 1 1-2 0v-3a1 1 0 0 1 1-1zm0-3a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>
+                </div>
+                <div>
+                  <div className="text-sm font-semibold text-slate-800">Предпросмотр распределения</div>
+                  <div className="text-xs text-slate-500">Проверьте до отправки</div>
+                </div>
+              </div>
+              <button onClick={() => { setShowShuffleModal(false); setShuffleResult(null); }} className={btnGhost}>
+                <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3l10 10M13 3 3 13" strokeLinecap="round"/></svg>
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="flex-1 overflow-auto p-6 space-y-5">
+              {/* Summary cards */}
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { label: 'Всего звонков', value: shuffleSummary.totalPicked, color: 'bg-slate-50 border-slate-200', vColor: 'text-slate-800' },
+                  { label: 'Операторов с нехваткой', value: shuffleSummary.insufficient.length, color: 'bg-rose-50 border-rose-100', vColor: 'text-rose-700' },
+                  { label: 'Диапазон длительностей', value: `${shuffleSummary.minDur != null ? secondsToHms(shuffleSummary.minDur) : '—'} — ${shuffleSummary.maxDur != null ? secondsToHms(shuffleSummary.maxDur) : '—'}`, color: 'bg-blue-50 border-blue-100', vColor: 'text-blue-800' },
+                ].map(c => (
+                  <div key={c.label} className={`${c.color} border rounded-xl p-3.5`}>
+                    <div className="text-xs text-slate-500 mb-1">{c.label}</div>
+                    <div className={`text-base font-semibold ${c.vColor}`}>{c.value}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Per-operator cards */}
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-3">По операторам</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {shuffleSummary.distribution.map((d, idx) => {
+                    const picked = d.picked || [];
+                    const totalSec = picked.reduce((s, p) => s + (p.durationSec || 0), 0);
+                    const avgSec = picked.length ? Math.round(totalSec / picked.length) : 0;
+                    const ok = d.available >= d.desired;
+                    return (
+                      <div key={d.operator + idx} className={`flex items-start gap-3 p-3.5 rounded-xl border ${ok ? 'border-slate-100 bg-white' : 'border-rose-100 bg-rose-50'}`}>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-sm font-medium text-slate-800 truncate">{d.operator}</span>
+                            <span className={`shrink-0 text-xs px-1.5 py-0.5 rounded-full font-medium ${ok ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{ok ? 'ОК' : 'Нехватка'}</span>
+                          </div>
+                          <div className="text-xs text-slate-500 mt-0.5">подано {picked.length} / нужно {d.desired} / доступно {d.available}</div>
+                        </div>
+                        <div className="text-right text-xs shrink-0">
+                          <div className="text-slate-500">Сумма</div>
+                          <div className="font-medium text-slate-700">{picked.length ? secondsToHms(totalSec) : '—'}</div>
+                          <div className="text-slate-400">ср. {picked.length ? secondsToHms(avgSec) : '—'}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Server response */}
+              {shuffleResult && (
+                <div className={`rounded-xl border p-4 ${shuffleResult.ok ? 'bg-emerald-50 border-emerald-100' : 'bg-rose-50 border-rose-100'}`}>
+                  <div className="flex items-start gap-3">
+                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${shuffleResult.ok ? 'bg-emerald-100' : 'bg-rose-100'}`}>
+                      {shuffleResult.ok
+                        ? <svg className="w-4 h-4 text-emerald-600" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M2.5 8.5l4 4 7-8" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                        : <svg className="w-4 h-4 text-rose-600" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M3 3l10 10M13 3 3 13" strokeLinecap="round"/></svg>}
+                    </div>
+                    <div className="flex-1">
+                      <div className={`text-sm font-semibold ${shuffleResult.ok ? 'text-emerald-700' : 'text-rose-700'}`}>
+                        {shuffleResult.ok ? 'Отправлено успешно' : `Ошибка (HTTP ${shuffleResult.httpStatus ?? '—'})`}
+                      </div>
+                      {shuffleResult.payload && (
+                        <div className="mt-2 text-xs text-slate-600 space-y-1.5">
+                          <div className="flex gap-4">
+                            {typeof shuffleResult.payload.imported !== 'undefined' && <span>Импортировано: <strong>{shuffleResult.payload.imported}</strong></span>}
+                            {typeof shuffleResult.payload.updated !== 'undefined' && <span>Обновлено: <strong>{shuffleResult.payload.updated}</strong></span>}
+                            {typeof shuffleResult.payload.skipped !== 'undefined' && <span>Пропущено: <strong>{shuffleResult.payload.skipped}</strong></span>}
+                          </div>
+                          {Array.isArray(shuffleResult.payload.missing_operators) && shuffleResult.payload.missing_operators.length > 0 && (
+                            <div>Не найдены: <strong>{shuffleResult.payload.missing_operators.join(', ')}</strong></div>
+                          )}
+                          <details className="mt-1">
+                            <summary className="cursor-pointer text-slate-400 hover:text-slate-600">Полный ответ JSON</summary>
+                            <pre className="mt-1.5 text-xs bg-white/60 rounded-lg p-2.5 overflow-auto max-h-40 whitespace-pre-wrap">{JSON.stringify(shuffleResult.payload, null, 2)}</pre>
+                          </details>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50/80 flex items-center justify-between shrink-0">
+              <div className="text-xs text-slate-500">Будет затронуто <strong>{shuffleSummary.totalPicked}</strong> звонков</div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => { setShowShuffleModal(false); setShuffleResult(null); }} className={btnSecondary}>Отмена</button>
+                {!shuffleResult && (
+                  <button
+                    onClick={handleConfirmShuffle}
+                    disabled={shuffling}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {shuffling
+                      ? <><span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />Отправка…</>
+                      : <><svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2.5 8.5l4 4 7-8" strokeLinecap="round" strokeLinejoin="round"/></svg>Подтвердить</>}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
             const cpad = (n) => String(n).padStart(2, "0");
             const timeToMinutes = (t) => {
