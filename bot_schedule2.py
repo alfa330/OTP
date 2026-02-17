@@ -2237,6 +2237,7 @@ def get_sv_operators_moderka():
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/sv/data', methods=['GET'])
+@require_api_key
 def get_sv_data():
     try:
         # id
@@ -2801,6 +2802,7 @@ def get_call_versions(call_id):
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/call_evaluations/<int:evaluation_id>', methods=['DELETE'])
+@require_api_key
 def delete_draft_evaluation(evaluation_id):
     try:
         # Now delete from imported_calls by id (admin or supervisor of the operator)
@@ -2941,6 +2943,7 @@ def shuffle_imported_calls():
         }), 500
 
 @app.route('/api/call_evaluation', methods=['POST'])
+@require_api_key
 def receive_call_evaluation():
     try:
         if not request.form:
