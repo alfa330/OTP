@@ -10122,31 +10122,90 @@
         const [sortKey, setSortKey]   = React.useState('last_seen_at');
         const [sortDir, setSortDir]   = React.useState('desc');
 
+        const [deviceFilter, setDeviceFilter] = React.useState('all'); // 'all' | 'desktop' | 'mobile' | 'tablet' | 'bot' | 'unknown'
+
+        // ── UA Parser ────────────────────────────────────────────────────────────
+        const parseUA = React.useCallback((ua) => {
+            if (!ua) return { type: 'unknown', os: '—', browser: '—', label: 'Неизвестно' };
+            const u = ua.toLowerCase();
+
+            // Device type
+            const isBot     = /bot|crawl|spider|slurp|bingpreview|facebookexternalhit|linkedinbot|twitterbot/.test(u);
+            const isTablet  = !isBot && /(ipad|tablet|(android(?!.*mobile))|(windows(?!.*phone)(.*touch))|kindle|playbook|silk|(puffin(?!.*(ip|ap|wp))))/.test(u);
+            const isMobile  = !isBot && !isTablet && /(mobi|android|iphone|ipod|blackberry|iemobile|opera mini|windows phone)/.test(u);
+            const type      = isBot ? 'bot' : isTablet ? 'tablet' : isMobile ? 'mobile' : 'desktop';
+
+            // OS
+            let os = '—';
+            if (/windows nt 10/.test(u))        os = 'Windows 10/11';
+            else if (/windows nt 6\.3/.test(u)) os = 'Windows 8.1';
+            else if (/windows nt 6\.1/.test(u)) os = 'Windows 7';
+            else if (/windows/.test(u))         os = 'Windows';
+            else if (/ipad/.test(u))            os = 'iPadOS';
+            else if (/iphone|ipod/.test(u))     os = 'iOS';
+            else if (/mac os x/.test(u)) {
+            const v = u.match(/mac os x (\d+[._]\d+)/);
+            os = v ? `macOS ${v[1].replace('_', '.')}` : 'macOS';
+            }
+            else if (/android/.test(u)) {
+            const v = u.match(/android (\d+(\.\d+)?)/);
+            os = v ? `Android ${v[1]}` : 'Android';
+            }
+            else if (/linux/.test(u))           os = 'Linux';
+            else if (/chromeos|cros/.test(u))   os = 'ChromeOS';
+
+            // Browser
+            let browser = '—';
+            if (/edg\/|edge\//.test(u))                          browser = 'Edge';
+            else if (/opr\/|opera/.test(u))                      browser = 'Opera';
+            else if (/yabrowser/.test(u))                        browser = 'Яндекс';
+            else if (/firefox\//.test(u))                        browser = 'Firefox';
+            else if (/chrome\//.test(u) && !/chromium/.test(u)) browser = 'Chrome';
+            else if (/chromium/.test(u))                         browser = 'Chromium';
+            else if (/safari\//.test(u) && !/chrome/.test(u))   browser = 'Safari';
+            else if (/msie|trident/.test(u))                     browser = 'IE';
+            else if (isBot)                                      browser = 'Bot';
+
+            const typeLabel = { desktop: 'ПК', mobile: 'Телефон', tablet: 'Планшет', bot: 'Бот', unknown: '?' };
+            const label = [typeLabel[type], os !== '—' ? os : null, browser !== '—' ? browser : null]
+            .filter(Boolean).join(' · ');
+
+            return { type, os, browser, label };
+        }, []);
+
         // ── Multi-select ─────────────────────────────────────────────────────────
         const [selected, setSelected]         = React.useState(new Set()); // Set<session_id>
         const [bulkRevoking, setBulkRevoking] = React.useState(false);
         const [bulkProgress, setBulkProgress] = React.useState({ done: 0, total: 0 });
         const [confirmOpen, setConfirmOpen]   = React.useState(false);
 
-        // ── Flatten ───────────────────────────────────────────────────────────────
+        // ── Flatten + enrich with parsed device ──────────────────────────────────
         const allRows = React.useMemo(() => {
             const rows = [];
             const push = (group, extra = {}) =>
-            (group.sessions || []).forEach((s) =>
+            (group.sessions || []).forEach((s) => {
+                const device = parseUA(s.user_agent);
                 rows.push({ ...s, user_name: group.user_name, user_id: group.user_id,
-                            user_role: group.user_role, user_login: group.user_login, ...extra })
-            );
+                            user_role: group.user_role, user_login: group.user_login,
+                            device, ...extra });
+            });
             (groupedAdminSessions.admins      || []).forEach((g) => push(g));
             (groupedAdminSessions.supervisors || []).forEach((g) => push(g));
             (groupedAdminSessions.operatorGroups || []).forEach((og) =>
             (og.operators || []).forEach((g) => push(g, { supervisor_name: og.supervisor_name }))
             );
             return rows;
-        }, [groupedAdminSessions]);
+        }, [groupedAdminSessions, parseUA]);
 
         const statCounts = React.useMemo(() => {
             const c = { admin: 0, sv: 0, operator: 0 };
             allRows.forEach((r) => { if (r.user_role in c) c[r.user_role]++; });
+            return c;
+        }, [allRows]);
+
+        const deviceCounts = React.useMemo(() => {
+            const c = { desktop: 0, mobile: 0, tablet: 0, bot: 0, unknown: 0 };
+            allRows.forEach((r) => { const t = r.device?.type || 'unknown'; if (t in c) c[t]++; });
             return c;
         }, [allRows]);
 
@@ -10161,13 +10220,15 @@
             return allRows
             .filter((r) => {
                 if (roleFilter !== 'all' && r.user_role !== roleFilter) return false;
+                if (deviceFilter !== 'all' && r.device?.type !== deviceFilter) return false;
                 if (!q) return true;
                 return (
                 r.user_name?.toLowerCase().includes(q)  ||
                 r.user_login?.toLowerCase().includes(q) ||
                 r.ip_address?.toLowerCase().includes(q) ||
                 r.session_id?.toLowerCase().includes(q) ||
-                r.user_agent?.toLowerCase().includes(q)
+                r.user_agent?.toLowerCase().includes(q) ||
+                r.device?.label?.toLowerCase().includes(q)
                 );
             })
             .sort((a, b) => {
@@ -10175,7 +10236,7 @@
                 const cmp = av < bv ? -1 : av > bv ? 1 : 0;
                 return sortDir === 'asc' ? cmp : -cmp;
             });
-        }, [allRows, search, roleFilter, sortKey, sortDir]);
+        }, [allRows, search, roleFilter, deviceFilter, sortKey, sortDir]);
 
         // ── Selection helpers ────────────────────────────────────────────────────
         const visibleIds      = filtered.map((r) => r.session_id);
@@ -10366,6 +10427,35 @@
                 </div>
             </div>
 
+            {/* ── Device filter ── */}
+            <div className="flex flex-wrap gap-2">
+                {[
+                { val: 'all',     label: 'Все устройства', icon: null },
+                { val: 'desktop', label: 'ПК',              icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0H3"/></svg> },
+                { val: 'mobile',  label: 'Телефон',         icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18h3"/></svg> },
+                { val: 'tablet',  label: 'Планшет',         icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5h3m-6.75 2.25h10.5a2.25 2.25 0 002.25-2.25v-15a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 4.5v15a2.25 2.25 0 002.25 2.25z"/></svg> },
+                { val: 'bot',     label: 'Боты',            icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21M6.75 19.5h10.5a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0017.25 4.5H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm5.25-6a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H12v-.008zm-3 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H9v-.008zm6 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H15v-.008z"/></svg> },
+                ].map(({ val, label, icon }) => {
+                const count = val === 'all' ? allRows.length : (deviceCounts[val] || 0);
+                if (val !== 'all' && count === 0) return null;
+                const active = deviceFilter === val;
+                return (
+                    <button key={val} onClick={() => setDeviceFilter(active ? 'all' : val)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all ${
+                        active
+                        ? 'bg-gray-900 text-white border-gray-900 shadow-sm'
+                        : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                    }`}>
+                    {icon}
+                    {label}
+                    <span className={`px-1.5 py-0.5 rounded-full text-xs leading-none ${active ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'}`}>
+                        {count}
+                    </span>
+                    </button>
+                );
+                })}
+            </div>
+
             {/* ── Bulk action bar ── */}
             <div className={`overflow-hidden transition-all duration-200 ease-in-out ${selected.size > 0 ? 'max-h-20 opacity-100' : 'max-h-0 opacity-0'}`}>
                 <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-gray-900 text-white shadow-lg">
@@ -10525,10 +10615,35 @@
                             </td>
 
                             {/* Device */}
-                            <td className="px-3 py-3 max-w-[180px]">
-                                <span className="text-xs text-gray-600 truncate block" title={row.user_agent}>
-                                {row.user_agent || '—'}
-                                </span>
+                            <td className="px-3 py-3">
+                                <div className="flex items-center gap-1.5">
+                                {row.device?.type === 'desktop' && (
+                                    <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0H3"/>
+                                    </svg>
+                                )}
+                                {row.device?.type === 'mobile' && (
+                                    <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18h3"/>
+                                    </svg>
+                                )}
+                                {row.device?.type === 'tablet' && (
+                                    <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5h3m-6.75 2.25h10.5a2.25 2.25 0 002.25-2.25v-15a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 4.5v15a2.25 2.25 0 002.25 2.25z"/>
+                                    </svg>
+                                )}
+                                <div>
+                                    <div className="text-xs font-medium text-gray-700">
+                                    {row.device?.os || '—'}
+                                    </div>
+                                    <div className="text-xs text-gray-400">{row.device?.browser || '—'}</div>
+                                </div>
+                                </div>
+                                {row.user_agent && (
+                                <div className="text-xs text-gray-300 truncate mt-0.5 max-w-[160px]" title={row.user_agent}>
+                                    {row.user_agent}
+                                </div>
+                                )}
                             </td>
 
                             {/* Last seen */}
@@ -10585,8 +10700,8 @@
                         <span className="ml-2 text-blue-600 font-medium">· {selected.size} выбрано</span>
                     )}
                     </span>
-                    {(search || roleFilter !== 'all') && (
-                    <button onClick={() => { setSearch(''); setRole('all'); }}
+                    {(search || roleFilter !== 'all' || deviceFilter !== 'all') && (
+                    <button onClick={() => { setSearch(''); setRole('all'); setDeviceFilter('all'); }}
                         className="text-xs text-blue-500 hover:text-blue-700 font-medium transition-colors">
                         Сбросить фильтры
                     </button>
