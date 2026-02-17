@@ -4834,6 +4834,9 @@
             const [shuffleSummary, setShuffleSummary] = useState(null);
             const [shuffling, setShuffling] = useState(false);
             const [shuffleResult, setShuffleResult] = useState(null);
+            const [distributionTab, setDistributionTab] = useState('general');
+            const [operatorSearch, setOperatorSearch] = useState('');
+            const [selectedOperatorsForShuffle, setSelectedOperatorsForShuffle] = useState(new Set());
 
             // --- helper / logic functions are kept unchanged (omitted here for brevity in the file preview) ---
             // To keep the canvas file compact but functional I've inlined the original functions from your
@@ -4871,6 +4874,10 @@
                 if (isNaN(d)) return null;
                 return d;
                 } catch (e) { return null; }
+            }
+
+            function normalizeName(value) {
+                return String(value || '').trim().toLowerCase();
             }
 
             function parseCSVText(text) {
@@ -5341,6 +5348,66 @@
                 });
             }, [operatorMap, svOperators, operatorParams, sampleCount]);
 
+            const operatorSelectionList = React.useMemo(() => {
+                const rows = [];
+                const seen = new Set();
+
+                for (const op of filteredSvOperators) {
+                const displayName = op.name || op.login || op.operator_name || String(op.id || '-');
+                const key = normalizeName(displayName);
+                if (!key || seen.has(key)) continue;
+                const matchedKey = findOperatorMapKeyByName(displayName);
+                const info = matchedKey ? operatorMap[matchedKey] : null;
+                const csvCount = Number(info?.count || 0);
+                const anyCsvCount = countAnyCallsForDisplayName(displayName);
+                if (onlyWithCsv && anyCsvCount === 0) continue;
+                rows.push({
+                    name: displayName,
+                    direction: op.direction_name || op.direction || '',
+                    supervisor: op.supervisor_name || op.sv_name || op.supervisor || '',
+                    status: op.status || '',
+                    apiCount: Number(op.call_count || 0),
+                    csvCount,
+                    matchedKey
+                });
+                seen.add(key);
+                }
+
+                if (selectedDirections.includes('all')) {
+                for (const csvName of unmatchedCsvOperators) {
+                    const key = normalizeName(csvName);
+                    if (!key || seen.has(key)) continue;
+                    const info = operatorMap[csvName];
+                    const csvCount = Number(info?.count || 0);
+                    if (onlyWithCsv && csvCount === 0) continue;
+                    rows.push({
+                    name: csvName,
+                    direction: 'CSV-only',
+                    supervisor: '-',
+                    status: '',
+                    apiCount: 0,
+                    csvCount,
+                    matchedKey: csvName
+                    });
+                    seen.add(key);
+                }
+                }
+
+                const query = normalizeName(operatorSearch);
+                return rows
+                .filter(r => {
+                    if (!query) return true;
+                    return normalizeName(r.name).includes(query)
+                    || normalizeName(r.direction).includes(query)
+                    || normalizeName(r.supervisor).includes(query);
+                })
+                .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+            }, [filteredSvOperators, selectedDirections, unmatchedCsvOperators, operatorMap, onlyWithCsv, operatorSearch, calls]);
+
+            const selectedOperatorLowerSet = React.useMemo(() => {
+                return new Set(Array.from(selectedOperatorsForShuffle || []).map(v => normalizeName(v)));
+            }, [selectedOperatorsForShuffle]);
+
             useEffect(() => {
                 recomputeOperatorMap(calls, minDurationSec, maxDurationSec, Number(sampleCount) || 0, Number(variationSec) || 0, operatorParams, !!selectedOperator);
                 // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5409,6 +5476,61 @@
                 setSelectedCalls(s);
             }
 
+            function clearSelectedCallsForOperator(opKey) {
+                const foundKey = findOperatorMapKeyByName(opKey);
+                const matching = foundKey ? (operatorMap[foundKey]?.all || []) : [];
+                const allRelated = getAllCallsForDisplayName(opKey);
+                const relatedIds = new Set([
+                ...matching.map(c => c.id),
+                ...allRelated.map(c => c.id)
+                ]);
+                if (relatedIds.size === 0) return;
+                const next = new Set(selectedCalls);
+                relatedIds.forEach(id => next.delete(id));
+                setSelectedCalls(next);
+            }
+
+            function countSelectedCallsForOperator(opKey) {
+                if (!opKey) return 0;
+                const foundKey = findOperatorMapKeyByName(opKey);
+                const matching = foundKey ? (operatorMap[foundKey]?.all || []) : [];
+                const allRelated = getAllCallsForDisplayName(opKey);
+                const relatedIds = new Set([
+                ...matching.map(c => c.id),
+                ...allRelated.map(c => c.id)
+                ]);
+                let count = 0;
+                relatedIds.forEach(id => { if (selectedCalls.has(id)) count += 1; });
+                return count;
+            }
+
+            function toggleOperatorForShuffle(name) {
+                const normalized = normalizeName(name);
+                if (!normalized) return;
+                setSelectedOperatorsForShuffle(prev => {
+                const next = new Set(prev || []);
+                let existing = null;
+                for (const item of next) {
+                    if (normalizeName(item) === normalized) { existing = item; break; }
+                }
+                if (existing != null) next.delete(existing);
+                else next.add(name);
+                return next;
+                });
+            }
+
+            function clearSelectedOperatorsForShuffle() {
+                setSelectedOperatorsForShuffle(new Set());
+            }
+
+            function selectAllVisibleOperatorsForShuffle() {
+                setSelectedOperatorsForShuffle(prev => {
+                const next = new Set(prev || []);
+                operatorSelectionList.forEach(item => next.add(item.name));
+                return next;
+                });
+            }
+
             function handleAssign() {
                 const picks = calls.filter(c => selectedCalls.has(c.id));
                 if (picks.length === 0) return alert('Выберите звонки для назначения');
@@ -5440,45 +5562,86 @@
             function handlePrepareShuffle() {
                 // Build list of target operators according to current filters
                 const toProcess = [];
+                const restrictBySelectedOperators = distributionTab === 'by_operator' && selectedOperatorsForShuffle.size > 0;
+                const selectedLower = new Set(Array.from(selectedOperatorsForShuffle).map(v => normalizeName(v)));
+
+                if (distributionTab === 'by_operator' && selectedOperatorsForShuffle.size === 0) {
+                if (typeof showToast === 'function') showToast?.('Сначала выберите хотя бы одного оператора', 'warning');
+                else alert('Сначала выберите хотя бы одного оператора');
+                return;
+                }
 
                 // API operators visible after filters
                 for (const op of filteredSvOperators) {
-                const displayName = op.name || op.login || op.operator_name || String(op.id || '—');
+                const displayName = op.name || op.login || op.operator_name || String(op.id || '-');
+                if (restrictBySelectedOperators && !selectedLower.has(normalizeName(displayName))) continue;
                 const matchedKey = findOperatorMapKeyByName(displayName);
                 const available = matchedKey ? (operatorMap[matchedKey]?.all || []) : getAllCallsForDisplayName(displayName);
                 const anyCsvCount = countAnyCallsForDisplayName(displayName);
                 if (onlyWithCsv && anyCsvCount === 0) continue; // skip
                 const desired = getDesiredSampleCountForOperator(displayName, matchedKey);
-                if ((Number(desired) || 0) <= 0) continue; // nothing to pick
+                if ((Number(desired) || 0) <= 0 && distributionTab !== 'by_operator') continue;
                 toProcess.push({ operatorName: displayName, matchedKey, available });
                 }
 
-                // CSV-only operators (unmatched) — include when directions selection is 'all' (same logic used earlier)
+                // CSV-only operators (unmatched) - include when directions selection is 'all'
                 if (selectedDirections.includes('all')) {
                 for (const csvName of unmatchedCsvOperators) {
+                    if (restrictBySelectedOperators && !selectedLower.has(normalizeName(csvName))) continue;
                     const info = operatorMap[csvName];
                     if (!info || info.count === 0) continue;
                     if (onlyWithCsv && info.count === 0) continue;
                     const desired = operatorParams[csvName]?.sampleCount != null ? Number(operatorParams[csvName].sampleCount) : Number(sampleCount) || 0;
-                    if ((Number(desired) || 0) <= 0) continue;
+                    if ((Number(desired) || 0) <= 0 && distributionTab !== 'by_operator') continue;
                     toProcess.push({ operatorName: csvName, matchedKey: csvName, available: info.all || [] });
                 }
                 }
 
-                // Now for each operator pick up to desired random calls
+                // Now for each operator pick up to desired random calls or use manual picks in "by operator" tab
                 const distribution = [];
                 const insufficient = [];
                 let totalPicked = 0;
                 const chosenCallIds = new Set();
 
+                if (toProcess.length === 0) {
+                if (typeof showToast === 'function') showToast?.('Нет операторов для распределения по текущим условиям', 'warning');
+                else alert('Нет операторов для распределения по текущим условиям');
+                return;
+                }
+
                 for (const it of toProcess) {
                 const desired = getDesiredSampleCountForOperator(it.operatorName, it.matchedKey);
-                const avail = (it.available || []).filter(c => c && c.id && !chosenCallIds.has(c.id));
-                const pickCount = Math.min(Number(desired) || 0, avail.length);
-                const picked = pickRandom(avail, pickCount);
+                const available = (it.available || []).filter(c => c && c.id);
+                const dedupAvailable = available.filter(c => !chosenCallIds.has(c.id));
+
+                const manualPicked = distributionTab === 'by_operator'
+                    ? dedupAvailable.filter(c => selectedCalls.has(c.id))
+                    : [];
+
+                let picked = [];
+                let desiredInSummary = Number(desired) || 0;
+                let pickMode = 'auto';
+
+                if (manualPicked.length > 0) {
+                    picked = manualPicked;
+                    desiredInSummary = manualPicked.length;
+                    pickMode = 'manual';
+                } else {
+                    const pickCount = Math.min(Number(desired) || 0, dedupAvailable.length);
+                    picked = pickRandom(dedupAvailable, pickCount);
+                    if (dedupAvailable.length < (Number(desired) || 0)) {
+                    insufficient.push({ operator: it.operatorName, desired: Number(desired) || 0, available: dedupAvailable.length });
+                    }
+                }
+
                 picked.forEach(p => chosenCallIds.add(p.id));
-                distribution.push({ operator: it.operatorName, desired: Number(desired) || 0, available: avail.length, picked });
-                if (avail.length < (Number(desired) || 0)) insufficient.push({ operator: it.operatorName, desired: Number(desired) || 0, available: avail.length });
+                distribution.push({
+                    operator: it.operatorName,
+                    desired: desiredInSummary,
+                    available: dedupAvailable.length,
+                    picked,
+                    mode: pickMode
+                });
                 totalPicked += picked.length;
                 }
 
@@ -5495,13 +5658,19 @@
                 enoughCount: distribution.length - insufficient.length,
                 minDur,
                 maxDur,
-                filters: { statuses: selectedStatuses, directions: selectedDirections, onlyWithCsv, month: selectedMonth }
+                filters: {
+                    statuses: selectedStatuses,
+                    directions: selectedDirections,
+                    onlyWithCsv,
+                    month: selectedMonth,
+                    tab: distributionTab,
+                    selectedOperators: Array.from(selectedOperatorsForShuffle)
+                }
                 };
 
                 setShuffleSummary(summary);
                 setShowShuffleModal(true);
             }
-
             async function handleConfirmShuffle() {
             if (!shuffleSummary) return;
             setShuffling(true);
@@ -5591,7 +5760,7 @@
                         <button onClick={splitAll} disabled={files.length===0 || parsing || loadingOperators} className={`px-3 py-2 rounded text-white ${(parsing || loadingOperators) ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
                             {(parsing || loadingOperators) ? 'Работа...' : 'Делить'}
                         </button>
-                        <button onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); setActiveRange(null); setOperatorParams({}); if (fileInputRef.current) fileInputRef.current.value = null; }} className="px-3 py-2 rounded border">Сброс</button>
+                        <button onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); setActiveRange(null); setOperatorParams({}); setSelectedOperatorsForShuffle(new Set()); setOperatorSearch(''); setDistributionTab('general'); if (fileInputRef.current) fileInputRef.current.value = null; }} className="px-3 py-2 rounded border">Сброс</button>
                         </div>
 
                         {files.length > 0 && (
@@ -5634,7 +5803,7 @@
                         </div>
 
                         <div className="mt-3 flex gap-2">
-                        <button onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); setSelectedStatuses(['all']); setOnlyWithCsv(false); setSelectedDirections(['all']); applyFilters(); }} className="px-3 py-2 rounded border">Сброс</button>
+                        <button onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); setSelectedStatuses(['all']); setOnlyWithCsv(false); setSelectedDirections(['all']); setSelectedOperatorsForShuffle(new Set()); setOperatorSearch(''); applyFilters(); }} className="px-3 py-2 rounded border">Сброс</button>
                         </div>
                     </div>
 
@@ -5697,7 +5866,25 @@
                     </div>
                 </div>
 
+                <div className="mb-4 border-b border-gray-200">
+                    <div className="inline-flex items-center gap-1 p-1 bg-gray-100 rounded-lg">
+                    <button
+                        onClick={() => setDistributionTab('general')}
+                        className={`px-3 py-1.5 rounded-md text-sm ${distributionTab === 'general' ? 'bg-white shadow text-blue-700' : 'text-gray-600 hover:text-gray-800'}`}
+                    >
+                        Общее
+                    </button>
+                    <button
+                        onClick={() => setDistributionTab('by_operator')}
+                        className={`px-3 py-1.5 rounded-md text-sm ${distributionTab === 'by_operator' ? 'bg-white shadow text-blue-700' : 'text-gray-600 hover:text-gray-800'}`}
+                    >
+                        По оператору
+                    </button>
+                    </div>
+                </div>
+
                 {/* Insufficient top block */}
+                {distributionTab === 'general' && (
                 <div className="space-y-4 mb-4">
                     {insufficientOperators.length > 0 && (
                     <div className="p-3 bg-red-50 border border-red-200 rounded">
@@ -5916,6 +6103,65 @@
                     </div>
                     )}
                 </div>
+                )}
+
+                {distributionTab === 'by_operator' && (
+                <div className="space-y-4 mb-4">
+                    <div className="p-4 bg-gray-50 border rounded">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-sm font-medium">Выбор операторов для распределения</div>
+                        <div className="text-xs text-gray-600">
+                        Выбрано: <span className="font-semibold">{selectedOperatorsForShuffle.size}</span> / {operatorSelectionList.length}
+                        </div>
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <input
+                        value={operatorSearch}
+                        onChange={e => setOperatorSearch(e.target.value)}
+                        placeholder="Поиск по оператору, SV или направлению"
+                        className="flex-1 min-w-[260px] p-2 border rounded text-sm"
+                        />
+                        <button onClick={selectAllVisibleOperatorsForShuffle} className="px-3 py-2 border rounded text-sm bg-white hover:bg-gray-50">Выбрать всех</button>
+                        <button onClick={clearSelectedOperatorsForShuffle} className="px-3 py-2 border rounded text-sm bg-white hover:bg-gray-50">Снять выбор</button>
+                    </div>
+
+                    {operatorSelectionList.length === 0 ? (
+                        <div className="mt-3 text-sm text-gray-500">По текущим фильтрам операторы не найдены.</div>
+                    ) : (
+                        <ul className="mt-3 max-h-80 overflow-auto space-y-2">
+                        {operatorSelectionList.map(item => {
+                            const isSelected = selectedOperatorLowerSet.has(normalizeName(item.name));
+                            const selectedCallsCount = countSelectedCallsForOperator(item.name);
+                            return (
+                            <li key={item.name} className={`flex items-center justify-between p-3 rounded-lg border ${isSelected ? 'border-blue-300 bg-blue-50/30' : 'bg-white'}`}>
+                                <div className="min-w-0 flex-1">
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input type="checkbox" checked={isSelected} onChange={() => toggleOperatorForShuffle(item.name)} />
+                                    <span className="font-medium truncate">{item.name}</span>
+                                </label>
+                                <div className="mt-1 text-xs text-gray-500 truncate">
+                                    {item.supervisor || '-'} | {item.direction || '-'} {item.status ? `| ${item.status}` : ''}
+                                </div>
+                                </div>
+                                <div className="flex items-center gap-2 text-xs">
+                                <span className="px-2 py-0.5 border rounded bg-white">Оценки: {item.apiCount}</span>
+                                <span className="px-2 py-0.5 border rounded bg-white">Подходящие: {item.csvCount}</span>
+                                <span className="px-2 py-0.5 border rounded bg-white">Выбрано звонков: {selectedCallsCount}</span>
+                                <button onClick={() => handleShowOperator(item.name)} className="px-2 py-1 border rounded bg-white hover:bg-gray-50">Звонки</button>
+                                </div>
+                            </li>
+                            );
+                        })}
+                        </ul>
+                    )}
+
+                    <div className="mt-3 text-xs text-gray-500">
+                        Если у выбранного оператора отмечены конкретные звонки, в распределение уйдут именно они; если не отмечены, применится обычная выборка по количеству.
+                    </div>
+                    </div>
+                </div>
+                )}
 
                 {/* Selected operator panel (improved visuals) */}
                 {selectedOperator && (
@@ -5924,11 +6170,14 @@
                             <div>
                             <h5 className="text-lg font-semibold truncate">Оператор: {selectedOperator}</h5>
                             <div className="text-sm text-gray-500">Всего подходящих: {operatorMap[selectedOperator]?.count ?? (operatorView.operatorKey === selectedOperator ? operatorView.matching.length : 0)}</div>
+                            <div className="text-sm text-gray-500">Выбрано вручную: {countSelectedCallsForOperator(selectedOperator)}</div>
                             </div>
 
                             <div className="flex items-center gap-3">
 
                             <button onClick={handleAssign} className="px-4 py-2 bg-blue-600 text-white rounded text-sm">Экспорт</button>
+                            <button onClick={() => selectAllForOperator(selectedOperator)} className="px-3 py-2 border rounded text-sm">Выбрать все</button>
+                            <button onClick={() => clearSelectedCallsForOperator(selectedOperator)} className="px-3 py-2 border rounded text-sm">Снять выбор</button>
 
                             <button title="Настройки оператора" onClick={handleOpenSettings} className="px-2 p-1 border rounded text-base bg-white hover:shadow" aria-label="Настройки">
                                 <i className="fa-solid fa-gear text-xl text-gray-700"></i>
@@ -5951,6 +6200,7 @@
                         <table className="w-full text-base table-auto border-collapse mb-4">
                             <thead className="bg-gray-100 sticky top-0">
                             <tr>
+                                <th className="p-2 text-left">Выбор</th>
                                 <th className="p-2 text-left">#</th>
                                 <th className="p-2 text-left">ID</th>
                                 <th className="p-2 text-left">Дата/время</th>
@@ -5961,6 +6211,9 @@
                             <tbody>
                             {(operatorView.operatorKey === selectedOperator ? operatorView.matching : (operatorMap[selectedOperator]?.all || [])).map((c, idx) => (
                                 <tr key={c.id} className="even:bg-white odd:bg-gray-50">
+                                <td className="p-3 align-top">
+                                    <input type="checkbox" checked={selectedCalls.has(c.id)} onChange={() => toggleSelectCall(c.id)} />
+                                </td>
                                 <td className="p-3 align-top">{idx+1}</td>
                                 <td className="p-3 align-top">{c.id}</td>
                                 <td className="p-3 align-top">{c.datetime ? c.datetime.toLocaleString() : c.datetimeRaw}</td>
@@ -5987,6 +6240,7 @@
                             <table className="w-full text-base table-auto border-collapse">
                             <thead className="bg-gray-100 sticky top-0">
                                 <tr>
+                                <th className="p-3 text-left">Выбор</th>
                                 <th className="p-3 text-left">#</th>
                                 <th className="p-3 text-left">ID</th>
                                 <th className="p-3 text-left">Дата/время</th>
@@ -5998,6 +6252,9 @@
                             <tbody>
                                 {operatorView.nonMatching.map((c, idx) => (
                                 <tr key={c.id} className="even:bg-white odd:bg-gray-50">
+                                    <td className="p-3 align-top">
+                                    <input type="checkbox" checked={selectedCalls.has(c.id)} onChange={() => toggleSelectCall(c.id)} />
+                                    </td>
                                     <td className="p-3 align-top">{idx+1}</td>
                                     <td className="p-3 align-top">{c.id}</td>
                                     <td className="p-3 align-top">{c.datetime ? c.datetime.toLocaleString() : c.datetimeRaw}</td>
@@ -6060,9 +6317,15 @@
 
                 {/* ----- NEW: Shuffle footer (в самом низу) ----- */}
                 <div className="mt-6 pt-4 border-t flex items-center justify-between">
-                    <div className="text-sm text-gray-600">Готово к распределению: фильтры применены</div>
+                    <div className="text-sm text-gray-600">
+                    {distributionTab === 'by_operator'
+                        ? `Режим по оператору: выбрано операторов ${selectedOperatorsForShuffle.size}, вручную отмечено звонков ${selectedCalls.size}`
+                        : 'Готово к распределению: фильтры применены'}
+                    </div>
                     <div className="flex items-center gap-2">
-                    <button onClick={handlePrepareShuffle} className="px-4 py-2 bg-purple-600 text-white rounded">Распределить</button>
+                    <button onClick={handlePrepareShuffle} className="px-4 py-2 bg-purple-600 text-white rounded">
+                        {distributionTab === 'by_operator' ? 'Распределить по выбранным операторам' : 'Распределить'}
+                    </button>
                     </div>
                 </div>
 
