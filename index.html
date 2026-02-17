@@ -14650,27 +14650,36 @@
             }, [clearSensitiveQrPolling, stopQrScanner]);
 
             useEffect(() => {
-                if (!user) return;
+                if (!user || !user.id) return;
+
                 if (user.role === 'admin') {
                     fetchSvList();
                     fetchDirections();
                     fetchUsers();
                 } else if (user.role === 'sv') {
-                    // передаём выбранный месяц прямо, чтобы использовать selectedReportMonth если он задан
-                    fetchSvData(selectedReportMonth || selectedMonth);
                     fetchSvList();
                     fetchUsers();
                     fetchDirections();
                 } else if (user.role === 'operator') {
                     fetchProfileData();
-                    fetchHoursData();
-                    fetchOperatorData();
-                    fetchTrainings();
                     fetchDirections();
                     fetchUsers();
                 }
+
                 fetchSensitiveAccessStatus();
-            }, [user, selectedMonth, selectedReportMonth, fetchSensitiveAccessStatus]);
+            }, [user?.id, user?.role]);
+
+            useEffect(() => {
+                if (!user || !user.id || user.role !== 'sv') return;
+                fetchSvData(selectedReportMonth || selectedMonth);
+            }, [user?.id, user?.role, selectedMonth, selectedReportMonth]);
+
+            useEffect(() => {
+                if (!user || !user.id || user.role !== 'operator') return;
+                fetchHoursData();
+                fetchOperatorData();
+                fetchTrainings();
+            }, [user?.id, user?.role, selectedMonth]);
 
             useEffect(() => {
                 if (view !== 'qr_access') {
