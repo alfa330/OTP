@@ -2454,8 +2454,7 @@ class Database:
             d.name AS direction_name,
             u.supervisor_id,
             su.name AS supervisor_name,
-            COALESCE(c.call_count, 0) AS call_count,
-            u.hire_date
+            COALESCE(c.call_count, 0) AS call_count
         FROM users u
         LEFT JOIN directions d ON u.direction_id = d.id
         LEFT JOIN users su ON u.supervisor_id = su.id
@@ -2482,9 +2481,7 @@ class Database:
                     "direction_name": row[4],
                     "supervisor_id": row[5],
                     "supervisor_name": row[6],
-                    "call_count": int(row[7]),
-                    "hire_date": row[8].isoformat() if row[8] else None,
-                    "hire_month": row[8].strftime('%Y-%m') if row[8] else None
+                    "call_count": int(row[7])
                 }
                 for row in rows
             ]
