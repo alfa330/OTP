@@ -443,6 +443,7 @@
     <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     
     <!-- Additional CDNs and styles requested -->
@@ -10799,6 +10800,21 @@
             const [aiMonthlyFeedbackError, setAiMonthlyFeedbackError] = useState('');
             const [aiMonthlyFeedbackResult, setAiMonthlyFeedbackResult] = useState(null);
             const [aiMonthlyFeedbackTitle, setAiMonthlyFeedbackTitle] = useState('');
+            const [sensitiveAccess, setSensitiveAccess] = useState({ required: false, granted: false, loading: false });
+            const [showSensitiveQrModal, setShowSensitiveQrModal] = useState(false);
+            const [sensitiveQrUrl, setSensitiveQrUrl] = useState('');
+            const [sensitiveQrImage, setSensitiveQrImage] = useState('');
+            const [sensitiveQrExpiresAt, setSensitiveQrExpiresAt] = useState('');
+            const [sensitiveQrError, setSensitiveQrError] = useState('');
+            const sensitiveQrPollRef = useRef(null);
+            const [qrApproveInput, setQrApproveInput] = useState('');
+            const [qrApproveLoading, setQrApproveLoading] = useState(false);
+            const [qrApproveResult, setQrApproveResult] = useState('');
+            const [qrScannerRunning, setQrScannerRunning] = useState(false);
+            const [qrScannerError, setQrScannerError] = useState('');
+            const qrVideoRef = useRef(null);
+            const qrStreamRef = useRef(null);
+            const qrScanTimerRef = useRef(null);
             // Images and state for Dev Letter carousel
             const devLetterImages = [
                 { src: 'assets/1.jpg', caption: 'Золотая молодежь' },
@@ -13516,6 +13532,12 @@
                 }
 
                 setExpandedEvaluation(evaluation);
+                const canLoadAudio = !!operatorData?.sensitive_access?.granted;
+                if (!canLoadAudio) {
+                    setAudioUrl(null);
+                    setLoadingAudioId(null);
+                    return;
+                }
                 setLoadingAudioId(evaluation.id);
                 const url = await getAudioUrlWithAuth(evaluation.id, user.apiKey, user.id);
                 setAudioUrl(url);
@@ -13744,6 +13766,13 @@
                 }
 
                 if (isMounted.current) {
+                    clearSensitiveQrPolling();
+                    setSensitiveAccess({ required: false, granted: false, loading: false });
+                    setShowSensitiveQrModal(false);
+                    setSensitiveQrUrl('');
+                    setSensitiveQrImage('');
+                    setSensitiveQrExpiresAt('');
+                    setSensitiveQrError('');
                     setUser(null);
                     setSvList([]);
                     setSvData(null);
@@ -14330,6 +14359,249 @@
                 }
             };
 
+            const clearSensitiveQrPolling = useCallback(() => {
+                if (sensitiveQrPollRef.current) {
+                    clearInterval(sensitiveQrPollRef.current);
+                    sensitiveQrPollRef.current = null;
+                }
+            }, []);
+
+            const stopQrScanner = useCallback(() => {
+                if (qrScanTimerRef.current) {
+                    clearInterval(qrScanTimerRef.current);
+                    qrScanTimerRef.current = null;
+                }
+                if (qrStreamRef.current) {
+                    qrStreamRef.current.getTracks().forEach(track => track.stop());
+                    qrStreamRef.current = null;
+                }
+                if (qrVideoRef.current) {
+                    qrVideoRef.current.srcObject = null;
+                }
+                setQrScannerRunning(false);
+            }, []);
+
+            const extractSensitiveToken = useCallback((value) => {
+                const raw = String(value || '').trim();
+                if (!raw) return '';
+                if (raw.toUpperCase().startsWith('OTP-SENSITIVE:')) {
+                    return raw.split(':').slice(1).join(':').trim();
+                }
+                if ((raw.startsWith('http://') || raw.startsWith('https://')) && raw.includes('token=')) {
+                    try {
+                        const parsed = new URL(raw);
+                        const token = parsed.searchParams.get('token');
+                        if (token) return token.trim();
+                    } catch (e) {
+                        // ignore
+                    }
+                }
+                return raw;
+            }, []);
+
+            const fetchSensitiveAccessStatus = useCallback(async () => {
+                if (!user) {
+                    setSensitiveAccess({ required: false, granted: false, loading: false });
+                    return;
+                }
+
+                setSensitiveAccess(prev => ({ ...prev, loading: true }));
+                try {
+                    const response = await axios.get(`${API_BASE_URL}/api/sensitive-access/status`, {
+                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                    });
+                    const data = response.data || {};
+                    if (data.status === 'success') {
+                        setSensitiveAccess({
+                            required: !!data.required,
+                            granted: !!data.granted,
+                            loading: false
+                        });
+                        if (user.role === 'operator' && data.granted) {
+                            clearSensitiveQrPolling();
+                            setShowSensitiveQrModal(false);
+                            fetchOperatorData();
+                        }
+                    } else {
+                        setSensitiveAccess(prev => ({ ...prev, loading: false }));
+                    }
+                } catch (err) {
+                    setSensitiveAccess(prev => ({ ...prev, loading: false }));
+                }
+            }, [user, clearSensitiveQrPolling]);
+
+            const closeSensitiveQrModal = useCallback(() => {
+                clearSensitiveQrPolling();
+                setShowSensitiveQrModal(false);
+                setSensitiveQrUrl('');
+                setSensitiveQrImage('');
+                setSensitiveQrExpiresAt('');
+                setSensitiveQrError('');
+                stopQrScanner();
+                setQrScannerError('');
+            }, [clearSensitiveQrPolling, stopQrScanner]);
+
+            const requestSensitiveQrAccess = async () => {
+                if (!user || user.role !== 'operator') return;
+
+                setSensitiveQrError('');
+                setSensitiveQrUrl('');
+                setSensitiveQrImage('');
+                setSensitiveQrExpiresAt('');
+                setShowSensitiveQrModal(true);
+
+                try {
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/sensitive-access/qr/request`,
+                        {},
+                        { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }
+                    );
+                    const data = response.data || {};
+                    if (data.status !== 'success' || !(data.qr_payload || data.token)) {
+                        throw new Error(data.error || 'Не удалось сформировать QR');
+                    }
+
+                    setSensitiveQrUrl(data.qr_payload || `OTP-SENSITIVE:${data.token}`);
+                    setSensitiveQrExpiresAt(data.token_expires_at || '');
+
+                    clearSensitiveQrPolling();
+                    sensitiveQrPollRef.current = setInterval(() => {
+                        fetchSensitiveAccessStatus();
+                    }, 2500);
+                } catch (err) {
+                    const msg = err.response?.data?.error || err.message || 'Не удалось сформировать QR';
+                    setSensitiveQrError(msg);
+                }
+            };
+
+            const revokeSensitiveAccess = async () => {
+                if (!user || user.role !== 'operator') return;
+                try {
+                    await axios.post(
+                        `${API_BASE_URL}/api/sensitive-access/revoke`,
+                        {},
+                        { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }
+                    );
+                    setSensitiveAccess(prev => ({ ...prev, granted: false }));
+                    setAudioUrl(null);
+                    setLoadingAudioId(null);
+                    setExpandedEvaluation(null);
+                    setExpandedEvalId(null);
+                    await fetchOperatorData();
+                    showToast('Доступ к чувствительным данным отключен', 'success');
+                } catch (err) {
+                    showToast(err.response?.data?.error || 'Не удалось отключить доступ', 'error');
+                }
+            };
+
+            const startQrScanner = async () => {
+                if (!user || (user.role !== 'admin' && user.role !== 'sv')) return;
+                setQrScannerError('');
+                setQrApproveResult('');
+
+                if (!navigator.mediaDevices?.getUserMedia) {
+                    setQrScannerError('Камера не поддерживается в этом браузере');
+                    return;
+                }
+                if (!window.BarcodeDetector) {
+                    setQrScannerError('BarcodeDetector недоступен, используйте ввод кода вручную');
+                    return;
+                }
+
+                try {
+                    const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
+                    qrStreamRef.current = stream;
+
+                    if (!qrVideoRef.current) {
+                        setQrScannerError('Видеоэлемент недоступен');
+                        stopQrScanner();
+                        return;
+                    }
+
+                    qrVideoRef.current.srcObject = stream;
+                    await qrVideoRef.current.play();
+                    setQrScannerRunning(true);
+
+                    qrScanTimerRef.current = setInterval(async () => {
+                        if (!qrVideoRef.current) return;
+                        try {
+                            const codes = await detector.detect(qrVideoRef.current);
+                            if (codes && codes.length > 0 && codes[0].rawValue) {
+                                const rawValue = String(codes[0].rawValue);
+                                setQrApproveInput(rawValue);
+                                stopQrScanner();
+                            }
+                        } catch (e) {
+                            // ignore frame errors
+                        }
+                    }, 450);
+                } catch (err) {
+                    setQrScannerError(err.message || 'Не удалось запустить сканер');
+                    stopQrScanner();
+                }
+            };
+
+            const approveSensitiveQrAccess = async () => {
+                if (!user || (user.role !== 'admin' && user.role !== 'sv')) return;
+                const token = extractSensitiveToken(qrApproveInput);
+                if (!token) {
+                    setQrApproveResult('Укажите QR токен для подтверждения');
+                    return;
+                }
+
+                setQrApproveLoading(true);
+                setQrApproveResult('');
+                try {
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/sensitive-access/approve`,
+                        { token },
+                        { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }
+                    );
+                    const data = response.data || {};
+                    if (data.status === 'success') {
+                        setQrApproveResult(`Доступ открыт для оператора: ${data.operator_name || data.operator_id}`);
+                        setQrApproveInput('');
+                        showToast(`Доступ открыт для ${data.operator_name || 'оператора'}`, 'success');
+                    } else {
+                        setQrApproveResult(data.error || 'Не удалось подтвердить QR');
+                    }
+                } catch (err) {
+                    setQrApproveResult(err.response?.data?.error || 'Не удалось подтвердить QR');
+                } finally {
+                    setQrApproveLoading(false);
+                }
+            };
+
+            useEffect(() => {
+                if (!showSensitiveQrModal || !sensitiveQrUrl) {
+                    setSensitiveQrImage('');
+                    return;
+                }
+                if (!window.QRCode || !window.QRCode.toDataURL) {
+                    setSensitiveQrError('QR библиотека не загружена');
+                    return;
+                }
+                window.QRCode.toDataURL(
+                    sensitiveQrUrl,
+                    { width: 280, margin: 1 },
+                    (err, url) => {
+                        if (err) {
+                            setSensitiveQrError('Не удалось сгенерировать QR');
+                            return;
+                        }
+                        setSensitiveQrImage(url);
+                    }
+                );
+            }, [showSensitiveQrModal, sensitiveQrUrl]);
+
+            useEffect(() => {
+                return () => {
+                    clearSensitiveQrPolling();
+                    stopQrScanner();
+                };
+            }, [clearSensitiveQrPolling, stopQrScanner]);
+
             useEffect(() => {
                 if (!user) return;
                 if (user.role === 'admin') {
@@ -14350,7 +14622,15 @@
                     fetchDirections();
                     fetchUsers();
                 }
-            }, [user, selectedMonth, selectedReportMonth]);
+                fetchSensitiveAccessStatus();
+            }, [user, selectedMonth, selectedReportMonth, fetchSensitiveAccessStatus]);
+
+            useEffect(() => {
+                if (view !== 'qr_access') {
+                    stopQrScanner();
+                    setQrScannerError('');
+                }
+            }, [view, stopQrScanner]);
 
            useEffect(() => {
                 if (selectedSvId) {
@@ -14544,6 +14824,11 @@
                                                 <i className="fas fa-laptop-house"></i> <span className="sidebar-text">Сессии</span>
                                             </button>
                                         </li>
+                                        <li>
+                                            <button onClick={() => { setView('qr_access'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-qrcode"></i> <span className="sidebar-text">QR доступ</span>
+                                            </button>
+                                        </li>
 
                                         <hr className="border-t border-white-700 my-2 opacity-40" />
 
@@ -14601,6 +14886,11 @@
                                         <li>
                                             <button onClick={() => { setView('operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'operators' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-users-cog"></i> <span className="sidebar-text">Оценки операторов</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => { setView('qr_access'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-qrcode"></i> <span className="sidebar-text">QR доступ</span>
                                             </button>
                                         </li>
                                         <li>
@@ -14734,8 +15024,123 @@
                         </div>
                     </div>
                     <div className={`main-content p-8 bg-gray-50 min-h-screen w-full overflow-y-auto ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+                        {user.role === 'operator' && (
+                        <div className="bg-white p-4 rounded-xl shadow-sm mb-6 border border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                            <div className="flex items-center gap-3">
+                                <i className={`fas fa-shield-alt ${sensitiveAccess.granted ? 'text-green-600' : 'text-amber-600'}`}></i>
+                                <div className="text-sm">
+                                    <div className="font-semibold text-gray-800">Доступ к моим данным оценок</div>
+                                    <div className={`${sensitiveAccess.granted ? 'text-green-700' : 'text-amber-700'}`}>
+                                        {sensitiveAccess.loading
+                                            ? 'Проверка статуса...'
+                                            : (sensitiveAccess.granted ? 'Открыт в текущей сессии' : 'Закрыт, нужен QR-скан от admin/sv')}
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={requestSensitiveQrAccess}
+                                    className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium transition"
+                                >
+                                    <i className="fas fa-qrcode mr-2"></i>Сгенерировать QR
+                                </button>
+                                {sensitiveAccess.granted && (
+                                <button
+                                    onClick={revokeSensitiveAccess}
+                                    className="px-4 py-2 rounded-lg bg-gray-200 text-gray-800 hover:bg-gray-300 text-sm font-medium transition"
+                                >
+                                    Закрыть доступ
+                                </button>
+                                )}
+                            </div>
+                        </div>
+                        )}
                         {user.role === 'admin' && (
                         <>
+                            {view === 'qr_access' && (
+                            <div className="bg-white p-6 sm:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                <div className="mb-6">
+                                    <h2 className="text-2xl font-semibold text-gray-800 mb-2">QR доступ</h2>
+                                    <p className="text-sm text-gray-600">
+                                        Отсканируйте QR оператора или вставьте токен вручную. Подтверждение откроет полный номер и аудио только в текущей сессии этого оператора.
+                                    </p>
+                                </div>
+
+                                <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                                    <div className="space-y-3">
+                                        <label className="block text-sm font-medium text-gray-700">QR токен / строка из QR</label>
+                                        <textarea
+                                            rows={4}
+                                            value={qrApproveInput}
+                                            onChange={(e) => setQrApproveInput(e.target.value)}
+                                            placeholder="Вставьте OTP-SENSITIVE:... или URL/токен"
+                                            className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                                        />
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={approveSensitiveQrAccess}
+                                                disabled={qrApproveLoading}
+                                                className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition ${qrApproveLoading ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
+                                            >
+                                                {qrApproveLoading ? 'Подтверждение...' : 'Подтвердить доступ'}
+                                            </button>
+                                            <button
+                                                onClick={() => { setQrApproveInput(''); setQrApproveResult(''); }}
+                                                className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-200 text-gray-800 hover:bg-gray-300 transition"
+                                            >
+                                                Очистить
+                                            </button>
+                                        </div>
+                                        {qrApproveResult && (
+                                            <div className={`text-sm rounded-lg p-3 border ${qrApproveResult.toLowerCase().includes('доступ открыт') ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
+                                                {qrApproveResult}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="space-y-3">
+                                        <label className="block text-sm font-medium text-gray-700">Сканер QR</label>
+                                        <div className="relative rounded-lg border border-gray-300 overflow-hidden bg-gray-900">
+                                            <video
+                                                ref={qrVideoRef}
+                                                className="w-full aspect-video object-cover"
+                                                autoPlay
+                                                muted
+                                                playsInline
+                                            />
+                                            {!qrScannerRunning && (
+                                                <div className="absolute inset-0 flex items-center justify-center text-xs text-white/90 bg-black/35">
+                                                    Камера выключена
+                                                </div>
+                                            )}
+                                        </div>
+                                        {qrScannerError && (
+                                            <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                                                {qrScannerError}
+                                            </div>
+                                        )}
+                                        <div className="flex items-center gap-2">
+                                            {!qrScannerRunning ? (
+                                                <button
+                                                    onClick={startQrScanner}
+                                                    className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-800 text-white hover:bg-gray-900 transition"
+                                                >
+                                                    Запустить сканер
+                                                </button>
+                                            ) : (
+                                                <button
+                                                    onClick={stopQrScanner}
+                                                    className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 text-white hover:bg-red-700 transition"
+                                                >
+                                                    Остановить сканер
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            )}
+
                             {view === 'sv_list' && (
                             <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                 <div className="flex justify-between items-center mb-6">
@@ -15541,7 +15946,91 @@
                             </>
                         )}
                         {user.role === 'sv' && (
-                            <>                            
+                            <>
+                                {view === 'qr_access' && (
+                                    <div className="bg-white p-6 sm:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                        <div className="mb-6">
+                                            <h2 className="text-2xl font-semibold text-gray-800 mb-2">QR доступ</h2>
+                                            <p className="text-sm text-gray-600">
+                                                Отсканируйте QR оператора или вставьте токен вручную. Подтверждение откроет полный номер и аудио только в текущей сессии этого оператора.
+                                            </p>
+                                        </div>
+
+                                        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                                            <div className="space-y-3">
+                                                <label className="block text-sm font-medium text-gray-700">QR токен / строка из QR</label>
+                                                <textarea
+                                                    rows={4}
+                                                    value={qrApproveInput}
+                                                    onChange={(e) => setQrApproveInput(e.target.value)}
+                                                    placeholder="Вставьте OTP-SENSITIVE:... или URL/токен"
+                                                    className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                                                />
+                                                <div className="flex items-center gap-2">
+                                                    <button
+                                                        onClick={approveSensitiveQrAccess}
+                                                        disabled={qrApproveLoading}
+                                                        className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition ${qrApproveLoading ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
+                                                    >
+                                                        {qrApproveLoading ? 'Подтверждение...' : 'Подтвердить доступ'}
+                                                    </button>
+                                                    <button
+                                                        onClick={() => { setQrApproveInput(''); setQrApproveResult(''); }}
+                                                        className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-200 text-gray-800 hover:bg-gray-300 transition"
+                                                    >
+                                                        Очистить
+                                                    </button>
+                                                </div>
+                                                {qrApproveResult && (
+                                                    <div className={`text-sm rounded-lg p-3 border ${qrApproveResult.toLowerCase().includes('доступ открыт') ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
+                                                        {qrApproveResult}
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <div className="space-y-3">
+                                                <label className="block text-sm font-medium text-gray-700">Сканер QR</label>
+                                                <div className="relative rounded-lg border border-gray-300 overflow-hidden bg-gray-900">
+                                                    <video
+                                                        ref={qrVideoRef}
+                                                        className="w-full aspect-video object-cover"
+                                                        autoPlay
+                                                        muted
+                                                        playsInline
+                                                    />
+                                                    {!qrScannerRunning && (
+                                                        <div className="absolute inset-0 flex items-center justify-center text-xs text-white/90 bg-black/35">
+                                                            Камера выключена
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                {qrScannerError && (
+                                                    <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                                                        {qrScannerError}
+                                                    </div>
+                                                )}
+                                                <div className="flex items-center gap-2">
+                                                    {!qrScannerRunning ? (
+                                                        <button
+                                                            onClick={startQrScanner}
+                                                            className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-800 text-white hover:bg-gray-900 transition"
+                                                        >
+                                                            Запустить сканер
+                                                        </button>
+                                                    ) : (
+                                                        <button
+                                                            onClick={stopQrScanner}
+                                                            className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 text-white hover:bg-red-700 transition"
+                                                        >
+                                                            Остановить сканер
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
                                 {view === 'manage_operators' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <div className="flex justify-between items-center mb-6">
@@ -16421,6 +16910,7 @@
                                         {(() => {
                                         // prepare filtered lists: exclude evaluations whose call is imported
                                         const allEvals = operatorData?.evaluations ?? [];
+                                        const canAccessSensitiveCallData = !!operatorData?.sensitive_access?.granted;
                                         const evalsForCalc = allEvals.filter(ev => {
                                             // if ev.call?.is_imported === true -> should be excluded from calculations
                                             return !(ev?.call?.is_imported === true || ev?.is_imported === true);
@@ -16622,7 +17112,11 @@
 
                                                                     <div>
                                                                         <h4 className="font-semibold text-gray-900 mb-2 text-sm">Аудио</h4>
-                                                                        {audioUrl ? (
+                                                                        {!canAccessSensitiveCallData ? (
+                                                                            <div className="text-sm text-amber-600 flex items-center gap-2">
+                                                                                <i className="fas fa-shield-alt"></i> Аудио скрыто до QR-подтверждения
+                                                                            </div>
+                                                                        ) : audioUrl ? (
                                                                             <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} />
                                                                         ) : (
                                                                             <div className="text-sm text-red-500 flex items-center gap-2">
@@ -16808,7 +17302,11 @@
 
                                                                 <div>
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Аудио</h4>
-                                                                    {audioUrl ? (
+                                                                    {!canAccessSensitiveCallData ? (
+                                                                    <div className="text-sm text-amber-600 flex items-center gap-2">
+                                                                        <i className="fas fa-shield-alt"></i> Аудио скрыто до QR-подтверждения
+                                                                    </div>
+                                                                    ) : audioUrl ? (
                                                                     <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} />
                                                                     ) : (
                                                                     <div className="text-sm text-red-500 flex items-center gap-2">
@@ -17496,6 +17994,61 @@
                         </>
                         )}
                     </div>
+
+                    {showSensitiveQrModal && (
+                        <div
+                            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+                            onClick={closeSensitiveQrModal}
+                        >
+                            <div
+                                className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-gray-200 p-5"
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <div className="flex items-center justify-between mb-3">
+                                    <h3 className="text-lg font-semibold text-gray-900">QR-подтверждение доступа</h3>
+                                    <button onClick={closeSensitiveQrModal} className="text-gray-500 hover:text-gray-700">
+                                        <i className="fas fa-times"></i>
+                                    </button>
+                                </div>
+                                <p className="text-sm text-gray-600 mb-4">
+                                    Покажите этот QR администратору или супервайзеру в разделе "QR доступ". После подтверждения полный номер и аудио откроются только в вашей текущей сессии.
+                                </p>
+                                {sensitiveQrError && (
+                                    <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">
+                                        {sensitiveQrError}
+                                    </div>
+                                )}
+                                <div className="flex justify-center mb-4">
+                                    {sensitiveQrImage ? (
+                                        <img src={sensitiveQrImage} alt="QR Access" className="w-64 h-64 border rounded-lg" />
+                                    ) : (
+                                        <div className="w-64 h-64 border rounded-lg flex items-center justify-center text-sm text-gray-500">
+                                            Генерация QR...
+                                        </div>
+                                    )}
+                                </div>
+                                {sensitiveQrExpiresAt && (
+                                    <p className="text-xs text-gray-500 mb-3">
+                                        Действителен до: {formatDate(sensitiveQrExpiresAt)}
+                                    </p>
+                                )}
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        onClick={requestSensitiveQrAccess}
+                                        className="flex-1 px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm"
+                                    >
+                                        Обновить QR
+                                    </button>
+                                    <button
+                                        onClick={fetchSensitiveAccessStatus}
+                                        className="px-3 py-2 rounded-lg bg-gray-200 text-gray-800 hover:bg-gray-300 text-sm"
+                                    >
+                                        Проверить
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     {showDevLetterModal && (
                         <div className="fixed inset-0 flex items-center justify-center bg-black/50 backdrop-blur-md z-50 p-3 sm:p-4">

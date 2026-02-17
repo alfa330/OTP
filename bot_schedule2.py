@@ -4,6 +4,8 @@ import threading
 import asyncio
 import requests
 import hashlib
+import base64
+import hmac
 import jwt
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -31,7 +33,7 @@ import tempfile
 from datetime import datetime, timedelta
 import time
 import math
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, parse_qs
 from ai_feed_back_service import generate_monthly_feedback_with_ai
 
 os.environ['TZ'] = 'Asia/Almaty'
@@ -74,6 +76,8 @@ JWT_COOKIE_SAMESITE = os.getenv('JWT_COOKIE_SAMESITE', 'None')
 JWT_COOKIE_SECURE = os.getenv('JWT_COOKIE_SECURE', 'true').lower() == 'true'
 JWT_COOKIE_PARTITIONED = os.getenv('JWT_COOKIE_PARTITIONED', 'true').lower() == 'true'
 JWT_TOKEN_PEPPER = os.getenv('JWT_TOKEN_PEPPER', JWT_SECRET)
+SENSITIVE_QR_SECRET = os.getenv('SENSITIVE_QR_SECRET', JWT_SECRET)
+SENSITIVE_QR_TTL_SECONDS = int(os.getenv('SENSITIVE_QR_TTL_SECONDS', '300'))
 
 ALLOWED_ORIGINS = {
     "https://alfa330.github.io",
@@ -405,6 +409,147 @@ def _current_session_id_from_access_token():
         return str(payload.get("sid"))
     except AuthError:
         return None
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode('utf-8').rstrip('=')
+
+
+def _base64url_decode(value: str) -> bytes:
+    padding = '=' * (-len(value) % 4)
+    return base64.urlsafe_b64decode((value + padding).encode('utf-8'))
+
+
+def _is_privileged_role(role: str) -> bool:
+    return role in ('admin', 'sv')
+
+
+def _mask_phone_number(phone_number):
+    if phone_number is None:
+        return None
+    raw = str(phone_number).strip()
+    if not raw:
+        return raw
+    digits = re.sub(r'\D', '', raw)
+    if not digits:
+        return '*' * min(len(raw), 6)
+    if len(digits) <= 4:
+        return '*' * len(digits)
+    return ('*' * (len(digits) - 4)) + digits[-4:]
+
+
+def _build_sensitive_qr_token(session_id, user_id):
+    expires_at = datetime.utcnow() + timedelta(seconds=SENSITIVE_QR_TTL_SECONDS)
+    payload = {
+        "sid": str(session_id),
+        "uid": int(user_id),
+        "exp": int(expires_at.timestamp()),
+        "nonce": uuid.uuid4().hex
+    }
+    payload_json = json.dumps(payload, separators=(',', ':'), sort_keys=True).encode('utf-8')
+    payload_b64 = _base64url_encode(payload_json)
+    signature = hmac.new(
+        SENSITIVE_QR_SECRET.encode('utf-8'),
+        payload_b64.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    token = f"{payload_b64}.{signature}"
+    return token, expires_at
+
+
+def _decode_sensitive_qr_token(token):
+    if not token or '.' not in token:
+        raise ValueError("Invalid QR token format")
+
+    payload_b64, signature = token.rsplit('.', 1)
+    expected_signature = hmac.new(
+        SENSITIVE_QR_SECRET.encode('utf-8'),
+        payload_b64.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(signature, expected_signature):
+        raise ValueError("Invalid QR token signature")
+
+    try:
+        payload_raw = _base64url_decode(payload_b64)
+        payload = json.loads(payload_raw.decode('utf-8'))
+    except Exception as exc:
+        raise ValueError("Invalid QR token payload") from exc
+
+    session_id = str(payload.get('sid') or '').strip()
+    user_id = payload.get('uid')
+    exp_ts = payload.get('exp')
+
+    try:
+        user_id = int(user_id)
+        exp_ts = int(exp_ts)
+    except Exception as exc:
+        raise ValueError("Invalid QR token claims") from exc
+
+    if not session_id:
+        raise ValueError("Invalid QR token session")
+
+    now_ts = int(datetime.utcnow().timestamp())
+    if exp_ts <= now_ts:
+        raise ValueError("QR token expired")
+
+    return {
+        "session_id": session_id,
+        "user_id": user_id,
+        "expires_at": datetime.utcfromtimestamp(exp_ts)
+    }
+
+
+def _is_sensitive_access_unlocked(user_id, session_id):
+    if not user_id or not session_id:
+        return False
+    try:
+        return db.is_session_sensitive_access_unlocked(session_id=session_id, user_id=user_id)
+    except Exception as exc:
+        logging.error(f"Failed to check sensitive session access: {exc}")
+        return False
+
+
+def _sanitize_evaluations_for_access(evaluations, reveal_sensitive):
+    result = []
+    for ev in (evaluations or []):
+        if not isinstance(ev, dict):
+            result.append(ev)
+            continue
+
+        item = dict(ev)
+        phone_masked = _mask_phone_number(item.get('phone_number'))
+        item['phone_number_masked'] = phone_masked
+        if not reveal_sensitive:
+            item['phone_number'] = phone_masked
+            item['audio_path'] = None
+        result.append(item)
+    return result
+
+
+def _authorize_operator_scope(requester, requester_id, operator_id):
+    role = requester[3]
+    if role == 'admin':
+        return True
+    if role == 'operator':
+        return requester_id == operator_id
+    if role == 'sv':
+        operator = db.get_user(id=operator_id)
+        return bool(operator and operator[3] == 'operator' and operator[6] == requester_id)
+    return False
+
+
+def _ensure_call_access_for_requester(call_operator_id, requester, requester_id):
+    role = requester[3]
+    if role == 'admin':
+        return True
+    if role == 'operator':
+        return requester_id == call_operator_id
+    if role == 'sv':
+        operator = db.get_user(id=call_operator_id)
+        return bool(operator and operator[3] == 'operator' and operator[6] == requester_id)
+    return False
 
 
 @app.before_request
@@ -744,6 +889,173 @@ def revoke_admin_session(session_id):
         return response, 200
     except Exception as e:
         logging.error(f"revoke_admin_session error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/sensitive-access/qr/request', methods=['POST', 'OPTIONS'])
+@require_api_key
+def request_sensitive_access_qr():
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester or requester[3] != 'operator':
+            return jsonify({"error": "Forbidden: only operator can generate QR access token"}), 403
+
+        session_id = _current_session_id_from_access_token()
+        if not session_id:
+            return jsonify({"error": "Active session not found"}), 401
+
+        session = db.get_user_session(session_id=session_id, user_id=requester_id)
+        if not session or session["revoked_at"] is not None:
+            return jsonify({"error": "Session not found or revoked"}), 401
+
+        token, expires_at = _build_sensitive_qr_token(session_id=session_id, user_id=requester_id)
+        qr_payload = f"OTP-SENSITIVE:{token}"
+
+        return jsonify({
+            "status": "success",
+            "qr_payload": qr_payload,
+            "token": token,
+            "token_expires_at": expires_at.isoformat() + "Z",
+            "granted": _is_sensitive_access_unlocked(requester_id, session_id),
+            "required": True
+        }), 200
+    except Exception as e:
+        logging.error(f"request_sensitive_access_qr error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/sensitive-access/status', methods=['GET', 'OPTIONS'])
+@require_api_key
+def get_sensitive_access_status():
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        role = requester[3]
+        session_id = _current_session_id_from_access_token()
+        required = role == 'operator'
+        if required:
+            granted = bool(_is_sensitive_access_unlocked(requester_id, session_id))
+        else:
+            granted = True
+
+        return jsonify({
+            "status": "success",
+            "required": required,
+            "granted": granted,
+            "session_id": session_id
+        }), 200
+    except Exception as e:
+        logging.error(f"get_sensitive_access_status error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/sensitive-access/revoke', methods=['POST', 'OPTIONS'])
+@require_api_key
+def revoke_sensitive_access():
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "User not found"}), 404
+
+        session_id = _current_session_id_from_access_token()
+        if not session_id:
+            return jsonify({"error": "Active session not found"}), 401
+
+        db.set_session_sensitive_access(session_id=session_id, user_id=requester_id, unlocked=False)
+        return jsonify({"status": "success", "granted": False}), 200
+    except Exception as e:
+        logging.error(f"revoke_sensitive_access error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/sensitive-access/approve', methods=['POST', 'OPTIONS'])
+@require_api_key
+def approve_sensitive_access():
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
+        approver_id = getattr(g, 'user_id', None)
+        if not approver_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        approver = db.get_user(id=approver_id)
+        if not approver or not _is_privileged_role(approver[3]):
+            return jsonify({"error": "Forbidden: only admin or supervisor can approve QR"}), 403
+
+        data = request.get_json(silent=True) or {}
+        raw_token = (data.get('token') or '').strip()
+        if not raw_token:
+            return jsonify({"error": "Missing token"}), 400
+
+        token = raw_token
+        if raw_token.upper().startswith('OTP-SENSITIVE:'):
+            token = raw_token.split(':', 1)[1].strip()
+        if 'token=' in token and ('http://' in token or 'https://' in token):
+            try:
+                parsed = urlparse(token)
+                query_token = parse_qs(parsed.query).get('token', [''])[0]
+                if query_token:
+                    token = query_token.strip()
+            except Exception:
+                pass
+
+        claims = _decode_sensitive_qr_token(token)
+        operator_id = claims["user_id"]
+        operator = db.get_user(id=operator_id)
+        if not operator or operator[3] != 'operator':
+            return jsonify({"error": "QR token does not belong to operator session"}), 400
+
+        session = db.get_user_session(session_id=claims["session_id"], user_id=operator_id)
+        if not session or session["revoked_at"] is not None:
+            return jsonify({"error": "Operator session not found or revoked"}), 410
+
+        if approver[3] == 'sv' and operator[6] != approver_id:
+            return jsonify({"error": "Supervisor can approve only own operators"}), 403
+
+        updated = db.set_session_sensitive_access(
+            session_id=claims["session_id"],
+            user_id=operator_id,
+            unlocked=True
+        )
+        if not updated:
+            return jsonify({"error": "Failed to activate access for operator session"}), 409
+
+        return jsonify({
+            "status": "success",
+            "operator_id": operator_id,
+            "operator_name": operator[2],
+            "session_id": claims["session_id"],
+            "approved_by": approver[2],
+            "approved_by_role": approver[3]
+        }), 200
+    except ValueError as token_error:
+        return jsonify({"error": str(token_error)}), 400
+    except Exception as e:
+        logging.error(f"approve_sensitive_access error: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -1704,7 +2016,25 @@ def get_call_evaluations():
         if not month:
             month = None
         operator_id = int(operator_id)
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+
+        if not _authorize_operator_scope(requester, requester_id, operator_id):
+            return jsonify({"error": "Unauthorized to view this operator evaluations"}), 403
+
         evaluations = db.get_call_evaluations(operator_id, month=month)
+        session_id = _current_session_id_from_access_token()
+        role = requester[3]
+        if role == 'operator':
+            reveal_sensitive = bool(_is_sensitive_access_unlocked(requester_id, session_id))
+        else:
+            reveal_sensitive = True
+        evaluations = _sanitize_evaluations_for_access(evaluations, reveal_sensitive)
 
         # Получаем информацию о супервайзере для dispute button
         operator = db.get_user(id=operator_id)
@@ -1717,6 +2047,10 @@ def get_call_evaluations():
             "supervisor": {
                 "id": supervisor[0] if supervisor else None,
                 "name": supervisor[2] if supervisor else None
+            },
+            "sensitive_access": {
+                "required": role == 'operator',
+                "granted": reveal_sensitive
             }
         })
     except Exception as e:
@@ -2740,6 +3074,21 @@ def sv_request_call():
 @require_api_key
 def get_call_versions(call_id):
     try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester or not _is_privileged_role(requester[3]):
+            return jsonify({"error": "Forbidden: only admin or supervisor can access call versions"}), 403
+
+        head_call = db.get_call_by_id(call_id)
+        if not head_call:
+            return jsonify({"error": "Call not found"}), 404
+
+        if not _ensure_call_access_for_requester(head_call["operator_id"], requester, requester_id):
+            return jsonify({"error": "Unauthorized to access this call versions"}), 403
+
         with db._get_cursor() as cursor:
             # Получаем все версии оценки, начиная с текущей и идя назад по previous_version_id
             versions = []
@@ -2852,9 +3201,28 @@ def delete_draft_evaluation(evaluation_id):
 @require_api_key
 def get_audio_file(evaluation_id):
     try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester or requester[3] not in ('admin', 'sv', 'operator'):
+            return jsonify({"error": "Audio is not available for this role"}), 403
+
+        if requester[3] == 'operator':
+            session_id = _current_session_id_from_access_token()
+            if not _is_sensitive_access_unlocked(requester_id, session_id):
+                return jsonify({
+                    "error": "Sensitive data access requires QR confirmation in current session",
+                    "code": "SENSITIVE_ACCESS_REQUIRED"
+                }), 403
+
         call = db.get_call_by_id(evaluation_id)
         if not call or not call['audio_path']:
             return jsonify({"error": "Audio file not found"}), 404
+
+        if not _ensure_call_access_for_requester(call["operator_id"], requester, requester_id):
+            return jsonify({"error": "Unauthorized to access this audio"}), 403
 
         gcs_client = get_gcs_client()
 
@@ -5663,10 +6031,11 @@ async def show_operator_evaluations(message: types.Message):
         message_text = "<b>Ваши последние оценки:</b>\n\n"
         for eval in evaluations[:5]:  # Показываем последние 5 оценок (уже только последние версии)
             correction_mark = " (корректировка)" if eval['is_correction'] else ""
+            masked_phone = eval.get('phone_number_masked') or _mask_phone_number(eval.get('phone_number'))
             message_text += (
                 f"📞 <b>Звонок {eval['id']}{correction_mark}</b>\n"
                 f"   📅 {eval['month']}\n"
-                f"   📱 {eval['phone_number']}\n"
+                f"   📱 {masked_phone}\n"
                 f"   ⭐ Оценка: <b>{eval['score']}</b>\n"
                 f"   🕒 Дата оценки: {eval['evaluation_date']}\n"
             )
