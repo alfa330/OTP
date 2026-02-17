@@ -444,7 +444,6 @@
     <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     
     <!-- Additional CDNs and styles requested -->
@@ -10731,6 +10730,16 @@
 
         // Main App
         const App = () => {
+            const currentMonth = new Date().toISOString().slice(0, 7);
+            const getStoredValue = (key, fallback) => {
+                try {
+                    const value = localStorage.getItem(key);
+                    return value || fallback;
+                } catch (e) {
+                    return fallback;
+                }
+            };
+
             const [user, setUser] = useState(null);
             const [login, setLogin] = useState('');
             const [password, setPassword] = useState('');
@@ -10757,7 +10766,7 @@
                 new_login: '',
                 confirm_login: ''
             });
-            const [selectedReportMonth, setSelectedReportMonth] = useState(new Date().toISOString().slice(0, 7));
+            const [selectedReportMonth, setSelectedReportMonth] = useState(() => getStoredValue('selectedReportMonth', currentMonth));
             const [expandedEvaluation, setExpandedEvaluation] = useState(null);  
             const [audioUrl, setAudioUrl] = useState(null);
             const [loadingAudioId, setLoadingAudioId] = useState(null);
@@ -10787,7 +10796,7 @@
             });
             const [showMonitoringScaleModal, setShowMonitoringScaleModal] = useState(false);
             const [directions, setDirections] = useState([]);
-            const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
+            const [selectedMonth, setSelectedMonth] = useState(() => getStoredValue('selectedMonth', currentMonth));
             const [users, setUsers] = useState([]);
             const [adminSessions, setAdminSessions] = useState([]);
             const [isAdminSessionsLoading, setIsAdminSessionsLoading] = useState(false);
@@ -12175,11 +12184,11 @@
                 let cancelled = false;
 
                 const restoreSession = async () => {
+                    let parsedStoredUser = null;
                     const storedUser = localStorage.getItem('user');
                     if (storedUser) {
                         try {
-                            const parsedUser = JSON.parse(storedUser);
-                            if (!cancelled) setUser(parsedUser);
+                            parsedStoredUser = JSON.parse(storedUser);
                         } catch (err) {
                             console.error('Error parsing stored user:', err);
                             localStorage.removeItem('user');
@@ -12202,8 +12211,12 @@
                         }
                     } catch (err) {
                         if (!cancelled) {
-                            setUser(null);
-                            localStorage.removeItem('user');
+                            if (parsedStoredUser) {
+                                setUser(parsedStoredUser);
+                            } else {
+                                setUser(null);
+                                localStorage.removeItem('user');
+                            }
                         }
                     }
                 };
@@ -12235,31 +12248,11 @@
                 }
             }, [view]);
             
-            // Persist and restore selectedMonth
-            useEffect(() => {
-                if (user) {
-                    const savedMonth = localStorage.getItem('selectedMonth');
-                    if (savedMonth) {
-                        setSelectedMonth(savedMonth);
-                    }
-                }
-            }, [user]);
-            
             useEffect(() => {
                 if (selectedMonth && user) {
                     localStorage.setItem('selectedMonth', selectedMonth);
                 }
             }, [selectedMonth]);
-            
-            // Persist and restore selectedReportMonth (for admin/supervisor)
-            useEffect(() => {
-                if (user && (user.role === 'admin' || user.role === 'supervisor')) {
-                    const savedReportMonth = localStorage.getItem('selectedReportMonth');
-                    if (savedReportMonth) {
-                        setSelectedReportMonth(savedReportMonth);
-                    }
-                }
-            }, [user]);
             
             useEffect(() => {
                 if (selectedReportMonth && user) {
@@ -12943,30 +12936,33 @@
                             };
 
                 const fetchDirections = async () => {
-                    if (!user || !user.id) {
-                        showToast('User not authenticated. Please log in again.', 'error');
-                        return;
-                    }
-                    setIsLoading(true);
-                    try {
-                        const response = await axios.get(`${API_BASE_URL}/api/admin/directions`, {
-                            headers: { 
-                                'X-API-Key': user.apiKey,
-                                'X-User-Id': user.id
-                            }
-                        });
-                        const data = response.data;
-                        if (data.status === 'success' && isMounted.current) {
-                            setDirections(data.directions.filter(d => d.isActive !== false));
-                        } else {
-                            showToast(data.error || 'Failed to fetch directions', 'error');
+                    const requestKey = `fetchDirections:${user?.id || 'anonymous'}`;
+                    return runSingleFlight(requestKey, async () => {
+                        if (!user || !user.id) {
+                            showToast('User not authenticated. Please log in again.', 'error');
+                            return;
                         }
-                    } catch (err) {
-                        console.error('Fetch directions error:', err);
-                        showToast(err.response?.data?.error || 'Failed to fetch directions', 'error');
-                    } finally {
-                        if (isMounted.current) setIsLoading(false);
-                    }
+                        setIsLoading(true);
+                        try {
+                            const response = await axios.get(`${API_BASE_URL}/api/admin/directions`, {
+                                headers: {
+                                    'X-API-Key': user.apiKey,
+                                    'X-User-Id': user.id
+                                }
+                            });
+                            const data = response.data;
+                            if (data.status === 'success' && isMounted.current) {
+                                setDirections(data.directions.filter(d => d.isActive !== false));
+                            } else {
+                                showToast(data.error || 'Failed to fetch directions', 'error');
+                            }
+                        } catch (err) {
+                            console.error('Fetch directions error:', err);
+                            showToast(err.response?.data?.error || 'Failed to fetch directions', 'error');
+                        } finally {
+                            if (isMounted.current) setIsLoading(false);
+                        }
+                    });
                 };
             
             const saveDirections = async (newDirections) => {
@@ -12999,24 +12995,27 @@
             };
 
             const fetchUsers = async () => {
-                setIsAdminDataLoading(true);
-                
-                try {
-                    const response = await axios.get(`${API_BASE_URL}/api/admin/users`, {
-                        headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success' && isMounted.current) {
-                        setUsers(data.users.filter(u => u.role === 'operator') || []);
-                    } else {
-                        showToast(data.error || 'Failed to fetch users', 'error');
+                const requestKey = `fetchUsers:${user?.id || 'anonymous'}`;
+                return runSingleFlight(requestKey, async () => {
+                    setIsAdminDataLoading(true);
+
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/api/admin/users`, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                        const data = response.data;
+                        if (data.status === 'success' && isMounted.current) {
+                            setUsers(data.users.filter(u => u.role === 'operator') || []);
+                        } else {
+                            showToast(data.error || 'Failed to fetch users', 'error');
+                        }
+                    } catch (err) {
+                        console.error('Fetch users error:', err);
+                        showToast(err.response?.data?.error || 'Failed to fetch users', 'error');
+                    } finally {
+                        if (isMounted.current) setIsAdminDataLoading(false);
                     }
-                } catch (err) {
-                    console.error('Fetch users error:', err);
-                    showToast(err.response?.data?.error || 'Failed to fetch users', 'error');
-                } finally {
-                    if (isMounted.current) setIsAdminDataLoading(false);
-                }
+                });
             };
 
             const fetchAdminSessions = async () => {
@@ -13248,6 +13247,23 @@
                 }
             };
             const isMounted = useRef(true);
+            const inFlightRequests = useRef({});
+
+            const runSingleFlight = useCallback((key, task) => {
+                if (!key || typeof task !== 'function') return Promise.resolve();
+                if (inFlightRequests.current[key]) {
+                    return inFlightRequests.current[key];
+                }
+                const promise = Promise.resolve()
+                    .then(task)
+                    .finally(() => {
+                        if (inFlightRequests.current[key] === promise) {
+                            delete inFlightRequests.current[key];
+                        }
+                    });
+                inFlightRequests.current[key] = promise;
+                return promise;
+            }, []);
 
             const debouncedFetch = useCallback(_.debounce((fn) => {
                 if (isMounted.current) {
@@ -13823,26 +13839,29 @@
             };
 
             const fetchSvList = async () => {
-                setIsAdminDataLoading(true);
-                
-                try {
-                    const response = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
-                        headers: { 'X-API-Key': user.apiKey }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success' && isMounted.current) {
-                        setSvList(data.sv_list || []);
-                    } else {
-                        showToast(data.error || 'Failed to fetch supervisor list', 'error');
-                        console.error(data.error || 'Failed to fetch supervisor list', 'error');
+                const requestKey = `fetchSvList:${user?.id || 'anonymous'}`;
+                return runSingleFlight(requestKey, async () => {
+                    setIsAdminDataLoading(true);
+
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
+                            headers: { 'X-API-Key': user.apiKey }
+                        });
+                        const data = response.data;
+                        if (data.status === 'success' && isMounted.current) {
+                            setSvList(data.sv_list || []);
+                        } else {
+                            showToast(data.error || 'Failed to fetch supervisor list', 'error');
+                            console.error(data.error || 'Failed to fetch supervisor list', 'error');
+                        }
+                    } catch (err) {
+                        console.error('Fetch SV list error:', err);
+                        showToast(err.response?.data?.error || 'Failed to fetch supervisor list', 'error');
+                        console.error(err.response?.data?.error || 'Failed to fetch supervisor list', 'error');
+                    } finally {
+                        if (isMounted.current) setIsAdminDataLoading(false);
                     }
-                } catch (err) {
-                    console.error('Fetch SV list error:', err);
-                    showToast(err.response?.data?.error || 'Failed to fetch supervisor list', 'error');
-                    console.error(err.response?.data?.error || 'Failed to fetch supervisor list', 'error');
-                } finally {
-                    if (isMounted.current) setIsAdminDataLoading(false);
-                }
+                });
             };
 
             const svDataUrl = (id, month) => {
@@ -13854,49 +13873,55 @@
                 // Замените вашу текущую функцию fetchSvData на эту версию.
                 // Использует selectedReportMonth если он задан, иначе selectedMonth.
             const fetchSvData = async (month = (selectedReportMonth || selectedMonth)) => {
-                setIsLoading(true);
-                try {
-                    if (!user || !user.id) return;
-                    const url = svDataUrl(user.id, month);
-                    const response = await axios.get(url, {
-                    headers: { 'X-API-Key': user.apiKey }
-                    });
-                    const data = response.data;
-                    if (data.status === 'success' && isMounted.current) {
-                    setSvData(data);
-                    } else {
-                    showToast(data.error || 'Failed to fetch supervisor data', 'error');
+                const requestKey = `fetchSvData:${user?.id || 'anonymous'}:${month || ''}`;
+                return runSingleFlight(requestKey, async () => {
+                    setIsLoading(true);
+                    try {
+                        if (!user || !user.id) return;
+                        const url = svDataUrl(user.id, month);
+                        const response = await axios.get(url, {
+                        headers: { 'X-API-Key': user.apiKey }
+                        });
+                        const data = response.data;
+                        if (data.status === 'success' && isMounted.current) {
+                        setSvData(data);
+                        } else {
+                        showToast(data.error || 'Failed to fetch supervisor data', 'error');
+                        }
+                    } catch (err) {
+                        console.error('Fetch SV data error:', err);
+                        showToast(err.response?.data?.error || 'Failed to fetch supervisor data', 'error');
+                    } finally {
+                        if (isMounted.current) setIsLoading(false);
                     }
-                } catch (err) {
-                    console.error('Fetch SV data error:', err);
-                    showToast(err.response?.data?.error || 'Failed to fetch supervisor data', 'error');
-                } finally {
-                    if (isMounted.current) setIsLoading(false);
-                }
+                });
                 };
 
             const fetchOperatorData = async () => {
-                setIsLoading(true);
-                
-                try {
-                    const response = await axios.get(
-                        `${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}&month=${selectedMonth}`,
-                        {
-                            headers: { 'X-API-Key': user.apiKey },
+                const requestKey = `fetchOperatorData:${user?.id || 'anonymous'}:${selectedMonth || ''}`;
+                return runSingleFlight(requestKey, async () => {
+                    setIsLoading(true);
+                    
+                    try {
+                        const response = await axios.get(
+                            `${API_BASE_URL}/api/call_evaluations?operator_id=${user.id}&month=${selectedMonth}`,
+                            {
+                                headers: { 'X-API-Key': user.apiKey },
+                            }
+                        );
+                        const data = response.data;
+                        if (data.status === 'success' && isMounted.current) {
+                            setOperatorData(data);
+                        } else {
+                            showToast(data.error || 'Failed to fetch operator data');
                         }
-                    );
-                    const data = response.data;
-                    if (data.status === 'success' && isMounted.current) {
-                        setOperatorData(data);
-                    } else {
-                        showToast(data.error || 'Failed to fetch operator data');
+                    } catch (err) {
+                        console.error('Fetch operator data error:', err);
+                        showToast(err.response?.data?.error || 'Failed to fetch operator data');
+                    } finally {
+                        if (isMounted.current) setIsLoading(false);
                     }
-                } catch (err) {
-                    console.error('Fetch operator data error:', err);
-                    showToast(err.response?.data?.error || 'Failed to fetch operator data');
-                } finally {
-                    if (isMounted.current) setIsLoading(false);
-                }
+                });
             };
 
             const filteredUsers = users.filter(u => 
@@ -13998,112 +14023,118 @@
             };
 
             const fetchTrainings = async () =>{
-                try{
-                    const response = await axios.get(`${API_BASE_URL}/api/trainings?month=${selectedMonth}`,{
-                        headers: {'X-API-Key': user.apiKey, 
-                                  'X-User-Id': user.id}
-                    });  
-                    const data = response.data;
-                    if (data.status === 'success' ){
-                        setOperatorTrainings(data.trainings);
-                    } 
-                }
-                catch (err) {
-                    console.error('Fetch training data error:',err);
-                    showToast('Fetch training data error','error');
-                }
+                const requestKey = `fetchTrainings:${user?.id || 'anonymous'}:${selectedMonth || ''}`;
+                return runSingleFlight(requestKey, async () => {
+                    try{
+                        const response = await axios.get(`${API_BASE_URL}/api/trainings?month=${selectedMonth}`,{
+                            headers: {'X-API-Key': user.apiKey, 
+                                      'X-User-Id': user.id}
+                        });  
+                        const data = response.data;
+                        if (data.status === 'success' ){
+                            setOperatorTrainings(data.trainings);
+                        } 
+                    }
+                    catch (err) {
+                        console.error('Fetch training data error:',err);
+                        showToast('Fetch training data error','error');
+                    }
+                });
             };
 
             const fetchHoursData = async () => {
-            setIsLoading(true);
+            const requestKey = `fetchHoursData:${user?.id || 'anonymous'}:${selectedMonth || ''}`;
+            return runSingleFlight(requestKey, async () => {
+                setIsLoading(true);
 
-            try {
-                const response = await axios.get(
-                `${API_BASE_URL}/api/sv/daily_hours?month=${selectedMonth}`,
-                {
-                    headers: {
-                    'X-API-Key': user.apiKey,
-                    'X-User-Id': String(user.id), // обязательно для /api/sv/daily_hours
-                    },
-                }
-                );
+                try {
+                    const response = await axios.get(
+                    `${API_BASE_URL}/api/sv/daily_hours?month=${selectedMonth}`,
+                    {
+                        headers: {
+                        'X-API-Key': user.apiKey,
+                        'X-User-Id': String(user.id), // обязательно для /api/sv/daily_hours
+                        },
+                    }
+                    );
 
-                const data = response.data;
+                    const data = response.data;
 
-                if (!isMounted.current) return;
+                    if (!isMounted.current) return;
 
-                if (data && data.status === 'success') {
-                // Если сервер уже вернул корректную обёртку с operators — используем её целиком
-                if (Array.isArray(data.operators)) {
-                    // Если это список для SV — найдём нашего оператора и гарантируем, что operators содержит хотя бы его
-                    const operatorObj = data.operators.find(op => Number(op.operator_id) === Number(user.id)) || data.operators[0];
+                    if (data && data.status === 'success') {
+                    // Если сервер уже вернул корректную обёртку с operators — используем её целиком
+                    if (Array.isArray(data.operators)) {
+                        // Если это список для SV — найдём нашего оператора и гарантируем, что operators содержит хотя бы его
+                        const operatorObj = data.operators.find(op => Number(op.operator_id) === Number(user.id)) || data.operators[0];
 
-                    if (operatorObj) {
-                    // Сохраняем весь ответ (он уже в нужном формате)
-                    setHoursData({
+                        if (operatorObj) {
+                        // Сохраняем весь ответ (он уже в нужном формате)
+                        setHoursData({
+                            status: data.status,
+                            month: data.month ?? selectedMonth,
+                            days_in_month: data.days_in_month ?? (data.operators[0]?.days_in_month ?? undefined),
+                            operators: [operatorObj],
+                        });
+                        } else {
+                        // operators — пуст или не содержит нужного оператора
+                        setHoursData({ status: data.status, month: data.month ?? selectedMonth, days_in_month: data.days_in_month, operators: [] });
+                        showToast('No daily hours available for this user/month', 'warning');
+                        }
+                    } else if (data.operator && typeof data.operator === 'object') {
+                        // Иногда бэкенд может вернуть { operator: {...}, month:..., days_in_month:... }
+                        setHoursData({
                         status: data.status,
                         month: data.month ?? selectedMonth,
-                        days_in_month: data.days_in_month ?? (data.operators[0]?.days_in_month ?? undefined),
-                        operators: [operatorObj],
-                    });
+                        days_in_month: data.days_in_month,
+                        operators: [data.operator],
+                        });
+                    } else if (data.operator === null || (Array.isArray(data.operators) && data.operators.length === 0)) {
+                        // Явный случай «нет данных»
+                        setHoursData({ status: data.status, month: data.month ?? selectedMonth, days_in_month: data.days_in_month, operators: [] });
+                        showToast('No daily hours available for this user/month', 'warning');
                     } else {
-                    // operators — пуст или не содержит нужного оператора
-                    setHoursData({ status: data.status, month: data.month ?? selectedMonth, days_in_month: data.days_in_month, operators: [] });
-                    showToast('No daily hours available for this user/month', 'warning');
+                        // Защитный fallback — если прилетел только объект daily map (старый/ошибочный формат),
+                        // оборачиваем его в ожидаемый формат: оператор без meta (operator_id не известен)
+                        // Но лучше, если бек вернёт нормальный объект — оставляем предупреждение.
+                        if (typeof data === 'object' && Object.keys(data).some(k => /^\d+$/.test(k))) {
+                        setHoursData({
+                            status: 'success',
+                            month: selectedMonth,
+                            days_in_month: Object.keys(data).length,
+                            operators: [{
+                            operator_id: user.id,
+                            name: null,
+                            rate: 0,
+                            norm_hours: 0,
+                            fines: 0,
+                            daily: data,
+                            aggregates: {},
+                            }],
+                        });
+                        showToast('Warning: received legacy daily map — wrapped into operator object', 'warning');
+                        } else {
+                        // Нечто совсем неожиданное — сохраним как есть и покажем ошибку
+                        setHoursData(data);
+                        showToast('Unexpected response format from server', 'error');
+                        console.warn('Unexpected /api/sv/daily_hours response:', data);
+                        }
                     }
-                } else if (data.operator && typeof data.operator === 'object') {
-                    // Иногда бэкенд может вернуть { operator: {...}, month:..., days_in_month:... }
-                    setHoursData({
-                    status: data.status,
-                    month: data.month ?? selectedMonth,
-                    days_in_month: data.days_in_month,
-                    operators: [data.operator],
-                    });
-                } else if (data.operator === null || (Array.isArray(data.operators) && data.operators.length === 0)) {
-                    // Явный случай «нет данных»
-                    setHoursData({ status: data.status, month: data.month ?? selectedMonth, days_in_month: data.days_in_month, operators: [] });
-                    showToast('No daily hours available for this user/month', 'warning');
-                } else {
-                    // Защитный fallback — если прилетел только объект daily map (старый/ошибочный формат),
-                    // оборачиваем его в ожидаемый формат: оператор без meta (operator_id не известен)
-                    // Но лучше, если бек вернёт нормальный объект — оставляем предупреждение.
-                    if (typeof data === 'object' && Object.keys(data).some(k => /^\d+$/.test(k))) {
-                    setHoursData({
-                        status: 'success',
-                        month: selectedMonth,
-                        days_in_month: Object.keys(data).length,
-                        operators: [{
-                        operator_id: user.id,
-                        name: null,
-                        rate: 0,
-                        norm_hours: 0,
-                        fines: 0,
-                        daily: data,
-                        aggregates: {},
-                        }],
-                    });
-                    showToast('Warning: received legacy daily map — wrapped into operator object', 'warning');
                     } else {
-                    // Нечто совсем неожиданное — сохраним как есть и покажем ошибку
-                    setHoursData(data);
-                    showToast('Unexpected response format from server', 'error');
-                    console.warn('Unexpected /api/sv/daily_hours response:', data);
+                    showToast(data?.error || 'Failed to fetch daily hours', 'error');
+                    // очистим старые данные, чтобы UI не показывал некорректную информацию
+                    setHoursData({ status: data?.status ?? 'error', month: selectedMonth, days_in_month: undefined, operators: [] });
                     }
+                } catch (err) {
+                    console.error('Fetch daily hours error:', err);
+                    showToast(err.response?.data?.error || 'Failed to fetch daily hours', 'error');
+                    if (isMounted.current) {
+                    setHoursData({ status: 'error', month: selectedMonth, days_in_month: undefined, operators: [] });
+                    }
+                } finally {
+                    if (isMounted.current) setIsLoading(false);
                 }
-                } else {
-                showToast(data?.error || 'Failed to fetch daily hours', 'error');
-                // очистим старые данные, чтобы UI не показывал некорректную информацию
-                setHoursData({ status: data?.status ?? 'error', month: selectedMonth, days_in_month: undefined, operators: [] });
-                }
-            } catch (err) {
-                console.error('Fetch daily hours error:', err);
-                showToast(err.response?.data?.error || 'Failed to fetch daily hours', 'error');
-                if (isMounted.current) {
-                setHoursData({ status: 'error', month: selectedMonth, days_in_month: undefined, operators: [] });
-                }
-            } finally {
-                if (isMounted.current) setIsLoading(false);
-            }
+            });
             };
 
             const fetchSelectedSvData = async (svId, month = (selectedReportMonth || selectedMonth)) => {
