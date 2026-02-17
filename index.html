@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
     <style>
@@ -4825,8 +4825,6 @@
             const [selectedStatuses, setSelectedStatuses] = useState(['all']);
             const [onlyWithCsv, setOnlyWithCsv] = useState(false);
             const [selectedDirections, setSelectedDirections] = useState(['all']);
-            const [selectedHireMonths, setSelectedHireMonths] = useState(['all']);
-            const [expandedHireYears, setExpandedHireYears] = useState(new Set());
 
             // New state: operatorView holds all CSV calls related to a viewed operator, split by matching vs non-matching
             const [operatorView, setOperatorView] = useState({ operatorKey: null, matching: [], nonMatching: [] });
@@ -4880,24 +4878,6 @@
 
             function normalizeName(value) {
                 return String(value || '').trim().toLowerCase();
-            }
-
-            function extractHireYearMonth(value) {
-                if (!value) return null;
-                const raw = String(value).trim();
-                if (!raw) return null;
-
-                if (/^\d{4}-\d{2}$/.test(raw)) return raw;
-                if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 7);
-
-                const dmy = raw.match(/^(\d{2})[.\-/](\d{2})[.\-/](\d{4})$/);
-                if (dmy) return `${dmy[3]}-${dmy[2]}`;
-
-                const dt = new Date(raw);
-                if (!isNaN(dt.getTime())) {
-                return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
-                }
-                return null;
             }
 
             function parseCSVText(text) {
@@ -5169,9 +5149,7 @@
                     direction_id: op.direction_id,
                     direction_name: op.direction_name,
                     status: op.status,
-                    call_count: op.call_count,
-                    hire_date: op.hire_date || op.hireDate || null,
-                    hire_month: op.hire_month || op.hireMonth || null
+                    call_count: op.call_count
                     }));
 
                     setSvOperators(ops);
@@ -5257,33 +5235,7 @@
                 }
             }
 
-            function toggleHireMonthSelection(monthKey) {
-                const key = String(monthKey);
-                const s = (selectedHireMonths || []).slice();
-                if (s.includes('all')) {
-                if (key === 'all') return setSelectedHireMonths(['all']);
-                setSelectedHireMonths([key]);
-                return;
-                }
-                if (s.includes(key)) {
-                const next = s.filter(x => x !== key);
-                setSelectedHireMonths(next.length ? next : ['all']);
-                } else {
-                setSelectedHireMonths(prev => prev.filter(Boolean).concat(key));
-                }
-            }
-
-            function toggleHireYearExpanded(yearKey) {
-                const y = String(yearKey);
-                setExpandedHireYears(prev => {
-                const next = new Set(prev || []);
-                if (next.has(y)) next.delete(y);
-                else next.add(y);
-                return next;
-                });
-            }
-
-            const statusDirectionFilteredSvOperators = React.useMemo(() => {
+            const filteredSvOperators = React.useMemo(() => {
                 let list = svOperators.slice();
                 if (!selectedStatuses || selectedStatuses.length === 0 || selectedStatuses.includes('all')) {
                 // do nothing
@@ -5299,57 +5251,6 @@
                 }
                 return list;
             }, [svOperators, selectedStatuses, selectedDirections]);
-
-            const hireMonthGroups = React.useMemo(() => {
-                const byYear = {};
-                const monthNamesRu = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
-
-                for (const op of statusDirectionFilteredSvOperators) {
-                const ym = extractHireYearMonth(op.hire_month || op.hire_date || op.hireDate || op.hire);
-                if (!ym) continue;
-                const parts = ym.split('-');
-                if (parts.length !== 2) continue;
-                const year = parts[0];
-                const month = parts[1];
-                if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) continue;
-                if (!byYear[year]) byYear[year] = new Set();
-                byYear[year].add(month);
-                }
-
-                return Object.keys(byYear)
-                .sort((a, b) => Number(b) - Number(a))
-                .map(year => ({
-                    year,
-                    months: Array.from(byYear[year])
-                    .sort((a, b) => Number(a) - Number(b))
-                    .map(month => ({
-                        value: `${year}-${month}`,
-                        label: `${monthNamesRu[Math.max(0, Number(month) - 1)] || month} ${year}`
-                    }))
-                }));
-            }, [statusDirectionFilteredSvOperators]);
-
-            const filteredSvOperators = React.useMemo(() => {
-                let list = statusDirectionFilteredSvOperators.slice();
-                if (!selectedHireMonths || selectedHireMonths.length === 0 || selectedHireMonths.includes('all')) {
-                return list;
-                }
-                const selectedSet = new Set(selectedHireMonths.map(String));
-                return list.filter(op => {
-                const ym = extractHireYearMonth(op.hire_month || op.hire_date || op.hireDate || op.hire);
-                return ym && selectedSet.has(ym);
-                });
-            }, [statusDirectionFilteredSvOperators, selectedHireMonths]);
-
-            useEffect(() => {
-                if (selectedHireMonths.includes('all')) return;
-                const available = new Set(
-                (hireMonthGroups || []).flatMap(group => (group.months || []).map(m => m.value))
-                );
-                const filtered = selectedHireMonths.filter(m => available.has(m));
-                if (filtered.length === selectedHireMonths.length) return;
-                setSelectedHireMonths(filtered.length > 0 ? filtered : ['all']);
-            }, [hireMonthGroups, selectedHireMonths]);
 
             function getDesiredSampleCountForOperator(displayName, matchedKey) {
                 if (matchedKey && operatorParams[matchedKey] && operatorParams[matchedKey].sampleCount != null) {
@@ -5375,7 +5276,7 @@
                 const isInsufficient = (Number(desired) || 0) > 0 && (Number(csvMatchedCount) || 0) < Number(desired);
                 if (isInsufficient) res.push({ op, csvCount: csvMatchedCount, desired, matchedKey });
                 }
-                if (selectedDirections.includes('all') && selectedHireMonths.includes('all')) {
+                if (selectedDirections.includes('all')) {
                 for (const k of Object.keys(operatorMap || {})) {
                     const info = operatorMap[k];
                     if (!info || info.count === 0) continue;
@@ -5397,7 +5298,7 @@
                 return String(an || '').localeCompare(String(bn || ''));
                 });
                 return res;
-            }, [filteredSvOperators, operatorMap, operatorParams, sampleCount, onlyWithCsv, selectedDirections, selectedHireMonths, svOperators, calls]);
+            }, [filteredSvOperators, operatorMap, operatorParams, sampleCount, onlyWithCsv, selectedDirections, svOperators, calls]);
 
             const groupedBySvThenDir = React.useMemo(() => {
                 const map = {};
@@ -5426,7 +5327,6 @@
             }, [filteredSvOperators, insufficientOperators]);
 
             const unmatchedCsvOperators = React.useMemo(() => {
-                if (!selectedHireMonths.includes('all')) return [];
                 const apiNames = new Set((svOperators || []).map(o => String(o.name || o.login || o.operator_name || o.id || '').trim().toLowerCase()));
                 return Object.keys(operatorMap || {}).filter(k => {
                 if (!operatorMap[k] || operatorMap[k].count === 0) return false;
@@ -5446,7 +5346,7 @@
                 if (aIns !== bIns) return bIns - aIns;
                 return String(a).localeCompare(String(b));
                 });
-            }, [operatorMap, svOperators, operatorParams, sampleCount, selectedHireMonths]);
+            }, [operatorMap, svOperators, operatorParams, sampleCount]);
 
             const operatorSelectionList = React.useMemo(() => {
                 const rows = [];
@@ -5473,7 +5373,7 @@
                 seen.add(key);
                 }
 
-                if (selectedDirections.includes('all') && selectedHireMonths.includes('all')) {
+                if (selectedDirections.includes('all')) {
                 for (const csvName of unmatchedCsvOperators) {
                     const key = normalizeName(csvName);
                     if (!key || seen.has(key)) continue;
@@ -5502,7 +5402,7 @@
                     || normalizeName(r.supervisor).includes(query);
                 })
                 .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
-            }, [filteredSvOperators, selectedDirections, selectedHireMonths, unmatchedCsvOperators, operatorMap, onlyWithCsv, operatorSearch, calls]);
+            }, [filteredSvOperators, selectedDirections, unmatchedCsvOperators, operatorMap, onlyWithCsv, operatorSearch, calls]);
 
             const selectedOperatorLowerSet = React.useMemo(() => {
                 return new Set(Array.from(selectedOperatorsForShuffle || []).map(v => normalizeName(v)));
@@ -5860,7 +5760,7 @@
                         <button onClick={splitAll} disabled={files.length===0 || parsing || loadingOperators} className={`px-3 py-2 rounded text-white ${(parsing || loadingOperators) ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}>
                             {(parsing || loadingOperators) ? 'Работа...' : 'Делить'}
                         </button>
-                        <button onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); setActiveRange(null); setOperatorParams({}); setSelectedOperatorsForShuffle(new Set()); setOperatorSearch(''); setSelectedHireMonths(['all']); setExpandedHireYears(new Set()); setDistributionTab('general'); if (fileInputRef.current) fileInputRef.current.value = null; }} className="px-3 py-2 rounded border">Сброс</button>
+                        <button onClick={() => { setFiles([]); setCalls([]); setOperatorMap({}); setSelectedOperator(null); setSelectedCalls(new Set()); setActiveRange(null); setOperatorParams({}); setSelectedOperatorsForShuffle(new Set()); setOperatorSearch(''); setDistributionTab('general'); if (fileInputRef.current) fileInputRef.current.value = null; }} className="px-3 py-2 rounded border">Сброс</button>
                         </div>
 
                         {files.length > 0 && (
@@ -5903,7 +5803,7 @@
                         </div>
 
                         <div className="mt-3 flex gap-2">
-                        <button onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); setSelectedStatuses(['all']); setOnlyWithCsv(false); setSelectedDirections(['all']); setSelectedHireMonths(['all']); setExpandedHireYears(new Set()); setSelectedOperatorsForShuffle(new Set()); setOperatorSearch(''); applyFilters(); }} className="px-3 py-2 rounded border">Сброс</button>
+                        <button onClick={() => { setMinDurationSec(null); setMaxDurationSec(null); setVariationSec(0); setSampleCount(3); setSelectedStatuses(['all']); setOnlyWithCsv(false); setSelectedDirections(['all']); setSelectedOperatorsForShuffle(new Set()); setOperatorSearch(''); applyFilters(); }} className="px-3 py-2 rounded border">Сброс</button>
                         </div>
                     </div>
 
@@ -5936,55 +5836,6 @@
                                 <button key={d.id} onClick={()=>toggleDirectionSelection(d.id)} className={`px-2 py-1 text-xs rounded border ${selectedDirections.includes(String(d.id)) ? 'bg-blue-600 text-white' : ''}`}>{d.name}</button>
                             ))}
                             </div>
-                        </div>
-
-                        <div>
-                            <label className="block text-xs text-gray-700">Стаж: месяц найма</label>
-                            <div className="mt-2 flex items-center flex-wrap gap-2">
-                            <button
-                                onClick={() => setSelectedHireMonths(['all'])}
-                                className={`px-2 py-1 text-xs rounded border ${selectedHireMonths.includes('all') ? 'bg-blue-600 text-white' : ''}`}
-                            >
-                                Все
-                            </button>
-                            {!selectedHireMonths.includes('all') && (
-                                <span className="text-xs text-gray-500">Выбрано: {selectedHireMonths.length}</span>
-                            )}
-                            </div>
-
-                            {hireMonthGroups.length === 0 ? (
-                            <div className="mt-2 text-xs text-gray-500">Нет данных по датам найма для текущих фильтров.</div>
-                            ) : (
-                            <div className="mt-2 max-h-56 overflow-auto space-y-2 pr-1">
-                                {hireMonthGroups.map(group => {
-                                const expanded = expandedHireYears.has(group.year);
-                                return (
-                                    <div key={group.year} className="border rounded bg-white">
-                                    <button
-                                        onClick={() => toggleHireYearExpanded(group.year)}
-                                        className="w-full px-3 py-2 text-left flex items-center justify-between text-sm hover:bg-gray-50"
-                                    >
-                                        <span>{group.year}</span>
-                                        <span className="text-gray-500">{expanded ? '-' : '+'}</span>
-                                    </button>
-                                    {expanded && (
-                                        <div className="px-2 pb-2 border-t border-gray-100 flex flex-wrap gap-2">
-                                        {group.months.map(m => (
-                                            <button
-                                            key={m.value}
-                                            onClick={() => toggleHireMonthSelection(m.value)}
-                                            className={`mt-2 px-2 py-1 text-xs rounded border ${selectedHireMonths.includes(m.value) ? 'bg-blue-600 text-white' : 'bg-white'}`}
-                                            >
-                                            {m.label}
-                                            </button>
-                                        ))}
-                                        </div>
-                                    )}
-                                    </div>
-                                );
-                                })}
-                            </div>
-                            )}
                         </div>
 
                         <div>
