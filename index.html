@@ -10245,7 +10245,7 @@
             <div className="grid grid-cols-3 gap-3">
                 {[
                 { key: 'admin',      label: 'Администраторы' },
-                { key: 'sv', label: 'Супервайзеры'   },
+                { key: 'supervisor', label: 'Супервайзеры'   },
                 { key: 'operator',   label: 'Операторы'      },
                 ].map(({ key, label }) => {
                 const active = roleFilter === key;
@@ -10295,7 +10295,7 @@
                 {[
                     { val: 'all',        label: 'Все' },
                     { val: 'admin',      label: 'Админы' },
-                    { val: 'sv', label: 'Супервайзеры' },
+                    { val: 'supervisor', label: 'Супервайзеры' },
                     { val: 'operator',   label: 'Операторы' },
                 ].map(({ val, label }) => (
                     <button key={val} onClick={() => setRole(val)}
