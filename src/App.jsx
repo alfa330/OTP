@@ -13430,17 +13430,37 @@ const withAccessTokenHeader = (headers = {}) => {
                                     <div className="flex items-center justify-between mb-6">
                                     <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
 
-                                    {/* Generate Report Button */}
-                                    <button
+                                    <div className="flex items-center gap-3">
+                                        <button
+                                        onClick={() => {
+                                            setUserToEdit({
+                                            name: "",
+                                            rate: 1.0,
+                                            direction_id: "",
+                                            hire_date: "",
+                                            supervisor_id: "",
+                                            status: "working",
+                                            role: "operator",
+                                            });
+                                            setShowUserEditModal(true);
+                                        }}
+                                        className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
+                                        >
+                                        <i className="fas fa-user-plus"></i> Добавить оператора
+                                        </button>
+
+                                        {/* Generate Report Button */}
+                                        <button
                                         onClick={handleGenerateReport}
                                         className={`bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-all duration-200 ${
-                                        isLoading ? "opacity-50 cursor-not-allowed" : ""
+                                            isLoading ? "opacity-50 cursor-not-allowed" : ""
                                         }`}
                                         disabled={isLoading}
-                                    >
+                                        >
                                         <i className="fas fa-file-excel mr-2"></i>
                                         {isLoading ? "Загрузка..." : "Сформировать отчет"}
-                                    </button>
+                                        </button>
+                                    </div>
                                     </div>
 
                                     {/* Tabs */}
