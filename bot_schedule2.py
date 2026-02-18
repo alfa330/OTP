@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import threading
 import asyncio
@@ -71,7 +71,6 @@ JWT_ACCESS_TOKEN_MINUTES = int(os.getenv('JWT_ACCESS_TOKEN_MINUTES', '30'))
 JWT_REFRESH_TOKEN_DAYS = int(os.getenv('JWT_REFRESH_TOKEN_DAYS', '30'))
 JWT_ACCESS_COOKIE_NAME = os.getenv('JWT_ACCESS_COOKIE_NAME', 'otp_access_token')
 JWT_REFRESH_COOKIE_NAME = os.getenv('JWT_REFRESH_COOKIE_NAME', 'otp_refresh_token')
-JWT_REFRESH_HEADER_NAME = os.getenv('JWT_REFRESH_HEADER_NAME', 'X-Refresh-Token')
 JWT_COOKIE_DOMAIN = os.getenv('JWT_COOKIE_DOMAIN', None)
 JWT_COOKIE_SAMESITE = os.getenv('JWT_COOKIE_SAMESITE', 'None')
 JWT_COOKIE_SECURE = os.getenv('JWT_COOKIE_SECURE', 'true').lower() == 'true'
@@ -112,7 +111,7 @@ CORS(app, resources={
     r"/api/*": {
         "origins": list(ALLOWED_ORIGINS) + [r"http://localhost:\d+", r"http://127\.0\.0\.1:\d+"],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "X-API-Key", "X-User-Id", "Authorization", JWT_REFRESH_HEADER_NAME],
+        "allow_headers": ["Content-Type", "X-API-Key", "X-User-Id", "Authorization"],
         "supports_credentials": True,
         "max_age": 86400
     }
@@ -163,22 +162,6 @@ def _set_request_auth_context(user_id):
     request.environ['HTTP_X_API_KEY'] = FLASK_API_KEY
     request.user_id = int(user_id)
     g.user_id = int(user_id)
-
-
-def _get_bearer_token():
-    auth_header = (request.headers.get('Authorization') or '').strip()
-    if not auth_header:
-        return None
-    parts = auth_header.split(' ', 1)
-    if len(parts) != 2 or parts[0].lower() != 'bearer':
-        return None
-    token = parts[1].strip()
-    return token or None
-
-
-def _get_refresh_header_token():
-    token = (request.headers.get(JWT_REFRESH_HEADER_NAME) or '').strip()
-    return token or None
 
 
 def _decode_token(token, expected_type, verify_exp=True):
@@ -324,30 +307,6 @@ def _get_cookie_value(cookie_name):
     return values[-1]
 
 
-def _authenticate_access_token_value(access_token, touch_session=True):
-    payload = _decode_token(access_token, expected_type="access", verify_exp=True)
-    user_id = int(payload["sub"])
-    session_id = str(payload["sid"])
-    session = db.get_user_session(session_id=session_id, user_id=user_id)
-    if not session:
-        raise AuthError("SESSION_NOT_FOUND", "Session not found")
-    if session["revoked_at"] is not None:
-        raise AuthError("SESSION_REVOKED", "Session revoked")
-    if session["expires_at"] and session["expires_at"] < datetime.utcnow():
-        raise AuthError("SESSION_EXPIRED", "Session expired")
-
-    if touch_session:
-        db.touch_user_session(
-            session_id=session_id,
-            user_id=user_id,
-            ip_address=_client_ip(),
-            user_agent=request.headers.get('User-Agent')
-        )
-
-    _set_request_auth_context(user_id)
-    return payload
-
-
 def _authenticate_access_cookie(optional=True, touch_session=True):
     access_tokens = _get_cookie_values(JWT_ACCESS_COOKIE_NAME)
     if not access_tokens:
@@ -358,86 +317,32 @@ def _authenticate_access_cookie(optional=True, touch_session=True):
     last_error = AuthError("INVALID_TOKEN", "Invalid access token")
     for access_token in reversed(access_tokens):
         try:
-            return _authenticate_access_token_value(access_token, touch_session=touch_session)
+            payload = _decode_token(access_token, expected_type="access", verify_exp=True)
+            user_id = int(payload["sub"])
+            session_id = str(payload["sid"])
+            session = db.get_user_session(session_id=session_id, user_id=user_id)
+            if not session:
+                raise AuthError("SESSION_NOT_FOUND", "Session not found")
+            if session["revoked_at"] is not None:
+                raise AuthError("SESSION_REVOKED", "Session revoked")
+            if session["expires_at"] and session["expires_at"] < datetime.utcnow():
+                raise AuthError("SESSION_EXPIRED", "Session expired")
+
+            if touch_session:
+                db.touch_user_session(
+                    session_id=session_id,
+                    user_id=user_id,
+                    ip_address=_client_ip(),
+                    user_agent=request.headers.get('User-Agent')
+                )
+
+            _set_request_auth_context(user_id)
+            return payload
         except AuthError as auth_error:
             last_error = auth_error
             continue
 
     raise last_error
-
-
-def _authenticate_access_bearer(optional=True, touch_session=True):
-    access_token = _get_bearer_token()
-    if not access_token:
-        if optional:
-            return None
-        raise AuthError("MISSING_TOKEN", "Missing bearer access token")
-    return _authenticate_access_token_value(access_token, touch_session=touch_session)
-
-
-def _authenticate_access(optional=True, touch_session=True):
-    last_error = None
-
-    try:
-        payload = _authenticate_access_bearer(optional=True, touch_session=touch_session)
-        if payload:
-            return payload
-    except AuthError as auth_error:
-        last_error = auth_error
-
-    try:
-        payload = _authenticate_access_cookie(optional=True, touch_session=touch_session)
-        if payload:
-            return payload
-    except AuthError as auth_error:
-        last_error = auth_error
-
-    if optional:
-        return None
-    if last_error:
-        raise last_error
-    raise AuthError("MISSING_TOKEN", "Missing access token")
-
-
-def _authenticate_refresh_token_value(refresh_token, rotate_tokens=True):
-    payload = _decode_token(refresh_token, expected_type="refresh", verify_exp=True)
-    user_id = int(payload["sub"])
-    session_id = str(payload["sid"])
-
-    session = db.get_user_session(session_id=session_id, user_id=user_id)
-    if not session:
-        raise AuthError("SESSION_NOT_FOUND", "Session not found")
-    if session["revoked_at"] is not None:
-        raise AuthError("SESSION_REVOKED", "Session revoked")
-    if session["expires_at"] and session["expires_at"] < datetime.utcnow():
-        raise AuthError("SESSION_EXPIRED", "Session expired")
-    if session["refresh_token_hash"] != _hash_token(refresh_token):
-        raise AuthError("REFRESH_TOKEN_MISMATCH", "Refresh token mismatch")
-
-    user = db.get_user(id=user_id)
-    if not user:
-        raise AuthError("USER_NOT_FOUND", "User not found")
-
-    if rotate_tokens:
-        new_access_token = _build_access_token(user, session_id)
-        new_refresh_token = _build_refresh_token(user_id, session_id)
-        db.rotate_user_session_token(
-            session_id=session_id,
-            user_id=user_id,
-            refresh_token_hash=_hash_token(new_refresh_token),
-            expires_at=datetime.utcnow() + timedelta(days=JWT_REFRESH_TOKEN_DAYS)
-        )
-        g.pending_auth_tokens = (new_access_token, new_refresh_token)
-    else:
-        db.touch_user_session(
-            session_id=session_id,
-            user_id=user_id,
-            ip_address=_client_ip(),
-            user_agent=request.headers.get('User-Agent')
-        )
-
-    _set_request_auth_context(user_id)
-    return payload
 
 
 def _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
@@ -450,7 +355,44 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
     last_error = AuthError("INVALID_TOKEN", "Invalid refresh token")
     for refresh_token in reversed(refresh_tokens):
         try:
-            return _authenticate_refresh_token_value(refresh_token, rotate_tokens=rotate_tokens)
+            payload = _decode_token(refresh_token, expected_type="refresh", verify_exp=True)
+            user_id = int(payload["sub"])
+            session_id = str(payload["sid"])
+
+            session = db.get_user_session(session_id=session_id, user_id=user_id)
+            if not session:
+                raise AuthError("SESSION_NOT_FOUND", "Session not found")
+            if session["revoked_at"] is not None:
+                raise AuthError("SESSION_REVOKED", "Session revoked")
+            if session["expires_at"] and session["expires_at"] < datetime.utcnow():
+                raise AuthError("SESSION_EXPIRED", "Session expired")
+            if session["refresh_token_hash"] != _hash_token(refresh_token):
+                raise AuthError("REFRESH_TOKEN_MISMATCH", "Refresh token mismatch")
+
+            user = db.get_user(id=user_id)
+            if not user:
+                raise AuthError("USER_NOT_FOUND", "User not found")
+
+            if rotate_tokens:
+                new_access_token = _build_access_token(user, session_id)
+                new_refresh_token = _build_refresh_token(user_id, session_id)
+                db.rotate_user_session_token(
+                    session_id=session_id,
+                    user_id=user_id,
+                    refresh_token_hash=_hash_token(new_refresh_token),
+                    expires_at=datetime.utcnow() + timedelta(days=JWT_REFRESH_TOKEN_DAYS)
+                )
+                g.pending_auth_tokens = (new_access_token, new_refresh_token)
+            else:
+                db.touch_user_session(
+                    session_id=session_id,
+                    user_id=user_id,
+                    ip_address=_client_ip(),
+                    user_agent=request.headers.get('User-Agent')
+                )
+
+            _set_request_auth_context(user_id)
+            return payload
         except AuthError as auth_error:
             last_error = auth_error
             continue
@@ -458,55 +400,15 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
     raise last_error
 
 
-def _authenticate_refresh_header(optional=True, rotate_tokens=True):
-    refresh_token = _get_refresh_header_token()
-    if not refresh_token:
-        if optional:
-            return None
-        raise AuthError("MISSING_REFRESH_TOKEN", "Missing refresh token header")
-    return _authenticate_refresh_token_value(refresh_token, rotate_tokens=rotate_tokens)
-
-
-def _authenticate_refresh(optional=True, rotate_tokens=True):
-    last_error = None
-
-    try:
-        payload = _authenticate_refresh_cookie(optional=True, rotate_tokens=rotate_tokens)
-        if payload:
-            return payload
-    except AuthError as auth_error:
-        last_error = auth_error
-
-    try:
-        payload = _authenticate_refresh_header(optional=True, rotate_tokens=rotate_tokens)
-        if payload:
-            return payload
-    except AuthError as auth_error:
-        last_error = auth_error
-
-    if optional:
-        return None
-    if last_error:
-        raise last_error
-    raise AuthError("MISSING_REFRESH_TOKEN", "Missing refresh token")
-
-
 def _current_session_id_from_access_token():
-    candidate_tokens = []
-    bearer_token = _get_bearer_token()
-    cookie_token = _get_cookie_value(JWT_ACCESS_COOKIE_NAME)
-    if bearer_token:
-        candidate_tokens.append(bearer_token)
-    if cookie_token:
-        candidate_tokens.append(cookie_token)
-
-    for access_token in candidate_tokens:
-        try:
-            payload = _decode_token(access_token, expected_type="access", verify_exp=False)
-            return str(payload.get("sid"))
-        except AuthError:
-            continue
-    return None
+    access_token = _get_cookie_value(JWT_ACCESS_COOKIE_NAME)
+    if not access_token:
+        return None
+    try:
+        payload = _decode_token(access_token, expected_type="access", verify_exp=False)
+        return str(payload.get("sid"))
+    except AuthError:
+        return None
 
 
 def _base64url_encode(value: bytes) -> str:
@@ -661,14 +563,14 @@ def hydrate_user_context_from_jwt():
         return None
 
     try:
-        payload = _authenticate_access(optional=True)
+        payload = _authenticate_access_cookie(optional=True)
         if payload:
             return None
     except AuthError as auth_error:
         request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
     try:
-        _authenticate_refresh(optional=True, rotate_tokens=False)
+        _authenticate_refresh_cookie(optional=True, rotate_tokens=False)
     except AuthError as refresh_auth_error:
         request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
     return None
@@ -683,13 +585,13 @@ def require_api_key(f):
             return f(*args, **kwargs)
 
         try:
-            if _authenticate_access(optional=True):
+            if _authenticate_access_cookie(optional=True):
                 return f(*args, **kwargs)
         except AuthError as auth_error:
             request.environ['JWT_AUTH_ERROR_CODE'] = auth_error.code
 
         try:
-            if _authenticate_refresh(optional=True, rotate_tokens=False):
+            if _authenticate_refresh_cookie(optional=True, rotate_tokens=False):
                 return f(*args, **kwargs)
         except AuthError as refresh_auth_error:
             request.environ['JWT_AUTH_ERROR_CODE'] = refresh_auth_error.code
@@ -698,7 +600,7 @@ def require_api_key(f):
         if auth_error_code:
             return jsonify({"error": "JWT authentication failed", "code": auth_error_code}), 401
 
-        if _get_cookie_value(JWT_REFRESH_COOKIE_NAME) or _get_refresh_header_token():
+        if _get_cookie_value(JWT_REFRESH_COOKIE_NAME):
             return jsonify({"error": "Access token required", "code": "TOKEN_EXPIRED"}), 401
 
         logging.warning("Unauthorized request: no valid JWT cookie")
@@ -714,7 +616,7 @@ def _build_cors_preflight_response():
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Vary"] = "Origin"
 
-    response.headers["Access-Control-Allow-Headers"] = f"Content-Type, X-API-Key, X-User-Id, Authorization, {JWT_REFRESH_HEADER_NAME}"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, X-User-Id, Authorization"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     response.headers["Access-Control-Max-Age"] = "86400"
     return response
@@ -731,7 +633,7 @@ def after_request(response):
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         response.headers['Vary'] = 'Origin'
 
-    response.headers['Access-Control-Allow-Headers'] = f'Content-Type, X-API-Key, X-User-Id, Authorization, {JWT_REFRESH_HEADER_NAME}'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-User-Id, Authorization'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, DELETE, PUT'
 
     pending_tokens = getattr(g, 'pending_auth_tokens', None)
@@ -779,15 +681,7 @@ def login():
             )
             _set_request_auth_context(user[0])
             payload = _get_user_payload(user)
-            response = jsonify({
-                "status": "success",
-                "user": payload,
-                **payload,
-                "tokens": {
-                    "access_token": access_token,
-                    "refresh_token": refresh_token
-                }
-            })
+            response = jsonify({"status": "success", "user": payload, **payload})
             _set_auth_cookies(response, access_token, refresh_token)
             return response, 200
 
@@ -820,7 +714,7 @@ def refresh_auth():
         if request.method == 'OPTIONS':
             return _build_cors_preflight_response()
 
-        _authenticate_refresh(optional=False, rotate_tokens=True)
+        _authenticate_refresh_cookie(optional=False, rotate_tokens=True)
         user_id = getattr(g, 'user_id', None)
         if not user_id:
             raise AuthError("UNAUTHORIZED", "Unauthorized")
@@ -829,14 +723,7 @@ def refresh_auth():
             raise AuthError("USER_NOT_FOUND", "User not found")
 
         payload_user = _get_user_payload(user)
-        response_payload = {"status": "success", "user": payload_user, **payload_user}
-        pending_tokens = getattr(g, 'pending_auth_tokens', None)
-        if pending_tokens:
-            response_payload["tokens"] = {
-                "access_token": pending_tokens[0],
-                "refresh_token": pending_tokens[1]
-            }
-        response = jsonify(response_payload)
+        response = jsonify({"status": "success", "user": payload_user, **payload_user})
         return response, 200
     except AuthError as auth_error:
         response = jsonify({"error": auth_error.message, "code": auth_error.code})
