@@ -8348,7 +8348,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [operatorTrainings, setOperatorTrainings] = useState([]);
             const [showAddSvModal, setShowAddSvModal] = useState(false);
             const [showDevLetterModal, setShowDevLetterModal] = useState(false);
-            const [qrConfirmModalOpen, setQrConfirmModalOpen] = useState(false);
+            const [qrConfirmModalOpen, setQrConfirmModalOpen] = useState(false); 
             const [showAiMonthlyFeedbackModal, setShowAiMonthlyFeedbackModal] = useState(false);
             const [aiMonthlyFeedbackLoading, setAiMonthlyFeedbackLoading] = useState(false);
             const [aiMonthlyFeedbackError, setAiMonthlyFeedbackError] = useState('');
