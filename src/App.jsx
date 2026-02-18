@@ -85,6 +85,8 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
         const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
         const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
         const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
+        let runtimeAccessToken = '';
+        let runtimeRefreshToken = '';
 
         const readFromStorage = (key) => {
             if (typeof window === 'undefined') return '';
@@ -122,18 +124,33 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
             return { accessToken, refreshToken };
         };
 
-        const getStoredAccessToken = () => readFromStorage(ACCESS_TOKEN_STORAGE_KEY);
-        const getStoredRefreshToken = () => readFromStorage(REFRESH_TOKEN_STORAGE_KEY);
+        const getStoredAccessToken = () => runtimeAccessToken || readFromStorage(ACCESS_TOKEN_STORAGE_KEY);
+        const getStoredRefreshToken = () => runtimeRefreshToken || readFromStorage(REFRESH_TOKEN_STORAGE_KEY);
 
         const persistAuthTokens = (payload) => {
             const { accessToken, refreshToken } = extractAuthTokens(payload);
-            if (accessToken) writeToStorage(ACCESS_TOKEN_STORAGE_KEY, accessToken);
-            if (refreshToken) writeToStorage(REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+            if (accessToken) {
+                runtimeAccessToken = accessToken;
+                writeToStorage(ACCESS_TOKEN_STORAGE_KEY, accessToken);
+                if (typeof axios !== 'undefined') {
+                    axios.defaults.headers.common.Authorization = `Bearer ${accessToken}`;
+                }
+            }
+            if (refreshToken) {
+                runtimeRefreshToken = refreshToken;
+                writeToStorage(REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+            }
         };
 
         const clearStoredAuthTokens = () => {
+            runtimeAccessToken = '';
+            runtimeRefreshToken = '';
             removeFromStorage(ACCESS_TOKEN_STORAGE_KEY);
             removeFromStorage(REFRESH_TOKEN_STORAGE_KEY);
+            if (typeof axios !== 'undefined') {
+                delete axios.defaults.headers.common.Authorization;
+                delete axios.defaults.headers.common.authorization;
+            }
         };
 
         const withAccessTokenHeader = (headers = {}) => {
@@ -141,6 +158,11 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
             if (!accessToken) return headers;
             return { ...headers, Authorization: `Bearer ${accessToken}` };
         };
+
+        const initialAccessToken = getStoredAccessToken();
+        if (initialAccessToken && typeof axios !== 'undefined') {
+            axios.defaults.headers.common.Authorization = `Bearer ${initialAccessToken}`;
+        }
 
         if (typeof axios !== 'undefined') {
             axios.defaults.withCredentials = true;
@@ -477,7 +499,7 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
 
             const [hoursResp, trainingsResp] = await Promise.all([
                 axios.get(url, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } }),
-                axios.get(trainingsUrl, { headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id } })
+                axios.get(trainingsUrl, { headers: withAccessTokenHeader({ 'X-API-Key': user.apiKey, 'X-User-Id': user.id }) })
             ]);
 
             if (hoursResp.data && hoursResp.data.status === 'success' && Array.isArray(hoursResp.data.operators)) {
@@ -1197,18 +1219,18 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
             try {
             if (trainingModalState.training?.id) {
                 await axios.put(`${API_BASE_URL}/api/trainings/${trainingModalState.training.id}`, data, {
-                headers: {
+                headers: withAccessTokenHeader({
                     'X-API-Key': user.apiKey,
                     'X-User-Id': user.id
-                }
+                })
                 });
                 fallbackToast('Тренинг обновлен', 'success');
             } else {
                 await axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: trainingModalState.operatorId }, {
-                headers: {
+                headers: withAccessTokenHeader({
                     'X-API-Key': user.apiKey,
                     'X-User-Id': user.id
-                }
+                })
                 });
                 fallbackToast('Тренинг добавлен', 'success');
             }
@@ -1229,10 +1251,10 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
             setIsTrainingActionLoading(true);
             try {
             await axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
-                headers: {
+                headers: withAccessTokenHeader({
                 'X-API-Key': user.apiKey,
                 'X-User-Id': user.id
-                }
+                })
             });
             fallbackToast('Тренинг удален', 'success');
             await fetchDailyHoursAndTrainings();
@@ -9067,10 +9089,10 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                     // Получаем тренинги только если операторы загружены
                     if (!operatorsLoaded) return;
                     axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
-                        headers: {
+                        headers: withAccessTokenHeader({
                             'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
-                        }
+                        })
                     }).then(res => {
                         const grouped = {};
                         (res.data.trainings || []).forEach(t => {
@@ -9119,18 +9141,18 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
 
                 const handleDelete = (trainingId) => {
                     axios.delete(`${API_BASE_URL}/api/trainings/${trainingId}`, {
-                        headers: {
+                        headers: withAccessTokenHeader({
                             'X-API-Key': user.apiKey,
                             'X-User-Id': user.id
-                        }
+                        })
                     })
                         .then(() => {
                             // Обновляем только тренинги
                             axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
-                                headers: {
+                                headers: withAccessTokenHeader({
                                     'X-API-Key': user.apiKey,
                                     'X-User-Id': user.id
-                                }
+                                })
                             })
                                 .then(res => {
                                     const grouped = {};
@@ -9155,10 +9177,10 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                 const handleSave = (data) => {
                     const updateTrainings = () => {
                         axios.get(`${API_BASE_URL}/api/trainings?month=${month}`, {
-                            headers: {
+                            headers: withAccessTokenHeader({
                                 'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
-                            }
+                            })
                         })
                             .then(res => {
                                 const grouped = {};
@@ -9176,10 +9198,10 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                     };
                     if (editingTraining) {
                         axios.put(`${API_BASE_URL}/api/trainings/${editingTraining.id}`, data, {
-                            headers: {
+                            headers: withAccessTokenHeader({
                                 'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
-                            }
+                            })
                         })
                             .then(() => {
                                 updateTrainings();
@@ -9191,10 +9213,10 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                             });
                     } else {
                         axios.post(`${API_BASE_URL}/api/trainings`, { ...data, operator_id: currentOperator }, {
-                            headers: {
+                            headers: withAccessTokenHeader({
                                 'X-API-Key': user.apiKey,
                                 'X-User-Id': user.id
-                            }
+                            })
                         })
                             .then(() => {
                                 updateTrainings();
@@ -9740,11 +9762,12 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                             setUser(sessionUser);
                         }
                     } catch (err) {
-                        if (err?.response?.status === 401) {
-                            clearStoredAuthTokens();
-                        }
                         if (!cancelled) {
-                            if (parsedStoredUser) {
+                            if (err?.response?.status === 401) {
+                                clearStoredAuthTokens();
+                                setUser(null);
+                                localStorage.removeItem('user');
+                            } else if (parsedStoredUser) {
                                 setUser(parsedStoredUser);
                             } else {
                                 setUser(null);
@@ -11566,8 +11589,8 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                 return runSingleFlight(requestKey, async () => {
                     try{
                         const response = await axios.get(`${API_BASE_URL}/api/trainings?month=${selectedMonth}`,{
-                            headers: {'X-API-Key': user.apiKey, 
-                                      'X-User-Id': user.id}
+                            headers: withAccessTokenHeader({'X-API-Key': user.apiKey, 
+                                      'X-User-Id': user.id})
                         });  
                         const data = response.data;
                         if (data.status === 'success' ){
