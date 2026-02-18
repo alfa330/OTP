@@ -13,7 +13,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         const defaults = {
         rate: base.rate ?? 1.0,
         direction_id: base.direction_id ?? "",
-        supervisor_id: base.supervisor_id ?? (user?.id ?? ""),
+        supervisor_id: base.supervisor_id ?? (user?.role === 'admin' ? "" : (user?.id ?? "")),
         status: base.status ?? "working",
         ...base,
         };
@@ -48,7 +48,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         rate: 1.0,
         hire_date: "",
         direction_id: "",
-        supervisor_id: user?.id ?? "",
+        supervisor_id: user?.role === 'admin' ? "" : (user?.id ?? ""),
         status: "working",
         });
         setModalError("");
@@ -57,9 +57,16 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     };
 
     const handleSave = async () => {
+        const isCreateMode = !editedUser?.id;
+
         // Простая локальная валидация
         if (!editedUser || !editedUser.name || editedUser.name.trim().length === 0) {
         setModalError("Имя обязательно.");
+        return;
+        }
+
+        if (isCreateMode && user?.role === 'admin' && !editedUser.supervisor_id) {
+        setModalError("Супервайзер обязателен.");
         return;
         }
 
@@ -212,6 +219,27 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     <option value={0.5}>0.50</option>
                     </select>
                 </div>
+
+                {user?.role === "admin" && (
+                <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
+                    <select
+                    value={editedUser?.supervisor_id || ""}
+                    onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                    disabled={isLoading || !!createdCredentials}
+                    >
+                    <option value="">Выберите супервайзера</option>
+                    {(svList || [])
+                        .filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status)
+                        .map((sv) => (
+                        <option key={sv.id} value={sv.id}>
+                            {sv.name}
+                        </option>
+                        ))}
+                    </select>
+                </div>
+                )}
 
                 {/* Направление */}
                 <div>
