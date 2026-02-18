@@ -71,6 +71,7 @@ JWT_ACCESS_TOKEN_MINUTES = int(os.getenv('JWT_ACCESS_TOKEN_MINUTES', '30'))
 JWT_REFRESH_TOKEN_DAYS = int(os.getenv('JWT_REFRESH_TOKEN_DAYS', '30'))
 JWT_ACCESS_COOKIE_NAME = os.getenv('JWT_ACCESS_COOKIE_NAME', 'otp_access_token')
 JWT_REFRESH_COOKIE_NAME = os.getenv('JWT_REFRESH_COOKIE_NAME', 'otp_refresh_token')
+JWT_REFRESH_HEADER_NAME = os.getenv('JWT_REFRESH_HEADER_NAME', 'X-Refresh-Token')
 JWT_COOKIE_DOMAIN = os.getenv('JWT_COOKIE_DOMAIN', None)
 JWT_COOKIE_SAMESITE = os.getenv('JWT_COOKIE_SAMESITE', 'None')
 JWT_COOKIE_SECURE = os.getenv('JWT_COOKIE_SECURE', 'true').lower() == 'true'
@@ -111,7 +112,7 @@ CORS(app, resources={
     r"/api/*": {
         "origins": list(ALLOWED_ORIGINS) + [r"http://localhost:\d+", r"http://127\.0\.0\.1:\d+"],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "X-API-Key", "X-User-Id", "Authorization"],
+        "allow_headers": ["Content-Type", "X-API-Key", "X-User-Id", "Authorization", "X-Refresh-Token"],
         "supports_credentials": True,
         "max_age": 86400
     }
@@ -307,12 +308,44 @@ def _get_cookie_value(cookie_name):
     return values[-1]
 
 
+def _get_bearer_access_token():
+    auth_header = (request.headers.get('Authorization') or '').strip()
+    if not auth_header:
+        return None
+    parts = auth_header.split(' ', 1)
+    if len(parts) != 2 or parts[0].strip().lower() != 'bearer':
+        return None
+    token = parts[1].strip()
+    return token or None
+
+
+def _get_refresh_header_token():
+    token = (request.headers.get(JWT_REFRESH_HEADER_NAME) or '').strip()
+    return token or None
+
+
+def _get_access_token_values():
+    tokens = _get_cookie_values(JWT_ACCESS_COOKIE_NAME)
+    header_token = _get_bearer_access_token()
+    if header_token:
+        tokens.append(header_token)
+    return tokens
+
+
+def _get_refresh_token_values():
+    tokens = _get_cookie_values(JWT_REFRESH_COOKIE_NAME)
+    header_token = _get_refresh_header_token()
+    if header_token:
+        tokens.append(header_token)
+    return tokens
+
+
 def _authenticate_access_cookie(optional=True, touch_session=True):
-    access_tokens = _get_cookie_values(JWT_ACCESS_COOKIE_NAME)
+    access_tokens = _get_access_token_values()
     if not access_tokens:
         if optional:
             return None
-        raise AuthError("MISSING_TOKEN", "Missing access token cookie")
+        raise AuthError("MISSING_TOKEN", "Missing access token")
 
     last_error = AuthError("INVALID_TOKEN", "Invalid access token")
     for access_token in reversed(access_tokens):
@@ -346,11 +379,11 @@ def _authenticate_access_cookie(optional=True, touch_session=True):
 
 
 def _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
-    refresh_tokens = _get_cookie_values(JWT_REFRESH_COOKIE_NAME)
+    refresh_tokens = _get_refresh_token_values()
     if not refresh_tokens:
         if optional:
             return None
-        raise AuthError("MISSING_REFRESH_TOKEN", "Missing refresh token cookie")
+        raise AuthError("MISSING_REFRESH_TOKEN", "Missing refresh token")
 
     last_error = AuthError("INVALID_TOKEN", "Invalid refresh token")
     for refresh_token in reversed(refresh_tokens):
@@ -401,7 +434,7 @@ def _authenticate_refresh_cookie(optional=True, rotate_tokens=True):
 
 
 def _current_session_id_from_access_token():
-    access_token = _get_cookie_value(JWT_ACCESS_COOKIE_NAME)
+    access_token = _get_cookie_value(JWT_ACCESS_COOKIE_NAME) or _get_bearer_access_token()
     if not access_token:
         return None
     try:
@@ -600,10 +633,10 @@ def require_api_key(f):
         if auth_error_code:
             return jsonify({"error": "JWT authentication failed", "code": auth_error_code}), 401
 
-        if _get_cookie_value(JWT_REFRESH_COOKIE_NAME):
+        if _get_refresh_token_values():
             return jsonify({"error": "Access token required", "code": "TOKEN_EXPIRED"}), 401
 
-        logging.warning("Unauthorized request: no valid JWT cookie")
+        logging.warning("Unauthorized request: no valid JWT token")
         return jsonify({"error": "Unauthorized"}), 401
     return decorated
 
@@ -616,7 +649,7 @@ def _build_cors_preflight_response():
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Vary"] = "Origin"
 
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, X-User-Id, Authorization"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, X-User-Id, Authorization, X-Refresh-Token"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     response.headers["Access-Control-Max-Age"] = "86400"
     return response
@@ -633,7 +666,7 @@ def after_request(response):
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         response.headers['Vary'] = 'Origin'
 
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-User-Id, Authorization'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, X-User-Id, Authorization, X-Refresh-Token'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, DELETE, PUT'
 
     pending_tokens = getattr(g, 'pending_auth_tokens', None)
@@ -681,7 +714,13 @@ def login():
             )
             _set_request_auth_context(user[0])
             payload = _get_user_payload(user)
-            response = jsonify({"status": "success", "user": payload, **payload})
+            response = jsonify({
+                "status": "success",
+                "user": payload,
+                **payload,
+                "access_token": access_token,
+                "refresh_token": refresh_token
+            })
             _set_auth_cookies(response, access_token, refresh_token)
             return response, 200
 
@@ -723,7 +762,12 @@ def refresh_auth():
             raise AuthError("USER_NOT_FOUND", "User not found")
 
         payload_user = _get_user_payload(user)
-        response = jsonify({"status": "success", "user": payload_user, **payload_user})
+        response_payload = {"status": "success", "user": payload_user, **payload_user}
+        pending_tokens = getattr(g, 'pending_auth_tokens', None)
+        if pending_tokens:
+            response_payload["access_token"] = pending_tokens[0]
+            response_payload["refresh_token"] = pending_tokens[1]
+        response = jsonify(response_payload)
         return response, 200
     except AuthError as auth_error:
         response = jsonify({"error": auth_error.message, "code": auth_error.code})
