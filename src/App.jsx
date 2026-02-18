@@ -83,12 +83,81 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
 
         const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
         const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
+        const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
+        const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
+
+        const readFromStorage = (key) => {
+            if (typeof window === 'undefined') return '';
+            try {
+                return window.localStorage.getItem(key) || '';
+            } catch (err) {
+                return '';
+            }
+        };
+
+        const writeToStorage = (key, value) => {
+            if (typeof window === 'undefined') return;
+            try {
+                if (value) {
+                    window.localStorage.setItem(key, value);
+                }
+            } catch (err) {
+                // ignore storage write errors (e.g. private mode restrictions)
+            }
+        };
+
+        const removeFromStorage = (key) => {
+            if (typeof window === 'undefined') return;
+            try {
+                window.localStorage.removeItem(key);
+            } catch (err) {
+                // ignore storage delete errors
+            }
+        };
+
+        const extractAuthTokens = (payload) => {
+            const tokenSource = (payload && typeof payload.tokens === 'object') ? payload.tokens : payload;
+            const accessToken = typeof tokenSource?.access_token === 'string' ? tokenSource.access_token.trim() : '';
+            const refreshToken = typeof tokenSource?.refresh_token === 'string' ? tokenSource.refresh_token.trim() : '';
+            return { accessToken, refreshToken };
+        };
+
+        const getStoredAccessToken = () => readFromStorage(ACCESS_TOKEN_STORAGE_KEY);
+        const getStoredRefreshToken = () => readFromStorage(REFRESH_TOKEN_STORAGE_KEY);
+
+        const persistAuthTokens = (payload) => {
+            const { accessToken, refreshToken } = extractAuthTokens(payload);
+            if (accessToken) writeToStorage(ACCESS_TOKEN_STORAGE_KEY, accessToken);
+            if (refreshToken) writeToStorage(REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+        };
+
+        const clearStoredAuthTokens = () => {
+            removeFromStorage(ACCESS_TOKEN_STORAGE_KEY);
+            removeFromStorage(REFRESH_TOKEN_STORAGE_KEY);
+        };
+
+        const withAccessTokenHeader = (headers = {}) => {
+            const accessToken = getStoredAccessToken();
+            if (!accessToken) return headers;
+            return { ...headers, Authorization: `Bearer ${accessToken}` };
+        };
 
         if (typeof axios !== 'undefined') {
             axios.defaults.withCredentials = true;
             if (!window.__otpAxiosAuthInterceptorInstalled) {
                 window.__otpAxiosAuthInterceptorInstalled = true;
                 window.__otpRefreshPromise = null;
+
+                axios.interceptors.request.use((config) => {
+                    const accessToken = getStoredAccessToken();
+                    if (accessToken) {
+                        config.headers = config.headers || {};
+                        if (!config.headers.Authorization && !config.headers.authorization) {
+                            config.headers.Authorization = `Bearer ${accessToken}`;
+                        }
+                    }
+                    return config;
+                });
 
                 axios.interceptors.response.use(
                     (response) => response,
@@ -110,16 +179,34 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                         ) {
                             originalRequest.__isRetryRequest = true;
                             if (!window.__otpRefreshPromise) {
+                                const refreshToken = getStoredRefreshToken();
+                                const refreshHeaders = refreshToken
+                                    ? { 'X-Refresh-Token': refreshToken }
+                                    : {};
+
                                 window.__otpRefreshPromise = axios.post(
                                     AUTH_REFRESH_URL,
                                     {},
-                                    { withCredentials: true }
-                                ).finally(() => {
+                                    {
+                                        withCredentials: true,
+                                        headers: refreshHeaders
+                                    }
+                                ).then((refreshResponse) => {
+                                    persistAuthTokens(refreshResponse?.data);
+                                    return refreshResponse;
+                                }).catch((refreshError) => {
+                                    clearStoredAuthTokens();
+                                    throw refreshError;
+                                }).finally(() => {
                                     window.__otpRefreshPromise = null;
                                 });
                             }
 
                             await window.__otpRefreshPromise;
+                            if (originalRequest?.headers) {
+                                delete originalRequest.headers.Authorization;
+                                delete originalRequest.headers.authorization;
+                            }
                             return axios(originalRequest);
                         }
 
@@ -1188,10 +1275,10 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
             const resp = await fetch(url, {
                 method: 'GET',
                 credentials: 'include',
-                headers: {
+                headers: withAccessTokenHeader({
                 'X-API-Key': user.apiKey || '',
                 'X-User-Id': String(user.id)
-                }
+                })
             });
 
             if (!resp.ok) {
@@ -4448,10 +4535,10 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                         setIsLoading(true);
                         const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators`, {
                             credentials: 'include',
-                            headers: {
+                            headers: withAccessTokenHeader({
                                 'X-Api-Key': user.apiKey,
                                 'X-User-Id': user.id
-                            }
+                            })
                         });
                         
                         if (response.ok) {
@@ -4597,11 +4684,11 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/day_off`, {
                         method: 'POST',
                         credentials: 'include',
-                        headers: {
+                        headers: withAccessTokenHeader({
                             'Content-Type': 'application/json',
                             'X-Api-Key': user.apiKey,
                             'X-User-Id': user.id
-                        },
+                        }),
                         body: JSON.stringify({
                             operator_id: opId,
                             day_off_date: date
@@ -4722,11 +4809,11 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                   const response = await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
                     method: 'POST',
                     credentials: 'include',
-                    headers: {
+                    headers: withAccessTokenHeader({
                       'Content-Type': 'application/json',
                       'X-Api-Key': user.apiKey,
                       'X-User-Id': user.id
-                    },
+                    }),
                     body: JSON.stringify({
                       operator_id: opId,
                       shifts: shifts
@@ -4800,11 +4887,11 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                   const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift`, {
                     method: 'POST',
                     credentials: 'include',
-                    headers: {
+                    headers: withAccessTokenHeader({
                       'Content-Type': 'application/json',
                       'X-Api-Key': user.apiKey,
                       'X-User-Id': user.id
-                    },
+                    }),
                     body: JSON.stringify({
                       operator_id: opId,
                       shift_date: date,
@@ -4856,11 +4943,11 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift`, {
                         method: 'DELETE',
                         credentials: 'include',
-                        headers: {
+                        headers: withAccessTokenHeader({
                             'Content-Type': 'application/json',
                             'X-Api-Key': user.apiKey,
                             'X-User-Id': user.id
-                        },
+                        }),
                         body: JSON.stringify({
                             operator_id: opId,
                             shift_date: date,
@@ -9653,6 +9740,9 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                             setUser(sessionUser);
                         }
                     } catch (err) {
+                        if (err?.response?.status === 401) {
+                            clearStoredAuthTokens();
+                        }
                         if (!cancelled) {
                             if (parsedStoredUser) {
                                 setUser(parsedStoredUser);
@@ -10980,10 +11070,10 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                     const response = await fetch(`${API_BASE_URL}/api/audio/${evaluationId}`, {
                         method: 'GET',
                         credentials: 'include',
-                        headers: {
+                        headers: withAccessTokenHeader({
                             'X-API-Key': apiKey,
                             'X-User-Id': userId
-                        }
+                        })
                     });
             
                     if (!response.ok) throw new Error(`Failed to fetch audio: ${response.status}`);
@@ -11203,6 +11293,7 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                     });
                     const data = response.data;
                     if (data.status === 'success' && isMounted.current) {
+                        persistAuthTokens(data);
                         const sessionUser = data.user || {
                             role: data.role,
                             id: data.id,
@@ -11244,6 +11335,7 @@ const APP_BASE_URL = import.meta.env.BASE_URL || '/';
                 }
 
                 if (isMounted.current) {
+                    clearStoredAuthTokens();
                     clearSensitiveQrPolling();
                     setSensitiveAccess({ required: false, granted: false, loading: false });
                     setShowSensitiveQrModal(false);
