@@ -56,8 +56,12 @@ const clearAuthTokens = () => {
 const withAccessTokenHeader = (headers = {}) => {
     const nextHeaders = { ...(headers || {}) };
     const accessToken = readAuthToken(ACCESS_TOKEN_STORAGE_KEY);
+    const refreshToken = readAuthToken(REFRESH_TOKEN_STORAGE_KEY);
     if (accessToken && !nextHeaders.Authorization) {
         nextHeaders.Authorization = `Bearer ${accessToken}`;
+    }
+    if (refreshToken && !nextHeaders['X-Refresh-Token']) {
+        nextHeaders['X-Refresh-Token'] = refreshToken;
     }
     return nextHeaders;
 };
@@ -133,13 +137,11 @@ const withAccessTokenHeader = (headers = {}) => {
                     const headers = nextConfig.headers || {};
                     const accessToken = readAuthToken(ACCESS_TOKEN_STORAGE_KEY);
                     const refreshToken = readAuthToken(REFRESH_TOKEN_STORAGE_KEY);
-                    const url = String(nextConfig.url || '');
-                    const isRefreshCall = url.includes('/api/auth/refresh');
 
                     if (accessToken && !headers.Authorization) {
                         headers.Authorization = `Bearer ${accessToken}`;
                     }
-                    if (isRefreshCall && refreshToken && !headers['X-Refresh-Token']) {
+                    if (refreshToken && !headers['X-Refresh-Token']) {
                         headers['X-Refresh-Token'] = refreshToken;
                     }
 
@@ -163,14 +165,27 @@ const withAccessTokenHeader = (headers = {}) => {
                     async (error) => {
                         const status = error?.response?.status;
                         const code = error?.response?.data?.code;
+                        const apiErrorText = error?.response?.data?.error;
                         const originalRequest = error?.config;
                         const url = originalRequest?.url || '';
                         const isRefreshCall = url.includes('/api/auth/refresh');
                         const isLoginCall = url.includes('/api/login');
+                        const hasRefreshToken = !!readAuthToken(REFRESH_TOKEN_STORAGE_KEY);
+                        const isRecoverableAuthError = (
+                            code === 'TOKEN_EXPIRED' ||
+                            code === 'INVALID_TOKEN' ||
+                            code === 'INVALID_TOKEN_TYPE' ||
+                            code === 'MISSING_TOKEN' ||
+                            code === 'SESSION_EXPIRED' ||
+                            code === 'SESSION_NOT_FOUND' ||
+                            code === 'SESSION_REVOKED' ||
+                            apiErrorText === 'JWT authentication failed'
+                        );
 
                         if (
                             status === 401 &&
-                            code === 'TOKEN_EXPIRED' &&
+                            hasRefreshToken &&
+                            isRecoverableAuthError &&
                             originalRequest &&
                             !originalRequest.__isRetryRequest &&
                             !isRefreshCall &&
@@ -9725,7 +9740,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         }
                     } catch (err) {
                         if (!cancelled) {
-                            if (parsedStoredUser) {
+                            if (parsedStoredUser && !err?.response) {
                                 setUser(parsedStoredUser);
                             } else {
                                 setUser(null);
