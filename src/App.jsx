@@ -12698,131 +12698,181 @@ const withAccessTokenHeader = (headers = {}) => {
                         {user.role === 'admin' && (
                         <>
                             {view === 'qr_access' && (
-                            <div className="bg-white rounded-2xl shadow-sm mb-6 border border-gray-100 overflow-hidden">
-                                {/* Header */}
-                                <div className="px-5 py-4 border-b border-gray-100 bg-gray-50">
-                                    <h2 className="text-lg font-semibold text-gray-900">QR доступ</h2>
-                                    <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
-                                        Отсканируйте QR оператора или вставьте токен вручную. Подтверждение откроет полный номер и аудио только в текущей сессии.
-                                    </p>
-                                </div>
+                                <div className="bg-white rounded-2xl shadow-sm mb-6 border border-gray-100 overflow-hidden">
+                                    {/* Header */}
+                                    <div className="px-5 py-4 border-b border-gray-100 bg-gray-50">
+                                        <h2 className="text-lg font-semibold text-gray-900">
+                                            <i className="fa-solid fa-qrcode mr-2 text-blue-600"></i>QR доступ
+                                        </h2>
+                                        <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
+                                            Отсканируйте QR оператора или вставьте токен вручную. Подтверждение откроет полный номер и аудио только в текущей сессии.
+                                        </p>
+                                    </div>
 
-                                <div className="p-5 space-y-6">
-                                    {/* Token input section */}
-                                    <div className="space-y-3">
-                                        <label className="block text-sm font-medium text-gray-700">
-                                            Токен / строка из QR
-                                        </label>
-                                        <textarea
-                                            rows={3}
-                                            value={qrApproveInput}
-                                            onChange={(e) => setQrApproveInput(e.target.value)}
-                                            placeholder="Вставьте OTP-SENSITIVE:... или URL/токен"
-                                            className="w-full p-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm resize-none bg-gray-50 placeholder-gray-400 transition"
-                                        />
-                                        <div className="flex gap-2">
-                                            <button
-                                                onClick={approveSensitiveQrAccess}
-                                                disabled={qrApproveLoading}
-                                                className={`flex-1 py-2.5 rounded-xl text-sm font-medium text-white transition active:scale-95 ${
-                                                    qrApproveLoading
-                                                        ? 'bg-blue-400 cursor-not-allowed'
-                                                        : 'bg-blue-600 hover:bg-blue-700'
-                                                }`}
-                                            >
-                                                {qrApproveLoading ? (
-                                                    <span className="flex items-center justify-center gap-2">
-                                                        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
-                                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-                                                        </svg>
-                                                        Подтверждение...
-                                                    </span>
-                                                ) : 'Подтвердить доступ'}
-                                            </button>
-                                            <button
-                                                onClick={() => { setQrApproveInput(''); setQrApproveResult(''); }}
-                                                className="px-4 py-2.5 rounded-xl text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 active:scale-95 transition"
-                                            >
-                                                Очистить
-                                            </button>
+                                    <div className="p-5 space-y-6">
+                                        {/* Token input section */}
+                                        <div className="space-y-3">
+                                            <label className="block text-sm font-medium text-gray-700">
+                                                <i className="fa-solid fa-key mr-1.5 text-gray-400"></i>Токен / строка из QR
+                                            </label>
+                                            <textarea
+                                                rows={3}
+                                                value={qrApproveInput}
+                                                onChange={(e) => setQrApproveInput(e.target.value)}
+                                                placeholder="Вставьте OTP-SENSITIVE:... или URL/токен"
+                                                className="w-full p-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm resize-none bg-gray-50 placeholder-gray-400 transition"
+                                            />
+                                            <div className="flex gap-2">
+                                                <button
+                                                    onClick={approveSensitiveQrAccess}
+                                                    disabled={qrApproveLoading}
+                                                    className={`flex-1 py-2.5 rounded-xl text-sm font-medium text-white transition active:scale-95 ${
+                                                        qrApproveLoading
+                                                            ? 'bg-blue-400 cursor-not-allowed'
+                                                            : 'bg-blue-600 hover:bg-blue-700'
+                                                    }`}
+                                                >
+                                                    {qrApproveLoading ? (
+                                                        <span className="flex items-center justify-center gap-2">
+                                                            <i className="fa-solid fa-circle-notch fa-spin"></i>
+                                                            Подтверждение...
+                                                        </span>
+                                                    ) : (
+                                                        <span className="flex items-center justify-center gap-2">
+                                                            <i className="fa-solid fa-unlock-keyhole"></i>
+                                                            Подтвердить доступ
+                                                        </span>
+                                                    )}
+                                                </button>
+                                                <button
+                                                    onClick={() => { setQrApproveInput(''); setQrApproveResult(''); }}
+                                                    className="px-4 py-2.5 rounded-xl text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 active:scale-95 transition"
+                                                >
+                                                    <i className="fa-solid fa-xmark"></i>
+                                                </button>
+                                            </div>
+
+                                            {qrApproveResult && (
+                                                <div className={`text-sm rounded-xl p-3 border flex items-start gap-2 ${
+                                                    qrApproveResult.toLowerCase().includes('доступ открыт')
+                                                        ? 'bg-green-50 text-green-700 border-green-200'
+                                                        : 'bg-red-50 text-red-700 border-red-200'
+                                                }`}>
+                                                    <i className={`mt-0.5 shrink-0 fa-solid ${
+                                                        qrApproveResult.toLowerCase().includes('доступ открыт')
+                                                            ? 'fa-circle-check'
+                                                            : 'fa-circle-xmark'
+                                                    }`}></i>
+                                                    {qrApproveResult}
+                                                </div>
+                                            )}
                                         </div>
 
-                                        {qrApproveResult && (
-                                            <div className={`text-sm rounded-xl p-3 border flex items-start gap-2 ${
-                                                qrApproveResult.toLowerCase().includes('доступ открыт')
-                                                    ? 'bg-green-50 text-green-700 border-green-200'
-                                                    : 'bg-red-50 text-red-700 border-red-200'
-                                            }`}>
-                                                <span className="mt-0.5 shrink-0">
-                                                    {qrApproveResult.toLowerCase().includes('доступ открыт') ? '✓' : '✕'}
-                                                </span>
-                                                {qrApproveResult}
+                                        {/* Divider */}
+                                        <div className="flex items-center gap-3">
+                                            <div className="flex-1 h-px bg-gray-100"/>
+                                            <span className="text-xs text-gray-400 font-medium">или сканируйте</span>
+                                            <div className="flex-1 h-px bg-gray-100"/>
+                                        </div>
+
+                                        {/* Scanner section */}
+                                        <div className="space-y-3">
+                                            <label className="block text-sm font-medium text-gray-700">
+                                                <i className="fa-solid fa-camera mr-1.5 text-gray-400"></i>Сканер QR
+                                            </label>
+
+                                            <div className="relative rounded-xl overflow-hidden bg-gray-900 aspect-video">
+                                                <video
+                                                    ref={qrVideoRef}
+                                                    className="w-full h-full object-cover"
+                                                    autoPlay
+                                                    muted
+                                                    playsInline
+                                                />
+                                                {/* Scanner overlay frame */}
+                                                {qrScannerRunning && (
+                                                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                                                        <div className="w-40 h-40 relative">
+                                                            <span className="absolute top-0 left-0 w-6 h-6 border-t-2 border-l-2 border-white rounded-tl-md"/>
+                                                            <span className="absolute top-0 right-0 w-6 h-6 border-t-2 border-r-2 border-white rounded-tr-md"/>
+                                                            <span className="absolute bottom-0 left-0 w-6 h-6 border-b-2 border-l-2 border-white rounded-bl-md"/>
+                                                            <span className="absolute bottom-0 right-0 w-6 h-6 border-b-2 border-r-2 border-white rounded-br-md"/>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                {!qrScannerRunning && (
+                                                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/50 backdrop-blur-sm">
+                                                        <i className="fa-solid fa-video-slash text-2xl text-white/60"></i>
+                                                        <span className="text-xs text-white/70">Камера выключена</span>
+                                                    </div>
+                                                )}
                                             </div>
-                                        )}
-                                    </div>
 
-                                    {/* Divider */}
-                                    <div className="flex items-center gap-3">
-                                        <div className="flex-1 h-px bg-gray-100"/>
-                                        <span className="text-xs text-gray-400 font-medium">или сканируйте</span>
-                                        <div className="flex-1 h-px bg-gray-100"/>
-                                    </div>
+                                            {qrScannerError && (
+                                                <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">
+                                                    <i className="fa-solid fa-triangle-exclamation mr-1.5"></i>
+                                                    {qrScannerError}
+                                                </div>
+                                            )}
 
-                                    {/* Scanner section */}
-                                    <div className="space-y-3">
-                                        <label className="block text-sm font-medium text-gray-700">Сканер QR</label>
+                                            <button
+                                                onClick={qrScannerRunning ? stopQrScanner : startQrScanner}
+                                                className={`w-full py-2.5 rounded-xl text-sm font-medium text-white active:scale-95 transition ${
+                                                    qrScannerRunning
+                                                        ? 'bg-red-500 hover:bg-red-600'
+                                                        : 'bg-gray-800 hover:bg-gray-900'
+                                                }`}
+                                            >
+                                                {qrScannerRunning ? (
+                                                    <span className="flex items-center justify-center gap-2">
+                                                        <i className="fa-solid fa-stop"></i> Остановить сканер
+                                                    </span>
+                                                ) : (
+                                                    <span className="flex items-center justify-center gap-2">
+                                                        <i className="fa-solid fa-play"></i> Запустить сканер
+                                                    </span>
+                                                )}
+                                            </button>
 
-                                        <div className="relative rounded-xl overflow-hidden bg-gray-900 aspect-video">
-                                            <video
-                                                ref={qrVideoRef}
-                                                className="w-full h-full object-cover"
-                                                autoPlay
-                                                muted
-                                                playsInline
-                                            />
-                                            {/* Scanner overlay frame */}
-                                            {qrScannerRunning && (
-                                                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                                                    <div className="w-40 h-40 relative">
-                                                        <span className="absolute top-0 left-0 w-6 h-6 border-t-2 border-l-2 border-white rounded-tl-md"/>
-                                                        <span className="absolute top-0 right-0 w-6 h-6 border-t-2 border-r-2 border-white rounded-tr-md"/>
-                                                        <span className="absolute bottom-0 left-0 w-6 h-6 border-b-2 border-l-2 border-white rounded-bl-md"/>
-                                                        <span className="absolute bottom-0 right-0 w-6 h-6 border-b-2 border-r-2 border-white rounded-br-md"/>
+                                            {/* ✅ Кнопка подтверждения после сканирования */}
+                                            {qrApproveInput && !qrApproveResult && (
+                                                <div className="mt-1 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                                                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
+                                                        <div className="flex items-center gap-2 text-blue-800 text-sm font-medium">
+                                                            <i className="fa-solid fa-qrcode text-blue-500 text-base"></i>
+                                                            QR успешно распознан
+                                                        </div>
+                                                        <p className="text-xs text-blue-600 font-mono bg-blue-100/60 rounded-lg px-3 py-2 break-all line-clamp-2">
+                                                            {qrApproveInput}
+                                                        </p>
+                                                        <button
+                                                            onClick={approveSensitiveQrAccess}
+                                                            disabled={qrApproveLoading}
+                                                            className={`w-full py-3 rounded-xl text-sm font-semibold text-white transition active:scale-95 shadow-md shadow-blue-200 ${
+                                                                qrApproveLoading
+                                                                    ? 'bg-blue-400 cursor-not-allowed'
+                                                                    : 'bg-blue-600 hover:bg-blue-700'
+                                                            }`}
+                                                        >
+                                                            {qrApproveLoading ? (
+                                                                <span className="flex items-center justify-center gap-2">
+                                                                    <i className="fa-solid fa-circle-notch fa-spin"></i>
+                                                                    Подтверждение...
+                                                                </span>
+                                                            ) : (
+                                                                <span className="flex items-center justify-center gap-2">
+                                                                    <i className="fa-solid fa-unlock-keyhole"></i>
+                                                                    Подтвердить доступ
+                                                                </span>
+                                                            )}
+                                                        </button>
                                                     </div>
                                                 </div>
                                             )}
-                                            {!qrScannerRunning && (
-                                                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/50 backdrop-blur-sm">
-                                                    <svg className="w-8 h-8 text-white/60" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                                                            d="M3 9V6a1 1 0 011-1h3M3 15v3a1 1 0 001 1h3m11-4v3a1 1 0 01-1 1h-3m4-11V6a1 1 0 00-1-1h-3"/>
-                                                    </svg>
-                                                    <span className="text-xs text-white/70">Камера выключена</span>
-                                                </div>
-                                            )}
                                         </div>
-
-                                        {qrScannerError && (
-                                            <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">
-                                                {qrScannerError}
-                                            </div>
-                                        )}
-
-                                        <button
-                                            onClick={qrScannerRunning ? stopQrScanner : startQrScanner}
-                                            className={`w-full py-2.5 rounded-xl text-sm font-medium text-white active:scale-95 transition ${
-                                                qrScannerRunning
-                                                    ? 'bg-red-500 hover:bg-red-600'
-                                                    : 'bg-gray-800 hover:bg-gray-900'
-                                            }`}
-                                        >
-                                            {qrScannerRunning ? '⏹ Остановить сканер' : '▶ Запустить сканер'}
-                                        </button>
                                     </div>
                                 </div>
-                            </div>
-                        )}
+                            )}
 
                             {view === 'sv_list' && (
                             <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
@@ -13636,7 +13686,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                     <div className="bg-white rounded-2xl shadow-sm mb-6 border border-gray-100 overflow-hidden">
                                         {/* Header */}
                                         <div className="px-5 py-4 border-b border-gray-100 bg-gray-50">
-                                            <h2 className="text-lg font-semibold text-gray-900">QR доступ</h2>
+                                            <h2 className="text-lg font-semibold text-gray-900">
+                                                <i className="fa-solid fa-qrcode mr-2 text-blue-600"></i>QR доступ
+                                            </h2>
                                             <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
                                                 Отсканируйте QR оператора или вставьте токен вручную. Подтверждение откроет полный номер и аудио только в текущей сессии.
                                             </p>
@@ -13646,7 +13698,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             {/* Token input section */}
                                             <div className="space-y-3">
                                                 <label className="block text-sm font-medium text-gray-700">
-                                                    Токен / строка из QR
+                                                    <i className="fa-solid fa-key mr-1.5 text-gray-400"></i>Токен / строка из QR
                                                 </label>
                                                 <textarea
                                                     rows={3}
@@ -13667,19 +13719,21 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     >
                                                         {qrApproveLoading ? (
                                                             <span className="flex items-center justify-center gap-2">
-                                                                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
-                                                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                                                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-                                                                </svg>
+                                                                <i className="fa-solid fa-circle-notch fa-spin"></i>
                                                                 Подтверждение...
                                                             </span>
-                                                        ) : 'Подтвердить доступ'}
+                                                        ) : (
+                                                            <span className="flex items-center justify-center gap-2">
+                                                                <i className="fa-solid fa-unlock-keyhole"></i>
+                                                                Подтвердить доступ
+                                                            </span>
+                                                        )}
                                                     </button>
                                                     <button
                                                         onClick={() => { setQrApproveInput(''); setQrApproveResult(''); }}
                                                         className="px-4 py-2.5 rounded-xl text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 active:scale-95 transition"
                                                     >
-                                                        Очистить
+                                                        <i className="fa-solid fa-xmark"></i>
                                                     </button>
                                                 </div>
 
@@ -13689,9 +13743,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             ? 'bg-green-50 text-green-700 border-green-200'
                                                             : 'bg-red-50 text-red-700 border-red-200'
                                                     }`}>
-                                                        <span className="mt-0.5 shrink-0">
-                                                            {qrApproveResult.toLowerCase().includes('доступ открыт') ? '✓' : '✕'}
-                                                        </span>
+                                                        <i className={`mt-0.5 shrink-0 fa-solid ${
+                                                            qrApproveResult.toLowerCase().includes('доступ открыт')
+                                                                ? 'fa-circle-check'
+                                                                : 'fa-circle-xmark'
+                                                        }`}></i>
                                                         {qrApproveResult}
                                                     </div>
                                                 )}
@@ -13706,7 +13762,9 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                             {/* Scanner section */}
                                             <div className="space-y-3">
-                                                <label className="block text-sm font-medium text-gray-700">Сканер QR</label>
+                                                <label className="block text-sm font-medium text-gray-700">
+                                                    <i className="fa-solid fa-camera mr-1.5 text-gray-400"></i>Сканер QR
+                                                </label>
 
                                                 <div className="relative rounded-xl overflow-hidden bg-gray-900 aspect-video">
                                                     <video
@@ -13729,10 +13787,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     )}
                                                     {!qrScannerRunning && (
                                                         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/50 backdrop-blur-sm">
-                                                            <svg className="w-8 h-8 text-white/60" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                                                                    d="M3 9V6a1 1 0 011-1h3M3 15v3a1 1 0 001 1h3m11-4v3a1 1 0 01-1 1h-3m4-11V6a1 1 0 00-1-1h-3"/>
-                                                            </svg>
+                                                            <i className="fa-solid fa-video-slash text-2xl text-white/60"></i>
                                                             <span className="text-xs text-white/70">Камера выключена</span>
                                                         </div>
                                                     )}
@@ -13740,6 +13795,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                                 {qrScannerError && (
                                                     <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">
+                                                        <i className="fa-solid fa-triangle-exclamation mr-1.5"></i>
                                                         {qrScannerError}
                                                     </div>
                                                 )}
@@ -13752,8 +13808,52 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             : 'bg-gray-800 hover:bg-gray-900'
                                                     }`}
                                                 >
-                                                    {qrScannerRunning ? '⏹ Остановить сканер' : '▶ Запустить сканер'}
+                                                    {qrScannerRunning ? (
+                                                        <span className="flex items-center justify-center gap-2">
+                                                            <i className="fa-solid fa-stop"></i> Остановить сканер
+                                                        </span>
+                                                    ) : (
+                                                        <span className="flex items-center justify-center gap-2">
+                                                            <i className="fa-solid fa-play"></i> Запустить сканер
+                                                        </span>
+                                                    )}
                                                 </button>
+
+                                                {/* ✅ Кнопка подтверждения после сканирования */}
+                                                {qrApproveInput && !qrApproveResult && (
+                                                    <div className="mt-1 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                                                        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
+                                                            <div className="flex items-center gap-2 text-blue-800 text-sm font-medium">
+                                                                <i className="fa-solid fa-qrcode text-blue-500 text-base"></i>
+                                                                QR успешно распознан
+                                                            </div>
+                                                            <p className="text-xs text-blue-600 font-mono bg-blue-100/60 rounded-lg px-3 py-2 break-all line-clamp-2">
+                                                                {qrApproveInput}
+                                                            </p>
+                                                            <button
+                                                                onClick={approveSensitiveQrAccess}
+                                                                disabled={qrApproveLoading}
+                                                                className={`w-full py-3 rounded-xl text-sm font-semibold text-white transition active:scale-95 shadow-md shadow-blue-200 ${
+                                                                    qrApproveLoading
+                                                                        ? 'bg-blue-400 cursor-not-allowed'
+                                                                        : 'bg-blue-600 hover:bg-blue-700'
+                                                                }`}
+                                                            >
+                                                                {qrApproveLoading ? (
+                                                                    <span className="flex items-center justify-center gap-2">
+                                                                        <i className="fa-solid fa-circle-notch fa-spin"></i>
+                                                                        Подтверждение...
+                                                                    </span>
+                                                                ) : (
+                                                                    <span className="flex items-center justify-center gap-2">
+                                                                        <i className="fa-solid fa-unlock-keyhole"></i>
+                                                                        Подтвердить доступ
+                                                                    </span>
+                                                                )}
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                )}
                                             </div>
                                         </div>
                                     </div>
