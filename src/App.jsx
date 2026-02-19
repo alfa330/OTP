@@ -12493,7 +12493,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         onClick={() => setMobileMenuOpen(false)}
                     ></div>
                     
-                    <div className={`sidebar fixed top-0 left-0 h-full bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 ${sidebarCollapsed ? 'collapsed' : ''} ${mobileMenuOpen ? 'mobile-open' : ''}`}>
+                    <div className={`sidebar fixed top-0 left-0 h-full bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 overflow-y-auto overflow-x-hidden ${sidebarCollapsed ? 'collapsed' : ''} ${mobileMenuOpen ? 'mobile-open' : ''}`}>
                         <div className="p-4">
                             {/* Кнопка сворачивания для десктопа */}
                             <button 
