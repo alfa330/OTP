@@ -8296,6 +8296,9 @@ const withAccessTokenHeader = (headers = {}) => {
                 confirm_login: ''
             });
             const [selectedReportMonth, setSelectedReportMonth] = useState(() => getStoredValue('selectedReportMonth', currentMonth));
+            const [callEvaluationContext, setCallEvaluationContext] = useState(null);
+            const [callEvaluationReturnView, setCallEvaluationReturnView] = useState('');
+            const [callEvaluationFrameReady, setCallEvaluationFrameReady] = useState(false);
             const [expandedEvaluation, setExpandedEvaluation] = useState(null);  
             const [audioUrl, setAudioUrl] = useState(null);
             const [loadingAudioId, setLoadingAudioId] = useState(null);
@@ -8369,6 +8372,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const qrVideoRef = useRef(null);
             const qrStreamRef = useRef(null);
             const qrScanTimerRef = useRef(null);
+            const callEvaluationFrameRef = useRef(null);
             // Images and state for gallery modal
             const devLetterImages = [
                 {
@@ -9820,6 +9824,34 @@ const withAccessTokenHeader = (headers = {}) => {
                     localStorage.setItem('selectedReportMonth', selectedReportMonth);
                 }
             }, [selectedReportMonth]);
+
+            const callEvaluationInitPayload = useMemo(() => ({
+                type: 'CALL_EVALUATION_INIT',
+                user: user ? {
+                    id: user.id,
+                    role: user.role,
+                    name: user.name
+                } : null,
+                initialSelection: callEvaluationContext || null
+            }), [user, callEvaluationContext]);
+
+            useEffect(() => {
+                const onMessage = (event) => {
+                    if (event.origin !== window.location.origin) return;
+                    if (event.data?.type !== 'CALL_EVALUATION_READY') return;
+                    setCallEvaluationFrameReady(true);
+                };
+
+                window.addEventListener('message', onMessage);
+                return () => window.removeEventListener('message', onMessage);
+            }, []);
+
+            useEffect(() => {
+                if (view !== 'call_evaluation' || !callEvaluationFrameReady) return;
+                const frameWindow = callEvaluationFrameRef.current?.contentWindow;
+                if (!frameWindow) return;
+                frameWindow.postMessage(callEvaluationInitPayload, window.location.origin);
+            }, [view, callEvaluationFrameReady, callEvaluationInitPayload]);
             
             // Persist and restore calculatorType (for salary view)
             useEffect(() => {
@@ -11222,10 +11254,32 @@ const withAccessTokenHeader = (headers = {}) => {
                 }
             };
 
-            const safeBtoa = (str) => {
-            return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (match, p1) => {
-                return String.fromCharCode('0x' + p1);
-            }));
+            const openCallEvaluationSection = ({ operatorId = null, operatorName = '', supervisorId = null, month = (selectedReportMonth || selectedMonth) } = {}) => {
+                const previousView = view === 'call_evaluation'
+                    ? (callEvaluationReturnView || (user?.role === 'admin' ? 'view_scores' : 'operators'))
+                    : view;
+                const isAlreadyOpen = view === 'call_evaluation';
+
+                setCallEvaluationContext({
+                    operatorId,
+                    operatorName,
+                    supervisorId,
+                    month
+                });
+                if (!isAlreadyOpen) {
+                    setCallEvaluationFrameReady(false);
+                }
+                setCallEvaluationReturnView(previousView);
+                setView('call_evaluation');
+                setMobileMenuOpen(false);
+            };
+
+            const closeCallEvaluationSection = () => {
+                if (callEvaluationReturnView) {
+                    setView(callEvaluationReturnView);
+                    return;
+                }
+                setView(user?.role === 'admin' ? 'view_scores' : 'operators');
             };
 
             const handleChangePassword = async () => {
@@ -11375,6 +11429,9 @@ const withAccessTokenHeader = (headers = {}) => {
                     setProfileData(null);
                     setHoursData(null);
                     setView('hours');
+                    setCallEvaluationContext(null);
+                    setCallEvaluationReturnView('');
+                    setCallEvaluationFrameReady(false);
                     setLogin('');
                     setPassword('');
                     setShowLogoutConfirm(false);
@@ -12431,6 +12488,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const averageScore = operatorData?.evaluations?.length > 0
                     ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
                     : 0;
+            const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
 
             return (
                 <div className="flex h-screen overflow-hidden">
@@ -12506,6 +12564,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                         </li>
                                         <li>
                                             <button
+                                                onClick={() => openCallEvaluationSection({
+                                                    supervisorId: selectedSvId || null,
+                                                    month: selectedReportMonth || selectedMonth
+                                                })}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_evaluation' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <i className="fas fa-clipboard-check"></i> <span className="sidebar-text">Раздел оценок</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button
                                                 onClick={() => { setView('sv_hours'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
@@ -12553,6 +12622,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <li>
                                             <button onClick={() => { setView('operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'operators' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-users-cog"></i> <span className="sidebar-text">Оценки операторов</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button
+                                                onClick={() => openCallEvaluationSection({ month: selectedReportMonth || selectedMonth })}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_evaluation' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <i className="fas fa-clipboard-check"></i> <span className="sidebar-text">Раздел оценок</span>
                                             </button>
                                         </li>
                                         <li>
@@ -12723,6 +12800,34 @@ const withAccessTokenHeader = (headers = {}) => {
                                 </button>
                                 )}
                             </div>
+                        </div>
+                        )}
+                        {(view === 'call_evaluation' && (user.role === 'admin' || user.role === 'sv')) && (
+                        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md mb-8 border border-gray-200">
+                            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+                                <div>
+                                    <h2 className="text-xl sm:text-2xl font-semibold text-gray-800">Оценки операторов</h2>
+                                    {callEvaluationContext?.operatorName && (
+                                        <p className="text-sm text-gray-600">
+                                            Оператор: <span className="font-medium text-gray-800">{callEvaluationContext.operatorName}</span>
+                                            {callEvaluationContext?.month ? ` · ${callEvaluationContext.month}` : ''}
+                                        </p>
+                                    )}
+                                </div>
+                                <button
+                                    onClick={closeCallEvaluationSection}
+                                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 transition"
+                                >
+                                    <i className="fas fa-arrow-left" /> Назад
+                                </button>
+                            </div>
+                            <iframe
+                                ref={callEvaluationFrameRef}
+                                title="Оценки операторов"
+                                src={callEvaluationIframeUrl}
+                                className="w-full rounded-lg border border-gray-200 bg-white"
+                                style={{ minHeight: 'calc(100vh - 260px)' }}
+                            />
                         </div>
                         )}
                         {user.role === 'admin' && (
@@ -13382,21 +13487,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 </button>
                                                                 )}
                                                                 <button
-                                                                onClick={() => {
-                                                                    const tokenData = {
-                                                                    apiKey: user.apiKey,
-                                                                    userId: user.id,
-                                                                    role: user.role,
-                                                                    name: user.name,
+                                                                onClick={() => openCallEvaluationSection({
                                                                     operatorId: op.id,
                                                                     operatorName: op.name,
                                                                     supervisorId: selectedSvId,
-                                                                    month: selectedReportMonth || selectedMonth,
-                                                                    timestamp: Date.now()
-                                                                    };
-                                                                    const token = safeBtoa(JSON.stringify(tokenData));
-                                                                    window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
-                                                                }}
+                                                                    month: selectedReportMonth || selectedMonth
+                                                                })}
                                                                 className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm"
                                                                 >
                                                                 Оценки
@@ -14447,20 +14543,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                             <div className="flex items-center gap-2">
                                                             <button
-                                                                onClick={() => {
-                                                                const tokenData = {
-                                                                    apiKey: user.apiKey,
-                                                                    userId: user.id,
-                                                                    role: user.role,
-                                                                    name: user.name,
+                                                                onClick={() => openCallEvaluationSection({
                                                                     operatorId: op.id,
                                                                     operatorName: op.name,
-                                                                    month: selectedReportMonth || selectedMonth,
-                                                                    timestamp: Date.now()
-                                                                };
-                                                                const token = safeBtoa(JSON.stringify(tokenData));
-                                                                window.open(`https://alfa330.github.io/call_evalution/?token=${encodeURIComponent(token)}`, '_blank');
-                                                                }}
+                                                                    month: selectedReportMonth || selectedMonth
+                                                                })}
                                                                 className="inline-flex items-center gap-2 bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition"
                                                                 title={`Оценить оператора ${op.name}`}
                                                             >
