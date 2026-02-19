@@ -12640,12 +12640,14 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                 <hr className="border-t border-white-700 my-2 opacity-40" />
 
+                                {/*
                                 <li>
                                         <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('Открываю галерею команды'); setShowDevLetterModal(true); try { startConfetti(); } catch(e){}; setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
                                         <i className="fas fa-images"></i> <span className="sidebar-text">Галерея команды</span>
                                     </button>
                                 </li>
-
+                                */}
+                                
                                <li className="relative" ref={sidebarAccountRef}>
                                 <button
                                     onClick={handleToggleDropdown}
