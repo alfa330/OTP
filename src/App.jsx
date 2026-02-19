@@ -12755,7 +12755,10 @@ const withAccessTokenHeader = (headers = {}) => {
                             </ul>
                         </div>
                     </div>
-                    <div className={`main-content w-full ${isCallEvaluationView ? 'p-0 bg-gray-50 h-screen overflow-y-auto' : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+                    <div
+                        className={`main-content w-full ${isCallEvaluationView ? 'p-0 h-screen overflow-y-auto' : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+                        style={isCallEvaluationView ? { backgroundColor: '#f7f7f5' } : undefined}
+                    >
                         {user.role === 'operator' && (
                         <div className="bg-white p-4 rounded-xl shadow-sm mb-6 border border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                             <div className="flex items-center gap-3">
@@ -12790,13 +12793,13 @@ const withAccessTokenHeader = (headers = {}) => {
                         </div>
                         )}
                         {isCallEvaluationView && (
-                        <div className="w-full py-5">
+                        <div className="w-full py-5" style={{ backgroundColor: '#f7f7f5' }}>
                             <iframe
                                 ref={callEvaluationFrameRef}
                                 title="Оценки операторов"
                                 src={callEvaluationIframeUrl}
-                                className="block w-[90%] max-w-[1500px] mx-auto bg-white"
-                                style={{ height: 'calc(100vh - 108px)', border: 'none' }}
+                                className="block w-[90%] max-w-[1500px] mx-auto"
+                                style={{ height: 'calc(100vh - 108px)', border: 'none', backgroundColor: '#f7f7f5' }}
                             />
                         </div>
                         )}
