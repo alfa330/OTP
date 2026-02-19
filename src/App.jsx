@@ -8297,7 +8297,6 @@ const withAccessTokenHeader = (headers = {}) => {
             });
             const [selectedReportMonth, setSelectedReportMonth] = useState(() => getStoredValue('selectedReportMonth', currentMonth));
             const [callEvaluationContext, setCallEvaluationContext] = useState(null);
-            const [callEvaluationReturnView, setCallEvaluationReturnView] = useState('');
             const [callEvaluationFrameReady, setCallEvaluationFrameReady] = useState(false);
             const [expandedEvaluation, setExpandedEvaluation] = useState(null);  
             const [audioUrl, setAudioUrl] = useState(null);
@@ -11255,9 +11254,6 @@ const withAccessTokenHeader = (headers = {}) => {
             };
 
             const openCallEvaluationSection = ({ operatorId = null, operatorName = '', supervisorId = null, month = (selectedReportMonth || selectedMonth) } = {}) => {
-                const previousView = view === 'call_evaluation'
-                    ? (callEvaluationReturnView || (user?.role === 'admin' ? 'view_scores' : 'operators'))
-                    : view;
                 const isAlreadyOpen = view === 'call_evaluation';
 
                 setCallEvaluationContext({
@@ -11269,17 +11265,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (!isAlreadyOpen) {
                     setCallEvaluationFrameReady(false);
                 }
-                setCallEvaluationReturnView(previousView);
                 setView('call_evaluation');
                 setMobileMenuOpen(false);
-            };
-
-            const closeCallEvaluationSection = () => {
-                if (callEvaluationReturnView) {
-                    setView(callEvaluationReturnView);
-                    return;
-                }
-                setView(user?.role === 'admin' ? 'view_scores' : 'operators');
             };
 
             const handleChangePassword = async () => {
@@ -11430,7 +11417,6 @@ const withAccessTokenHeader = (headers = {}) => {
                     setHoursData(null);
                     setView('hours');
                     setCallEvaluationContext(null);
-                    setCallEvaluationReturnView('');
                     setCallEvaluationFrameReady(false);
                     setLogin('');
                     setPassword('');
@@ -12803,32 +12789,13 @@ const withAccessTokenHeader = (headers = {}) => {
                         </div>
                         )}
                         {(view === 'call_evaluation' && (user.role === 'admin' || user.role === 'sv')) && (
-                        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-md mb-8 border border-gray-200">
-                            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
-                                <div>
-                                    <h2 className="text-xl sm:text-2xl font-semibold text-gray-800">Оценки операторов</h2>
-                                    {callEvaluationContext?.operatorName && (
-                                        <p className="text-sm text-gray-600">
-                                            Оператор: <span className="font-medium text-gray-800">{callEvaluationContext.operatorName}</span>
-                                            {callEvaluationContext?.month ? ` · ${callEvaluationContext.month}` : ''}
-                                        </p>
-                                    )}
-                                </div>
-                                <button
-                                    onClick={closeCallEvaluationSection}
-                                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 transition"
-                                >
-                                    <i className="fas fa-arrow-left" /> Назад
-                                </button>
-                            </div>
-                            <iframe
-                                ref={callEvaluationFrameRef}
-                                title="Оценки операторов"
-                                src={callEvaluationIframeUrl}
-                                className="w-full rounded-lg border border-gray-200 bg-white"
-                                style={{ minHeight: 'calc(100vh - 260px)' }}
-                            />
-                        </div>
+                        <iframe
+                            ref={callEvaluationFrameRef}
+                            title="Оценки операторов"
+                            src={callEvaluationIframeUrl}
+                            className="w-full bg-white"
+                            style={{ minHeight: 'calc(100vh - 140px)', border: 'none' }}
+                        />
                         )}
                         {user.role === 'admin' && (
                         <>
