@@ -12755,7 +12755,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             </ul>
                         </div>
                     </div>
-                    <div className={`main-content w-full ${isCallEvaluationView ? 'p-0 bg-white h-screen overflow-hidden' : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+                    <div className={`main-content w-full ${isCallEvaluationView ? 'p-0 bg-gray-50 h-screen overflow-y-auto' : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
                         {user.role === 'operator' && (
                         <div className="bg-white p-4 rounded-xl shadow-sm mb-6 border border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                             <div className="flex items-center gap-3">
@@ -12790,13 +12790,15 @@ const withAccessTokenHeader = (headers = {}) => {
                         </div>
                         )}
                         {isCallEvaluationView && (
-                        <iframe
-                            ref={callEvaluationFrameRef}
-                            title="Оценки операторов"
-                            src={callEvaluationIframeUrl}
-                            className="block w-full h-full bg-white"
-                            style={{ border: 'none' }}
-                        />
+                        <div className="w-full py-6">
+                            <iframe
+                                ref={callEvaluationFrameRef}
+                                title="Оценки операторов"
+                                src={callEvaluationIframeUrl}
+                                className="block w-[82%] max-w-[1400px] mx-auto bg-white"
+                                style={{ height: 'calc(100vh - 120px)', border: 'none' }}
+                            />
+                        </div>
                         )}
                         {user.role === 'admin' && (
                         <>
