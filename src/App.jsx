@@ -12112,6 +12112,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     const rawValue = String(codes[0].rawValue);
                                     setQrApproveInput(rawValue);
                                     stopQrScanner();
+                                    setQrConfirmModalOpen(true); // ← открываем модалку сразу после скана
                                 }
                             } catch (e) {
                                 // ignore frame errors
@@ -12146,6 +12147,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             if (code && code.data) {
                                 setQrApproveInput(String(code.data));
                                 stopQrScanner();
+                                setQrConfirmModalOpen(true); // ← открываем модалку сразу после скана
                             }
                         } catch (e) {
                             // ignore frame errors
