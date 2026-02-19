@@ -12756,7 +12756,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         </div>
                     </div>
                     <div
-                        className={`main-content w-full ${isCallEvaluationView ? 'p-0 h-screen overflow-y-auto' : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+                        className={`main-content w-full ${isCallEvaluationView ? 'p-0 h-screen overflow-hidden' : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
                         style={isCallEvaluationView ? { backgroundColor: '#f7f7f5' } : undefined}
                     >
                         {user.role === 'operator' && (
@@ -12793,13 +12793,13 @@ const withAccessTokenHeader = (headers = {}) => {
                         </div>
                         )}
                         {isCallEvaluationView && (
-                        <div className="w-full py-5" style={{ backgroundColor: '#f7f7f5' }}>
+                        <div className="w-full h-full px-2 md:px-3 py-3" style={{ backgroundColor: '#f7f7f5' }}>
                             <iframe
                                 ref={callEvaluationFrameRef}
                                 title="Оценки операторов"
                                 src={callEvaluationIframeUrl}
-                                className="block w-[90%] max-w-[1500px] mx-auto"
-                                style={{ height: 'calc(100vh - 108px)', border: 'none', backgroundColor: '#f7f7f5' }}
+                                className="block w-full"
+                                style={{ height: 'calc(100vh - 24px)', border: 'none', backgroundColor: '#f7f7f5' }}
                             />
                         </div>
                         )}
