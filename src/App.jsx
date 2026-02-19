@@ -12790,13 +12790,13 @@ const withAccessTokenHeader = (headers = {}) => {
                         </div>
                         )}
                         {isCallEvaluationView && (
-                        <div className="w-full py-6">
+                        <div className="w-full py-5">
                             <iframe
                                 ref={callEvaluationFrameRef}
                                 title="Оценки операторов"
                                 src={callEvaluationIframeUrl}
-                                className="block w-[82%] max-w-[1400px] mx-auto bg-white"
-                                style={{ height: 'calc(100vh - 120px)', border: 'none' }}
+                                className="block w-[90%] max-w-[1500px] mx-auto bg-white"
+                                style={{ height: 'calc(100vh - 108px)', border: 'none' }}
                             />
                         </div>
                         )}
