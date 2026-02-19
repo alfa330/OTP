@@ -91,27 +91,6 @@
     .sidebar {
       width: 256px;
       transition: width 0.3s ease;
-      overflow-y: auto;
-      overflow-x: hidden;
-      -webkit-overflow-scrolling: touch;
-      scrollbar-width: thin;
-      scrollbar-color: rgba(191, 219, 254, 0.95) rgba(30, 64, 175, 0.28);
-    }
-    .sidebar::-webkit-scrollbar {
-      width: 10px;
-    }
-    .sidebar::-webkit-scrollbar-track {
-      background: linear-gradient(180deg, rgba(30, 58, 138, 0.32), rgba(30, 64, 175, 0.12));
-      border-radius: 999px;
-      margin: 8px 0;
-    }
-    .sidebar::-webkit-scrollbar-thumb {
-      background: linear-gradient(180deg, #dbeafe 0%, #93c5fd 45%, #60a5fa 100%);
-      border-radius: 999px;
-      border: 2px solid rgba(30, 64, 175, 0.55);
-    }
-    .sidebar::-webkit-scrollbar-thumb:hover {
-      background: linear-gradient(180deg, #eff6ff 0%, #bfdbfe 45%, #93c5fd 100%);
     }
     .sidebar.collapsed {
       width: 80px;
