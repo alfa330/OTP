@@ -8765,13 +8765,11 @@ const withAccessTokenHeader = (headers = {}) => {
                 const reasons = [
                     "Обратная связь",
                     "Собрание",
-                    "Тех. сбой",
                     "Мотивационная беседа",
                     "Дисциплинарный тренинг",
                     "Тренинг по качеству. Разбор ошибок",
                     "Тренинг по качеству. Объяснение МШ",
                     "Тренинг по продукту",
-                    "Мониторинг",
                     "Практика в офисе таксопарка",
                     "Другое"
                 ];
@@ -12647,7 +12645,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     </button>
                                 </li>
                                 */}
-                                
+
                                <li className="relative" ref={sidebarAccountRef}>
                                 <button
                                     onClick={handleToggleDropdown}
