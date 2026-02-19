@@ -8369,15 +8369,43 @@ const withAccessTokenHeader = (headers = {}) => {
             const qrVideoRef = useRef(null);
             const qrStreamRef = useRef(null);
             const qrScanTimerRef = useRef(null);
-            // Images and state for Dev Letter carousel
+            // Images and state for gallery modal
             const devLetterImages = [
-                { src: `${APP_BASE_URL}assets/1.jpg`, caption: 'Золотая молодежь' },
-                { src: `${APP_BASE_URL}assets/2.jpg`, caption: 'Неформалогия' },
-                { src: `${APP_BASE_URL}assets/4.jpg`, caption: 'Непередаваемы улыбки' },
-                { src: `${APP_BASE_URL}assets/5.jpg`, caption: 'Иююю...' },
-                { src: `${APP_BASE_URL}assets/6.jpg`, caption: '...Наш хранитель отдела' },
-                { src: `${APP_BASE_URL}assets/7.jpg`, caption: 'Хэллоуинские настроения' },
-                { src: `${APP_BASE_URL}assets/9.jpg`, caption: 'Желаю вам носить только такие тяжести' }
+                {
+                    src: `${APP_BASE_URL}assets/1.jpg`,
+                    caption: 'Команда в сборе',
+                    description: 'Тестовый текст не придерайтесь а'
+                },
+                {
+                    src: `${APP_BASE_URL}assets/2.jpg`,
+                    caption: 'Неформальная пауза',
+                    description: 'Момент, где рабочая энергия сочетается с живым общением.'
+                },
+                {
+                    src: `${APP_BASE_URL}assets/4.jpg`,
+                    caption: 'Улыбки дня',
+                    description: 'Эти кадры напоминают, что настроение команды решает многое.'
+                },
+                {
+                    src: `${APP_BASE_URL}assets/5.jpg`,
+                    caption: 'Энергия момента',
+                    description: 'Когда в деле есть драйв, даже сложные задачи идут легче.'
+                },
+                {
+                    src: `${APP_BASE_URL}assets/6.jpg`,
+                    caption: 'Опора отдела',
+                    description: 'Люди, которые стабильно держат качество и помогают другим.'
+                },
+                {
+                    src: `${APP_BASE_URL}assets/7.jpg`,
+                    caption: 'Тематический день',
+                    description: 'Рабочие будни с креативом и сильной командной атмосферой.'
+                },
+                {
+                    src: `${APP_BASE_URL}assets/9.jpg`,
+                    caption: 'Победные кадры',
+                    description: 'Фото, которое отлично передает характер нашей команды.'
+                }
             ];
             const [devLetterIndex, setDevLetterIndex] = useState(0);
             // Refs for autoplay pause and thumbnail scrolling
@@ -8404,9 +8432,9 @@ const withAccessTokenHeader = (headers = {}) => {
                     // ignore
                 }
             }, [devLetterIndex]);
-            // Global helper to open/close the Dev Letter modal programmatically
+            // Global helper to open/close the gallery modal programmatically
             useEffect(() => {
-                window.ShowDevLetterModal = () => { console.log('window.ShowDevLetterModal called'); showToast?.('С наступающим вас!'); setShowDevLetterModal(true); };
+                window.ShowDevLetterModal = () => { console.log('window.ShowDevLetterModal called'); showToast?.('Открываю галерею команды'); setShowDevLetterModal(true); };
                 window.HideDevLetterModal = () => { console.log('window.HideDevLetterModal called'); setShowDevLetterModal(false); };
 
                 const onKeyDown = (e) => {
@@ -12612,13 +12640,12 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                 <hr className="border-t border-white-700 my-2 opacity-40" />
 
-                                {/* Убераю письмо от модера
                                 <li>
-                                        <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('С наступающим вас!'); setShowDevLetterModal(true); try { startConfetti(); } catch(e){}; setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
-                                        <i className="fas fa-envelope"></i> <span className="sidebar-text">Письмо от модера</span>
+                                        <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('Открываю галерею команды'); setShowDevLetterModal(true); try { startConfetti(); } catch(e){}; setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
+                                        <i className="fas fa-images"></i> <span className="sidebar-text">Галерея команды</span>
                                     </button>
                                 </li>
-                                */}
+
                                <li className="relative" ref={sidebarAccountRef}>
                                 <button
                                     onClick={handleToggleDropdown}
@@ -16020,94 +16047,96 @@ const withAccessTokenHeader = (headers = {}) => {
                                 </button>
 
                                 <div className="p-4 sm:p-6 md:p-10">
-                                    {/* Header */}
-                                    <div className="mb-10">
-                                        <div className="mb-3">
-                                            <h2 className="text-3xl font-bold text-gray-900">
-                                                Письмо от модератора
-                                            </h2>
-                                            <div className="mt-3 h-[1px] w-[21.2rem] bg-blue-600"></div>
-                                        </div>
-                                        <p className="text-sm text-gray-400">
-                                            26 декабря 2025 г.
+                                    <div className="mb-6 sm:mb-8">
+                                        <h2 className="text-2xl sm:text-3xl font-bold text-gray-900">
+                                            Галерея команды OTP
+                                        </h2>
+                                        <p className="mt-2 text-sm text-gray-500">
+                                            Кадры с рабочими моментами, общими победами и атмосферой команды.
                                         </p>
                                     </div>
 
-                                    {/* Content */}
-                                        <div className="bg-white rounded-2xl p-4 shadow-sm space-y-5 text-gray-700 leading-relaxed">
-                                        <p className="text-lg font-semibold text-gray-900">
-                                            Дорогие коллеги,
-                                        </p>
-
-                                        <p className="text-justify">
-                                            Поздравляю вас с наступающим <span className="font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-indigo-600">Новым годом</span>! Для меня большая гордость работать с такими мощными профессионалами своего дела, как вы. Каждый из вас вносит свой уникальный вклад в нашу команду, и я искренне благодарен за вашу преданность, трудолюбие и творческий подход к решению задач. Пишет ChatGPT.
-                                        </p>
-
-                                        <p className="text-justify">
-                                            Шутки шутками но, большое спасибо, что провели этот год со мной, слушая мои самые крутые шутки, странные запросы и бесконечные «чукинги чал». Надеюсь, в новом году мы будем продолжать покорять вершины, делать невозможное возможным и смеяться над своими же гениальными (или не очень) идеями.
-                                        </p>
-
-                                        <p className="text-justify">
-                                            Желаю вам и вашим близким здоровья, счастья, вдохновения и чтобы все злые водители этого года ушли вместе с ним. А тем коллегам, которые только пришли в наш коллективчик, особенно крепких нервов — надеюсь, мы с вами так же продолжим работать и в следующем году, ведь дети — это цветы жизни.
-                                        </p>
-
-                                        {/* Signature */}
-                                        <div className="pt-6 mt-8 border-t border-gray-200">
-                                            <p className="text-sm text-gray-500 italic mb-1">
-                                                С уважением,
-                                            </p>
-                                            <p className="text-base text-gray-900 font-semibold">
-                                                Модератор — Ядигаров Руслан Азизулы
-                                            </p>
-                                        </div>
-
-                                        {/* Carousel: photos with caption overlay (wider + horizontal scroll for thumbnails) */}
-                                        <div className="mt-6">
+                                    <div className="bg-white rounded-2xl p-4 sm:p-5 shadow-sm">
+                                        <div className="grid lg:grid-cols-[minmax(0,1.8fr)_minmax(0,1fr)] gap-4 sm:gap-5">
                                             <div className="relative bg-gray-100 rounded-2xl overflow-hidden aspect-[16/9]">
-                                                <img src={devLetterImages[devLetterIndex].src} alt={devLetterImages[devLetterIndex].caption} onMouseEnter={() => { devAutoplayPausedRef.current = true; }} onMouseLeave={() => { devAutoplayPausedRef.current = false; }} onTouchStart={() => { devAutoplayPausedRef.current = true; }} onTouchEnd={() => { devAutoplayPausedRef.current = false; }} className="absolute inset-0 w-full h-full object-cover" />
+                                                <img
+                                                    src={devLetterImages[devLetterIndex].src}
+                                                    alt={devLetterImages[devLetterIndex].caption}
+                                                    onMouseEnter={() => { devAutoplayPausedRef.current = true; }}
+                                                    onMouseLeave={() => { devAutoplayPausedRef.current = false; }}
+                                                    onTouchStart={() => { devAutoplayPausedRef.current = true; }}
+                                                    onTouchEnd={() => { devAutoplayPausedRef.current = false; }}
+                                                    className="absolute inset-0 w-full h-full object-cover"
+                                                />
                                                 <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-transparent"></div>
                                                 <div className="absolute left-4 sm:left-6 bottom-4 sm:bottom-6">
-                                                    <div className="bg-black/60 text-white px-3 sm:px-4 py-1.5 sm:py-2 rounded-md text-sm sm:text-sm max-w-[86%]">{devLetterImages[devLetterIndex].caption}</div>
+                                                    <div className="bg-black/60 text-white px-3 sm:px-4 py-1.5 sm:py-2 rounded-md text-sm max-w-[90%]">
+                                                        {devLetterImages[devLetterIndex].caption}
+                                                    </div>
                                                 </div>
 
-                                                <button onClick={() => setDevLetterIndex((devLetterIndex - 1 + devLetterImages.length) % devLetterImages.length)} className="absolute left-2 sm:left-4 top-1/2 -translate-y-1/2 bg-white/90 hover:bg-white p-2 sm:p-3 rounded-full shadow-md">
+                                                <button
+                                                    onClick={() => setDevLetterIndex((devLetterIndex - 1 + devLetterImages.length) % devLetterImages.length)}
+                                                    className="absolute left-2 sm:left-4 top-1/2 -translate-y-1/2 bg-white/90 hover:bg-white p-2 sm:p-3 rounded-full shadow-md"
+                                                    aria-label="Предыдущее фото"
+                                                >
                                                     <i className="fas fa-chevron-left"></i>
                                                 </button>
-                                                <button onClick={() => setDevLetterIndex((devLetterIndex + 1) % devLetterImages.length)} className="absolute right-2 sm:right-4 top-1/2 -translate-y-1/2 bg-white/90 hover:bg-white p-2 sm:p-3 rounded-full shadow-md">
+                                                <button
+                                                    onClick={() => setDevLetterIndex((devLetterIndex + 1) % devLetterImages.length)}
+                                                    className="absolute right-2 sm:right-4 top-1/2 -translate-y-1/2 bg-white/90 hover:bg-white p-2 sm:p-3 rounded-full shadow-md"
+                                                    aria-label="Следующее фото"
+                                                >
                                                     <i className="fas fa-chevron-right"></i>
                                                 </button>
                                             </div>
 
-                                            <div className="mt-3">
-                                                <div ref={thumbsContainerRef} className="flex gap-3 dev-carousel-thumbs overflow-x-auto py-2 px-1" style={{ WebkitOverflowScrolling: 'touch' }}>
-                                                    {devLetterImages.map((img, i) => (
-                                                        <button ref={el => thumbItemsRef.current[i] = el} key={i} onClick={() => setDevLetterIndex(i)} className={`flex-shrink-0 w-24 sm:w-28 md:w-36 h-16 sm:h-20 md:h-24 rounded-lg overflow-hidden border-2 ${i === devLetterIndex ? 'border-blue-500' : 'border-transparent'} shadow-sm` }>
-                                                            <img src={img.src} alt={img.caption} className="w-full h-full object-cover" />
-                                                        </button>
-                                                    ))}
-                                                </div>
+                                            <div className="rounded-2xl border border-blue-100 bg-gradient-to-b from-blue-50 to-white p-4 sm:p-5">
+                                                <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">
+                                                    Фото {devLetterIndex + 1} из {devLetterImages.length}
+                                                </p>
+                                                <h3 className="mt-2 text-xl font-semibold text-gray-900">
+                                                    {devLetterImages[devLetterIndex].caption}
+                                                </h3>
+                                                <p className="mt-3 text-sm leading-relaxed text-gray-600">
+                                                    {devLetterImages[devLetterIndex].description || 'Коллекция ярких рабочих моментов команды OTP.'}
+                                                </p>
+                                                <p className="mt-4 text-xs text-gray-500">
+                                                    Выберите миниатюру ниже, чтобы открыть нужный кадр.
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div className="mt-4">
+                                            <div ref={thumbsContainerRef} className="flex gap-3 dev-carousel-thumbs overflow-x-auto py-2 px-1" style={{ WebkitOverflowScrolling: 'touch' }}>
+                                                {devLetterImages.map((img, i) => (
+                                                    <button
+                                                        ref={el => thumbItemsRef.current[i] = el}
+                                                        key={i}
+                                                        onClick={() => setDevLetterIndex(i)}
+                                                        className={`relative flex-shrink-0 w-24 sm:w-28 md:w-36 h-16 sm:h-20 md:h-24 rounded-lg overflow-hidden border-2 ${i === devLetterIndex ? 'border-blue-500' : 'border-transparent'} shadow-sm`}
+                                                        aria-label={`Открыть фото ${i + 1}`}
+                                                    >
+                                                        <img src={img.src} alt={img.caption} className="w-full h-full object-cover" />
+                                                    </button>
+                                                ))}
                                             </div>
                                         </div>
                                     </div>
 
-                                    {/* Footer */}
-                                    <div className="flex justify-end mt-8">
-                                        <button
-                                            onClick={() => setShowDevLetterModal(false)}
-                                            className="px-8 py-3 text-sm font-semibold text-white bg-blue-600 rounded-xl hover:bg-blue-700 transition-all shadow-lg hover:shadow-xl transform hover:scale-105"
-                                        >
-                                            Закрыть
-                                        </button>
-                                    </div>
-                                    {/* CTA: send your photos to Telegram */}
-                                    <div className="mt-4 mb-4 text-center">
-                                        <p className="text-sm text-gray-600">Хотите добавить свои фотографии с описанием?</p>
-                                        <p className="text-sm mt-1">
-                                            Отправляйте в Telegram:&nbsp;
+                                    <div className="mt-5 sm:mt-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                                        <p className="text-sm text-gray-600">
+                                            Хотите добавить свой кадр? Пишите в Telegram:&nbsp;
                                             <a href="https://t.me/Alfa33O" target="_blank" rel="noopener noreferrer" className="text-blue-600 font-semibold hover:underline">
                                                 <i className="fab fa-telegram-plane"></i>&nbsp;@Alfa33O
                                             </a>
                                         </p>
+                                        <button
+                                            onClick={() => setShowDevLetterModal(false)}
+                                            className="px-6 py-3 text-sm font-semibold text-white bg-blue-600 rounded-xl hover:bg-blue-700 transition-all shadow-lg hover:shadow-xl"
+                                        >
+                                            Закрыть галерею
+                                        </button>
                                     </div>
                                 </div>
                             </div>
