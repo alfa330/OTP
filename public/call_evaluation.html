@@ -1259,7 +1259,11 @@ const App = ({ user, initialSelection }) => {
         if (!selectedOperator || !userId) { setCalls([]); return; }
         setIsLoading(true);
         try {
-            const r = await authFetch(`${API_BASE_URL}/api/call_evaluations?operator_id=${selectedOperator.id}`, {headers:{'X-User-Id':userId}});
+            const params = new URLSearchParams({
+                operator_id: String(selectedOperator.id),
+                month: selectedMonth
+            });
+            const r = await authFetch(`${API_BASE_URL}/api/call_evaluations?${params.toString()}`, {headers:{'X-User-Id':userId}});
             const d = await r.json();
             if (d.status === 'success') {
                 setCalls(d.evaluations.map(ev => ({
@@ -1294,7 +1298,7 @@ const App = ({ user, initialSelection }) => {
             }
         } catch(e) { console.error(e); }
         finally { setIsLoading(false); }
-    }, [selectedOperator, userId]);
+    }, [selectedOperator, userId, selectedMonth]);
 
     useEffect(() => { fetchEvaluations(); }, [fetchEvaluations]);
     useEffect(() => { setFromDate(null); setToDate(null); }, [selectedMonth]);
