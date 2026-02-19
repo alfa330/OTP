@@ -12793,8 +12793,8 @@ const withAccessTokenHeader = (headers = {}) => {
                             ref={callEvaluationFrameRef}
                             title="Оценки операторов"
                             src={callEvaluationIframeUrl}
-                            className="w-full bg-white"
-                            style={{ minHeight: 'calc(100vh - 140px)', border: 'none' }}
+                            className="block w-full bg-white"
+                            style={{ height: 'calc(100vh - 64px)', border: 'none' }}
                         />
                         )}
                         {user.role === 'admin' && (
