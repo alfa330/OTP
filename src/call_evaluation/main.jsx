@@ -225,7 +225,7 @@ const SvRequestButton = ({ call, userId, userRole, fetchEvaluations, onReevaluat
             });
             const d = await r.json();
             if (!r.ok) throw new Error(d.error);
-            await fetchEvaluations?.();
+            await fetchEvaluations?.({ force: true });
             setShowModal(false); setComment('');
             alert('Заявка отправлена');
         } catch(e) { alert('Ошибка: ' + e.message); }
@@ -677,6 +677,8 @@ const App = ({ user, initialSelection }) => {
     const [viewMode, setViewMode] = useState('normal');
     const [showVersionsModal, setShowVersionsModal] = useState(false);
     const [versionHistory, setVersionHistory] = useState([]);
+    const operatorsCacheRef = useRef(new Map());
+    const callsCacheRef = useRef(new Map());
     const MAX_EVALS = 20;
     const normalizeStatus = (status) => String(status ?? '').trim().toLowerCase();
     const isFiredStatus = (status) => {
@@ -698,6 +700,38 @@ const App = ({ user, initialSelection }) => {
         const d = new Date(new Date().getFullYear(), new Date().getMonth()-i, 1);
         return { value: `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`, label: d.toLocaleString('ru',{month:'long',year:'numeric'}) };
     });
+
+    const getOperatorsCacheKey = useCallback((scopeId) => `${userRole || 'unknown'}:${scopeId || 'none'}`, [userRole]);
+    const getCallsCacheKey = useCallback((operatorId, month) => `${operatorId}:${month}`, []);
+    const mapEvaluationToCall = useCallback((ev, operator) => ({
+        id: ev.id,
+        fileName: `Call ${ev.phone_number}`,
+        totalScore: ev.score != null ? parseFloat(ev.score).toFixed(2) : null,
+        date: ev.evaluation_date ? ev.evaluation_date.split('T')[0] : '',
+        phoneNumber: ev.phone_number,
+        combinedComment: ev.comment,
+        appeal_date: ev.appeal_date || '-',
+        selectedDirection: ev.direction?.name || operator?.direction || '-',
+        directionId: ev.direction?.id ?? null,
+        directions: [{name: ev.direction?.name || '-', hasFileUpload: ev.direction?.hasFileUpload ?? true, criteria: ev.direction?.criteria || []}],
+        scores: ev.scores || [],
+        criterionComments: ev.criterion_comments || [],
+        audioUrl: null,
+        isDraft: ev.is_draft,
+        assignedMonth: ev.month,
+        isCorrection: ev.is_correction || false,
+        is_imported: ev.is_imported || false,
+        sv_request: !!ev.sv_request,
+        sv_request_comment: ev.sv_request_comment || null,
+        sv_request_by: ev.sv_request_by || null,
+        sv_request_by_name: ev.sv_request_by_name || null,
+        sv_request_at: ev.sv_request_at || null,
+        sv_request_approved: !!ev.sv_request_approved,
+        sv_request_approved_by: ev.sv_request_approved_by || null,
+        sv_request_approved_by_name: ev.sv_request_approved_by_name || null,
+        sv_request_approved_at: ev.sv_request_approved_at || null,
+        _rawEvaluation: ev
+    }), []);
 
     // Supervisors
     useEffect(() => {
@@ -739,20 +773,68 @@ const App = ({ user, initialSelection }) => {
         }
     }, [operators, operatorFromToken]);
 
-    // Directions + Operators
+    // Directions
     useEffect(() => {
         if (!userId) return;
+        authFetch(`${API_BASE_URL}/api/admin/directions`, {headers:{'X-User-Id':userId}})
+            .then(r => r.json())
+            .then(d => { if (d.status === 'success') setDirections(d.directions || []); })
+            .catch(console.error);
+    }, [userId]);
+
+    // Operators
+    useEffect(() => {
+        if (!userId) return;
+        const scopeId = userRole === 'admin' ? selectedSupervisor : userId;
+        if (!scopeId) {
+            setOperators([]);
+            return;
+        }
+
+        const cacheKey = getOperatorsCacheKey(scopeId);
+        const cachedOperators = operatorsCacheRef.current.get(cacheKey);
+        if (cachedOperators) {
+            setOperators(cachedOperators);
+            return;
+        }
+
+        let isCancelled = false;
         setIsLoading(true);
-        const fetchDirs = authFetch(`${API_BASE_URL}/api/admin/directions`, {headers:{'X-User-Id':userId}})
-            .then(r=>r.json()).then(d=>{ if(d.status==='success') setDirections(d.directions); }).catch(console.error);
-        const fetchOps = authFetch(`${API_BASE_URL}/api/sv/data?id=${userRole==='admin'&&selectedSupervisor ? selectedSupervisor : userId}`, {headers:{'X-User-Id':userId}})
-            .then(r=>r.json()).then(d=>{ if(d.status==='success') setOperators(d.operators); }).catch(console.error);
-        Promise.all([fetchDirs,fetchOps]).finally(()=>setIsLoading(false));
-    }, [userId, userRole, selectedSupervisor]);
+        authFetch(`${API_BASE_URL}/api/sv/data?id=${scopeId}`, {headers:{'X-User-Id':userId}})
+            .then(r => r.json())
+            .then(d => {
+                if (isCancelled) return;
+                if (d.status === 'success') {
+                    const nextOperators = d.operators || [];
+                    operatorsCacheRef.current.set(cacheKey, nextOperators);
+                    setOperators(nextOperators);
+                } else {
+                    setOperators([]);
+                }
+            })
+            .catch((e) => {
+                if (!isCancelled) {
+                    setOperators([]);
+                    console.error(e);
+                }
+            })
+            .finally(() => {
+                if (!isCancelled) setIsLoading(false);
+            });
+
+        return () => { isCancelled = true; };
+    }, [userId, userRole, selectedSupervisor, getOperatorsCacheKey]);
 
     // Evaluations fetch
-    const fetchEvaluations = useCallback(async () => {
+    const fetchEvaluations = useCallback(async ({ force = false } = {}) => {
         if (!selectedOperator || !userId) { setCalls([]); return; }
+        const isOperatorFromLoadedList = operators.some(op => op.id === selectedOperator.id);
+        if (!isOperatorFromLoadedList) { setCalls([]); return; }
+        const cacheKey = getCallsCacheKey(selectedOperator.id, selectedMonth);
+        if (!force && callsCacheRef.current.has(cacheKey)) {
+            setCalls(callsCacheRef.current.get(cacheKey) || []);
+            return;
+        }
         setIsLoading(true);
         try {
             const params = new URLSearchParams({
@@ -762,46 +844,26 @@ const App = ({ user, initialSelection }) => {
             const r = await authFetch(`${API_BASE_URL}/api/call_evaluations?${params.toString()}`, {headers:{'X-User-Id':userId}});
             const d = await r.json();
             if (d.status === 'success') {
-                setCalls(d.evaluations.map(ev => ({
-                    id: ev.id,
-                    fileName: `Call ${ev.phone_number}`,
-                    totalScore: ev.score != null ? parseFloat(ev.score).toFixed(2) : null,
-                    date: ev.evaluation_date ? ev.evaluation_date.split('T')[0] : '',
-                    phoneNumber: ev.phone_number,
-                    combinedComment: ev.comment,
-                    appeal_date: ev.appeal_date || '-',
-                    selectedDirection: ev.direction?.name || selectedOperator?.direction || '-',
-                    directionId: ev.direction?.id ?? null,
-                    directions: [{name: ev.direction?.name||'-', hasFileUpload: ev.direction?.hasFileUpload??true, criteria: ev.direction?.criteria||[]}],
-                    scores: ev.scores || [],
-                    criterionComments: ev.criterion_comments || [],
-                    audioUrl: null,
-                    isDraft: ev.is_draft,
-                    assignedMonth: ev.month,
-                    isCorrection: ev.is_correction || false,
-                    is_imported: ev.is_imported || false,
-                    sv_request: !!ev.sv_request,
-                    sv_request_comment: ev.sv_request_comment || null,
-                    sv_request_by: ev.sv_request_by || null,
-                    sv_request_by_name: ev.sv_request_by_name || null,
-                    sv_request_at: ev.sv_request_at || null,
-                    sv_request_approved: !!ev.sv_request_approved,
-                    sv_request_approved_by: ev.sv_request_approved_by || null,
-                    sv_request_approved_by_name: ev.sv_request_approved_by_name || null,
-                    sv_request_approved_at: ev.sv_request_approved_at || null,
-                    _rawEvaluation: ev
-                })));
+                const nextCalls = (d.evaluations || []).map(ev => mapEvaluationToCall(ev, selectedOperator));
+                callsCacheRef.current.set(cacheKey, nextCalls);
+                setCalls(nextCalls);
             }
         } catch(e) { console.error(e); }
         finally { setIsLoading(false); }
-    }, [selectedOperator, userId, selectedMonth]);
+    }, [selectedOperator, userId, selectedMonth, operators, getCallsCacheKey, mapEvaluationToCall]);
 
     useEffect(() => { fetchEvaluations(); }, [fetchEvaluations]);
     useEffect(() => { setFromDate(null); setToDate(null); }, [selectedMonth]);
 
     const handleEvaluateCall = (data) => {
         setCalls(prev => {
-            if (!data) return prev.filter(c => c.id !== editingEval?.id);
+            if (!data) {
+                const nextCalls = prev.filter(c => c.id !== editingEval?.id);
+                if (selectedOperator?.id) {
+                    callsCacheRef.current.set(getCallsCacheKey(selectedOperator.id, selectedMonth), nextCalls);
+                }
+                return nextCalls;
+            }
             const newCall = {
                 id: data.id, fileName: `Call ${data.phoneNumber}`, scores: data.scores, criterionComments: data.criterionComments,
                 combinedComment: data.comment, totalScore: data.totalScore, date: new Date().toISOString().slice(0,10),
@@ -814,11 +876,15 @@ const App = ({ user, initialSelection }) => {
             let updated = data.isCorrection
                 ? prev.filter(c => c.id !== data.id && c.id !== editingEval?.id)
                 : prev.filter(c => c.id !== newCall.id);
-            return [...updated, newCall];
+            const nextCalls = [...updated, newCall];
+            if (selectedOperator?.id) {
+                callsCacheRef.current.set(getCallsCacheKey(selectedOperator.id, selectedMonth), nextCalls);
+            }
+            return nextCalls;
         });
         if (data?.isCorrection && data?.id) { delete audioUrlCache[data.id]; if (editingEval?.id) delete audioUrlCache[editingEval.id]; }
         setEditingEval(null);
-        if (!data?.isDraft) fetchEvaluations();
+        if (!data?.isDraft) fetchEvaluations({ force: true });
     };
 
     const handleSelectCall = async (callId) => {
@@ -829,7 +895,15 @@ const App = ({ user, initialSelection }) => {
             setLoadingCallId(callId);
             if (!call.audioUrl && call.directions?.[0]?.hasFileUpload) {
                 const url = await getAudioUrl(call.id, userId);
-                if (url) setCalls(prev => prev.map(c => c.id===callId ? {...c, audioUrl:url} : c));
+                if (url) {
+                    setCalls(prev => {
+                        const nextCalls = prev.map(c => c.id===callId ? {...c, audioUrl:url} : c);
+                        if (selectedOperator?.id) {
+                            callsCacheRef.current.set(getCallsCacheKey(selectedOperator.id, selectedMonth), nextCalls);
+                        }
+                        return nextCalls;
+                    });
+                }
             }
             setExpandedId(callId);
             setLoadingCallId(null);
@@ -842,7 +916,13 @@ const App = ({ user, initialSelection }) => {
             const r = await authFetch(`${API_BASE_URL}/api/call_evaluations/${id}`, { method:'DELETE', headers:{'Content-Type':'application/json','X-User-Id':userId} });
             const d = await r.json();
             if (!r.ok) throw new Error(d.error);
-            setCalls(prev => prev.filter(c => c.id !== id));
+            setCalls(prev => {
+                const nextCalls = prev.filter(c => c.id !== id);
+                if (selectedOperator?.id) {
+                    callsCacheRef.current.set(getCallsCacheKey(selectedOperator.id, selectedMonth), nextCalls);
+                }
+                return nextCalls;
+            });
         } catch(e) { alert('Ошибка: ' + e.message); }
     };
 
@@ -897,7 +977,7 @@ const App = ({ user, initialSelection }) => {
                         {userRole === 'admin' && (
                             <div className="filter-group">
                                 <label className="label">Супервайзер</label>
-                                <select className="select" value={selectedSupervisor||''} style={selectedSupervisorIsFired ? { color:'var(--text-3)' } : undefined} onChange={e => { setSelectedSupervisor(parseInt(e.target.value)||null); setSelectedOperator(null); setOperators([]); setCalls([]); }}>
+                                <select className="select" value={selectedSupervisor||''} style={selectedSupervisorIsFired ? { color:'var(--text-3)' } : undefined} onChange={e => { setSelectedSupervisor(parseInt(e.target.value)||null); setSelectedOperator(null); setCalls([]); setExpandedId(null); }}>
                                     <option value="">Выбрать</option>
                                     {orderedSupervisors.map(sv => (
                                         <option key={sv.id} value={sv.id} className={isFiredStatus(sv?.status) ? 'option-fired' : ''} style={isFiredStatus(sv?.status) ? { color:'var(--text-3)' } : undefined}>{sv.name}</option>
