@@ -1500,8 +1500,11 @@ const App = ({ user, initialSelection }) => {
                                 <label className="label">Супервайзер</label>
                                 <select className="select" value={selectedSupervisor||''} onChange={e => { setSelectedSupervisor(parseInt(e.target.value)||null); setSelectedOperator(null); setOperators([]); setCalls([]); }}>
                                     <option value="">Выбрать</option>
-                                    {[...supervisors].sort((a,b)=>a.name.localeCompare(b.name,'ru')).map(sv => (
-                                        <option key={sv.id} value={sv.id}>{sv.name}{sv.status==='fired'?' (уволен)':''}</option>
+                                    {supervisors.filter(sv=>sv.status!=='fired').sort((a,b)=>a.name.localeCompare(b.name,'ru')).map(sv => (
+                                        <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                    ))}
+                                    {supervisors.filter(sv=>sv.status==='fired').sort((a,b)=>a.name.localeCompare(b.name,'ru')).map(sv => (
+                                        <option key={sv.id} value={sv.id} style={{color:'var(--text-3)'}}>{sv.name} (уволен)</option>
                                     ))}
                                 </select>
                             </div>
@@ -1514,7 +1517,7 @@ const App = ({ user, initialSelection }) => {
                                     <option key={op.id} value={op.id}>{op.name}</option>
                                 ))}
                                 {operators.filter(o=>o.status==='fired').sort((a,b)=>a.name.localeCompare(b.name,'ru')).map(op => (
-                                    <option key={op.id} value={op.id}>{op.name} (уволен)</option>
+                                    <option key={op.id} value={op.id} style={{color:'var(--text-3)'}}>{op.name} (уволен)</option>
                                 ))}
                             </select>
                         </div>
