@@ -519,18 +519,22 @@
 
         /* ── Tooltip ── */
         .tooltip-wrap { position: relative; display: inline-flex; align-items: center; }
-        .tooltip-wrap:hover .tooltip-box { opacity: 1; visibility: visible; transform: translateY(0); }
         .tooltip-box {
-            position: absolute; bottom: calc(100% + 8px); left: 50%;
-            transform: translateX(-50%) translateY(4px);
-            background: #1a1a18; color: #fff;
-            font-size: 12px; padding: 6px 10px;
-            border-radius: 6px; white-space: pre-wrap;
-            width: 240px; z-index: 300;
-            opacity: 0; visibility: hidden;
-            transition: all var(--transition);
+            position: fixed;
+            transform: translate(-50%, -100%);
+            background: #1a1a18;
+            color: #fff;
+            font-size: 12px;
+            padding: 6px 10px;
+            border-radius: 6px;
+            white-space: pre-wrap;
+            width: 240px;
+            max-width: calc(100vw - 24px);
+            z-index: 4000;
             pointer-events: none;
+            box-shadow: var(--shadow-md);
         }
+        .tooltip-box.bottom { transform: translate(-50%, 0); }
 
         /* ── Date range picker overrides ── */
         .flatpickr-calendar { border-radius: var(--radius-lg) !important; border: 1px solid var(--border) !important; box-shadow: var(--shadow-md) !important; }
@@ -618,8 +622,30 @@ const { useState, useEffect, useRef, useCallback } = React;
 
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
+const EMBED_STATE_KEY = 'call_evaluation_embed_state';
 let refreshPromise = null;
 const audioUrlCache = {};
+
+const readEmbedState = () => {
+    try {
+        const raw = sessionStorage.getItem(EMBED_STATE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return null;
+        return {
+            user: parsed.user || null,
+            initialSelection: parsed.initialSelection || null
+        };
+    } catch {
+        return null;
+    }
+};
+
+const writeEmbedState = ({ user = null, initialSelection = null } = {}) => {
+    try {
+        sessionStorage.setItem(EMBED_STATE_KEY, JSON.stringify({ user, initialSelection }));
+    } catch {}
+};
 
 const readJsonSafe = async (r) => { try { return await r.json(); } catch { return null; } };
 
@@ -743,6 +769,64 @@ const CriterionCard = ({ criterion, index, score, comment, commentVisible, onSco
 
 
 // ─── SV Request Button ─────────────────────────────────
+const HoverTooltip = ({ text, children }) => {
+    const triggerRef = useRef(null);
+    const [isOpen, setIsOpen] = useState(false);
+    const [placement, setPlacement] = useState('top');
+    const [position, setPosition] = useState({ left: 0, top: 0 });
+
+    const recalcPosition = useCallback(() => {
+        if (!triggerRef.current) return;
+        const rect = triggerRef.current.getBoundingClientRect();
+        const halfTooltipWidth = 120;
+        const left = Math.min(
+            window.innerWidth - halfTooltipWidth - 12,
+            Math.max(halfTooltipWidth + 12, rect.left + rect.width / 2)
+        );
+        const shouldShowTop = rect.top > 110;
+        setPlacement(shouldShowTop ? 'top' : 'bottom');
+        setPosition({
+            left,
+            top: shouldShowTop ? rect.top - 8 : rect.bottom + 8
+        });
+    }, []);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        recalcPosition();
+        const handleViewportChange = () => recalcPosition();
+        window.addEventListener('scroll', handleViewportChange, true);
+        window.addEventListener('resize', handleViewportChange);
+        return () => {
+            window.removeEventListener('scroll', handleViewportChange, true);
+            window.removeEventListener('resize', handleViewportChange);
+        };
+    }, [isOpen, recalcPosition]);
+
+    return (
+        <span
+            ref={triggerRef}
+            className="tooltip-wrap"
+            onMouseEnter={() => { setIsOpen(true); recalcPosition(); }}
+            onMouseLeave={() => setIsOpen(false)}
+            onFocus={() => { setIsOpen(true); recalcPosition(); }}
+            onBlur={() => setIsOpen(false)}
+        >
+            {children}
+            {isOpen && ReactDOM.createPortal(
+                <div
+                    className={`tooltip-box ${placement === 'bottom' ? 'bottom' : ''}`}
+                    role="tooltip"
+                    style={{ left: position.left, top: position.top }}
+                >
+                    {text}
+                </div>,
+                document.body
+            )}
+        </span>
+    );
+};
+
 const SvRequestButton = ({ call, userId, userRole, fetchEvaluations, onReevaluate }) => {
     const [showModal, setShowModal] = useState(false);
     const [comment, setComment] = useState('');
@@ -793,20 +877,18 @@ const SvRequestButton = ({ call, userId, userRole, fetchEvaluations, onReevaluat
     );
 
     if (call.sv_request && !call.sv_request_approved) return (
-        <div className="tooltip-wrap">
+        <HoverTooltip text={[call.sv_request_comment && `Комментарий: ${call.sv_request_comment}`, call.sv_request_by_name && `От: ${call.sv_request_by_name}`].filter(Boolean).join('\n') || 'Запрос на рассмотрении'}>
             <span style={{fontSize:13, color:'var(--amber)', display:'flex', alignItems:'center', gap:4}}>
                 <i className="fas fa-clock" style={{fontSize:11}} /> Ожидает
             </span>
-            <div className="tooltip-box">{[call.sv_request_comment && `Комментарий: ${call.sv_request_comment}`, call.sv_request_by_name && `От: ${call.sv_request_by_name}`].filter(Boolean).join('\n') || 'Запрос на рассмотрении'}</div>
-        </div>
+        </HoverTooltip>
     );
 
     if (call.sv_request_approved) return (
         <div style={{display:'flex', alignItems:'center', gap:6}}>
-            <div className="tooltip-wrap">
+            <HoverTooltip text={[call.sv_request_comment && `Комм.: ${call.sv_request_comment}`, call.sv_request_by_name && `Запросил: ${call.sv_request_by_name}`, call.sv_request_approved_by_name && `Одобрил: ${call.sv_request_approved_by_name}`].filter(Boolean).join('\n') || 'Запрос одобрен'}>
                 <i className="fas fa-info-circle" style={{color:'var(--green)', cursor:'pointer'}} />
-                <div className="tooltip-box">{[call.sv_request_comment && `Комм.: ${call.sv_request_comment}`, call.sv_request_by_name && `Запросил: ${call.sv_request_by_name}`, call.sv_request_approved_by_name && `Одобрил: ${call.sv_request_approved_by_name}`].filter(Boolean).join('\n') || 'Запрос одобрен'}</div>
-            </div>
+            </HoverTooltip>
             <button className="btn btn-primary btn-sm" onClick={e => { e.stopPropagation(); onReevaluate(); }}>Переоценить</button>
         </div>
     );
@@ -1170,7 +1252,6 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
                         </button>
                     )}
                     <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
-                    <button className="btn btn-secondary" onClick={() => handleSubmit(true)} disabled={isSubmitting}>Черновик</button>
                     <button className="btn btn-primary" onClick={() => handleSubmit(false)} disabled={isSubmitDisabled || isSubmitting}>
                         {isSubmitting ? <><span className="spinner" /> Отправка...</> : <><i className="fas fa-check" /> Отправить</>}
                     </button>
@@ -1247,8 +1328,21 @@ const App = ({ user, initialSelection }) => {
             });
         }
         if (initialSelection.month) setSelectedMonth(initialSelection.month);
-        if (initialSelection.supervisorId) setSelectedSupervisor(initialSelection.supervisorId);
+        if (initialSelection.supervisorId != null) setSelectedSupervisor(Number(initialSelection.supervisorId) || null);
     }, [initialSelection]);
+
+    useEffect(() => {
+        if (!userId) return;
+        writeEmbedState({
+            user: { id: userId, role: userRole, name: userName },
+            initialSelection: {
+                operatorId: selectedOperator?.id || null,
+                operatorName: selectedOperator?.name || '',
+                supervisorId: selectedSupervisor || null,
+                month: selectedMonth
+            }
+        });
+    }, [userId, userRole, userName, selectedOperator, selectedSupervisor, selectedMonth]);
 
     useEffect(() => {
         if (operatorFromToken && operators.length > 0) {
@@ -1707,17 +1801,22 @@ if (isEmbedded) {
         if (event.origin !== window.location.origin) return;
         const data = event.data || {};
         if (data.type !== 'CALL_EVALUATION_INIT') return;
-        renderApp({ user: data.user || null, initialSelection: data.initialSelection || null });
+        const nextState = { user: data.user || null, initialSelection: data.initialSelection || null };
+        writeEmbedState(nextState);
+        renderApp(nextState);
     };
 
     window.addEventListener('message', onMessage);
     window.parent.postMessage({ type: 'CALL_EVALUATION_READY' }, window.location.origin);
-    renderApp();
+    renderApp(readEmbedState() || {});
 } else {
-    renderApp({
-        user: window.__CALL_EVALUATION_USER__ || null,
-        initialSelection: window.__CALL_EVALUATION_SELECTION__ || null
-    });
+    const storedState = readEmbedState();
+    const nextState = {
+        user: window.__CALL_EVALUATION_USER__ || storedState?.user || null,
+        initialSelection: window.__CALL_EVALUATION_SELECTION__ || storedState?.initialSelection || null
+    };
+    if (nextState.user || nextState.initialSelection) writeEmbedState(nextState);
+    renderApp(nextState);
 }
 </script>
 </body>

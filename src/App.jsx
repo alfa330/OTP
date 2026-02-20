@@ -9839,11 +9839,14 @@ const withAccessTokenHeader = (headers = {}) => {
                     if (event.origin !== window.location.origin) return;
                     if (event.data?.type !== 'CALL_EVALUATION_READY') return;
                     setCallEvaluationFrameReady(true);
+                    const frameWindow = callEvaluationFrameRef.current?.contentWindow;
+                    if (!frameWindow) return;
+                    frameWindow.postMessage(callEvaluationInitPayload, window.location.origin);
                 };
 
                 window.addEventListener('message', onMessage);
                 return () => window.removeEventListener('message', onMessage);
-            }, []);
+            }, [callEvaluationInitPayload]);
 
             useEffect(() => {
                 if (view !== 'call_evaluation' || !callEvaluationFrameReady) return;
