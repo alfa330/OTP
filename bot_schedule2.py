@@ -2380,7 +2380,7 @@ def dispute_call_evaluation():
             return jsonify({"error": f"Failed to send dispute message to supervisor: {error_detail}"}), 500
 
         # Отправка админу
-        admin_response = send_telegram_message(admin, admin_message, audio_url)
+        admin_response = send_telegram_message(os.getenv("ADMIN_ID"), admin_message, audio_url)
         if admin_response.status_code != 200:
             error_detail = admin_response.json().get('description', 'Unknown error')
             logging.error(f"Telegram API error (admin): {error_detail}")
@@ -5496,7 +5496,7 @@ async def notify_supervisor_handler(callback: types.CallbackQuery):
 async def _is_admin_user(tg_id):
     """Проверка админа: сначала сравнение с переменной admin, затем fallback — проверка в БД."""
     try:
-        if admin is not None and str(tg_id) == str(admin):
+        if os.getenv("ADMIN_ID") is not None and str(tg_id) == str(os.getenv("ADMIN_ID")):
             return True
 
         # fallback: проверить в users по telegram_id и role='admin'
