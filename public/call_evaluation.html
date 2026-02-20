@@ -184,6 +184,7 @@
         .input::placeholder, .textarea::placeholder { color: var(--text-3); }
         .input:read-only { background: var(--surface-2); color: var(--text-2); cursor: default; }
         .select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b6b67' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; padding-right: 32px; }
+        .select option.option-fired { color: var(--text-3); }
         .textarea { resize: vertical; min-height: 80px; line-height: 1.5; }
         .label { font-size: 12px; font-weight: 500; color: var(--text-2); margin-bottom: 5px; display: block; letter-spacing: 0.01em; }
         .field { margin-bottom: 16px; }
@@ -1296,6 +1297,12 @@ const App = ({ user, initialSelection }) => {
     const [showVersionsModal, setShowVersionsModal] = useState(false);
     const [versionHistory, setVersionHistory] = useState([]);
     const MAX_EVALS = 20;
+    const normalizeStatus = (status) => String(status ?? '').trim().toLowerCase();
+    const isFiredStatus = (status) => {
+        const s = normalizeStatus(status);
+        return s === 'fired' || s === 'dismissed' || s === 'terminated' || s === 'уволен';
+    };
+    const compareByNameRu = (a, b) => String(a?.name ?? '').localeCompare(String(b?.name ?? ''), 'ru');
 
     const fmtDate = (ds) => {
         if (!ds) return '—';
@@ -1467,6 +1474,17 @@ const App = ({ user, initialSelection }) => {
     const evalCount = displayedCalls.filter(c => !c.isDraft && !c.is_imported).length;
     const avgScore = evalCount > 0 ? displayedCalls.filter(c=>!c.isDraft&&!c.is_imported).reduce((s,c)=>s+parseFloat(c.totalScore),0)/evalCount : 0;
     const isMaxReached = callsByMonth.filter(c=>!c.isDraft&&!c.is_imported).length >= MAX_EVALS;
+    const orderedSupervisors = [...supervisors].sort((a, b) => {
+        const firedDiff = Number(isFiredStatus(a?.status)) - Number(isFiredStatus(b?.status));
+        return firedDiff !== 0 ? firedDiff : compareByNameRu(a, b);
+    });
+    const orderedOperators = [...operators].sort((a, b) => {
+        const firedDiff = Number(isFiredStatus(a?.status)) - Number(isFiredStatus(b?.status));
+        return firedDiff !== 0 ? firedDiff : compareByNameRu(a, b);
+    });
+    const selectedSupervisorObj = selectedSupervisor ? supervisors.find(sv => sv.id === selectedSupervisor) : null;
+    const selectedSupervisorIsFired = isFiredStatus(selectedSupervisorObj?.status);
+    const selectedOperatorIsFired = isFiredStatus(selectedOperator?.status);
 
     const getScoreClass = (s) => {
         const v = parseFloat(s);
@@ -1498,26 +1516,20 @@ const App = ({ user, initialSelection }) => {
                         {userRole === 'admin' && (
                             <div className="filter-group">
                                 <label className="label">Супервайзер</label>
-                                <select className="select" value={selectedSupervisor||''} onChange={e => { setSelectedSupervisor(parseInt(e.target.value)||null); setSelectedOperator(null); setOperators([]); setCalls([]); }}>
+                                <select className="select" value={selectedSupervisor||''} style={selectedSupervisorIsFired ? { color:'var(--text-3)' } : undefined} onChange={e => { setSelectedSupervisor(parseInt(e.target.value)||null); setSelectedOperator(null); setOperators([]); setCalls([]); }}>
                                     <option value="">Выбрать</option>
-                                    {supervisors.filter(sv=>sv.status!=='fired').sort((a,b)=>a.name.localeCompare(b.name,'ru')).map(sv => (
-                                        <option key={sv.id} value={sv.id}>{sv.name}</option>
-                                    ))}
-                                    {supervisors.filter(sv=>sv.status==='fired').sort((a,b)=>a.name.localeCompare(b.name,'ru')).map(sv => (
-                                        <option key={sv.id} value={sv.id} style={{color:'var(--text-3)'}}>{sv.name} (уволен)</option>
+                                    {orderedSupervisors.map(sv => (
+                                        <option key={sv.id} value={sv.id} className={isFiredStatus(sv?.status) ? 'option-fired' : ''} style={isFiredStatus(sv?.status) ? { color:'var(--text-3)' } : undefined}>{sv.name}</option>
                                     ))}
                                 </select>
                             </div>
                         )}
                         <div className="filter-group">
                             <label className="label">Оператор</label>
-                            <select className="select" value={selectedOperator?.id||''} onChange={e => { const op=operators.find(o=>o.id===parseInt(e.target.value))||null; setSelectedOperator(op); setCalls([]); setExpandedId(null); }}>
+                            <select className="select" value={selectedOperator?.id||''} style={selectedOperatorIsFired ? { color:'var(--text-3)' } : undefined} onChange={e => { const op=operators.find(o=>o.id===parseInt(e.target.value))||null; setSelectedOperator(op); setCalls([]); setExpandedId(null); }}>
                                 <option value="">Выбрать</option>
-                                {[...operators.filter(o=>o.status!=='fired').sort((a,b)=>a.name.localeCompare(b.name,'ru'))].map(op => (
-                                    <option key={op.id} value={op.id}>{op.name}</option>
-                                ))}
-                                {operators.filter(o=>o.status==='fired').sort((a,b)=>a.name.localeCompare(b.name,'ru')).map(op => (
-                                    <option key={op.id} value={op.id} style={{color:'var(--text-3)'}}>{op.name} (уволен)</option>
+                                {orderedOperators.map(op => (
+                                    <option key={op.id} value={op.id} className={isFiredStatus(op?.status) ? 'option-fired' : ''} style={isFiredStatus(op?.status) ? { color:'var(--text-3)' } : undefined}>{op.name}</option>
                                 ))}
                             </select>
                         </div>
