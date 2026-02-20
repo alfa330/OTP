@@ -12560,7 +12560,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 })}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_evaluation' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-clipboard-check"></i> <span className="sidebar-text">Раздел оценок</span>
+                                                <i className="fas fa-clipboard-check"></i> <span className="sidebar-text">Журнал оценок</span>
                                             </button>
                                         </li>
                                         <li>
@@ -12619,7 +12619,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 onClick={() => openCallEvaluationSection({ month: selectedReportMonth || selectedMonth })}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_evaluation' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-clipboard-check"></i> <span className="sidebar-text">Раздел оценок</span>
+                                                <i className="fas fa-clipboard-check"></i> <span className="sidebar-text">Журнал оценок</span>
                                             </button>
                                         </li>
                                         <li>
