@@ -4778,30 +4778,75 @@ const withAccessTokenHeader = (headers = {}) => {
                 setSelectedDays({ opId: null, dates: [] });
             };
 
+            const buildAdjustedShiftPayloadForDate = ({ opId, date, start, end, editIndex = null, breaks = null }) => {
+                const hasExplicitBreaks = Array.isArray(breaks);
+                const simulated = operators.map(o => ({ ...o, shifts: { ...(o.shifts || {}) } }));
+                const simOp = simulated.find(x => x.id === opId);
+                if (!simOp) {
+                  return { start, end, breaks: hasExplicitBreaks ? breaks.map(b => ({ start: b.start, end: b.end })) : [] };
+                }
+
+                const existing = (simOp.shifts?.[date] ?? []).map(s => ({
+                  ...s,
+                  breaks: Array.isArray(s.breaks) ? s.breaks.map(b => ({ start: b.start, end: b.end })) : []
+                }));
+
+                if (editIndex === null) {
+                  existing.push({ start, end });
+                } else if (existing[editIndex]) {
+                  existing[editIndex] = { ...existing[editIndex], start, end };
+                } else {
+                  existing[editIndex] = { start, end };
+                }
+
+                const merged = mergeSegments(existing);
+                const inputStartMin = timeToMinutes(start);
+                const inputEndMin = timeToMinutes(end);
+                const inputEndNorm = (inputEndMin <= inputStartMin) ? (inputEndMin + 1440) : inputEndMin;
+                const targetSeg = merged.find(s => {
+                  const sMin = s.__startMin ?? timeToMinutes(s.start);
+                  const eMin = s.__endMin ?? (timeToMinutes(s.end) + (timeToMinutes(s.end) <= timeToMinutes(s.start) ? 1440 : 0));
+                  return sMin <= inputStartMin && eMin >= inputEndNorm;
+                }) || merged.find(s => s.start === minutesToTime(inputStartMin) && s.end === minutesToTime(inputEndMin % 1440));
+
+                if (!targetSeg) {
+                  return { start, end, breaks: hasExplicitBreaks ? breaks.map(b => ({ start: b.start, end: b.end })) : [] };
+                }
+
+                let seedBreaks = hasExplicitBreaks
+                  ? breaks.map(b => ({ start: b.start, end: b.end }))
+                  : (Array.isArray(targetSeg.breaks) ? targetSeg.breaks.map(b => ({ start: b.start, end: b.end })) : []);
+
+                if ((!seedBreaks || seedBreaks.length === 0) && !hasExplicitBreaks) {
+                  const sMin = targetSeg.__startMin ?? timeToMinutes(targetSeg.start);
+                  const eMin = targetSeg.__endMin ?? (timeToMinutes(targetSeg.end) + (timeToMinutes(targetSeg.end) <= timeToMinutes(targetSeg.start) ? 1440 : 0));
+                  seedBreaks = computeBreaksForShiftMinutes(sMin, eMin);
+                }
+
+                targetSeg.breaks = seedBreaks.map(b => ({ start: b.start, end: b.end }));
+                simOp.shifts[date] = merged;
+
+                try { adjustBreaksForOperatorOnDate(simOp, date, simulated); } catch (e) { /* ignore */ }
+
+                const adjustedTarget = (simOp.shifts?.[date] ?? []).find(s => {
+                  const sMin = s.__startMin ?? timeToMinutes(s.start);
+                  const eMin = s.__endMin ?? (timeToMinutes(s.end) + (timeToMinutes(s.end) <= timeToMinutes(s.start) ? 1440 : 0));
+                  return sMin <= inputStartMin && eMin >= inputEndNorm;
+                }) || targetSeg;
+
+                return {
+                  start: adjustedTarget.start ?? start,
+                  end: adjustedTarget.end ?? end,
+                  breaks: (adjustedTarget.breaks ?? []).map(b => ({ start: b.start, end: b.end }))
+                };
+            };
+
             const saveSegmentToMultipleDays = async ({ opId, dates, start, end, breaks = null }) => {
                 try {
-                  const op = operators.find(x => x.id === opId);
-              
-                  // Подготавливаем данные для массового сохранения — вычисляем breaks для каждой даты, если не передано
+                  // Подготавливаем данные для массового сохранения — отправляем уже скорректированные перерывы
                   const shifts = dates.map(date => {
-                    let bToSend = breaks;
-                    if (!bToSend) {
-                      const arr = (op?.shifts?.[date] ?? []).map(s => ({ ...s }));
-                      arr.push({ start, end });
-                      const merged = mergeSegments(arr);
-                      const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
-                      if (seg) {
-                        if (!seg.breaks || seg.breaks.length === 0) {
-                          const sMin = seg.__startMin ?? timeToMinutes(seg.start);
-                          const eMin = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
-                          seg.breaks = computeBreaksForShiftMinutes(sMin, eMin);
-                        }
-                        bToSend = seg.breaks.map(b => ({ start: b.start, end: b.end }));
-                      } else {
-                        bToSend = [];
-                      }
-                    }
-                    return { date: date, start: start, end: end, breaks: bToSend || [] };
+                    const prepared = buildAdjustedShiftPayloadForDate({ opId, date, start, end, breaks });
+                    return { date, start: prepared.start, end: prepared.end, breaks: prepared.breaks || [] };
                   });
               
                   // Отправляем список shifts с перерывами
@@ -4827,13 +4872,14 @@ const withAccessTokenHeader = (headers = {}) => {
                     const op = copy.find(x => x.id === opId);
                     if (!op) return prev;
                     dates.forEach((date, i) => {
+                      const sentShift = shifts[i];
                       const arr = op.shifts[date] ? ([...op.shifts[date]]) : [];
                       arr.push({ start, end });
                       const merged = mergeSegments(arr);
                       // присваиваем перерывы, если были вычислены
-                      const bForDate = shifts[i].breaks;
+                      const bForDate = sentShift?.breaks;
                       if (bForDate) {
-                        const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                        const seg = merged.find(s => s.start === sentShift.start && s.end === sentShift.end);
                         if (seg) seg.breaks = bForDate.map(b => ({ start: b.start, end: b.end }));
                       }
                       op.shifts[date] = merged;
@@ -4854,35 +4900,26 @@ const withAccessTokenHeader = (headers = {}) => {
                 try {
                   // найдём оператора в текущем state
                   const op = operators.find(x => x.id === opId);
+                  const previousSegment = (editIndex !== null) ? (op?.shifts?.[date]?.[editIndex] ?? null) : null;
               
-                  // вычислим breaksToSend — если breaks переданы явно, используем их,
-                  // иначе попытаемся получить перерывы из локального состояния / сгенерировать их
-                  let breaksToSend = breaks;
-                  if (!breaksToSend) {
-                    const arr = (op?.shifts?.[date] ?? []).map(s => ({ ...s }));
-                    if (editIndex === null) {
-                      arr.push({ start, end });
-                    } else {
-                      // если редактируем, заменим соответствующий индекс
-                      if (arr[editIndex]) arr[editIndex] = { start, end };
-                      else arr[editIndex] = { start, end };
-                    }
-                    const merged = mergeSegments(arr);
-                    const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
-                    if (seg) {
-                      // если в сегменте нет breaks — сгенерируем их по длине сегмента
-                      if (!seg.breaks || seg.breaks.length === 0) {
-                        const sMin = seg.__startMin ?? timeToMinutes(seg.start);
-                        const eMin = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
-                        seg.breaks = computeBreaksForShiftMinutes(sMin, eMin);
-                      }
-                      breaksToSend = seg.breaks.map(b => ({ start: b.start, end: b.end }));
-                    } else {
-                      breaksToSend = [];
-                    }
+                  // Отправляем на сервер уже после локальной корректировки не-пересечения перерывов
+                  const prepared = buildAdjustedShiftPayloadForDate({ opId, date, start, end, editIndex, breaks });
+                  const breaksToSend = prepared.breaks || [];
+                  const effectiveStart = prepared.start || start;
+                  const effectiveEnd = prepared.end || end;
+              
+                  const payload = {
+                    operator_id: opId,
+                    shift_date: date,
+                    start_time: effectiveStart,
+                    end_time: effectiveEnd,
+                    breaks: breaksToSend
+                  };
+                  if (previousSegment && editIndex !== null) {
+                    payload.previous_start_time = previousSegment.start;
+                    payload.previous_end_time = previousSegment.end;
                   }
-              
-                  // Отправляем на сервер уже с breaksToSend
+
                   const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift`, {
                     method: 'POST',
                     credentials: 'include',
@@ -4891,13 +4928,7 @@ const withAccessTokenHeader = (headers = {}) => {
                       'X-Api-Key': user.apiKey,
                       'X-User-Id': user.id
                     }),
-                    body: JSON.stringify({
-                      operator_id: opId,
-                      shift_date: date,
-                      start_time: start,
-                      end_time: end,
-                      breaks: breaksToSend
-                    })
+                    body: JSON.stringify(payload)
                   });
               
                   if (!response.ok) throw new Error('Failed to save shift');
@@ -4916,7 +4947,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     const merged = mergeSegments(arr);
                     // подставим перерывы, если они были
                     if (breaksToSend && editIndex !== null) {
-                      const seg = merged.find(s => s.start === minutesToTime(timeToMinutes(start)) && s.end === minutesToTime(timeToMinutes(end) % 1440));
+                      const seg = merged.find(s => s.start === effectiveStart && s.end === effectiveEnd);
                       if (seg) seg.breaks = breaksToSend.map(b => ({ start: b.start, end: b.end }));
                     }
                     op.shifts[date] = merged;

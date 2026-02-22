@@ -4080,6 +4080,8 @@ def get_operators_with_schedules():
         
         return jsonify({"operators": operators}), 200
     
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error getting operators with schedules: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -4095,7 +4097,9 @@ def save_work_shift():
         "shift_date": "YYYY-MM-DD",
         "start_time": "HH:MM",
         "end_time": "HH:MM",
-        "breaks": [{"start": minutes, "end": minutes}, ...]  // optional
+        "breaks": [{"start": minutes, "end": minutes}, ...],  // optional
+        "previous_start_time": "HH:MM",  // optional, for edit without duplicates
+        "previous_end_time": "HH:MM"     // optional, for edit without duplicates
     }
     """
     try:
@@ -4113,20 +4117,32 @@ def save_work_shift():
         if role not in ['admin', 'sv']:
             return jsonify({"error": "Forbidden"}), 403
         
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         operator_id = data.get('operator_id')
         shift_date = data.get('shift_date')
         start_time = data.get('start_time')
         end_time = data.get('end_time')
         breaks = data.get('breaks')
+        previous_start_time = data.get('previous_start_time')
+        previous_end_time = data.get('previous_end_time')
         
         if not all([operator_id, shift_date, start_time, end_time]):
             return jsonify({"error": "Missing required fields"}), 400
         
-        shift_id = db.save_shift(operator_id, shift_date, start_time, end_time, breaks)
+        shift_id = db.save_shift(
+            operator_id,
+            shift_date,
+            start_time,
+            end_time,
+            breaks,
+            previous_start_time=previous_start_time,
+            previous_end_time=previous_end_time
+        )
         
         return jsonify({"message": "Shift saved successfully", "shift_id": shift_id}), 200
     
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error saving shift: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -4159,7 +4175,7 @@ def delete_work_shift():
         if role not in ['admin', 'sv']:
             return jsonify({"error": "Forbidden"}), 403
         
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         operator_id = data.get('operator_id')
         shift_date = data.get('shift_date')
         start_time = data.get('start_time')
@@ -4175,6 +4191,8 @@ def delete_work_shift():
         else:
             return jsonify({"error": "Shift not found"}), 404
     
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error deleting shift: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -4205,7 +4223,7 @@ def toggle_work_day_off():
         if role not in ['admin', 'sv']:
             return jsonify({"error": "Forbidden"}), 403
         
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         operator_id = data.get('operator_id')
         day_off_date = data.get('day_off_date')
         
@@ -4219,6 +4237,8 @@ def toggle_work_day_off():
             "is_day_off": is_day_off
         }), 200
     
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error toggling day off: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -4257,7 +4277,7 @@ def save_shifts_bulk():
         if role not in ['admin', 'sv']:
             return jsonify({"error": "Forbidden"}), 403
         
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         operator_id = data.get('operator_id')
         shifts = data.get('shifts', [])
         
@@ -4274,6 +4294,8 @@ def save_shifts_bulk():
             "shift_ids": shift_ids
         }), 200
     
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error saving shifts bulk: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
