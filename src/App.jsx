@@ -4293,11 +4293,13 @@ const withAccessTokenHeader = (headers = {}) => {
             return res;
             };
 
-            function buildOccupiedIntervalsForDate(allOperators, dateStr, excludeOpId) {
+            function buildOccupiedIntervalsForDate(allOperators, dateStr, excludeOpId, directionScope) {
             const occupied = [];
             const dateObj = parseDateStr(dateStr);
             const prevStr = todayDateStr(addDays(dateObj, -1));
             const nextStr = todayDateStr(addDays(dateObj, 1));
+            const normDirection = (v) => String(v ?? '').trim().toLowerCase();
+            const scopeDirectionKey = normDirection(directionScope);
             const clampRange = (s, e) => {
                 const ns = Math.max(0, Math.min(2880, s));
                 const ne = Math.max(0, Math.min(2880, e));
@@ -4305,6 +4307,7 @@ const withAccessTokenHeader = (headers = {}) => {
             };
             allOperators.forEach(op => {
                 if (op.id === excludeOpId) return;
+                if (normDirection(op?.direction) !== scopeDirectionKey) return;
                 const segs = op.shifts?.[dateStr] ?? [];
                 segs.forEach(seg => {
                 (seg.breaks ?? []).forEach(b => {
@@ -4351,7 +4354,7 @@ const withAccessTokenHeader = (headers = {}) => {
             function adjustBreaksForOperatorOnDate(op, dateStr, allOperators) {
             const segs = op.shifts?.[dateStr];
             if (!segs || segs.length === 0) return;
-            let occupied = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id);
+            let occupied = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id, op?.direction);
             for (const seg of segs) {
                 const rawSegStart = seg.__startMin ?? timeToMinutes(seg.start);
                 const rawSegEnd = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
