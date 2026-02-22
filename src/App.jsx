@@ -5015,6 +5015,8 @@ const withAccessTokenHeader = (headers = {}) => {
             const saveSegmentToMultipleTargets = async ({ targets, start, end, breaks = null }) => {
                 const normalizedTargets = normalizeBulkTargets(targets);
                 if (normalizedTargets.length === 0) return;
+                // В bulk-режиме пустой массив не должен отключать автогенерацию перерывов.
+                const breaksForBulk = (Array.isArray(breaks) && breaks.length === 0) ? null : breaks;
 
                 try {
                   // Одна общая симуляция нужна, чтобы перерывы считались с учетом уже подготовленных ячеек (в т.ч. других операторов)
@@ -5025,7 +5027,7 @@ const withAccessTokenHeader = (headers = {}) => {
                       date: target.date,
                       start,
                       end,
-                      breaks,
+                      breaks: breaksForBulk,
                       simulatedOperators: simulated
                     });
                     const simOp = simulated.find(x => x.id === target.opId);
@@ -6110,7 +6112,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             {!modalState.isDayOff && isBulkSelectionModal && (
                                 <button 
                                     className="px-5 py-3 rounded-lg bg-gradient-to-r from-green-600 to-green-500 hover:from-green-700 hover:to-green-600 text-white font-semibold shadow-lg hover:shadow-xl transition-all flex items-center gap-2"
-                                    onClick={() => saveSegmentToMultipleTargets({ targets: modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })), start: modalState.start, end: modalState.end, breaks: Array.isArray(modalState.breaks) ? modalState.breaks : null })}
+                                    onClick={() => saveSegmentToMultipleTargets({ targets: modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })), start: modalState.start, end: modalState.end, breaks: (modalState.breaks && modalState.breaks.length) ? modalState.breaks : null })}
                                 >
                                     <i className="fas fa-check-double"></i>
                                     Применить ко всем ({modalBulkCount})
