@@ -4513,31 +4513,55 @@ const withAccessTokenHeader = (headers = {}) => {
             }
 
         function ShiftPlannerViewWithCalendar({ initialOperators, user }) {
+            function clonePlannerOperator(op, overrides = {}) {
+                const next = { ...(op || {}), ...overrides };
+                return {
+                    ...next,
+                    shifts: next.shifts ? { ...next.shifts } : {},
+                    daysOff: Array.isArray(next.daysOff) ? [...next.daysOff] : []
+                };
+            }
+
+            function mergePlannerOperators(baseOps = [], existingOps = []) {
+                const existingMap = new Map((existingOps || []).map(op => [op.id, op]));
+                const merged = (baseOps || []).map(base => {
+                    const existing = existingMap.get(base.id);
+                    if (!existing) return clonePlannerOperator(base);
+                    return clonePlannerOperator({
+                        ...base,
+                        shifts: existing.shifts,
+                        daysOff: existing.daysOff
+                    });
+                });
+
+                const seen = new Set(merged.map(op => op.id));
+                (existingOps || []).forEach(op => {
+                    if (!seen.has(op.id)) merged.push(clonePlannerOperator(op));
+                });
+                return merged;
+            }
+
             const [viewMode, setViewMode] = useState('day');
             const [currentDate, setCurrentDate] = useState(() => new Date());
             const [selectedSupervisors, setSelectedSupervisors] = useState([]);
             const [selectedStatuses, setSelectedStatuses] = useState([]);
             const [selectedDirections, setSelectedDirections] = useState([]);
-            const [operators, setOperators] = useState(() => {
-                const today = todayDateStr();
-                const copy = (initialOperators || []).map(op => ({
-                    ...op,
-                    // гарантируем существование объекта shifts
-                    shifts: op.shifts ? { ...op.shifts } : {},
-                    // гарантируем существование массива daysOff
-                    daysOff: op.daysOff ? [...op.daysOff] : []
-                }));
-
-                return copy;
-            });
+            const [operators, setOperators] = useState(() => mergePlannerOperators(initialOperators || [], []));
 
             const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff: false, multipleDates: null });
             const [selectedDays, setSelectedDays] = useState({ opId: null, dates: [] });
             const [isLoading, setIsLoading] = useState(false);
             const dragState = useRef(null);
 
+            // Синхронизация метаданных операторов из parent (`users`) без потери локальных shifts/daysOff
+            useEffect(() => {
+                setOperators(prevOps => mergePlannerOperators(initialOperators || [], prevOps));
+            }, [initialOperators]);
+
             // Загрузка данных с сервера
             useEffect(() => {
+                if (!user?.id || !user?.apiKey) return;
+                let cancelled = false;
                 const loadSchedules = async () => {
                     try {
                         setIsLoading(true);
@@ -4551,30 +4575,46 @@ const withAccessTokenHeader = (headers = {}) => {
                         
                         if (response.ok) {
                             const data = await response.json();
-                            // Объединяем данные с сервера с initialOperators
+                            if (cancelled) return;
+                            const serverOperators = Array.isArray(data?.operators) ? data.operators : [];
+                            const serverMap = new Map(serverOperators.map(op => [op.id, op]));
+                            // Объединяем данные с сервера с initialOperators/текущим state
                             setOperators(prevOps => {
-                                return prevOps.map(op => {
-                                    const serverOp = data.operators.find(sop => sop.id === op.id);
+                                const base = mergePlannerOperators(
+                                    (initialOperators && initialOperators.length) ? initialOperators : serverOperators,
+                                    prevOps
+                                );
+                                const merged = base.map(op => {
+                                    const serverOp = serverMap.get(op.id);
                                     if (serverOp) {
-                                        return {
-                                            ...op,
+                                        return clonePlannerOperator({
+                                            ...serverOp, // fallback metadata from backend
+                                            ...op,       // preserve parent-provided metadata if present
                                             shifts: serverOp.shifts || {},
                                             daysOff: serverOp.daysOff || []
-                                        };
+                                        });
                                     }
                                     return op;
                                 });
+                                const seen = new Set(merged.map(op => op.id));
+                                serverOperators.forEach(serverOp => {
+                                    if (!seen.has(serverOp.id)) merged.push(clonePlannerOperator(serverOp));
+                                });
+                                return merged;
                             });
+                        } else {
+                            console.error('Error loading schedules:', response.status, response.statusText);
                         }
                     } catch (error) {
                         console.error('Error loading schedules:', error);
                     } finally {
-                        setIsLoading(false);
+                        if (!cancelled) setIsLoading(false);
                     }
                 };
                 
                 loadSchedules();
-            }, []);
+                return () => { cancelled = true; };
+            }, [user?.id, user?.apiKey, initialOperators]);
 
             // Получаем уникальных супервайзеров (скрываем тех, у кого все операторы со статусом "fired")
             const uniqueSupervisors = useMemo(() => {
@@ -4582,7 +4622,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 const supervisorsOperators = new Map();
                 
                 // Собираем всех операторов по супервайзерам
-                (initialOperators || []).forEach(op => {
+                operators.forEach(op => {
                     if (op.supervisor_id && op.supervisor_name) {
                         if (!supervisorsOperators.has(op.supervisor_id)) {
                             supervisorsOperators.set(op.supervisor_id, []);
@@ -4603,22 +4643,22 @@ const withAccessTokenHeader = (headers = {}) => {
                 });
                 
                 return filtered.sort((a, b) => a.name.localeCompare(b.name));
-            }, [initialOperators]);
+            }, [operators]);
 
             // Получаем уникальные направления
             const uniqueDirections = useMemo(() => {
                 const directionsMap = new Map();
-                (initialOperators || []).forEach(op => {
+                operators.forEach(op => {
                     if (op.direction) {
                         directionsMap.set(op.direction, op.direction);
                     }
                 });
                 return Array.from(directionsMap.values()).sort((a, b) => a.localeCompare(b));
-            }, [initialOperators]);
+            }, [operators]);
 
             // Фильтруем операторов по выбранным супервайзерам, статусам и направлениям
             const filteredOperators = useMemo(() => {
-                let filtered = operators;
+                let filtered = [...operators];
                 
                 // Фильтр по супервайзерам
                 if (selectedSupervisors.length > 0) {
@@ -4883,7 +4923,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     dates.forEach((date, i) => {
                       const sentShift = shifts[i];
                       const arr = op.shifts[date] ? ([...op.shifts[date]]) : [];
-                      arr.push({ start, end });
+                      arr.push({ start: sentShift?.start || start, end: sentShift?.end || end });
                       const merged = mergeSegments(arr);
                       // присваиваем перерывы, если были вычислены
                       const bForDate = sentShift?.breaks;
@@ -4949,9 +4989,9 @@ const withAccessTokenHeader = (headers = {}) => {
                     if (!op) return prev;
                     const arr = op.shifts[date] ? ([...op.shifts[date]]) : [];
                     if (editIndex === null) {
-                      arr.push({ start, end });
+                      arr.push({ start: effectiveStart, end: effectiveEnd });
                     } else {
-                      arr[editIndex] = { start, end };
+                      arr[editIndex] = { start: effectiveStart, end: effectiveEnd };
                     }
                     const merged = mergeSegments(arr);
                     // подставим перерывы, если они были
