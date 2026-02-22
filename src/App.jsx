@@ -5425,7 +5425,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                             : [];
                                             const labelList = [...origArr, ...prevCont];
                                             const displayParts = (viewMode === 'day') ? parts : parts.filter(p => p.sourceDate === d);
-                                            const durationHours = displayParts.reduce((acc, p) => acc + (p.end - p.start) / 60, 0);
+                                            const durationHours = (viewMode === 'day')
+                                                ? displayParts.reduce((acc, p) => acc + (p.end - p.start) / 60, 0)
+                                                : (op.shifts?.[d] ?? []).reduce((acc, s) => {
+                                                    const sM = timeToMinutes(s.start);
+                                                    let eM = timeToMinutes(s.end);
+                                                    if (eM <= sM) eM += 1440;
+                                                    return acc + ((eM - sM) / 60);
+                                                }, 0);
                                             const hasShift = (viewMode === 'day')
                                                 ? (parts.length > 0 || labelList.length > 0)
                                                 : (labelList.length > 0);
