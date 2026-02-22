@@ -4297,24 +4297,30 @@ const withAccessTokenHeader = (headers = {}) => {
             const occupied = [];
             const dateObj = parseDateStr(dateStr);
             const prevStr = todayDateStr(addDays(dateObj, -1));
+            const nextStr = todayDateStr(addDays(dateObj, 1));
+            const clampRange = (s, e) => {
+                const ns = Math.max(0, Math.min(2880, s));
+                const ne = Math.max(0, Math.min(2880, e));
+                if (ne > ns) occupied.push({ start: ns, end: ne });
+            };
             allOperators.forEach(op => {
                 if (op.id === excludeOpId) return;
                 const segs = op.shifts?.[dateStr] ?? [];
                 segs.forEach(seg => {
                 (seg.breaks ?? []).forEach(b => {
-                    const s = Math.max(0, Math.min(1440, b.start));
-                    const e = Math.max(0, Math.min(1440, b.end));
-                    if (e > s) occupied.push({ start: s, end: e });
+                    clampRange(b.start, b.end);
                 });
                 });
                 const prevSegs = op.shifts?.[prevStr] ?? [];
                 prevSegs.forEach(seg => {
                 (seg.breaks ?? []).forEach(b => {
-                    const s = b.start - 1440;
-                    const e = b.end - 1440;
-                    const ns = Math.max(0, Math.min(1440, s));
-                    const ne = Math.max(0, Math.min(1440, e));
-                    if (ne > ns) occupied.push({ start: ns, end: ne });
+                    clampRange(b.start - 1440, b.end - 1440);
+                });
+                });
+                const nextSegs = op.shifts?.[nextStr] ?? [];
+                nextSegs.forEach(seg => {
+                (seg.breaks ?? []).forEach(b => {
+                    clampRange(b.start + 1440, b.end + 1440);
                 });
                 });
             });
@@ -4347,12 +4353,15 @@ const withAccessTokenHeader = (headers = {}) => {
             if (!segs || segs.length === 0) return;
             let occupied = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id);
             for (const seg of segs) {
-                seg.breaks = seg.breaks ?? computeBreaksForShiftMinutes(seg.__startMin ?? timeToMinutes(seg.start), seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0)));
-                const segStart = Math.max(0, seg.__startMin ?? timeToMinutes(seg.start));
-                const segEnd = Math.min(1440, seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0)));
+                const rawSegStart = seg.__startMin ?? timeToMinutes(seg.start);
+                const rawSegEnd = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
+                seg.breaks = seg.breaks ?? computeBreaksForShiftMinutes(rawSegStart, rawSegEnd);
+                const segStart = Math.max(0, rawSegStart);
+                const segEnd = Math.max(segStart, Math.min(2880, rawSegEnd));
                 const newBreaks = [];
                 for (const b of seg.breaks) {
                 const length = b.end - b.start;
+                if (length <= 0 || segEnd - segStart <= 0) continue;
                 let desiredStart = Math.max(segStart, Math.min(segEnd - length, b.start));
                 const found = findNonOverlappingStart(desiredStart, length, segStart, segEnd, occupied);
                 if (found !== null) {
@@ -5352,7 +5361,15 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         color: "white",
                                                         }}
                                                     >
-                                                        <div className="px-1 truncate text-[11px] border border-white/30 bg-white/10 rounded-sm z-40" style={{ paddingLeft: 6, paddingRight: 6 }}>{minutesToTime(p.start)} — {minutesToTime(p.end)}</div>
+                                                        <div className="px-1 truncate text-[11px] border border-white/30 bg-white/10 rounded-sm z-40" style={{ paddingLeft: 6, paddingRight: 6 }}>{(() => {
+                                                            const srcSeg = op.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                                                            if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                            const srcStart = timeToMinutes(srcSeg.start);
+                                                            const srcEnd = timeToMinutes(srcSeg.end);
+                                                            const isCrossing = srcEnd <= srcStart;
+                                                            if (isCrossing && p.sourceDate === d) return `${srcSeg.start} — ${srcSeg.end} (+1)`;
+                                                            return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                        })()}</div>
                                                         <button
                                                         onClick={(e) => { e.stopPropagation(); openEditModal(op.id, p.sourceDate, p.sourceIndex); }}
                                                         className="text-[10px] px-1 py-0.5 mr-1 rounded bg-white/20"
