@@ -5406,8 +5406,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                             const sM = timeToMinutes(s.start);
                                             const eM = timeToMinutes(s.end);
                                             const crossing = eM <= sM;
-                                            const text = crossing ? `${s.start} — ${s.end} (+1)` : `${s.start} — ${s.end}`;
-                                            return { text, crossing, idx };
+                                            const crossesForDisplay = crossing && s.end !== '00:00';
+                                            const text = crossesForDisplay ? `${s.start} — ${s.end} (+1)` : `${s.start} — ${s.end}`;
+                                            return { text, crossing: crossesForDisplay, idx };
                                             });
                                             const prevArr = op.shifts?.[todayDateStr(addDays(parseDateStr(d), -1))] ?? [];
                                             const prevCont = prevArr
@@ -5415,7 +5416,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 const sM = timeToMinutes(s.start);
                                                 const eM = timeToMinutes(s.end);
                                                 const crossing = eM <= sM;
-                                                if (!crossing) return null;
+                                                const crossesForDisplay = crossing && s.end !== '00:00';
+                                                if (!crossesForDisplay) return null;
                                                 return { text: `${s.start} — ${s.end} (+1)`, crossing: true, idx };
                                             })
                                             .filter(Boolean);
@@ -5463,7 +5465,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             const srcStart = timeToMinutes(srcSeg.start);
                                                             const srcEnd = timeToMinutes(srcSeg.end);
                                                             const isCrossing = srcEnd <= srcStart;
-                                                            if (isCrossing) return `${srcSeg.start} — ${srcSeg.end} (+1)`;
+                                                            if (isCrossing && srcSeg.end !== '00:00') return `${srcSeg.start} — ${srcSeg.end} (+1)`;
                                                             return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
                                                         })()}</div>
                                                         <button
