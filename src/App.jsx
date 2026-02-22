@@ -4293,13 +4293,17 @@ const withAccessTokenHeader = (headers = {}) => {
             return res;
             };
 
-            function buildOccupiedIntervalsForDate(allOperators, dateStr, excludeOpId, directionScope) {
+            function buildOccupiedIntervalsForDate(allOperators, dateStr, excludeOpId, directionScope, getDirectionBreakScopeKey) {
             const occupied = [];
             const dateObj = parseDateStr(dateStr);
             const prevStr = todayDateStr(addDays(dateObj, -1));
             const nextStr = todayDateStr(addDays(dateObj, 1));
             const normDirection = (v) => String(v ?? '').trim().toLowerCase();
-            const scopeDirectionKey = normDirection(directionScope);
+            const getScopeKey = (v) => {
+                if (typeof getDirectionBreakScopeKey === 'function') return String(getDirectionBreakScopeKey(v) ?? '');
+                return `dir:${normDirection(v)}`;
+            };
+            const scopeDirectionKey = getScopeKey(directionScope);
             const clampRange = (s, e) => {
                 const ns = Math.max(0, Math.min(2880, s));
                 const ne = Math.max(0, Math.min(2880, e));
@@ -4307,7 +4311,7 @@ const withAccessTokenHeader = (headers = {}) => {
             };
             allOperators.forEach(op => {
                 if (op.id === excludeOpId) return;
-                if (normDirection(op?.direction) !== scopeDirectionKey) return;
+                if (getScopeKey(op?.direction) !== scopeDirectionKey) return;
                 const segs = op.shifts?.[dateStr] ?? [];
                 segs.forEach(seg => {
                 (seg.breaks ?? []).forEach(b => {
@@ -4351,10 +4355,10 @@ const withAccessTokenHeader = (headers = {}) => {
             return null;
             }
 
-            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators) {
+            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators, getDirectionBreakScopeKey) {
             const segs = op.shifts?.[dateStr];
             if (!segs || segs.length === 0) return;
-            let occupied = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id, op?.direction);
+            let occupied = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id, op?.direction, getDirectionBreakScopeKey);
             for (const seg of segs) {
                 const rawSegStart = seg.__startMin ?? timeToMinutes(seg.start);
                 const rawSegEnd = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
@@ -4549,6 +4553,8 @@ const withAccessTokenHeader = (headers = {}) => {
             const [selectedSupervisors, setSelectedSupervisors] = useState([]);
             const [selectedStatuses, setSelectedStatuses] = useState([]);
             const [selectedDirections, setSelectedDirections] = useState([]);
+            const [breakDirectionGroups, setBreakDirectionGroups] = useState([]);
+            const [breakGroupDraftDirections, setBreakGroupDraftDirections] = useState([]);
             const [operators, setOperators] = useState(() => mergePlannerOperators(initialOperators || [], []));
 
             const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff: false, multipleDates: null, multipleTargets: null, showAddPanel: false });
@@ -4560,6 +4566,51 @@ const withAccessTokenHeader = (headers = {}) => {
                 () => `otp.work_schedules.ui_state.${user?.login || user?.name || user?.role || 'anonymous'}`,
                 [user?.login, user?.name, user?.role]
             );
+            const normalizeBreakDirectionName = (v) => String(v ?? '').trim();
+            const normalizeBreakDirectionKey = (v) => normalizeBreakDirectionName(v).toLowerCase();
+            const sanitizeBreakDirectionGroups = (groups) => {
+                if (!Array.isArray(groups)) return [];
+                const usedDirections = new Set();
+                const seenGroups = new Set();
+                const result = [];
+
+                groups.forEach(group => {
+                    if (!Array.isArray(group)) return;
+                    const map = new Map();
+                    group.forEach(raw => {
+                        const label = normalizeBreakDirectionName(raw);
+                        const key = normalizeBreakDirectionKey(label);
+                        if (!key) return;
+                        if (usedDirections.has(key)) return;
+                        if (!map.has(key)) map.set(key, label);
+                    });
+
+                    const keys = Array.from(map.keys()).sort();
+                    if (keys.length < 2) return;
+                    const sig = keys.join('|');
+                    if (seenGroups.has(sig)) return;
+                    seenGroups.add(sig);
+                    keys.forEach(k => usedDirections.add(k));
+                    result.push(Array.from(map.values()));
+                });
+
+                return result;
+            };
+            const breakDirectionScopeKeyMap = useMemo(() => {
+                const map = new Map();
+                (breakDirectionGroups || []).forEach(group => {
+                    const keys = Array.from(new Set((group || []).map(normalizeBreakDirectionKey).filter(Boolean))).sort();
+                    if (keys.length < 2) return;
+                    const scopeKey = `group:${keys.join('|')}`;
+                    keys.forEach(key => map.set(key, scopeKey));
+                });
+                return map;
+            }, [breakDirectionGroups]);
+            const getBreakConflictDirectionScopeKey = (direction) => {
+                const key = normalizeBreakDirectionKey(direction);
+                if (!key) return 'dir:';
+                return breakDirectionScopeKeyMap.get(key) || `dir:${key}`;
+            };
 
             // Восстановление выбранной даты/фильтров/режима после перезагрузки
             useEffect(() => {
@@ -4591,6 +4642,9 @@ const withAccessTokenHeader = (headers = {}) => {
                     if (Array.isArray(parsed?.selectedDirections)) {
                         setSelectedDirections(parsed.selectedDirections.filter(v => typeof v === 'string'));
                     }
+                    if (Array.isArray(parsed?.breakDirectionGroups)) {
+                        setBreakDirectionGroups(sanitizeBreakDirectionGroups(parsed.breakDirectionGroups));
+                    }
                 } catch (e) {
                     console.error('Failed to restore work schedules UI state:', e);
                 } finally {
@@ -4610,7 +4664,8 @@ const withAccessTokenHeader = (headers = {}) => {
                             viewMode,
                             selectedSupervisors,
                             selectedStatuses,
-                            selectedDirections
+                            selectedDirections,
+                            breakDirectionGroups
                         })
                     );
                 } catch (e) {
@@ -4622,7 +4677,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 viewMode,
                 selectedSupervisors,
                 selectedStatuses,
-                selectedDirections
+                selectedDirections,
+                breakDirectionGroups
             ]);
 
             // Синхронизация метаданных операторов из parent (`users`) без потери графиков
@@ -4722,6 +4778,50 @@ const withAccessTokenHeader = (headers = {}) => {
                 });
                 return Array.from(directionsMap.values()).sort((a, b) => a.localeCompare(b));
             }, [operators]);
+            const breakDirectionGroupMembership = useMemo(() => {
+                const map = new Map();
+                (breakDirectionGroups || []).forEach((group, groupIndex) => {
+                    (group || []).forEach(dir => {
+                        const key = normalizeBreakDirectionKey(dir);
+                        if (!key) return;
+                        map.set(key, groupIndex);
+                    });
+                });
+                return map;
+            }, [breakDirectionGroups]);
+            const toggleBreakGroupDraftDirection = (dir) => {
+                setBreakGroupDraftDirections(prev => (
+                    prev.includes(dir)
+                        ? prev.filter(x => x !== dir)
+                        : [...prev, dir]
+                ));
+            };
+            const addBreakDirectionGroupFromDraft = () => {
+                const draftMap = new Map();
+                (breakGroupDraftDirections || []).forEach(dir => {
+                    const label = normalizeBreakDirectionName(dir);
+                    const key = normalizeBreakDirectionKey(label);
+                    if (!key) return;
+                    if (!draftMap.has(key)) draftMap.set(key, label);
+                });
+                const nextGroup = Array.from(draftMap.values());
+                if (nextGroup.length < 2) {
+                    alert('Выберите минимум 2 направления для группы');
+                    return;
+                }
+
+                const selectedKeys = new Set(Array.from(draftMap.keys()));
+                setBreakDirectionGroups(prev => {
+                    const stripped = (prev || [])
+                        .map(group => (group || []).filter(dir => !selectedKeys.has(normalizeBreakDirectionKey(dir))))
+                        .filter(group => group.length >= 2);
+                    return sanitizeBreakDirectionGroups([...stripped, nextGroup]);
+                });
+                setBreakGroupDraftDirections([]);
+            };
+            const removeBreakDirectionGroupAt = (groupIndex) => {
+                setBreakDirectionGroups(prev => sanitizeBreakDirectionGroups((prev || []).filter((_, idx) => idx !== groupIndex)));
+            };
 
             // Фильтруем операторов по выбранным супервайзерам, статусам и направлениям
             const filteredOperators = useMemo(() => {
@@ -4997,7 +5097,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 targetSeg.breaks = seedBreaks.map(b => ({ start: b.start, end: b.end }));
                 simOp.shifts[date] = merged;
 
-                try { adjustBreaksForOperatorOnDate(simOp, date, simulated); } catch (e) { /* ignore */ }
+                try { adjustBreaksForOperatorOnDate(simOp, date, simulated, getBreakConflictDirectionScopeKey); } catch (e) { /* ignore */ }
 
                 const adjustedTarget = (simOp.shifts?.[date] ?? []).find(s => {
                   const sMin = s.__startMin ?? timeToMinutes(s.start);
@@ -5101,7 +5201,7 @@ const withAccessTokenHeader = (headers = {}) => {
                       if (!touchedPairs.has(pairKey)) return;
                       const op = copy.find(x => x.id === target.opId);
                       if (!op) return;
-                      try { adjustBreaksForOperatorOnDate(op, target.date, copy); } catch (e) { /* ignore */ }
+                      try { adjustBreaksForOperatorOnDate(op, target.date, copy, getBreakConflictDirectionScopeKey); } catch (e) { /* ignore */ }
                       touchedPairs.delete(pairKey);
                     });
                     return copy;
@@ -5231,7 +5331,7 @@ const withAccessTokenHeader = (headers = {}) => {
                       if (seg) seg.breaks = breaksToSend.map(b => ({ start: b.start, end: b.end }));
                     }
                     op.shifts[date] = merged;
-                    try { adjustBreaksForOperatorOnDate(op, date, copy); } catch (e) { /* ignore */ }
+                    try { adjustBreaksForOperatorOnDate(op, date, copy, getBreakConflictDirectionScopeKey); } catch (e) { /* ignore */ }
                     return copy;
                   });
               
@@ -5508,6 +5608,94 @@ const withAccessTokenHeader = (headers = {}) => {
                                     className="mt-2 w-full px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
                                 >
                                     Сбросить фильтр
+                                </button>
+                            )}
+                        </div>
+                        <div className="bg-white rounded shadow-sm p-3 w-[260px] flex-shrink-0">
+                            <div className="text-sm font-medium mb-1">Группы направлений для перерывов</div>
+                            <div className="text-[11px] text-slate-500 mb-2">
+                                Внутри одной группы перерывы не будут пересекаться между направлениями
+                            </div>
+
+                            <div className="max-h-40 overflow-y-auto border rounded p-2">
+                                {uniqueDirections.length === 0 ? (
+                                    <div className="text-xs text-slate-400">Нет направлений</div>
+                                ) : (
+                                    uniqueDirections.map(dir => {
+                                        const groupIndex = breakDirectionGroupMembership.get(normalizeBreakDirectionKey(dir));
+                                        const isSelectedForDraft = breakGroupDraftDirections.includes(dir);
+                                        return (
+                                            <label key={`break-group-${dir}`} className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={isSelectedForDraft}
+                                                    onChange={() => toggleBreakGroupDraftDirection(dir)}
+                                                    className="rounded"
+                                                />
+                                                <span className="text-xs flex-1 truncate">{dir}</span>
+                                                {Number.isInteger(groupIndex) && (
+                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">
+                                                        G{groupIndex + 1}
+                                                    </span>
+                                                )}
+                                            </label>
+                                        );
+                                    })
+                                )}
+                            </div>
+
+                            <div className="mt-2 flex gap-2">
+                                <button
+                                    onClick={addBreakDirectionGroupFromDraft}
+                                    disabled={breakGroupDraftDirections.length < 2}
+                                    className="flex-1 px-2 py-1 text-xs bg-sky-600 hover:bg-sky-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    Создать группу
+                                </button>
+                                <button
+                                    onClick={() => setBreakGroupDraftDirections([])}
+                                    className="px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
+                                >
+                                    Сброс
+                                </button>
+                            </div>
+
+                            <div className="mt-3 space-y-2">
+                                {breakDirectionGroups.length === 0 ? (
+                                    <div className="text-xs text-slate-400 border border-dashed rounded p-2">
+                                        Нет настроенных групп
+                                    </div>
+                                ) : (
+                                    breakDirectionGroups.map((group, idx) => (
+                                        <div key={`break-direction-group-${idx}`} className="border rounded p-2 bg-slate-50">
+                                            <div className="flex items-center justify-between gap-2 mb-1">
+                                                <div className="text-xs font-medium text-slate-700">Группа {idx + 1}</div>
+                                                <button
+                                                    onClick={() => removeBreakDirectionGroupAt(idx)}
+                                                    className="text-xs px-2 py-0.5 rounded bg-red-50 hover:bg-red-100 text-red-700"
+                                                    title="Удалить группу"
+                                                >
+                                                    <i className="fas fa-trash-alt"></i>
+                                                </button>
+                                            </div>
+                                            <div className="flex flex-wrap gap-1">
+                                                {group.map(dir => (
+                                                    <span key={`${idx}-${dir}`} className="px-2 py-0.5 text-[10px] rounded-full bg-white border text-slate-700">
+                                                        {dir}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+
+                            {breakDirectionGroups.length > 0 && (
+                                <button
+                                    onClick={() => setBreakDirectionGroups([])}
+                                    className="mt-2 w-full px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
+                                >
+                                    Очистить все группы
                                 </button>
                             )}
                         </div>
