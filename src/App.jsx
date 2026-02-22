@@ -4559,6 +4559,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
             const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff: false, multipleDates: null, multipleTargets: null, showAddPanel: false });
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
+            const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
             const dragState = useRef(null);
             const plannerUiStateLoadedRef = useRef(false);
@@ -5479,6 +5480,42 @@ const withAccessTokenHeader = (headers = {}) => {
                 ? Array.from(new Set(modalBulkTargets.map(target => target.date))).sort()
                 : (Array.isArray(modalState?.multipleDates) ? [...modalState.multipleDates].sort() : []);
             const isBulkSelectionModal = modalBulkCount > 1;
+            const dayViewBreaksDateStr = todayDateStr(new Date(currentDate));
+            const dayBreaksByOperator = useMemo(() => {
+                if (viewMode !== 'day') return [];
+                const dateStr = dayViewBreaksDateStr;
+
+                return (filteredOperators || []).map(op => {
+                    const parts = getShiftPartsForDate(op, dateStr);
+                    const breaks = parts.flatMap(p => {
+                        const srcSeg = op.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                        const sourceShiftText = srcSeg ? `${srcSeg.start} — ${srcSeg.end}` : `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                        return getBreakPartsForPart(op, p, dateStr).map(b => ({
+                            start: b.start,
+                            end: b.end,
+                            durationMin: Math.max(0, b.end - b.start),
+                            sourceDate: p.sourceDate,
+                            sourceShiftText
+                        }));
+                    }).sort((a, b) => (a.start - b.start) || (a.end - b.end));
+
+                    return {
+                        opId: op.id,
+                        name: op.name || `Оператор ${op.id}`,
+                        direction: op.direction || 'Без направления',
+                        breaks
+                    };
+                }).filter(item => item.breaks.length > 0);
+            }, [viewMode, dayViewBreaksDateStr, filteredOperators]);
+            const dayBreaksStats = useMemo(() => {
+                const operatorsCount = dayBreaksByOperator.length;
+                const breaksCount = dayBreaksByOperator.reduce((acc, item) => acc + item.breaks.length, 0);
+                const totalMinutes = dayBreaksByOperator.reduce(
+                    (acc, item) => acc + item.breaks.reduce((s, b) => s + (b.durationMin || 0), 0),
+                    0
+                );
+                return { operatorsCount, breaksCount, totalMinutes };
+            }, [dayBreaksByOperator]);
 
             return (
                 <div className="p-4 min-h-screen bg-slate-50">
@@ -5709,6 +5746,21 @@ const withAccessTokenHeader = (headers = {}) => {
                             <button onClick={() => setViewMode('week')} className={`px-3 py-1 rounded ${viewMode === 'week' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Неделя</button>
                             <button onClick={() => setViewMode('month')} className={`px-3 py-1 rounded ${viewMode === 'month' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Месяц</button>
                         </div>
+                        {viewMode === 'day' && (
+                            <button
+                                onClick={() => setShowDayBreaksModal(true)}
+                                className="ml-3 px-3 py-1 rounded bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 text-sm font-medium flex items-center gap-2"
+                                title="Показать перерывы операторов за выбранный день"
+                            >
+                                <i className="fas fa-mug-hot text-amber-600"></i>
+                                Перерывы
+                                {dayBreaksStats.breaksCount > 0 && (
+                                    <span className="px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-900 text-[10px] leading-none">
+                                        {dayBreaksStats.breaksCount}
+                                    </span>
+                                )}
+                            </button>
+                        )}
                         </div>
                         <div className="flex gap-2 items-center">
                         <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-left"></i></button>
@@ -6318,6 +6370,74 @@ const withAccessTokenHeader = (headers = {}) => {
                         </div>
                     </div>
                     </>
+                </SimpleModal>
+
+                <SimpleModal open={showDayBreaksModal} onClose={() => setShowDayBreaksModal(false)}>
+                    <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-200">
+                        <div>
+                            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                <i className="fas fa-mug-hot text-amber-600"></i>
+                                Перерывы за день
+                            </h3>
+                            <div className="text-sm text-slate-600 mt-1">
+                                {dayViewBreaksDateStr}
+                            </div>
+                        </div>
+                        <button
+                            onClick={() => setShowDayBreaksModal(false)}
+                            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
+                        >
+                            <i className="fas fa-times"></i>
+                        </button>
+                    </div>
+
+                    <div className="mb-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-900">
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                            <span><strong>Операторов:</strong> {dayBreaksStats.operatorsCount}</span>
+                            <span><strong>Перерывов:</strong> {dayBreaksStats.breaksCount}</span>
+                            <span><strong>Всего:</strong> {(dayBreaksStats.totalMinutes / 60).toFixed(2)} ч</span>
+                        </div>
+                        <div className="text-xs text-amber-800/80 mt-1">
+                            Показываются операторы из текущей выборки (с учетом фильтров)
+                        </div>
+                    </div>
+
+                    <div className="max-h-[60vh] overflow-auto pr-1 space-y-3">
+                        {viewMode !== 'day' && (
+                            <div className="text-sm text-slate-500 bg-slate-50 border rounded p-3">
+                                Переключитесь в режим <strong>День</strong>, чтобы посмотреть перерывы по выбранной дате.
+                            </div>
+                        )}
+                        {viewMode === 'day' && dayBreaksByOperator.length === 0 && (
+                            <div className="text-sm text-slate-500 bg-slate-50 border rounded p-3">
+                                За выбранный день у операторов нет перерывов.
+                            </div>
+                        )}
+                        {viewMode === 'day' && dayBreaksByOperator.map(item => (
+                            <div key={`day-breaks-${item.opId}`} className="border rounded-lg p-3 bg-white">
+                                <div className="flex items-center justify-between gap-3 mb-2">
+                                    <div>
+                                        <div className="font-semibold text-slate-900">{item.name}</div>
+                                        <div className="text-xs text-slate-500">{item.direction}</div>
+                                    </div>
+                                    <div className="text-xs text-slate-600">
+                                        {item.breaks.length} {item.breaks.length === 1 ? 'перерыв' : item.breaks.length < 5 ? 'перерыва' : 'перерывов'}
+                                    </div>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                    {item.breaks.map((b, idx) => (
+                                        <div key={`${item.opId}-${idx}-${b.start}-${b.end}`} className="px-2 py-1 rounded border border-amber-200 bg-amber-50 text-xs text-amber-900">
+                                            <span className="font-semibold">{minutesToTime(b.start)} — {minutesToTime(b.end)}</span>
+                                            <span className="ml-1 text-amber-800/80">({Math.round((b.durationMin || 0) / 5) * 5} мин)</span>
+                                            {b.sourceDate !== dayViewBreaksDateStr && (
+                                                <span className="ml-1 text-amber-700">из {b.sourceDate}</span>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
                 </SimpleModal>
 
                 {/* Плавающий счетчик выбранных дней */}
