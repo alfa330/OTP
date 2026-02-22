@@ -5411,19 +5411,24 @@ const withAccessTokenHeader = (headers = {}) => {
                                             return { text, crossing: crossesForDisplay, idx };
                                             });
                                             const prevArr = op.shifts?.[todayDateStr(addDays(parseDateStr(d), -1))] ?? [];
-                                            const prevCont = prevArr
-                                            .map((s, idx) => {
-                                                const sM = timeToMinutes(s.start);
-                                                const eM = timeToMinutes(s.end);
-                                                const crossing = eM <= sM;
-                                                const crossesForDisplay = crossing && s.end !== '00:00';
-                                                if (!crossesForDisplay) return null;
-                                                return { text: `${s.start} — ${s.end} (+1)`, crossing: true, idx };
-                                            })
-                                            .filter(Boolean);
+                                            const prevCont = (viewMode === 'day')
+                                            ? prevArr
+                                                .map((s, idx) => {
+                                                    const sM = timeToMinutes(s.start);
+                                                    const eM = timeToMinutes(s.end);
+                                                    const crossing = eM <= sM;
+                                                    const crossesForDisplay = crossing && s.end !== '00:00';
+                                                    if (!crossesForDisplay) return null;
+                                                    return { text: `${s.start} — ${s.end} (+1)`, crossing: true, idx };
+                                                })
+                                                .filter(Boolean)
+                                            : [];
                                             const labelList = [...origArr, ...prevCont];
-                                            const durationHours = parts.reduce((acc, p) => acc + (p.end - p.start) / 60, 0);
-                                            const hasShift = parts.length > 0 || labelList.length > 0;
+                                            const displayParts = (viewMode === 'day') ? parts : parts.filter(p => p.sourceDate === d);
+                                            const durationHours = displayParts.reduce((acc, p) => acc + (p.end - p.start) / 60, 0);
+                                            const hasShift = (viewMode === 'day')
+                                                ? (parts.length > 0 || labelList.length > 0)
+                                                : (labelList.length > 0);
                                             const isDayOff = op.daysOff?.includes(d) ?? false;
                                             const isSelected = selectedDays.opId === op.id && selectedDays.dates.includes(d);
                                             let bgColor = ' bg-white';
