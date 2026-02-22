@@ -5416,7 +5416,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 const eM = timeToMinutes(s.end);
                                                 const crossing = eM <= sM;
                                                 if (!crossing) return null;
-                                                return { text: `${minutesToTime(0)} — ${minutesToTime((timeToMinutes(s.end) + 1440) - 1440)}`, crossing: true, idx };
+                                                return { text: `${s.start} — ${s.end} (+1)`, crossing: true, idx };
                                             })
                                             .filter(Boolean);
                                             const labelList = [...origArr, ...prevCont];
@@ -5463,7 +5463,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             const srcStart = timeToMinutes(srcSeg.start);
                                                             const srcEnd = timeToMinutes(srcSeg.end);
                                                             const isCrossing = srcEnd <= srcStart;
-                                                            if (isCrossing && p.sourceDate === d) return `${srcSeg.start} — ${srcSeg.end} (+1)`;
+                                                            if (isCrossing) return `${srcSeg.start} — ${srcSeg.end} (+1)`;
                                                             return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
                                                         })()}</div>
                                                         <button
