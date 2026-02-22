@@ -5804,27 +5804,27 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                 {viewMode === 'day' && (
                                     <div className="mt-2">
-                                    <div className="relative h-8 px-1">
-                                        <div className="absolute inset-0 flex items-end">
+                                    <div className="relative h-8 px-1 isolate">
+                                        <div className="absolute inset-0 flex items-end z-20">
                                         {Array.from({ length: 24 }).map((_, i) => (
                                             <div key={i} className="flex-1 text-center text-[11px] leading-[12px]">{pad(i)}</div>
                                         ))}
                                         </div>
-                                        <div className="absolute inset-0 flex">
+                                        <div className="absolute inset-0 flex z-10">
                                         {Array.from({ length: 24 }).map((_, i) => (
                                             <div key={i} className="flex-1 border-r last:border-r-0" />
                                         ))}
                                         </div>
                                     </div>
 
-                                    <div className="relative h-6 mt-1 px-1">
-                                        <div className="absolute inset-0 flex items-start">
+                                    <div className="relative h-6 mt-1 px-1 isolate">
+                                        <div className="absolute inset-0 flex items-start z-20">
                                         {(() => {
                                             const totals = totalsPerHourForDate(visibleRange[0]);
                                             return totals.map((t, hour) => <div key={hour} className="flex-1 text-center text-[10px] text-slate-700">{t > 0 ? t.toFixed(1) : '0'}</div>);
                                         })()}
                                         </div>
-                                        <div className="absolute inset-0 flex pointer-events-none">
+                                        <div className="absolute inset-0 flex pointer-events-none z-10">
                                         {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
                                         </div>
                                     </div>
