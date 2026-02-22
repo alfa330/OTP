@@ -485,6 +485,10 @@ class Database:
                     UNIQUE(operator_id, day_off_date)
                 );
             """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_shift_breaks_shift_id
+                ON shift_breaks(shift_id);
+            """)
 
             # AI feedback cache table
             cursor.execute("""
@@ -4138,15 +4142,172 @@ class Database:
 
     # ==================== Work Shifts Methods ====================
     
+    def _normalize_schedule_date(self, value):
+        if value is None:
+            raise ValueError("shift_date is required")
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            return datetime.strptime(value, '%Y-%m-%d').date()
+        raise ValueError("Invalid date format, expected YYYY-MM-DD")
+
+    def _normalize_schedule_time(self, value, field_name):
+        if value is None:
+            raise ValueError(f"{field_name} is required")
+        if isinstance(value, dt_time):
+            return value
+        if isinstance(value, str):
+            return datetime.strptime(value, '%H:%M').time()
+        raise ValueError(f"Invalid {field_name} format, expected HH:MM")
+
+    def _normalize_shift_breaks(self, breaks):
+        if breaks is None:
+            return []
+        if not isinstance(breaks, list):
+            raise ValueError("breaks must be a list")
+
+        normalized = []
+        seen = set()
+        for item in breaks:
+            if not isinstance(item, dict):
+                raise ValueError("Each break must be an object")
+            start_raw = item.get('start')
+            end_raw = item.get('end')
+            if start_raw is None or end_raw is None:
+                raise ValueError("Each break must contain start and end")
+
+            start_val = _time_to_minutes(start_raw) if isinstance(start_raw, str) else int(start_raw)
+            end_val = _time_to_minutes(end_raw) if isinstance(end_raw, str) else int(end_raw)
+            if end_val <= start_val:
+                raise ValueError("Break end must be greater than break start")
+
+            key = (start_val, end_val)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append({'start': start_val, 'end': end_val})
+
+        normalized.sort(key=lambda b: (b['start'], b['end']))
+        return normalized
+
+    def _schedule_interval_minutes(self, start_time_value, end_time_value):
+        if isinstance(start_time_value, dt_time):
+            start_str = start_time_value.strftime('%H:%M')
+        else:
+            start_str = str(start_time_value)
+        if isinstance(end_time_value, dt_time):
+            end_str = end_time_value.strftime('%H:%M')
+        else:
+            end_str = str(end_time_value)
+
+        start_min = _time_to_minutes(start_str)
+        end_min = _time_to_minutes(end_str)
+        if end_min <= start_min:
+            end_min += 24 * 60
+        return start_min, end_min
+
+    def _insert_shift_breaks(self, cursor, shift_id, breaks):
+        cursor.execute("DELETE FROM shift_breaks WHERE shift_id = %s", (shift_id,))
+        if breaks:
+            cursor.executemany(
+                """
+                INSERT INTO shift_breaks (shift_id, start_minutes, end_minutes)
+                VALUES (%s, %s, %s)
+                """,
+                [(shift_id, b['start'], b['end']) for b in breaks]
+            )
+
+    def _save_shift_tx(
+        self,
+        cursor,
+        operator_id,
+        shift_date,
+        start_time,
+        end_time,
+        breaks=None,
+        previous_start_time=None,
+        previous_end_time=None
+    ):
+        breaks_norm = self._normalize_shift_breaks(breaks)
+        new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
+
+        prev_start_obj = None
+        prev_end_obj = None
+        if previous_start_time is not None and previous_end_time is not None:
+            prev_start_obj = self._normalize_schedule_time(previous_start_time, 'previous_start_time')
+            prev_end_obj = self._normalize_schedule_time(previous_end_time, 'previous_end_time')
+            if (
+                prev_start_obj != start_time or prev_end_obj != end_time
+            ):
+                cursor.execute(
+                    """
+                    DELETE FROM work_shifts
+                    WHERE operator_id = %s AND shift_date = %s
+                      AND start_time = %s AND end_time = %s
+                    """,
+                    (operator_id, shift_date, prev_start_obj, prev_end_obj)
+                )
+
+        cursor.execute(
+            """
+            SELECT id, start_time, end_time
+            FROM work_shifts
+            WHERE operator_id = %s AND shift_date = %s
+            """,
+            (operator_id, shift_date)
+        )
+        existing_rows = cursor.fetchall()
+
+        overlap_ids = []
+        for shift_id, existing_start, existing_end in existing_rows:
+            if existing_start == start_time and existing_end == end_time:
+                continue
+            ex_start_min, ex_end_min = self._schedule_interval_minutes(existing_start, existing_end)
+            if new_start_min < ex_end_min and ex_start_min < new_end_min:
+                overlap_ids.append(shift_id)
+
+        if overlap_ids:
+            cursor.execute(
+                "DELETE FROM work_shifts WHERE id = ANY(%s)",
+                (overlap_ids,)
+            )
+
+        cursor.execute(
+            """
+            INSERT INTO work_shifts (operator_id, shift_date, start_time, end_time, updated_at)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (operator_id, shift_date, start_time, end_time)
+            DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+            RETURNING id
+            """,
+            (operator_id, shift_date, start_time, end_time)
+        )
+        shift_id = cursor.fetchone()[0]
+        self._insert_shift_breaks(cursor, shift_id, breaks_norm)
+
+        cursor.execute(
+            """
+            DELETE FROM days_off
+            WHERE operator_id = %s AND day_off_date = %s
+            """,
+            (operator_id, shift_date)
+        )
+
+        return shift_id
+
     def get_operators_with_shifts(self, start_date=None, end_date=None):
         """
         Получить всех операторов со сменами и выходными днями за период.
         Возвращает список операторов с их сменами и выходными.
         """
+        start_date_obj = self._normalize_schedule_date(start_date) if start_date else None
+        end_date_obj = self._normalize_schedule_date(end_date) if end_date else None
+
         with self._get_cursor() as cursor:
-            # Получаем всех операторов
             cursor.execute("""
-                SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name, 
+                SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
                        d.name as direction, u.status, u.rate
                 FROM users u
                 LEFT JOIN users s ON u.supervisor_id = s.id
@@ -4155,98 +4316,13 @@ class Database:
                 ORDER BY d.name, u.name
             """)
             operators = cursor.fetchall()
-            
-            result = []
-            for op in operators:
-                op_id, name, supervisor_id, supervisor_name, direction, status, rate = op
-                
-                # Получаем смены оператора
-                shifts_query = """
-                    SELECT ws.id, ws.shift_date, ws.start_time, ws.end_time
-                    FROM work_shifts ws
-                    WHERE ws.operator_id = %s
-                """
-                params = [op_id]
-                
-                if start_date:
-                    shifts_query += " AND ws.shift_date >= %s"
-                    params.append(start_date)
-                if end_date:
-                    shifts_query += " AND ws.shift_date <= %s"
-                    params.append(end_date)
-                    
-                shifts_query += " ORDER BY ws.shift_date, ws.start_time"
-                cursor.execute(shifts_query, params)
-                shifts_rows = cursor.fetchall()
-                
-                # Формируем словарь смен по датам
-                shifts_dict = {}
-                shift_ids = []
-                for shift_row in shifts_rows:
-                    shift_id, shift_date, start_time, end_time = shift_row
-                    date_str = shift_date.strftime('%Y-%m-%d')
-                    if date_str not in shifts_dict:
-                        shifts_dict[date_str] = []
-                    shifts_dict[date_str].append({
-                        'id': shift_id,
-                        'start': start_time.strftime('%H:%M'),
-                        'end': end_time.strftime('%H:%M'),
-                        'breaks': []
-                    })
-                    shift_ids.append(shift_id)
-                
-                # Получаем перерывы для всех смен оператора
-                if shift_ids:
-                    cursor.execute("""
-                        SELECT shift_id, start_minutes, end_minutes
-                        FROM shift_breaks
-                        WHERE shift_id = ANY(%s)
-                        ORDER BY shift_id, start_minutes
-                    """, (shift_ids,))
-                    breaks_rows = cursor.fetchall()
-                    
-                    # Группируем перерывы по shift_id
-                    for date_str, shifts in shifts_dict.items():
-                        for shift in shifts:
-                            shift['breaks'] = [
-                                {'start': b[1], 'end': b[2]} 
-                                for b in breaks_rows if b[0] == shift['id']
-                            ]
-                
-                # Объединяем перекрывающиеся смены для каждой даты
-                for date_str in shifts_dict:
-                    original_shifts = shifts_dict[date_str]
-                    merged_shifts = _merge_shifts_for_date(original_shifts)
-                    # Сохраняем первый не-None ID из оригинальных смен для совместимости
-                    # (для отображения, при сохранении будут созданы новые смены)
-                    for merged_shift in merged_shifts:
-                        # Находим первую оригинальную смену, которая входит в эту объединенную
-                        # Используем первую смену из списка как приближение
-                        if original_shifts:
-                            first_id = original_shifts[0].get('id')
-                            if first_id:
-                                merged_shift['id'] = first_id
-                    shifts_dict[date_str] = merged_shifts
-                
-                # Получаем выходные дни оператора
-                days_off_query = """
-                    SELECT day_off_date
-                    FROM days_off
-                    WHERE operator_id = %s
-                """
-                params = [op_id]
-                
-                if start_date:
-                    days_off_query += " AND day_off_date >= %s"
-                    params.append(start_date)
-                if end_date:
-                    days_off_query += " AND day_off_date <= %s"
-                    params.append(end_date)
-                    
-                cursor.execute(days_off_query, params)
-                days_off = [row[0].strftime('%Y-%m-%d') for row in cursor.fetchall()]
-                
-                result.append({
+            if not operators:
+                return []
+
+            operator_ids = [row[0] for row in operators]
+            result_map = {}
+            for op_id, name, supervisor_id, supervisor_name, direction, status, rate in operators:
+                result_map[op_id] = {
                     'id': op_id,
                     'name': name,
                     'supervisor_id': supervisor_id,
@@ -4254,112 +4330,133 @@ class Database:
                     'direction': direction,
                     'status': status,
                     'rate': float(rate) if rate else 1.0,
-                    'shifts': shifts_dict,
-                    'daysOff': days_off
-                })
-            
-            return result
+                    'shifts': {},
+                    'daysOff': []
+                }
 
-    def save_shift(self, operator_id, shift_date, start_time, end_time, breaks=None):
-        """
-        Сохранить смену для оператора. Если смена с такими параметрами существует, обновить перерывы.
-        Автоматически объединяет перекрывающиеся смены на одну дату.
-        """
-        if isinstance(shift_date, str):
-            shift_date = datetime.strptime(shift_date, '%Y-%m-%d').date()
-        
-        if isinstance(start_time, str):
-            start_time = datetime.strptime(start_time, '%H:%M').time()
-        if isinstance(end_time, str):
-            end_time = datetime.strptime(end_time, '%H:%M').time()
-        
-        with self._get_cursor() as cursor:
-            # Получаем все существующие смены на эту дату
-            cursor.execute("""
-                SELECT ws.id, ws.start_time, ws.end_time
+            shifts_query = """
+                SELECT ws.id, ws.operator_id, ws.shift_date, ws.start_time, ws.end_time
                 FROM work_shifts ws
-                WHERE ws.operator_id = %s AND ws.shift_date = %s
-                ORDER BY ws.start_time
-            """, (operator_id, shift_date))
-            existing_shifts = cursor.fetchall()
-            
-            # Формируем список всех смен (существующие + новая)
-            all_shifts = []
-            existing_shift_ids = []
-            
-            for shift_id, existing_start, existing_end in existing_shifts:
-                existing_shift_ids.append(shift_id)
-                # Получаем перерывы для существующей смены
-                cursor.execute("""
-                    SELECT start_minutes, end_minutes
-                    FROM shift_breaks
-                    WHERE shift_id = %s
-                    ORDER BY start_minutes
-                """, (shift_id,))
-                existing_breaks = [{'start': b[0], 'end': b[1]} for b in cursor.fetchall()]
-                
-                all_shifts.append({
-                    'id': shift_id,
-                    'start': existing_start.strftime('%H:%M'),
-                    'end': existing_end.strftime('%H:%M'),
-                    'breaks': existing_breaks
-                })
-            
-            # Добавляем новую смену
-            new_breaks = breaks or []
-            all_shifts.append({
-                'id': None,
-                'start': start_time.strftime('%H:%M'),
-                'end': end_time.strftime('%H:%M'),
-                'breaks': new_breaks
-            })
-            
-            # Объединяем перекрывающиеся смены
-            merged_shifts = _merge_shifts_for_date(all_shifts)
-            
-            # Удаляем все старые смены на эту дату
-            if existing_shift_ids:
-                cursor.execute("""
-                    DELETE FROM work_shifts
-                    WHERE id = ANY(%s)
-                """, (existing_shift_ids,))
-            
-            # Сохраняем объединенные смены
-            result_ids = []
-            for merged_shift in merged_shifts:
-                merged_start = datetime.strptime(merged_shift['start'], '%H:%M').time()
-                merged_end = datetime.strptime(merged_shift['end'], '%H:%M').time()
-                
-                cursor.execute("""
-                    INSERT INTO work_shifts (operator_id, shift_date, start_time, end_time, updated_at)
-                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                    RETURNING id
-                """, (operator_id, shift_date, merged_start, merged_end))
-                new_shift_id = cursor.fetchone()[0]
-                result_ids.append(new_shift_id)
+                WHERE ws.operator_id = ANY(%s)
+            """
+            shifts_params = [operator_ids]
+            if start_date_obj:
+                shifts_query += " AND ws.shift_date >= %s"
+                shifts_params.append(start_date_obj)
+            if end_date_obj:
+                shifts_query += " AND ws.shift_date <= %s"
+                shifts_params.append(end_date_obj)
+            shifts_query += " ORDER BY ws.operator_id, ws.shift_date, ws.start_time"
+            cursor.execute(shifts_query, shifts_params)
+            shifts_rows = cursor.fetchall()
 
-                # NOTE: Previously code automatically inserted records into `shift_breaks` here.
-                # Automatic creation of shift_breaks is disabled — breaks are no longer
-                # created when saving/merging shifts. If breaks need to be added,
-                # they should be created explicitly via a dedicated API.
-            
-            # Возвращаем ID первой объединенной смены (или единственной)
-            return result_ids[0] if result_ids else None
+            shift_ids = []
+            shift_ref = {}
+            for shift_id, operator_id, shift_date, start_time_value, end_time_value in shifts_rows:
+                op_entry = result_map.get(operator_id)
+                if not op_entry:
+                    continue
+                date_str = shift_date.strftime('%Y-%m-%d')
+                shift_item = {
+                    'id': shift_id,
+                    'start': start_time_value.strftime('%H:%M'),
+                    'end': end_time_value.strftime('%H:%M'),
+                    'breaks': []
+                }
+                op_entry['shifts'].setdefault(date_str, []).append(shift_item)
+                shift_ids.append(shift_id)
+                shift_ref[shift_id] = shift_item
+
+            if shift_ids:
+                cursor.execute(
+                    """
+                    SELECT shift_id, start_minutes, end_minutes
+                    FROM shift_breaks
+                    WHERE shift_id = ANY(%s)
+                    ORDER BY shift_id, start_minutes, end_minutes
+                    """,
+                    (shift_ids,)
+                )
+                for shift_id, br_start, br_end in cursor.fetchall():
+                    item = shift_ref.get(shift_id)
+                    if item is None:
+                        continue
+                    item['breaks'].append({'start': int(br_start), 'end': int(br_end)})
+
+            # Keep backward-compatible read behavior: frontend expects already merged segments on load.
+            for op_entry in result_map.values():
+                for day_key, day_shifts in list(op_entry['shifts'].items()):
+                    op_entry['shifts'][day_key] = _merge_shifts_for_date(day_shifts)
+
+            days_off_query = """
+                SELECT operator_id, day_off_date
+                FROM days_off
+                WHERE operator_id = ANY(%s)
+            """
+            days_off_params = [operator_ids]
+            if start_date_obj:
+                days_off_query += " AND day_off_date >= %s"
+                days_off_params.append(start_date_obj)
+            if end_date_obj:
+                days_off_query += " AND day_off_date <= %s"
+                days_off_params.append(end_date_obj)
+            days_off_query += " ORDER BY operator_id, day_off_date"
+            cursor.execute(days_off_query, days_off_params)
+            for operator_id, day_off_date in cursor.fetchall():
+                op_entry = result_map.get(operator_id)
+                if op_entry is None:
+                    continue
+                op_entry['daysOff'].append(day_off_date.strftime('%Y-%m-%d'))
+
+            return [result_map[row[0]] for row in operators]
+
+    def save_shift(
+        self,
+        operator_id,
+        shift_date,
+        start_time,
+        end_time,
+        breaks=None,
+        previous_start_time=None,
+        previous_end_time=None
+    ):
+        """
+        Сохранить смену для оператора и синхронизировать её с фронтовым merged-состоянием.
+        - заменяет пересекающиеся смены на этой дате одной присланной сменой
+        - обновляет/перезаписывает перерывы
+        - снимает day off на эту дату, если он был
+        """
+        shift_date_obj = self._normalize_schedule_date(shift_date)
+        start_time_obj = self._normalize_schedule_time(start_time, 'start_time')
+        end_time_obj = self._normalize_schedule_time(end_time, 'end_time')
+
+        with self._get_cursor() as cursor:
+            return self._save_shift_tx(
+                cursor=cursor,
+                operator_id=int(operator_id),
+                shift_date=shift_date_obj,
+                start_time=start_time_obj,
+                end_time=end_time_obj,
+                breaks=breaks,
+                previous_start_time=previous_start_time,
+                previous_end_time=previous_end_time
+            )
 
     def delete_shift(self, operator_id, shift_date, start_time, end_time):
         """
         Удалить конкретную смену оператора.
         """
-        if isinstance(shift_date, str):
-            shift_date = datetime.strptime(shift_date, '%Y-%m-%d').date()
-        
+        shift_date_obj = self._normalize_schedule_date(shift_date)
+        start_time_obj = self._normalize_schedule_time(start_time, 'start_time')
+        end_time_obj = self._normalize_schedule_time(end_time, 'end_time')
+
         with self._get_cursor() as cursor:
             cursor.execute("""
                 DELETE FROM work_shifts
-                WHERE operator_id = %s AND shift_date = %s 
+                WHERE operator_id = %s AND shift_date = %s
                   AND start_time = %s AND end_time = %s
                 RETURNING id
-            """, (operator_id, shift_date, start_time, end_time))
+            """, (int(operator_id), shift_date_obj, start_time_obj, end_time_obj))
             return cursor.fetchone() is not None
 
     def toggle_day_off(self, operator_id, day_off_date):
@@ -4368,130 +4465,62 @@ class Database:
         Если день уже выходной - убрать, иначе - добавить и удалить все смены в этот день.
         Возвращает True если день стал выходным, False если был убран.
         """
-        if isinstance(day_off_date, str):
-            day_off_date = datetime.strptime(day_off_date, '%Y-%m-%d').date()
-        
+        day_off_date_obj = self._normalize_schedule_date(day_off_date)
+        operator_id = int(operator_id)
+
         with self._get_cursor() as cursor:
-            # Проверяем, является ли день уже выходным
             cursor.execute("""
-                SELECT id FROM days_off
+                SELECT 1
+                FROM days_off
                 WHERE operator_id = %s AND day_off_date = %s
-            """, (operator_id, day_off_date))
-            
+            """, (operator_id, day_off_date_obj))
             existing = cursor.fetchone()
-            
+
             if existing:
-                # Убираем выходной
                 cursor.execute("""
                     DELETE FROM days_off
                     WHERE operator_id = %s AND day_off_date = %s
-                """, (operator_id, day_off_date))
+                """, (operator_id, day_off_date_obj))
                 return False
-            else:
-                # Добавляем выходной
-                cursor.execute("""
-                    INSERT INTO days_off (operator_id, day_off_date)
-                    VALUES (%s, %s)
-                """, (operator_id, day_off_date))
-                
-                # Удаляем все смены в этот день
-                cursor.execute("""
-                    DELETE FROM work_shifts
-                    WHERE operator_id = %s AND shift_date = %s
-                """, (operator_id, day_off_date))
-                
-                return True
+
+            cursor.execute("""
+                INSERT INTO days_off (operator_id, day_off_date)
+                VALUES (%s, %s)
+                ON CONFLICT (operator_id, day_off_date) DO NOTHING
+            """, (operator_id, day_off_date_obj))
+            cursor.execute("""
+                DELETE FROM work_shifts
+                WHERE operator_id = %s AND shift_date = %s
+            """, (operator_id, day_off_date_obj))
+            return True
 
     def save_shifts_bulk(self, operator_id, shifts_data):
         """
         Массовое сохранение смен для оператора.
         shifts_data: [{'date': 'YYYY-MM-DD', 'start': 'HH:MM', 'end': 'HH:MM', 'breaks': [...]}, ...]
-        Автоматически объединяет перекрывающиеся смены на одну дату.
         """
-        # Группируем смены по датам
-        shifts_by_date = defaultdict(list)
-        for shift in shifts_data:
-            shift_date = shift['date']
-            shifts_by_date[shift_date].append(shift)
-        
+        operator_id = int(operator_id)
+        if not isinstance(shifts_data, list):
+            raise ValueError("shifts must be a list")
+
         result_ids = []
-        
-        # Обрабатываем каждую дату отдельно
-        for shift_date, date_shifts in shifts_by_date.items():
-            # Получаем все существующие смены на эту дату
-            if isinstance(shift_date, str):
-                shift_date_obj = datetime.strptime(shift_date, '%Y-%m-%d').date()
-            else:
-                shift_date_obj = shift_date
-            
-            with self._get_cursor() as cursor:
-                cursor.execute("""
-                    SELECT ws.id, ws.start_time, ws.end_time
-                    FROM work_shifts ws
-                    WHERE ws.operator_id = %s AND ws.shift_date = %s
-                    ORDER BY ws.start_time
-                """, (operator_id, shift_date_obj))
-                existing_shifts = cursor.fetchall()
-                
-                # Формируем список всех смен (существующие + новые)
-                all_shifts = []
-                existing_shift_ids = []
-                
-                for shift_id, existing_start, existing_end in existing_shifts:
-                    existing_shift_ids.append(shift_id)
-                    # Получаем перерывы для существующей смены
-                    cursor.execute("""
-                        SELECT start_minutes, end_minutes
-                        FROM shift_breaks
-                        WHERE shift_id = %s
-                        ORDER BY start_minutes
-                    """, (shift_id,))
-                    existing_breaks = [{'start': b[0], 'end': b[1]} for b in cursor.fetchall()]
-                    
-                    all_shifts.append({
-                        'id': shift_id,
-                        'start': existing_start.strftime('%H:%M'),
-                        'end': existing_end.strftime('%H:%M'),
-                        'breaks': existing_breaks
-                    })
-                
-                # Добавляем новые смены
-                for shift in date_shifts:
-                    all_shifts.append({
-                        'id': None,
-                        'start': shift['start'],
-                        'end': shift['end'],
-                        'breaks': shift.get('breaks', [])
-                    })
-                
-                # Объединяем перекрывающиеся смены
-                merged_shifts = _merge_shifts_for_date(all_shifts)
-                
-                # Удаляем все старые смены на эту дату
-                if existing_shift_ids:
-                    cursor.execute("""
-                        DELETE FROM work_shifts
-                        WHERE id = ANY(%s)
-                    """, (existing_shift_ids,))
-                
-                # Сохраняем объединенные смены
-                for merged_shift in merged_shifts:
-                    merged_start = datetime.strptime(merged_shift['start'], '%H:%M').time()
-                    merged_end = datetime.strptime(merged_shift['end'], '%H:%M').time()
-                    
-                    cursor.execute("""
-                        INSERT INTO work_shifts (operator_id, shift_date, start_time, end_time, updated_at)
-                        VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                        RETURNING id
-                    """, (operator_id, shift_date_obj, merged_start, merged_end))
-                    new_shift_id = cursor.fetchone()[0]
-                    result_ids.append(new_shift_id)
-                    
-                    # NOTE: Previously code automatically inserted records into `shift_breaks` here.
-                    # Automatic creation of shift_breaks is disabled — breaks are no longer
-                    # created when saving/merging shifts in bulk. If breaks need to be
-                    # added, use a dedicated API to create shift_breaks explicitly.
-        
+        with self._get_cursor() as cursor:
+            for shift in shifts_data:
+                if not isinstance(shift, dict):
+                    raise ValueError("Each shift must be an object")
+                shift_date_obj = self._normalize_schedule_date(shift.get('date'))
+                start_time_obj = self._normalize_schedule_time(shift.get('start'), 'start')
+                end_time_obj = self._normalize_schedule_time(shift.get('end'), 'end')
+                shift_id = self._save_shift_tx(
+                    cursor=cursor,
+                    operator_id=operator_id,
+                    shift_date=shift_date_obj,
+                    start_time=start_time_obj,
+                    end_time=end_time_obj,
+                    breaks=shift.get('breaks')
+                )
+                result_ids.append(shift_id)
+
         return result_ids
 
     def get_ai_feedback_cache(self, operator_id: int, month: str):
