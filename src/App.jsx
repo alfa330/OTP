@@ -5518,8 +5518,8 @@ const withAccessTokenHeader = (headers = {}) => {
             }, [dayBreaksByOperator]);
 
             return (
-                <div className="p-4 min-h-screen bg-slate-50">
-                <div className="flex items-start gap-4 mb-4 h-[calc(100vh-2rem)]">
+                <div className="px-4 py-2 min-h-screen bg-slate-50">
+                <div className="flex items-start gap-4 mb-0 h-[calc(100vh-1rem)]">
                     <div className="flex flex-col gap-3">
                     <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
                         <div className="bg-white rounded shadow-sm p-3 w-[260px] flex-shrink-0">
