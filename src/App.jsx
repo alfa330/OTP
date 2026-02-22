@@ -4548,7 +4548,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [selectedDirections, setSelectedDirections] = useState([]);
             const [operators, setOperators] = useState(() => mergePlannerOperators(initialOperators || [], []));
 
-            const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff: false, multipleDates: null });
+            const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff: false, multipleDates: null, showAddPanel: false });
             const [selectedDays, setSelectedDays] = useState({ opId: null, dates: [] });
             const [isLoading, setIsLoading] = useState(false);
             const dragState = useRef(null);
@@ -4784,9 +4784,9 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (editIndex !== null && arr[editIndex]) {
                 const seg = arr[editIndex];
                 const breaks = (seg.breaks ?? []).map(b => ({ start: b.start, end: b.end }));
-                setModalState({ open: true, opId, date, start: seg.start, end: seg.end, editIndex, breaks, isDayOff, multipleDates: null });
+                setModalState({ open: true, opId, date, start: seg.start, end: seg.end, editIndex, breaks, isDayOff, multipleDates: null, showAddPanel: true });
                 } else {
-                setModalState({ open: true, opId, date, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff, multipleDates: null });
+                setModalState({ open: true, opId, date, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff, multipleDates: null, showAddPanel: false });
                 }
             };
 
@@ -4881,7 +4881,8 @@ const withAccessTokenHeader = (headers = {}) => {
                     editIndex: null, 
                     breaks: [], 
                     isDayOff: false,
-                    multipleDates: dates
+                    multipleDates: dates,
+                    showAddPanel: true
                 });
             };
 
@@ -5062,7 +5063,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     return copy;
                   });
               
-                  setModalState(m => ({ ...m, editIndex: null, multipleDates: null }));
+                  setModalState(m => ({ ...m, editIndex: null, multipleDates: null, showAddPanel: false, breaks: [] }));
                 } catch (error) {
                   console.error('Error saving shift:', error);
                   alert('Ошибка сохранения смены');
@@ -5172,6 +5173,27 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (overlapEnd > overlapStart) res.push({ start: overlapStart, end: overlapEnd });
                 });
                 return res;
+            };
+
+            const getModalBreakEditorContext = () => {
+                if (modalState.isDayOff || modalState.multipleDates) return null;
+                const op = operators.find(o => o.id === modalState.opId);
+                const seg = (modalState.editIndex !== null) ? (op?.shifts?.[modalState.date]?.[modalState.editIndex] ?? null) : null;
+
+                let segStartMin = seg ? (seg.__startMin ?? timeToMinutes(seg.start)) : timeToMinutes(modalState.start);
+                let segEndMin = seg ? (seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0))) : timeToMinutes(modalState.end);
+                if (!Number.isFinite(segStartMin) || !Number.isFinite(segEndMin)) return null;
+                if (segEndMin <= segStartMin) segEndMin += 1440;
+                const segDur = segEndMin - segStartMin;
+                if (segDur <= 0) return null;
+
+                const generatedBreaks = seg
+                    ? (seg.breaks ?? computeBreaksForShiftMinutes(segStartMin, segEndMin))
+                    : computeBreaksForShiftMinutes(segStartMin, segEndMin);
+                const breaksLocal = (modalState.breaks && modalState.breaks.length ? modalState.breaks : generatedBreaks)
+                    .map(b => ({ start: b.start, end: b.end }));
+
+                return { seg, segStartMin, segEndMin, segDur, breaksLocal };
             };
 
             return (
@@ -5717,7 +5739,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <button 
                                             className="px-3 py-2 text-sm font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors flex items-center gap-1"
                                             onClick={() => {
-                                                setModalState(m => ({ ...m, start: seg.start, end: seg.end, editIndex: idx, breaks: (seg.breaks ?? []).map(b => ({ start: b.start, end: b.end })) }));
+                                                setModalState(m => ({ ...m, start: seg.start, end: seg.end, editIndex: idx, breaks: (seg.breaks ?? []).map(b => ({ start: b.start, end: b.end })), showAddPanel: true }));
                                             }}
                                         >
                                             <i className="fas fa-pen text-xs"></i>
@@ -5737,11 +5759,32 @@ const withAccessTokenHeader = (headers = {}) => {
                         </div>
                     </div>
 
-                    <div className="mb-6">
-                        <h4 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                            <i className="fas fa-clock text-blue-500"></i>
-                            {modalState.editIndex !== null ? 'Редактировать время' : 'Добавить новую смену'}
-                        </h4>
+                    <div className="mb-4">
+                        <div className="flex items-center justify-between gap-3">
+                            <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                                <i className="fas fa-clock text-blue-500"></i>
+                                {modalState.editIndex !== null ? 'Редактирование смены' : 'Добавление смены'}
+                            </h4>
+                            {modalState.editIndex === null && (
+                                <button
+                                    type="button"
+                                    className={`px-3 py-2 text-sm font-semibold rounded-lg border transition-colors flex items-center gap-2 ${modalState.showAddPanel ? 'bg-blue-50 border-blue-200 text-blue-700 hover:bg-blue-100' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}
+                                    onClick={() => setModalState(m => ({
+                                        ...m,
+                                        showAddPanel: !m.showAddPanel,
+                                        breaks: !m.showAddPanel ? (m.breaks ?? []) : []
+                                    }))}
+                                >
+                                    <i className={`fas ${modalState.showAddPanel ? 'fa-chevron-up' : 'fa-plus'}`}></i>
+                                    {modalState.showAddPanel ? 'Скрыть блок' : 'Добавить смену'}
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    {(modalState.editIndex !== null || modalState.showAddPanel) && (
+                    <>
+                    <div className="mb-6 p-4 rounded-xl border-2 border-blue-100 bg-gradient-to-br from-blue-50/70 to-white">
                         <div className="grid grid-cols-2 gap-4">
                             <div>
                                 <label className="block text-xs font-medium text-slate-600 mb-2">Начало смены</label>
@@ -5768,19 +5811,17 @@ const withAccessTokenHeader = (headers = {}) => {
                     <h4 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
                         <i className="fas fa-mug-hot text-amber-600"></i>
                         Перерывы
+                        <span className="text-xs text-slate-500 font-normal">(предпросмотр доступен до сохранения)</span>
                     </h4>
                     <div className="border-2 border-slate-200 rounded-lg p-4 bg-white">
                         <div className="relative h-8 bg-slate-50 rounded" id="mini-bar">
                         <div className="absolute inset-0 flex items-center">
                             <div className="h-3 bg-slate-200 mx-2 rounded w-full" />
                         </div>
-                        {modalState.editIndex !== null && (() => {
-                            const op = operators.find(o => o.id === modalState.opId);
-                            const seg = op?.shifts?.[modalState.date]?.[modalState.editIndex];
-                            const segStartMin = seg ? (seg.__startMin ?? timeToMinutes(seg.start)) : timeToMinutes(modalState.start);
-                            const segEndMin = seg ? (seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0))) : timeToMinutes(modalState.end);
-                            const segDur = segEndMin - segStartMin;
-                            const breaksLocal = modalState.breaks && modalState.breaks.length ? modalState.breaks : (seg ? (seg.breaks ?? computeBreaksForShiftMinutes(segStartMin, segEndMin)) : []);
+                        {(() => {
+                            const ctx = getModalBreakEditorContext();
+                            if (!ctx) return null;
+                            const { segStartMin, segEndMin, segDur, breaksLocal } = ctx;
                             return breaksLocal.map((b, i) => {
                             const bStart = b.start - segStartMin;
                             const bEnd = b.end - segStartMin;
@@ -5802,7 +5843,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                     const minutes = Math.round((segStartMin + rel * segDur) / 5) * 5;
                                     const idx = dragState.current.index;
                                     setModalState(m => {
-                                    const nb = (m.breaks ?? breaksLocal).map(x => ({ ...x }));
+                                    const source = (m.breaks && m.breaks.length) ? m.breaks : breaksLocal;
+                                    const nb = source.map(x => ({ ...x }));
                                     const size = nb[idx].end - nb[idx].start;
                                     nb[idx].start = Math.max(segStartMin, Math.min(segEndMin - size, minutes - Math.round(size/2)));
                                     nb[idx].end = nb[idx].start + size;
@@ -5816,7 +5858,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         })()}
                         </div>
 
-                        <div className="mt-2 flex gap-2">
+                        <div className="mt-2 flex gap-2 flex-wrap">
                         {(modalState.breaks && modalState.breaks.length ? modalState.breaks : []).map((b, i) => (
                             <div key={i} className="flex items-center gap-2">
                             <input type="time" step="300" value={minutesToTime(b.start % 1440)} onChange={(e) => {
@@ -5831,23 +5873,29 @@ const withAccessTokenHeader = (headers = {}) => {
                             </div>
                         ))}
 
-                        {(!modalState.breaks || modalState.breaks.length === 0) && modalState.editIndex !== null && (() => {
-                            const op = operators.find(o => o.id === modalState.opId);
-                            const seg = op?.shifts?.[modalState.date]?.[modalState.editIndex];
-                            if (!seg) return null;
-                            const segStartMin = seg.__startMin ?? timeToMinutes(seg.start);
-                            const segEndMin = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
-                            return <button className="px-2 py-1 ml-2 rounded bg-sky-600 text-white text-sm" onClick={() => setModalState(m => ({ ...m, breaks: computeBreaksForShiftMinutes(segStartMin, segEndMin) }))}>Сгенерировать перерывы</button>;
+                        {(!modalState.breaks || modalState.breaks.length === 0) && (() => {
+                            const ctx = getModalBreakEditorContext();
+                            if (!ctx) return null;
+                            return (
+                                <button
+                                    className="px-2 py-1 rounded bg-sky-600 text-white text-sm"
+                                    onClick={() => setModalState(m => ({ ...m, breaks: ctx.breaksLocal.map(b => ({ start: b.start, end: b.end })) }))}
+                                >
+                                    Сгенерировать перерывы
+                                </button>
+                            );
                         })()}
                         </div>
                     </div>
                     </div>
                     </>
                     )}
+                    </>
+                    )}
 
                     {/* Нижняя панель с кнопками */}
                     <div className="mt-6 pt-4 border-t border-slate-200">
-                        {!modalState.isDayOff && (
+                        {!modalState.isDayOff && (modalState.multipleDates || modalState.editIndex !== null || modalState.showAddPanel) && (
                             <div className="mb-4 p-3 bg-blue-50 border border-blue-100 rounded-lg">
                                 <div className="flex items-center justify-between">
                                     <span className="text-sm text-blue-900 font-medium flex items-center gap-2">
@@ -5877,7 +5925,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     Применить ко всем ({modalState.multipleDates.length})
                                 </button>
                             )}
-                            {!modalState.isDayOff && !modalState.multipleDates && (
+                            {!modalState.isDayOff && !modalState.multipleDates && (modalState.editIndex !== null || modalState.showAddPanel) && (
                                 <button 
                                     className="px-5 py-3 rounded-lg bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white font-semibold shadow-lg hover:shadow-xl transition-all flex items-center gap-2"
                                     onClick={() => saveSegment({ opId: modalState.opId, date: modalState.date, start: modalState.start, end: modalState.end, editIndex: modalState.editIndex, breaks: modalState.breaks && modalState.breaks.length ? modalState.breaks : null })}
