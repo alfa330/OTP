@@ -4554,8 +4554,8 @@ const withAccessTokenHeader = (headers = {}) => {
             const dragState = useRef(null);
             const plannerUiStateLoadedRef = useRef(false);
             const plannerUiStateStorageKey = useMemo(
-                () => `otp.work_schedules.ui_state.${user?.id || 'anonymous'}`,
-                [user?.id]
+                () => `otp.work_schedules.ui_state.${user?.login || user?.name || user?.role || 'anonymous'}`,
+                [user?.login, user?.name, user?.role]
             );
 
             // Восстановление выбранной даты/фильтров/режима после перезагрузки
@@ -4629,17 +4629,14 @@ const withAccessTokenHeader = (headers = {}) => {
 
             // Загрузка данных с сервера (с повторами при смене user и когда parent-дата пришла позже)
             useEffect(() => {
-                if (!user?.id || !user?.apiKey) return;
+                if (!user) return;
                 let cancelled = false;
                 const loadSchedules = async () => {
                     try {
                         setIsLoading(true);
                         const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators`, {
                             credentials: 'include',
-                            headers: withAccessTokenHeader({
-                                'X-Api-Key': user.apiKey,
-                                'X-User-Id': user.id
-                            })
+                            headers: withAccessTokenHeader()
                         });
 
                         if (response.ok) {
@@ -4681,7 +4678,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                 loadSchedules();
                 return () => { cancelled = true; };
-            }, [user?.id, user?.apiKey, initialOperators]);
+            }, [user, initialOperators]);
 
             // Получаем уникальных супервайзеров (скрываем тех, у кого все операторы со статусом "fired")
             const uniqueSupervisors = useMemo(() => {
@@ -4800,9 +4797,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         method: 'POST',
                         credentials: 'include',
                         headers: withAccessTokenHeader({
-                            'Content-Type': 'application/json',
-                            'X-Api-Key': user.apiKey,
-                            'X-User-Id': user.id
+                            'Content-Type': 'application/json'
                         }),
                         body: JSON.stringify({
                             operator_id: opId,
@@ -4970,9 +4965,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     method: 'POST',
                     credentials: 'include',
                     headers: withAccessTokenHeader({
-                      'Content-Type': 'application/json',
-                      'X-Api-Key': user.apiKey,
-                      'X-User-Id': user.id
+                      'Content-Type': 'application/json'
                     }),
                     body: JSON.stringify({
                       operator_id: opId,
@@ -5040,9 +5033,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     method: 'POST',
                     credentials: 'include',
                     headers: withAccessTokenHeader({
-                      'Content-Type': 'application/json',
-                      'X-Api-Key': user.apiKey,
-                      'X-User-Id': user.id
+                      'Content-Type': 'application/json'
                     }),
                     body: JSON.stringify(payload)
                   });
@@ -5090,9 +5081,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         method: 'DELETE',
                         credentials: 'include',
                         headers: withAccessTokenHeader({
-                            'Content-Type': 'application/json',
-                            'X-Api-Key': user.apiKey,
-                            'X-User-Id': user.id
+                            'Content-Type': 'application/json'
                         }),
                         body: JSON.stringify({
                             operator_id: opId,
