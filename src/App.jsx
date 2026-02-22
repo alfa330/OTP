@@ -5726,7 +5726,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         <div className="flex-1 bg-white rounded shadow-sm p-2 w-full flex flex-col min-h-0 overflow-hidden">
                         <div className="table-scroll overflow-auto w-full flex-1 min-h-0" style={{ position: 'relative' }}>
                             <div style={{ minWidth: 'max-content', width: '100%' }}>
-                            <div className="flex items-start border-b pb-2 mb-2 sticky top-0 z-30 bg-white">
+                            <div className="flex items-start border-b pb-2 mb-2 sticky top-0 z-60 bg-white">
                                 <div className="w-64 sticky left-0 top-0 z-50 bg-white pr-2 border-r" style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }} />
                                 <div className="flex-1" style={{ overflow: 'visible' }}>
                                 <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
