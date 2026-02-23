@@ -396,6 +396,8 @@ const withAccessTokenHeader = (headers = {}) => {
         const [selectedCell, setSelectedCell] = useState(null);
         const [cellModel, setCellModel] = useState(null);
         const [isSavingCell, setIsSavingCell] = useState(false);
+        const [selectedHourCells, setSelectedHourCells] = useState([]);
+        const [isBulkDeletingHours, setIsBulkDeletingHours] = useState(false);
 
         // upload per day preview
         const [selectedDayUpload, setSelectedDayUpload] = useState(null);
@@ -437,6 +439,10 @@ const withAccessTokenHeader = (headers = {}) => {
             fetchDailyHoursAndTrainings();
             // eslint-disable-next-line
         }, [user, selectedSvId, month]);
+
+        useEffect(() => {
+            setSelectedHourCells([]);
+        }, [month, selectedSvId]);
 
         function fallbackToast(msg, type = 'success') {
             try {
@@ -517,6 +523,38 @@ const withAccessTokenHeader = (headers = {}) => {
         }
         function dayToDateStr(day) {
             return `${monthParts.year}-${String(monthParts.monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        }
+
+        function makeSelectedHourCellKey(operatorId, day) {
+            return `${String(operatorId)}:${String(day)}`;
+        }
+
+        function clearSelectedHourCells() {
+            setSelectedHourCells([]);
+        }
+
+        function handleHoursCellClick(e, operator, day) {
+            if (e?.ctrlKey || e?.metaKey) {
+            e.preventDefault();
+            e.stopPropagation();
+            setSelectedHourCells(prev => {
+                const next = Array.isArray(prev) ? [...prev] : [];
+                const key = makeSelectedHourCellKey(operator?.operator_id, day);
+                const idx = next.findIndex(item => makeSelectedHourCellKey(item.operator_id, item.day) === key);
+                if (idx >= 0) {
+                next.splice(idx, 1);
+                return next;
+                }
+                next.push({
+                operator_id: operator?.operator_id,
+                name: operator?.name,
+                day: Number(day)
+                });
+                return next;
+            });
+            return;
+            }
+            openCellDetail(operator, day);
         }
 
         // ====== Upload-per-day (preview) ======
@@ -797,6 +835,111 @@ const withAccessTokenHeader = (headers = {}) => {
             }
         }
 
+        async function bulkDeleteSelectedHourCells() {
+            if (!user) return;
+
+            const selected = Array.isArray(selectedHourCells) ? selectedHourCells : [];
+            if (selected.length === 0) {
+            fallbackToast('Сначала выберите ячейки (Ctrl/Cmd + клик)', 'error');
+            return;
+            }
+
+            const operatorsById = new Map((operators || []).map(op => [String(op.operator_id), op]));
+            const groupedByDate = new Map();
+            let skippedWithoutDailyRow = 0;
+            let skippedMissingOperator = 0;
+
+            for (const cell of selected) {
+            const op = operatorsById.get(String(cell.operator_id));
+            if (!op) {
+                skippedMissingOperator += 1;
+                continue;
+            }
+            const dayKey = String(cell.day);
+            if (!op.daily || !op.daily[dayKey]) {
+                skippedWithoutDailyRow += 1;
+                continue;
+            }
+
+            const dateStr = dayToDateStr(cell.day);
+            if (!groupedByDate.has(dateStr)) groupedByDate.set(dateStr, []);
+            groupedByDate.get(dateStr).push({
+                operator_id: op.operator_id,
+                name: op.name,
+                work_time: 0,
+                break_time: 0,
+                talk_time: 0,
+                calls: 0,
+                efficiency: 0,
+                fine_amount: 0,
+                fine_reason: null,
+                fine_comment: null,
+                fines: [],
+                month
+            });
+            }
+
+            const deletableCount = Array.from(groupedByDate.values()).reduce((sum, arr) => sum + arr.length, 0);
+            if (deletableCount === 0) {
+            fallbackToast('В выбранных ячейках нет сохраненных данных для удаления', 'error');
+            return;
+            }
+
+            const confirmMessage = [
+            `Удалить данные учета часов в ${deletableCount} ячейк(ах)?`,
+            'Тренинги не удаляются.',
+            skippedWithoutDailyRow > 0 ? `Пустые ячейки будут пропущены: ${skippedWithoutDailyRow}.` : null
+            ].filter(Boolean).join('\n');
+            if (!window.confirm(confirmMessage)) return;
+
+            setIsBulkDeletingHours(true);
+            let successRequests = 0;
+            const failedDates = [];
+            try {
+            for (const [dateStr, rows] of groupedByDate.entries()) {
+                try {
+                const resp = await axios.post(`${API_BASE_URL}/api/hours/upload_group_day`, {
+                    date: dateStr,
+                    sv_id: selectedSvId || null,
+                    operators: rows
+                }, {
+                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id, 'Content-Type': 'application/json' },
+                    timeout: 60000
+                });
+                if (resp.data && resp.data.status === 'success') {
+                    successRequests += 1;
+                } else {
+                    failedDates.push(dateStr);
+                }
+                } catch (err) {
+                console.error('bulkDeleteSelectedHourCells error', dateStr, err);
+                failedDates.push(dateStr);
+                }
+            }
+
+            if (successRequests > 0) {
+                await fetchDailyHoursAndTrainings();
+            }
+            setSelectedHourCells([]);
+            if (selectedCell && selected.some(c => String(c.operator_id) === String(selectedCell.operator?.operator_id) && Number(c.day) === Number(selectedCell.day))) {
+                closeCellModal();
+            }
+
+            if (failedDates.length === 0) {
+                let msg = `Удалено данных: ${deletableCount} ячейк(ах)`;
+                if (skippedWithoutDailyRow > 0) msg += `. Пропущено пустых: ${skippedWithoutDailyRow}`;
+                if (skippedMissingOperator > 0) msg += `. Пропущено (оператор не найден): ${skippedMissingOperator}`;
+                fallbackToast(msg, 'success');
+            } else if (successRequests > 0) {
+                fallbackToast(`Частично выполнено. Ошибки по датам: ${failedDates.join(', ')}`, 'error');
+            } else {
+                fallbackToast('Не удалось удалить выбранные данные', 'error');
+            }
+            } finally {
+            setIsBulkDeletingHours(false);
+            }
+        }
+
         // ====== Norm change ======
         async function handleNormChange(operatorId, value) {
             try {
@@ -940,6 +1083,10 @@ const withAccessTokenHeader = (headers = {}) => {
             }
             return map;
         }, [filteredOperators]);
+
+        const selectedHourCellKeySet = useMemo(() => {
+            return new Set((selectedHourCells || []).map(cell => makeSelectedHourCellKey(cell.operator_id, cell.day)));
+        }, [selectedHourCells]);
 
         // ====== FOOTER AGGREGATES ======
         const footerTotals = useMemo(() => {
@@ -1432,7 +1579,34 @@ const withAccessTokenHeader = (headers = {}) => {
                 </div>
             </div>
 
-            
+            <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-blue-100 bg-blue-50/60 px-3 py-2">
+                <span className="text-sm text-gray-700">
+                Мультивыбор ячеек: <span className="font-medium">Ctrl/Cmd + клик</span>
+                </span>
+                <span className="text-xs text-gray-500">Тренинги при удалении не затрагиваются</span>
+                {selectedHourCells.length > 0 && (
+                <>
+                    <span className="ml-auto text-sm font-medium text-blue-800">
+                    Выбрано: {selectedHourCells.length}
+                    </span>
+                    <button
+                    type="button"
+                    onClick={clearSelectedHourCells}
+                    className="px-3 py-1.5 text-sm rounded-md border bg-white hover:bg-gray-50"
+                    >
+                    Снять выбор
+                    </button>
+                    <button
+                    type="button"
+                    onClick={bulkDeleteSelectedHourCells}
+                    disabled={isBulkDeletingHours || isLoading}
+                    className={`px-3 py-1.5 text-sm rounded-md text-white ${isBulkDeletingHours || isLoading ? 'bg-red-300 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700'}`}
+                    >
+                    {isBulkDeletingHours ? 'Удаление...' : 'Удалить данные'}
+                    </button>
+                </>
+                )}
+            </div>
 
             {/* Table */}
             <div className="overflow-auto border rounded-md">
@@ -1565,12 +1739,19 @@ const withAccessTokenHeader = (headers = {}) => {
                                 {/* Days */}
                                 {daysArray.map(day => (
                                 <div key={day} className="p-2 min-w-[72px] text-center border-l">
+                                    {(() => {
+                                    const isSelected = selectedHourCellKeySet.has(makeSelectedHourCellKey(op.operator_id, day));
+                                    return (
                                     <button
-                                    onClick={() => openCellDetail(op, day)}
-                                    className="w-full h-8 rounded-md text-sm flex items-center justify-center"
+                                    type="button"
+                                    onClick={(e) => handleHoursCellClick(e, op, day)}
+                                    className={`w-full h-8 rounded-md text-sm flex items-center justify-center ${isSelected ? 'ring-2 ring-blue-500 ring-offset-1 ring-offset-white bg-blue-50' : ''}`}
+                                    title={isSelected ? 'Выбрано. Ctrl/Cmd+клик чтобы снять выбор' : 'Клик: открыть. Ctrl/Cmd+клик: выбрать для массового удаления'}
                                     aria-label={`Данные ${op.name} за ${day}-${monthLabel}`}>
                                     {renderCellByMetricWithStyleAndMarker(op, day, selectedTab)}
                                     </button>
+                                    );
+                                    })()}
                                 </div>
                                 ))}
 
