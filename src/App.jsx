@@ -6159,49 +6159,52 @@ const withAccessTokenHeader = (headers = {}) => {
                                 <div className="grid grid-cols-1 gap-3 mb-3">
                                     <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-3 sm:p-4">
                                         <div className="lg:grid lg:grid-cols-2 lg:gap-4">
-                                        <div className={`rounded-lg border p-3 mb-3 lg:mb-0 ${myNowStatus.panelClass}`}>
-                                            <div className="flex items-center justify-between gap-2">
-                                                <div className="text-[11px] uppercase tracking-wide text-slate-600">Статус сейчас</div>
-                                                <div className={`px-2 py-0.5 rounded-full text-xs font-semibold ${myNowStatus.badgeClass}`}>
-                                                    {myNowStatus.label}
+                                            <div className="space-y-3">
+                                                <div className={`rounded-lg border p-3 ${myNowStatus.panelClass}`}>
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <div className="text-[11px] uppercase tracking-wide text-slate-600">Статус сейчас</div>
+                                                        <div className={`px-2 py-0.5 rounded-full text-xs font-semibold ${myNowStatus.badgeClass}`}>
+                                                            {myNowStatus.label}
+                                                        </div>
+                                                    </div>
+                                                    <div className="mt-2 text-sm font-medium text-slate-900">
+                                                        {myNowStatus.hint}
+                                                    </div>
+                                                    {myNowStatus.subHint && (
+                                                        <div className="mt-1 text-xs text-slate-600">
+                                                            {myNowStatus.subHint}
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                                    <div className="flex items-center justify-between gap-3">
+                                                        <div className="min-w-0">
+                                                            <div className="text-sm font-semibold text-slate-900">Напоминание о перерыве</div>
+                                                            <div className="text-xs text-slate-500">За 5 минут до начала</div>
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={handleToggleBreakReminder}
+                                                            className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors border ${
+                                                                breakReminderEnabled ? 'bg-blue-600 border-blue-600' : 'bg-white border-slate-300'
+                                                            }`}
+                                                            aria-pressed={breakReminderEnabled}
+                                                            aria-label={breakReminderEnabled ? 'Выключить напоминания о перерыве' : 'Включить напоминания о перерыве'}
+                                                        >
+                                                            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${breakReminderEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                                                        </button>
+                                                    </div>
+                                                    <div className="mt-2 text-[11px] text-slate-500">
+                                                        {breakReminderPermissionState === 'granted' && 'Браузерные уведомления разрешены'}
+                                                        {breakReminderPermissionState === 'denied' && 'Браузерные уведомления запрещены (останутся только уведомления в приложении)'}
+                                                        {breakReminderPermissionState === 'default' && 'Разрешение на браузерные уведомления будет запрошено при включении'}
+                                                        {breakReminderPermissionState === 'unsupported' && 'Браузерные уведомления не поддерживаются'}
+                                                    </div>
                                                 </div>
                                             </div>
-                                            <div className="mt-2 text-sm font-medium text-slate-900">
-                                                {myNowStatus.hint}
-                                            </div>
-                                            {myNowStatus.subHint && (
-                                                <div className="mt-1 text-xs text-slate-600">
-                                                    {myNowStatus.subHint}
-                                                </div>
-                                            )}
-                                        </div>
-                                        <div>
-                                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 mb-3">
-                                            <div className="flex items-center justify-between gap-3">
-                                                <div className="min-w-0">
-                                                    <div className="text-sm font-semibold text-slate-900">Напоминание о перерыве</div>
-                                                    <div className="text-xs text-slate-500">За 5 минут до начала</div>
-                                                </div>
-                                                <button
-                                                    type="button"
-                                                    onClick={handleToggleBreakReminder}
-                                                    className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors border ${
-                                                        breakReminderEnabled ? 'bg-blue-600 border-blue-600' : 'bg-white border-slate-300'
-                                                    }`}
-                                                    aria-pressed={breakReminderEnabled}
-                                                    aria-label={breakReminderEnabled ? 'Выключить напоминания о перерыве' : 'Включить напоминания о перерыве'}
-                                                >
-                                                    <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${breakReminderEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
-                                                </button>
-                                            </div>
-                                            <div className="mt-2 text-[11px] text-slate-500">
-                                                {breakReminderPermissionState === 'granted' && 'Браузерные уведомления разрешены'}
-                                                {breakReminderPermissionState === 'denied' && 'Браузерные уведомления запрещены (останутся только уведомления в приложении)'}
-                                                {breakReminderPermissionState === 'default' && 'Разрешение на браузерные уведомления будет запрошено при включении'}
-                                                {breakReminderPermissionState === 'unsupported' && 'Браузерные уведомления не поддерживаются'}
-                                            </div>
-                                        </div>
-                                        <div className="pt-0 lg:pt-1">
+
+                                            <div className="pt-0 lg:pt-1">
                                             <div className="text-xs font-semibold text-slate-900 mb-2">Ближайшие смены</div>
                                             {myUpcomingShiftItems.length === 0 ? (
                                                 <div className="text-xs text-slate-400">Нет предстоящих смен</div>
@@ -6253,8 +6256,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     })}
                                                 </div>
                                             )}
-                                        </div>
-                                        </div>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
