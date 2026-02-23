@@ -5862,6 +5862,10 @@ const withAccessTokenHeader = (headers = {}) => {
                 const m = mins % 60;
                 return `${h}ч ${String(m).padStart(2, '0')}м`;
             };
+            const formatMinutesOnly = (minutesValue) => {
+                const mins = Math.max(0, Math.round(Number(minutesValue) || 0));
+                return `${mins} мин`;
+            };
 
             if (isOperatorSelfSchedules) {
                 return (
@@ -5927,7 +5931,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             </div>
                                             <div className="rounded-lg border border-amber-200 p-3 bg-amber-50">
                                                 <div className="text-[11px] uppercase tracking-wide text-amber-700">Перерывы</div>
-                                                <div className="text-xl font-bold text-amber-900 tabular-nums">{formatHoursMinutes(myScheduleSummary.totalBreakMin)}</div>
+                                                <div className="text-xl font-bold text-amber-900 tabular-nums">{formatMinutesOnly(myScheduleSummary.totalBreakMin)}</div>
                                             </div>
                                         </div>
                                     </div>
@@ -5999,7 +6003,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                         Перерывы: {item.breakCount}
                                                                     </span>
                                                                     <span className="text-[11px] text-amber-700 tabular-nums">
-                                                                        {formatHoursMinutes(item.breakMinutes)}
+                                                                        {formatMinutesOnly(item.breakMinutes)}
                                                                     </span>
                                                                 </div>
                                                             </div>
@@ -6137,7 +6141,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                     {formatBreakMinuteWithDay(item.start)} — {formatBreakMinuteWithDay(item.end)}
                                                                                 </div>
                                                                                 <div className="text-[11px] text-amber-800 font-medium tabular-nums whitespace-nowrap">
-                                                                                    {formatHoursMinutes(item.durationMin)}
+                                                                                    {formatMinutesOnly(item.durationMin)}
                                                                                 </div>
                                                                             </div>
                                                                             <div className="mt-1 text-[11px] text-slate-600">
@@ -6164,7 +6168,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     )}
                                                 </div>
                                             )}
-                                            {myScheduleVisibleDays.length > 0 && (
+                                            {myScheduleVisibleDays.length > 0 && viewMode !== 'day' && (
                                                 <div className="flex items-center justify-between px-1">
                                                     <div className="text-sm font-semibold text-slate-900">Дни периода</div>
                                                     <div className="text-xs text-slate-500">
@@ -6222,7 +6226,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     </div>
                                                                     <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
                                                                         <div className="text-[11px] text-amber-700 uppercase tracking-wide">Перерывы</div>
-                                                                        <div className="text-sm font-semibold text-amber-900 tabular-nums">{formatHoursMinutes(dayBreakMin)}</div>
+                                                                        <div className="text-sm font-semibold text-amber-900 tabular-nums">{formatMinutesOnly(dayBreakMin)}</div>
                                                                         <div className="text-[11px] text-amber-700/80 mt-0.5">{dayBreakCount} шт.</div>
                                                                     </div>
                                                                 </div>
@@ -6249,35 +6253,37 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                         {segBreakCount} пер.
                                                                                     </span>
                                                                                     <span className="text-[11px] text-amber-700 tabular-nums">
-                                                                                        {formatHoursMinutes(segBreakMin)}
+                                                                                        {formatMinutesOnly(segBreakMin)}
                                                                                     </span>
                                                                                 </div>
                                                                             </div>
-                                                                            <div className="px-3 py-2">
-                                                                                <div className="text-[11px] font-medium text-slate-600 mb-1.5 flex items-center gap-2 uppercase tracking-wide">
-                                                                                    <i className="fas fa-mug-hot text-amber-600"></i>
-                                                                                    Перерывы
-                                                                                </div>
-                                                                                {segBreakCount === 0 ? (
-                                                                                    <div className="text-xs text-slate-400">Перерывов нет</div>
-                                                                                ) : (
-                                                                                    <div className="space-y-1.5">
-                                                                                        {(seg.breaks || []).map((b, bi) => {
-                                                                                            const breakDuration = Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0));
-                                                                                            return (
-                                                                                                <div key={`${dayCard.date}-${idx}-break-${bi}`} className="flex items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50/70 px-2 py-1">
-                                                                                                    <div className="text-xs text-amber-900 tabular-nums">
-                                                                                                        {formatBreakMinuteWithDay(b.start)} — {formatBreakMinuteWithDay(b.end)}
-                                                                                                    </div>
-                                                                                                    <div className="text-[11px] text-amber-800 font-medium tabular-nums whitespace-nowrap">
-                                                                                                        {formatHoursMinutes(breakDuration)}
-                                                                                                    </div>
-                                                                                                </div>
-                                                                                            );
-                                                                                        })}
+                                                                            {viewMode !== 'day' && (
+                                                                                <div className="px-3 py-2">
+                                                                                    <div className="text-[11px] font-medium text-slate-600 mb-1.5 flex items-center gap-2 uppercase tracking-wide">
+                                                                                        <i className="fas fa-mug-hot text-amber-600"></i>
+                                                                                        Перерывы
                                                                                     </div>
-                                                                                )}
-                                                                            </div>
+                                                                                    {segBreakCount === 0 ? (
+                                                                                        <div className="text-xs text-slate-400">Перерывов нет</div>
+                                                                                    ) : (
+                                                                                        <div className="space-y-1.5">
+                                                                                            {(seg.breaks || []).map((b, bi) => {
+                                                                                                const breakDuration = Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0));
+                                                                                                return (
+                                                                                                    <div key={`${dayCard.date}-${idx}-break-${bi}`} className="flex items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50/70 px-2 py-1">
+                                                                                                        <div className="text-xs text-amber-900 tabular-nums">
+                                                                                                            {formatBreakMinuteWithDay(b.start)} — {formatBreakMinuteWithDay(b.end)}
+                                                                                                        </div>
+                                                                                                        <div className="text-[11px] text-amber-800 font-medium tabular-nums whitespace-nowrap">
+                                                                                                            {formatMinutesOnly(breakDuration)}
+                                                                                                        </div>
+                                                                                                    </div>
+                                                                                                );
+                                                                                            })}
+                                                                                        </div>
+                                                                                    )}
+                                                                                </div>
+                                                                            )}
                                                                         </div>
                                                                     );
                                                                 })}
