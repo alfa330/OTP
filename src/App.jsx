@@ -4688,12 +4688,12 @@ const withAccessTokenHeader = (headers = {}) => {
             ]);
 
             useEffect(() => {
-                if (!isOperatorSelfSchedules) return;
+                if (user?.role !== 'operator') return;
                 const timer = setInterval(() => {
                     setMyNowTick(v => v + 1);
                 }, 60000);
                 return () => clearInterval(timer);
-            }, [isOperatorSelfSchedules]);
+            }, [user?.role]);
 
             // Синхронизация метаданных операторов из parent (`users`) без потери графиков
             useEffect(() => {
