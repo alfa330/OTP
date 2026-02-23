@@ -174,6 +174,41 @@ def _merge_shifts_for_date(shifts: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     
     return result
 
+SCHEDULE_SPECIAL_STATUS_META: Dict[str, Dict[str, str]] = {
+    'bs': {
+        'label': 'Б/С',
+        'kind': 'absence'
+    },
+    'sick_leave': {
+        'label': 'Больничный',
+        'kind': 'absence'
+    },
+    'annual_leave': {
+        'label': 'Ежегодный отпуск',
+        'kind': 'absence'
+    },
+    'dismissal': {
+        'label': 'Увольнение',
+        'kind': 'dismissal'
+    }
+}
+
+SCHEDULE_DISMISSAL_REASONS: List[str] = [
+    'Б/С на летний период',
+    'Мошенничество',
+    'Нарушение дисциплины',
+    'не может совмещать с учебой',
+    'не может совмещать с работой',
+    'не нравится работа',
+    'выгорание',
+    'не устраивает доход',
+    'перевод в другой отдел',
+    'переезд',
+    'по состоянию здоровья',
+    'пропал',
+    'слабый/не выполняет kpi'
+]
+
 def get_pool():
     global POOL
     if POOL is None:
@@ -490,9 +525,32 @@ class Database:
                     UNIQUE(operator_id, day_off_date)
                 );
             """)
+            # Special statuses by period (vacation/sick leave/unpaid leave/dismissal)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS operator_schedule_status_periods (
+                    id SERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    status_code VARCHAR(32) NOT NULL,
+                    start_date DATE NOT NULL,
+                    end_date DATE NULL,
+                    dismissal_reason TEXT NULL,
+                    comment TEXT NULL,
+                    created_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_shift_breaks_shift_id
                 ON shift_breaks(shift_id);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_operator_start
+                ON operator_schedule_status_periods(operator_id, start_date);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_operator_end
+                ON operator_schedule_status_periods(operator_id, end_date);
             """)
 
             # AI feedback cache table
@@ -4308,6 +4366,112 @@ class Database:
 
         return shift_id
 
+    def _normalize_schedule_status_code(self, status_code):
+        code = str(status_code or '').strip()
+        if code not in SCHEDULE_SPECIAL_STATUS_META:
+            raise ValueError("Invalid status_code")
+        return code
+
+    def _serialize_schedule_status_period(self, row):
+        period_id, operator_id, status_code, start_date_value, end_date_value, dismissal_reason, comment = row[:7]
+        meta = SCHEDULE_SPECIAL_STATUS_META.get(status_code, {})
+        return {
+            'id': int(period_id),
+            'operatorId': int(operator_id),
+            'statusCode': status_code,
+            'label': meta.get('label') or status_code,
+            'kind': meta.get('kind') or 'absence',
+            'startDate': start_date_value.strftime('%Y-%m-%d') if start_date_value else None,
+            'endDate': end_date_value.strftime('%Y-%m-%d') if end_date_value else None,
+            'dismissalReason': dismissal_reason,
+            'comment': comment or ''
+        }
+
+    def _load_schedule_status_periods_for_operators(self, cursor, operator_ids, start_date_obj=None, end_date_obj=None):
+        operator_ids = [int(v) for v in (operator_ids or []) if v is not None]
+        result = {
+            op_id: {
+                'scheduleStatusPeriods': [],
+                'scheduleStatusDays': {}
+            }
+            for op_id in operator_ids
+        }
+        if not operator_ids:
+            return result
+
+        query = """
+            SELECT id, operator_id, status_code, start_date, end_date, dismissal_reason, comment
+            FROM operator_schedule_status_periods
+            WHERE operator_id = ANY(%s)
+        """
+        params = [operator_ids]
+
+        if start_date_obj and end_date_obj:
+            query += " AND start_date <= %s AND COALESCE(end_date, DATE '9999-12-31') >= %s"
+            params.extend([end_date_obj, start_date_obj])
+        elif start_date_obj:
+            query += " AND COALESCE(end_date, DATE '9999-12-31') >= %s"
+            params.append(start_date_obj)
+        elif end_date_obj:
+            query += " AND start_date <= %s"
+            params.append(end_date_obj)
+
+        query += " ORDER BY operator_id, start_date, id"
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        should_expand_days = bool(start_date_obj and end_date_obj)
+        for row in rows:
+            op_id = int(row[1])
+            bucket = result.get(op_id)
+            if bucket is None:
+                continue
+
+            period_payload = self._serialize_schedule_status_period(row)
+            bucket['scheduleStatusPeriods'].append(period_payload)
+
+            if not should_expand_days:
+                continue
+
+            period_start = row[3]
+            period_end = row[4] or end_date_obj
+            overlap_start = max(period_start, start_date_obj)
+            overlap_end = min(period_end, end_date_obj)
+            if overlap_end < overlap_start:
+                continue
+
+            day_value = {
+                'id': period_payload['id'],
+                'statusCode': period_payload['statusCode'],
+                'label': period_payload['label'],
+                'kind': period_payload['kind'],
+                'startDate': period_payload['startDate'],
+                'endDate': period_payload['endDate'],
+                'dismissalReason': period_payload['dismissalReason'],
+                'comment': period_payload['comment']
+            }
+            cur_day = overlap_start
+            while cur_day <= overlap_end:
+                bucket['scheduleStatusDays'][cur_day.strftime('%Y-%m-%d')] = day_value
+                cur_day += timedelta(days=1)
+
+        return result
+
+    def _attach_schedule_status_periods_to_operators(self, cursor, operators_map, operator_ids, start_date_obj=None, end_date_obj=None):
+        statuses_map = self._load_schedule_status_periods_for_operators(
+            cursor=cursor,
+            operator_ids=operator_ids,
+            start_date_obj=start_date_obj,
+            end_date_obj=end_date_obj
+        )
+        for op_id in (operator_ids or []):
+            target = operators_map.get(op_id)
+            if target is None:
+                continue
+            data = statuses_map.get(op_id) or {}
+            target['scheduleStatusPeriods'] = data.get('scheduleStatusPeriods', [])
+            target['scheduleStatusDays'] = data.get('scheduleStatusDays', {})
+
     def get_operators_with_shifts(self, start_date=None, end_date=None):
         """
         Получить всех операторов со сменами и выходными днями за период.
@@ -4342,7 +4506,9 @@ class Database:
                     'status': status,
                     'rate': float(rate) if rate else 1.0,
                     'shifts': {},
-                    'daysOff': []
+                    'daysOff': [],
+                    'scheduleStatusPeriods': [],
+                    'scheduleStatusDays': {}
                 }
 
             shifts_query = """
@@ -4419,6 +4585,14 @@ class Database:
                     continue
                 op_entry['daysOff'].append(day_off_date.strftime('%Y-%m-%d'))
 
+            self._attach_schedule_status_periods_to_operators(
+                cursor=cursor,
+                operators_map=result_map,
+                operator_ids=operator_ids,
+                start_date_obj=start_date_obj,
+                end_date_obj=end_date_obj
+            )
+
             return [result_map[row[0]] for row in operators]
 
     def get_operator_with_shifts(self, operator_id, start_date=None, end_date=None):
@@ -4454,7 +4628,9 @@ class Database:
                 'status': status,
                 'rate': float(rate) if rate else 1.0,
                 'shifts': {},
-                'daysOff': []
+                'daysOff': [],
+                'scheduleStatusPeriods': [],
+                'scheduleStatusDays': {}
             }
 
             shifts_query = """
@@ -4522,6 +4698,14 @@ class Database:
             cursor.execute(days_off_query, days_off_params)
             for (day_off_date,) in cursor.fetchall():
                 result['daysOff'].append(day_off_date.strftime('%Y-%m-%d'))
+
+            self._attach_schedule_status_periods_to_operators(
+                cursor=cursor,
+                operators_map={operator_id: result},
+                operator_ids=[operator_id],
+                start_date_obj=start_date_obj,
+                end_date_obj=end_date_obj
+            )
 
             return result
 
@@ -4608,6 +4792,141 @@ class Database:
                 WHERE operator_id = %s AND shift_date = %s
             """, (operator_id, day_off_date_obj))
             return True
+
+    def save_schedule_status_period(
+        self,
+        operator_id,
+        status_code,
+        start_date,
+        end_date=None,
+        dismissal_reason=None,
+        comment=None,
+        created_by=None
+    ):
+        """
+        Сохранить период специального статуса оператора.
+        Новая запись замещает пересекающиеся периоды (с обрезкой/разделением при необходимости).
+        """
+        operator_id = int(operator_id)
+        status_code_norm = self._normalize_schedule_status_code(status_code)
+        start_date_obj = self._normalize_schedule_date(start_date)
+
+        comment_norm = None
+        if comment is not None:
+            comment_text = str(comment).strip()
+            comment_norm = comment_text or None
+
+        if status_code_norm == 'dismissal':
+            end_date_obj = None
+            dismissal_reason_norm = str(dismissal_reason or '').strip()
+            if dismissal_reason_norm not in set(SCHEDULE_DISMISSAL_REASONS):
+                raise ValueError("Invalid dismissal_reason")
+            if not comment_norm:
+                raise ValueError("Comment is required for dismissal")
+        else:
+            end_date_obj = self._normalize_schedule_date(end_date or start_date_obj)
+            if end_date_obj < start_date_obj:
+                raise ValueError("end_date must be >= start_date")
+            dismissal_reason_norm = None
+
+        created_by_id = int(created_by) if created_by is not None else None
+        infinite_date = date(9999, 12, 31)
+        new_end_cmp = end_date_obj or infinite_date
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, status_code, start_date, end_date, dismissal_reason, comment, created_by
+                FROM operator_schedule_status_periods
+                WHERE operator_id = %s
+                  AND start_date <= %s
+                  AND COALESCE(end_date, DATE '9999-12-31') >= %s
+                ORDER BY start_date, id
+            """, (operator_id, new_end_cmp, start_date_obj))
+            overlapping = cursor.fetchall()
+
+            for row in overlapping:
+                (
+                    existing_id,
+                    existing_status_code,
+                    existing_start,
+                    existing_end,
+                    existing_dismissal_reason,
+                    existing_comment,
+                    existing_created_by
+                ) = row
+                existing_end_cmp = existing_end or infinite_date
+
+                left_exists = existing_start < start_date_obj
+                right_exists = (end_date_obj is not None) and (existing_end_cmp > end_date_obj)
+
+                if left_exists and right_exists:
+                    left_end = start_date_obj - timedelta(days=1)
+                    right_start = end_date_obj + timedelta(days=1)
+
+                    cursor.execute("""
+                        UPDATE operator_schedule_status_periods
+                        SET end_date = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """, (left_end, existing_id))
+
+                    cursor.execute("""
+                        INSERT INTO operator_schedule_status_periods (
+                            operator_id, status_code, start_date, end_date,
+                            dismissal_reason, comment, created_by, created_at, updated_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """, (
+                        operator_id,
+                        existing_status_code,
+                        right_start,
+                        existing_end,
+                        existing_dismissal_reason,
+                        existing_comment,
+                        existing_created_by
+                    ))
+                    continue
+
+                if left_exists:
+                    left_end = start_date_obj - timedelta(days=1)
+                    cursor.execute("""
+                        UPDATE operator_schedule_status_periods
+                        SET end_date = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """, (left_end, existing_id))
+                    continue
+
+                if right_exists:
+                    right_start = end_date_obj + timedelta(days=1)
+                    cursor.execute("""
+                        UPDATE operator_schedule_status_periods
+                        SET start_date = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                    """, (right_start, existing_id))
+                    continue
+
+                cursor.execute("""
+                    DELETE FROM operator_schedule_status_periods
+                    WHERE id = %s
+                """, (existing_id,))
+
+            cursor.execute("""
+                INSERT INTO operator_schedule_status_periods (
+                    operator_id, status_code, start_date, end_date,
+                    dismissal_reason, comment, created_by, created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment
+            """, (
+                operator_id,
+                status_code_norm,
+                start_date_obj,
+                end_date_obj,
+                dismissal_reason_norm,
+                comment_norm,
+                created_by_id
+            ))
+            saved_row = cursor.fetchone()
+            return self._serialize_schedule_status_period(saved_row)
 
     def save_shifts_bulk(self, operator_id, shifts_data):
         """

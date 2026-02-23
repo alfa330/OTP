@@ -4308,6 +4308,75 @@ def toggle_work_day_off():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/work_schedules/status_period', methods=['POST'])
+@require_api_key
+def save_work_schedule_status_period():
+    """
+    Сохранить специальный статус оператора на период.
+    Body: {
+        "operator_id": int,
+        "status_code": "bs" | "sick_leave" | "annual_leave" | "dismissal",
+        "start_date": "YYYY-MM-DD",
+        "end_date": "YYYY-MM-DD",              # required except dismissal
+        "dismissal_reason": "...",             # required for dismissal
+        "comment": "..."                       # required for dismissal
+        "range_start": "YYYY-MM-DD",           # optional: return operator snapshot for range
+        "range_end": "YYYY-MM-DD"              # optional
+    }
+    """
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester_id = int(requester_id)
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+
+        if user_data[3] not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+
+        data = request.get_json(silent=True) or {}
+        operator_id = data.get('operator_id')
+        status_code = data.get('status_code')
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        dismissal_reason = data.get('dismissal_reason')
+        comment = data.get('comment')
+        range_start = data.get('range_start')
+        range_end = data.get('range_end')
+
+        if not operator_id or not status_code or not start_date:
+            return jsonify({"error": "Missing required fields"}), 400
+
+        status_period = db.save_schedule_status_period(
+            operator_id=operator_id,
+            status_code=status_code,
+            start_date=start_date,
+            end_date=end_date,
+            dismissal_reason=dismissal_reason,
+            comment=comment,
+            created_by=requester_id
+        )
+
+        operator_snapshot = None
+        if range_start and range_end:
+            operator_snapshot = db.get_operator_with_shifts(operator_id, range_start, range_end)
+
+        return jsonify({
+            "message": "Status period saved successfully",
+            "status_period": status_period,
+            "operator": operator_snapshot
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error saving status period: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/work_schedules/shifts_bulk', methods=['POST'])
 @require_api_key
 def save_shifts_bulk():

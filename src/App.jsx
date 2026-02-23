@@ -4706,7 +4706,11 @@ const withAccessTokenHeader = (headers = {}) => {
                 return {
                     ...next,
                     shifts: next.shifts ? { ...next.shifts } : {},
-                    daysOff: Array.isArray(next.daysOff) ? [...next.daysOff] : []
+                    daysOff: Array.isArray(next.daysOff) ? [...next.daysOff] : [],
+                    scheduleStatusPeriods: Array.isArray(next.scheduleStatusPeriods) ? next.scheduleStatusPeriods.map(p => ({ ...(p || {}) })) : [],
+                    scheduleStatusDays: next.scheduleStatusDays ? Object.fromEntries(
+                        Object.entries(next.scheduleStatusDays).map(([k, v]) => [k, { ...(v || {}) }])
+                    ) : {}
                 };
             }
 
@@ -4718,7 +4722,9 @@ const withAccessTokenHeader = (headers = {}) => {
                     return clonePlannerOperator({
                         ...base,
                         shifts: existing.shifts,
-                        daysOff: existing.daysOff
+                        daysOff: existing.daysOff,
+                        scheduleStatusPeriods: existing.scheduleStatusPeriods ?? base.scheduleStatusPeriods,
+                        scheduleStatusDays: existing.scheduleStatusDays ?? base.scheduleStatusDays
                     });
                 });
 
@@ -4738,7 +4744,25 @@ const withAccessTokenHeader = (headers = {}) => {
             const [breakGroupDraftDirections, setBreakGroupDraftDirections] = useState([]);
             const [operators, setOperators] = useState(() => mergePlannerOperators(initialOperators || [], []));
 
-            const [modalState, setModalState] = useState({ open: false, opId: null, date: null, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff: false, multipleDates: null, multipleTargets: null, showAddPanel: false });
+            const [modalState, setModalState] = useState({
+                open: false,
+                opId: null,
+                date: null,
+                start: '09:00',
+                end: '17:00',
+                editIndex: null,
+                breaks: [],
+                isDayOff: false,
+                multipleDates: null,
+                multipleTargets: null,
+                showAddPanel: false,
+                statusCode: '',
+                statusStartDate: '',
+                statusEndDate: '',
+                dismissalReason: '',
+                statusComment: '',
+                statusSaving: false
+            });
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
@@ -4805,6 +4829,102 @@ const withAccessTokenHeader = (headers = {}) => {
                 const key = normalizeBreakDirectionKey(direction);
                 if (!key) return 'dir:';
                 return breakDirectionScopeKeyMap.get(key) || `dir:${key}`;
+            };
+            const scheduleStatusOptions = [
+                { value: 'bs', label: 'Б/С' },
+                { value: 'sick_leave', label: 'Больничный' },
+                { value: 'annual_leave', label: 'Ежегодный отпуск' },
+                { value: 'dismissal', label: 'Увольнение' }
+            ];
+            const dismissalReasonOptions = [
+                'Б/С на летний период',
+                'Мошенничество',
+                'Нарушение дисциплины',
+                'не может совмещать с учебой',
+                'не может совмещать с работой',
+                'не нравится работа',
+                'выгорание',
+                'не устраивает доход',
+                'перевод в другой отдел',
+                'переезд',
+                'по состоянию здоровья',
+                'пропал',
+                'слабый/не выполняет kpi'
+            ];
+            const getScheduleStatusTone = (statusCode) => {
+                switch (statusCode) {
+                    case 'bs':
+                        return {
+                            cellBg: ' bg-amber-50',
+                            cellBorder: ' border-amber-200',
+                            text: 'text-amber-800',
+                            pill: 'bg-amber-100 text-amber-800 border-amber-200'
+                        };
+                    case 'sick_leave':
+                        return {
+                            cellBg: ' bg-emerald-50',
+                            cellBorder: ' border-emerald-200',
+                            text: 'text-emerald-800',
+                            pill: 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                        };
+                    case 'annual_leave':
+                        return {
+                            cellBg: ' bg-orange-50',
+                            cellBorder: ' border-orange-200',
+                            text: 'text-orange-800',
+                            pill: 'bg-orange-100 text-orange-800 border-orange-200'
+                        };
+                    case 'dismissal':
+                        return {
+                            cellBg: ' bg-rose-50',
+                            cellBorder: ' border-rose-200',
+                            text: 'text-rose-800',
+                            pill: 'bg-rose-100 text-rose-800 border-rose-200'
+                        };
+                    default:
+                        return {
+                            cellBg: ' bg-slate-50',
+                            cellBorder: ' border-slate-200',
+                            text: 'text-slate-700',
+                            pill: 'bg-slate-100 text-slate-700 border-slate-200'
+                        };
+                }
+            };
+            const isDateWithinStatusPeriod = (dateStr, period) => {
+                if (!period || !dateStr) return false;
+                const start = period.startDate || period.start_date;
+                const end = period.endDate || period.end_date || null;
+                if (!start) return false;
+                if (String(dateStr) < String(start)) return false;
+                if (end && String(dateStr) > String(end)) return false;
+                return true;
+            };
+            const getPlannerScheduleStatusForDate = (op, dateStr) => {
+                if (!op || !dateStr) return null;
+                const dayMap = op.scheduleStatusDays || {};
+                if (dayMap && dayMap[dateStr]) return dayMap[dateStr];
+                const periods = Array.isArray(op.scheduleStatusPeriods) ? op.scheduleStatusPeriods : [];
+                let found = null;
+                for (const period of periods) {
+                    if (!isDateWithinStatusPeriod(dateStr, period)) continue;
+                    if (!found) {
+                        found = period;
+                        continue;
+                    }
+                    const foundStart = String(found.startDate || '');
+                    const nextStart = String(period.startDate || '');
+                    if (nextStart >= foundStart) found = period;
+                }
+                return found ? {
+                    id: found.id,
+                    statusCode: found.statusCode || found.status_code,
+                    label: found.label || found.statusLabel || 'Статус',
+                    kind: found.kind,
+                    startDate: found.startDate || found.start_date || null,
+                    endDate: found.endDate || found.end_date || null,
+                    dismissalReason: found.dismissalReason || found.dismissal_reason || null,
+                    comment: found.comment || ''
+                } : null;
             };
 
             // Восстановление выбранной даты/фильтров/режима после перезагрузки
@@ -4925,7 +5045,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                         ...serverOp,
                                         ...op,
                                         shifts: serverOp.shifts || {},
-                                        daysOff: serverOp.daysOff || []
+                                        daysOff: serverOp.daysOff || [],
+                                        scheduleStatusPeriods: serverOp.scheduleStatusPeriods || [],
+                                        scheduleStatusDays: serverOp.scheduleStatusDays || {}
                                     });
                                 });
                                 const seen = new Set(merged.map(op => op.id));
@@ -5186,6 +5308,133 @@ const withAccessTokenHeader = (headers = {}) => {
                 return () => { cancelled = true; };
             }, [isOperatorSelfSchedules, user, operatorTodayKey]);
 
+            const buildModalStatusDraftForDate = (opId, date) => {
+                const fallbackDate = typeof date === 'string' && date ? date : '';
+                const op = operators.find(o => o.id === opId);
+                const activeStatus = getPlannerScheduleStatusForDate(op, fallbackDate);
+                const statusCode = activeStatus?.statusCode || '';
+                const isDismissal = statusCode === 'dismissal';
+                return {
+                    statusCode,
+                    statusStartDate: activeStatus?.startDate || fallbackDate,
+                    statusEndDate: isDismissal ? '' : (activeStatus?.endDate || fallbackDate),
+                    dismissalReason: activeStatus?.dismissalReason || '',
+                    statusComment: activeStatus?.comment || '',
+                    statusSaving: false
+                };
+            };
+
+            const applyOperatorScheduleSnapshot = (operatorSnapshot) => {
+                if (!operatorSnapshot?.id) return;
+                setOperators(prev => prev.map(op => {
+                    if (op.id !== operatorSnapshot.id) return op;
+                    return clonePlannerOperator({
+                        ...op,
+                        ...operatorSnapshot,
+                        shifts: operatorSnapshot.shifts || {},
+                        daysOff: operatorSnapshot.daysOff || [],
+                        scheduleStatusPeriods: operatorSnapshot.scheduleStatusPeriods || [],
+                        scheduleStatusDays: operatorSnapshot.scheduleStatusDays || {}
+                    });
+                }));
+            };
+
+            const saveScheduleStatusPeriod = async () => {
+                if (!modalState.opId || !modalState.date) return;
+                if (modalState.multipleDates || modalState.multipleTargets) return;
+
+                const statusCode = String(modalState.statusCode || '').trim();
+                const startDate = String(modalState.statusStartDate || modalState.date || '').trim();
+                const isDismissal = statusCode === 'dismissal';
+                const endDate = isDismissal ? null : String(modalState.statusEndDate || startDate || '').trim();
+                const dismissalReason = isDismissal ? String(modalState.dismissalReason || '').trim() : null;
+                const statusComment = String(modalState.statusComment || '').trim();
+
+                if (!statusCode) {
+                    alert('Выберите статус');
+                    return;
+                }
+                if (!startDate) {
+                    alert('Укажите дату начала');
+                    return;
+                }
+                if (!isDismissal && !endDate) {
+                    alert('Укажите дату окончания');
+                    return;
+                }
+                if (isDismissal) {
+                    if (!dismissalReason) {
+                        alert('Укажите причину увольнения');
+                        return;
+                    }
+                    if (!statusComment) {
+                        alert('Комментарий обязателен для увольнения');
+                        return;
+                    }
+                }
+
+                try {
+                    setModalState(m => ({ ...m, statusSaving: true }));
+
+                    const rangeStart = visibleRange?.[0];
+                    const rangeEnd = visibleRange?.[visibleRange.length - 1];
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/status_period`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({
+                            operator_id: modalState.opId,
+                            status_code: statusCode,
+                            start_date: startDate,
+                            end_date: endDate,
+                            dismissal_reason: dismissalReason,
+                            comment: statusComment || null,
+                            range_start: rangeStart || null,
+                            range_end: rangeEnd || null
+                        })
+                    });
+
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+
+                    if (payload?.operator) {
+                        applyOperatorScheduleSnapshot(payload.operator);
+                        const selectedDayStatus = getPlannerScheduleStatusForDate(payload.operator, modalState.date);
+                        setModalState(m => ({
+                            ...m,
+                            ...buildModalStatusDraftForDate(m.opId, m.date),
+                            isDayOff: Array.isArray(payload.operator?.daysOff) ? payload.operator.daysOff.includes(m.date) : m.isDayOff,
+                            statusCode: selectedDayStatus?.statusCode || m.statusCode || statusCode,
+                            statusStartDate: selectedDayStatus?.startDate || startDate,
+                            statusEndDate: (selectedDayStatus?.statusCode === 'dismissal') ? '' : (selectedDayStatus?.endDate || endDate || startDate),
+                            dismissalReason: selectedDayStatus?.dismissalReason || (isDismissal ? dismissalReason : ''),
+                            statusComment: selectedDayStatus?.comment ?? (statusComment || '')
+                        }));
+                    } else if (payload?.status_period) {
+                        setOperators(prev => prev.map(op => {
+                            if (op.id !== modalState.opId) return op;
+                            const nextPeriods = Array.isArray(op.scheduleStatusPeriods) ? [...op.scheduleStatusPeriods] : [];
+                            nextPeriods.push(payload.status_period);
+                            return clonePlannerOperator({
+                                ...op,
+                                scheduleStatusPeriods: nextPeriods
+                            });
+                        }));
+                        setModalState(m => ({ ...m, statusSaving: false }));
+                    } else {
+                        setModalState(m => ({ ...m, statusSaving: false }));
+                    }
+                } catch (error) {
+                    console.error('Error saving status period:', error);
+                    setModalState(m => ({ ...m, statusSaving: false }));
+                    alert(`Ошибка сохранения статуса: ${error?.message || error}`);
+                }
+            };
+
             const openEditModal = (opId, date, editIndex = null) => {
                 const op = operators.find(o => o.id === opId);
                 const arr = op?.shifts?.[date] ?? [];
@@ -5193,9 +5442,9 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (editIndex !== null && arr[editIndex]) {
                 const seg = arr[editIndex];
                 const breaks = (seg.breaks ?? []).map(b => ({ start: b.start, end: b.end }));
-                setModalState({ open: true, opId, date, start: seg.start, end: seg.end, editIndex, breaks, isDayOff, multipleDates: null, multipleTargets: null, showAddPanel: true });
+                setModalState({ open: true, opId, date, start: seg.start, end: seg.end, editIndex, breaks, isDayOff, multipleDates: null, multipleTargets: null, showAddPanel: true, ...buildModalStatusDraftForDate(opId, date) });
                 } else {
-                setModalState({ open: true, opId, date, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff, multipleDates: null, multipleTargets: null, showAddPanel: false });
+                setModalState({ open: true, opId, date, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff, multipleDates: null, multipleTargets: null, showAddPanel: false, ...buildModalStatusDraftForDate(opId, date) });
                 }
             };
 
@@ -5298,7 +5547,13 @@ const withAccessTokenHeader = (headers = {}) => {
                     isDayOff: false,
                     multipleDates: normalizedTargets.map(t => t.date),
                     multipleTargets: normalizedTargets,
-                    showAddPanel: true
+                    showAddPanel: true,
+                    statusCode: '',
+                    statusStartDate: firstTarget.date,
+                    statusEndDate: firstTarget.date,
+                    dismissalReason: '',
+                    statusComment: '',
+                    statusSaving: false
                 });
             };
             const openEditModalForMultipleDays = (opId, dates) => {
@@ -6070,8 +6325,8 @@ const withAccessTokenHeader = (headers = {}) => {
                     return {
                         key: 'off',
                         label: 'Выходной',
-                        badgeClass: 'bg-red-100 text-red-800',
-                        panelClass: 'border-red-200 bg-red-50',
+                        badgeClass: 'bg-sky-100 text-sky-800',
+                        panelClass: 'border-sky-200 bg-sky-50',
                         hint: 'Сегодня отмечен выходной',
                         subHint: nextFutureShift ? `Следующая смена: ${formatDateRuShort(nextFutureShift.date)} ${nextFutureShift.start}` : null
                     };
@@ -6467,7 +6722,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 <span className="text-sm font-normal text-slate-500">{formatDateRuDayMonth(myCurrentDayCard.date)}</span>
                                                             </div>
                                                             <div className="flex items-center gap-2 text-xs">
-                                                                {myCurrentDayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold">Выходной</span>}
+                                                                {myCurrentDayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 font-semibold">Выходной</span>}
                                                                 <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700">{myTimelineParts.length} фрагм.</span>
                                                             </div>
                                                         </div>
@@ -6514,7 +6769,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                             {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-200/80" />))}
                                                                         </div>
                                                                         {myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
-                                                                            <div className="absolute inset-0 flex items-center justify-center text-sm font-medium text-red-600">Выходной</div>
+                                                                            <div className="absolute inset-0 flex items-center justify-center text-sm font-medium text-sky-600">Выходной</div>
                                                                         )}
                                                                         {!myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
                                                                             <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">Нет смен</div>
@@ -6638,7 +6893,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                             hasShifts
                                                                                 ? 'bg-blue-50 border-blue-200 text-blue-900'
                                                                                 : dayCard.isDayOff
-                                                                                    ? 'bg-red-50 border-red-200 text-red-700'
+                                                                                    ? 'bg-sky-50 border-sky-200 text-sky-700'
                                                                                     : 'bg-slate-50 border-slate-200 text-slate-600'
                                                                         }`}>
                                                                             {primaryShiftLabel}
@@ -6657,7 +6912,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 <div className="flex items-center gap-2">
                                                                     <div className="flex flex-wrap items-center justify-end gap-1">
                                                                         {isToday && <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-semibold">Сегодня</span>}
-                                                                        {dayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold">Выходной</span>}
+                                                                        {dayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-xs font-semibold">Выходной</span>}
                                                                         {!dayCard.isDayOff && dayCard.shifts.length > 0 && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{dayCard.shifts.length} смен</span>}
                                                                     </div>
                                                                     <div className="w-7 h-7 rounded-lg border border-slate-200 bg-white flex items-center justify-center text-slate-500">
@@ -6673,7 +6928,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     </span>
                                                                 )}
                                                                 {dayCard.isDayOff && dayCard.shifts.length === 0 && (
-                                                                    <span className="px-2 py-1 rounded-md border border-red-200 bg-red-50 text-xs text-red-700">
+                                                                    <span className="px-2 py-1 rounded-md border border-sky-200 bg-sky-50 text-xs text-sky-700">
                                                                         Выходной
                                                                     </span>
                                                                 )}
@@ -6812,7 +7067,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <span className="px-2 py-1 rounded-md bg-slate-50 border border-slate-200 text-slate-700">
                                                             Показано дней: <span className="font-semibold tabular-nums">{myScheduleVisibleDays.length}</span>
                                                         </span>
-                                                        <span className="px-2 py-1 rounded-md bg-red-50 border border-red-200 text-red-700">
+                                                        <span className="px-2 py-1 rounded-md bg-sky-50 border border-sky-200 text-sky-700">
                                                             Выходных: <span className="font-semibold tabular-nums">{myScheduleSummary.daysOffCount}</span>
                                                         </span>
                                                     </div>
@@ -7210,6 +7465,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                             const hasShift = (viewMode === 'day')
                                                 ? (parts.length > 0 || labelList.length > 0)
                                                 : (labelList.length > 0);
+                                            const cellScheduleStatus = getPlannerScheduleStatusForDate(op, d);
+                                            const cellScheduleStatusTone = cellScheduleStatus ? getScheduleStatusTone(cellScheduleStatus.statusCode) : null;
                                             const isDayOff = op.daysOff?.includes(d) ?? false;
                                             const isSelected = selectedDayKeySet.has(makeSelectedCellKey(op.id, d));
                                             let bgColor = ' bg-white';
@@ -7217,8 +7474,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                             if (isSelected) {
                                                 bgColor = ' bg-green-100';
                                                 borderClass = ' border-green-500 border-2';
+                                            } else if (cellScheduleStatus) {
+                                                bgColor = cellScheduleStatusTone?.cellBg || ' bg-amber-50';
+                                                borderClass = cellScheduleStatusTone?.cellBorder || ' border-amber-200';
                                             } else if (isDayOff) {
-                                                bgColor = ' bg-red-50';
+                                                bgColor = ' bg-sky-50';
                                             } else if (hasShift) {
                                                 bgColor = ' bg-blue-50';
                                             }
@@ -7226,9 +7486,15 @@ const withAccessTokenHeader = (headers = {}) => {
                                             <div key={d} className={"h-[56px] overflow-hidden border rounded p-1 relative" + borderClass + bgColor + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={(e) => handleDayClick(e, op.id, d)}>
                                                 {viewMode === 'day' ? (
                                                 <div className="relative h-12">
-                                                    {isDayOff ? (
+                                                    {cellScheduleStatus ? (
+                                                        <div className="flex items-center justify-center h-full px-1">
+                                                            <div className={`text-sm font-semibold truncate ${cellScheduleStatusTone?.text || 'text-slate-700'}`} title={cellScheduleStatus.label || 'Статус'}>
+                                                                {cellScheduleStatus.label || 'Статус'}
+                                                            </div>
+                                                        </div>
+                                                    ) : isDayOff ? (
                                                         <div className="flex items-center justify-center h-full">
-                                                            <div className="text-sm font-medium text-red-600">Выходной</div>
+                                                            <div className="text-sm font-medium text-sky-600">Выходной</div>
                                                         </div>
                                                     ) : (
                                                     <>
@@ -7280,9 +7546,15 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 </div>
                                                 ) : (
                                                 <div className="flex flex-col text-sm overflow-hidden h-full">
-                                                    {isDayOff ? (
+                                                    {cellScheduleStatus ? (
+                                                        <div className="flex items-center justify-center h-full px-1">
+                                                            <div className={`text-xs font-semibold text-center leading-tight ${cellScheduleStatusTone?.text || 'text-slate-700'}`}>
+                                                                {cellScheduleStatus.label || 'Статус'}
+                                                            </div>
+                                                        </div>
+                                                    ) : isDayOff ? (
                                                         <div className="flex items-center justify-center h-full">
-                                                            <div className="text-xs font-medium text-red-600">Выходной</div>
+                                                            <div className="text-xs font-medium text-sky-600">Выходной</div>
                                                         </div>
                                                     ) : labelList.length > 0 ? (
                                                     <div className="relative h-full pb-4">
@@ -7297,7 +7569,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     )}
                                                 </div>
                                                 )}
-                                                {viewMode === 'day' && durationHours > 0 && (
+                                                {viewMode === 'day' && !cellScheduleStatus && durationHours > 0 && (
                                                 <div className="absolute left-1 bottom-[1px] text-xs text-slate-500">{durationHours.toFixed(2)} ч</div>
                                                 )}
                                             </div>
@@ -7393,26 +7665,142 @@ const withAccessTokenHeader = (headers = {}) => {
 
                     <>
                     {!modalState.multipleDates && (
-                    <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl">
+                    <div className="mb-6 p-4 bg-sky-50 border border-sky-200 rounded-xl">
                         <label className="flex items-center gap-3 cursor-pointer group">
                             <input 
                                 type="checkbox" 
                                 checked={modalState.isDayOff} 
                                 onChange={() => toggleDayOff(modalState.opId, modalState.date)}
-                                className="w-5 h-5 rounded text-red-600 focus:ring-2 focus:ring-red-500"
+                                className="w-5 h-5 rounded text-sky-600 focus:ring-2 focus:ring-sky-500"
                             />
                             <div className="flex-1">
                                 <div className="flex items-center gap-2">
-                                    <i className="fas fa-calendar-times text-red-600"></i>
-                                    <span className="text-sm font-semibold text-red-900">Отметить как выходной</span>
+                                    <i className="fas fa-calendar-times text-sky-600"></i>
+                                    <span className="text-sm font-semibold text-sky-900">Отметить как выходной</span>
                                 </div>
                                 {modalState.isDayOff && (
-                                    <div className="mt-1 text-xs text-red-600">
+                                    <div className="mt-1 text-xs text-sky-700">
                                         Все запланированные смены будут удалены
                                     </div>
                                 )}
                             </div>
                         </label>
+                    </div>
+                    )}
+
+                    {!isBulkSelectionModal && (
+                    <div className="mb-6 p-4 rounded-xl border border-slate-200 bg-slate-50/70">
+                        <div className="flex items-center justify-between gap-3 mb-3">
+                            <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                                <i className="fas fa-user-clock text-slate-500"></i>
+                                Статус на период
+                            </h4>
+                            {(() => {
+                                const op = operators.find(o => o.id === modalState.opId);
+                                const activeStatus = getPlannerScheduleStatusForDate(op, modalState.date);
+                                if (!activeStatus) return null;
+                                const tone = getScheduleStatusTone(activeStatus.statusCode);
+                                return (
+                                    <span className={`px-2 py-1 rounded-full border text-xs font-semibold ${tone.pill}`}>
+                                        {activeStatus.label}
+                                    </span>
+                                );
+                            })()}
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div className="md:col-span-2">
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Статус</label>
+                                <select
+                                    value={modalState.statusCode || ''}
+                                    onChange={(e) => setModalState(m => ({
+                                        ...m,
+                                        statusCode: e.target.value,
+                                        statusEndDate: e.target.value === 'dismissal' ? '' : (m.statusEndDate || m.statusStartDate || m.date || ''),
+                                        dismissalReason: e.target.value === 'dismissal' ? m.dismissalReason : '',
+                                        statusComment: e.target.value === 'dismissal' ? m.statusComment : (m.statusComment || '')
+                                    }))}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                >
+                                    <option value="">Не выбран</option>
+                                    {scheduleStatusOptions.map(opt => (
+                                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">Дата начала</label>
+                                <input
+                                    type="date"
+                                    value={modalState.statusStartDate || modalState.date || ''}
+                                    onChange={(e) => setModalState(m => ({
+                                        ...m,
+                                        statusStartDate: e.target.value,
+                                        statusEndDate: (m.statusCode && m.statusCode !== 'dismissal' && (!m.statusEndDate || m.statusEndDate < e.target.value))
+                                            ? e.target.value
+                                            : m.statusEndDate
+                                    }))}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                />
+                            </div>
+
+                            {modalState.statusCode !== 'dismissal' && (
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Дата окончания</label>
+                                    <input
+                                        type="date"
+                                        value={modalState.statusEndDate || modalState.statusStartDate || modalState.date || ''}
+                                        min={modalState.statusStartDate || modalState.date || ''}
+                                        onChange={(e) => setModalState(m => ({ ...m, statusEndDate: e.target.value }))}
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                            )}
+
+                            {modalState.statusCode === 'dismissal' && (
+                                <>
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Причина увольнения</label>
+                                    <select
+                                        value={modalState.dismissalReason || ''}
+                                        onChange={(e) => setModalState(m => ({ ...m, dismissalReason: e.target.value }))}
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    >
+                                        <option value="">Выберите причину</option>
+                                        {dismissalReasonOptions.map(reason => (
+                                            <option key={reason} value={reason}>{reason}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="md:col-span-2">
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий (обязательно)</label>
+                                    <textarea
+                                        value={modalState.statusComment || ''}
+                                        onChange={(e) => setModalState(m => ({ ...m, statusComment: e.target.value }))}
+                                        rows={3}
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+                                        placeholder="Укажите комментарий"
+                                    />
+                                </div>
+                                </>
+                            )}
+                        </div>
+
+                        <div className="mt-3 flex items-center justify-between gap-3">
+                            <div className="text-xs text-slate-500">
+                                Статус выделяется цветом в ячейках на весь указанный период
+                            </div>
+                            <button
+                                type="button"
+                                onClick={saveScheduleStatusPeriod}
+                                disabled={!!modalState.statusSaving}
+                                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                <i className={`fas ${modalState.statusSaving ? 'fa-spinner fa-spin' : 'fa-save'}`}></i>
+                                {modalState.statusSaving ? 'Сохраняем...' : 'Сохранить статус'}
+                            </button>
+                        </div>
                     </div>
                     )}
 
@@ -7670,7 +8058,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             </button>
                             {isBulkSelectionModal && (
                                 <button 
-                                    className="px-5 py-3 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 font-semibold border border-red-200 transition-colors flex items-center gap-2"
+                                    className="px-5 py-3 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 font-semibold border border-sky-200 transition-colors flex items-center gap-2"
                                     onClick={() => setDayOffForMultipleTargets(modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })))}
                                 >
                                     <i className="fas fa-calendar-times"></i>
