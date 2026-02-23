@@ -10595,6 +10595,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const dir = usersSortDirection === 'asc' ? 1 : -1;
             const nameA = (a?.name || '').toString();
             const nameB = (b?.name || '').toString();
+            const fieldKey = field === 'supervisor' ? 'supervisor_name' : field;
 
             if (field === 'rate') {
                 const ra = safeNum(a.rate);
@@ -10627,8 +10628,8 @@ const withAccessTokenHeader = (headers = {}) => {
             }
 
             // direction / supervisor / name - string comparison
-            const fa = (a[field] || '').toString();
-            const fb = (b[field] || '').toString();
+            const fa = (a[fieldKey] || '').toString();
+            const fb = (b[fieldKey] || '').toString();
             const res = fa.localeCompare(fb, 'ru', { sensitivity: 'base' });
             if (res === 0) return nameA.localeCompare(nameB, 'ru', { sensitivity: 'base' });
             return res * dir;
@@ -15698,33 +15699,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                             );
                                         });
 
-                                        // Группировка по супервайзерам
-                                        const grouped = searched.reduce((acc, u) => {
-                                        const key = u.supervisor_name || "Без супервайзера";
-                                        if (!acc[key]) acc[key] = [];
-                                        acc[key].push(u);
-                                        return acc;
-                                        }, {});
-
-                                        // Сортировка групп (по имени супервайзера) или по полю 'supervisor' если выбрано
-                                        let sortedSvNames = Object.keys(grouped);
-                                        if (usersSortField === 'supervisor') {
-                                        sortedSvNames = sortedSvNames.sort((a, b) => {
-                                            const res = a.localeCompare(b, 'ru', { sensitivity: 'base' });
-                                            return usersSortDirection === 'asc' ? res : -res;
-                                        });
-                                        // внутри группы — сортировка по имени оператора, учитывая направление сортировки
-                                        sortedSvNames.forEach(sv => {
-                                            grouped[sv].sort((x, y) => (x.name || '').localeCompare(y.name || '', 'ru', { sensitivity: 'base' }) * (usersSortDirection === 'asc' ? 1 : -1));
-                                        });
-                                        } else {
-                                        // внутри каждой группы — сортируем по выбранному полю (combined: primary + name)
-                                        sortedSvNames.forEach(sv => {
-                                            grouped[sv].sort((a, b) => compareUsersByField(a, b, usersSortField));
-                                        });
-                                        // стабильный порядок групп по имени супервайзера
-                                        sortedSvNames = sortedSvNames.sort((a, b) => a.localeCompare(b, 'ru', { sensitivity: 'base' }));
-                                        }
+                                        const sortedUsersFlat = [...searched].sort((a, b) => compareUsersByField(a, b, usersSortField));
+                                        const grouped = { __all__: sortedUsersFlat };
+                                        const sortedSvNames = ['__all__'];
 
                                         return (
                                         <div className="overflow-x-auto rounded-lg border border-gray-200">
@@ -15742,10 +15719,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                             {sortedSvNames.map((svName) => {
                                             const svUsers = grouped[svName] || [];
                                             return (
-                                                <div key={svName} className="mb-8">
+                                                <div key={svName} className={svName === '__all__' ? '' : 'mb-8'}>
+                                                {svName !== '__all__' && (
                                                 <h3 className="text-xl font-semibold text-gray-800 bg-gray-100 px-6 py-3 rounded-t-lg">
                                                     {svName}
                                                 </h3>
+                                                )}
                                                 <table className="min-w-full table-fixed border rounded-lg w-full">
                                                     <colgroup>
                                                     <col style={{ width: "30%" }} />
@@ -15836,7 +15815,6 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 <button
                                                                     onClick={() => {
                                                                     setUserToEdit(u);
-                                                                    console.log(u.hire_date);
                                                                     setShowUserEditModal(true);
                                                                     setOpenMenuId(null);
                                                                     }}
@@ -15875,7 +15853,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                                     <tfoot className="bg-gray-50">
                                                     <tr>
-                                                        <td className="px-6 py-3 font-medium text-gray-700">{svUsers.length} операторов</td>
+                                                        <td className="px-6 py-3 font-medium text-gray-700">{svUsers.length} сотрудников</td>
                                                         <td className="px-6 py-3 text-gray-700">
                                                         {Array.from(new Set(svUsers.map((u) => u.direction || "-"))).join(", ")}
                                                         </td>
