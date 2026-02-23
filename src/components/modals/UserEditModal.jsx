@@ -43,7 +43,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     useEffect(() => {
         // Устанавливаем defaults при открытии для режима создания
         const base = userToEdit || {};
-        const initialStatus = base.status ?? "working";
+        const initialStatus = (base.status === 'unpaid_leave' ? 'bs' : (base.status ?? "working"));
         const initialDate = todayInputDate();
         const defaults = {
         rate: base.rate ?? 1.0,
@@ -59,6 +59,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         use_schedule_status_period: false,
         ...base,
         };
+        if (defaults.status === 'unpaid_leave') {
+            defaults.status = 'bs';
+            defaults.use_schedule_status_period = true;
+            if (!defaults.status_period_start_date) defaults.status_period_start_date = initialDate;
+            if (!defaults.status_period_end_date) defaults.status_period_end_date = initialDate;
+        }
         setEditedUser(defaults);
         setModalError("");
         setCreatedCredentials(null);
@@ -356,7 +362,6 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         >
                         <option value="working">Работает</option>
                         <option value="fired">Уволен</option>
-                        <option value="unpaid_leave">Без содержания</option>
                         <option value="bs">Б/С</option>
                         <option value="sick_leave">Больничный</option>
                         <option value="annual_leave">Ежегодный отпуск</option>
@@ -592,7 +597,6 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             >
                             <option value="working">Работает</option>
                             <option value="fired">Уволен</option>
-                            <option value="unpaid_leave">Без содержания</option>
                             <option value="bs">Б/С</option>
                             <option value="sick_leave">Больничный</option>
                             <option value="annual_leave">Ежегодный отпуск</option>
