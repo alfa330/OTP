@@ -4050,6 +4050,41 @@ def delete_training(training_id):
 
 # ==================== Work Schedules API ====================
 
+@app.route('/api/work_schedules/my', methods=['GET'])
+@require_api_key
+def get_my_work_schedules():
+    """
+    Получить смены/перерывы/выходные текущего оператора.
+    Query params: start_date, end_date (optional, format: YYYY-MM-DD)
+    """
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester_id = int(requester_id)
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+
+        if user_data[3] != 'operator':
+            return jsonify({"error": "Forbidden"}), 403
+
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        operator_schedule = db.get_operator_with_shifts(requester_id, start_date, end_date)
+        if not operator_schedule:
+            return jsonify({"error": "Operator not found"}), 404
+
+        return jsonify({"operator": operator_schedule}), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error getting my work schedules: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/work_schedules/operators', methods=['GET'])
 @require_api_key
 def get_operators_with_schedules():

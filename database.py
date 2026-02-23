@@ -4410,6 +4410,110 @@ class Database:
 
             return [result_map[row[0]] for row in operators]
 
+    def get_operator_with_shifts(self, operator_id, start_date=None, end_date=None):
+        """
+        Получить одного оператора с его сменами/перерывами/выходными за период.
+        Возвращает структуру, совместимую с get_operators_with_shifts()[i].
+        """
+        operator_id = int(operator_id)
+        start_date_obj = self._normalize_schedule_date(start_date) if start_date else None
+        end_date_obj = self._normalize_schedule_date(end_date) if end_date else None
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
+                       d.name as direction, u.status, u.rate
+                FROM users u
+                LEFT JOIN users s ON u.supervisor_id = s.id
+                LEFT JOIN directions d ON u.direction_id = d.id
+                WHERE u.id = %s AND u.role = 'operator'
+                LIMIT 1
+            """, (operator_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            op_id, name, supervisor_id, supervisor_name, direction, status, rate = row
+            result = {
+                'id': op_id,
+                'name': name,
+                'supervisor_id': supervisor_id,
+                'supervisor_name': supervisor_name,
+                'direction': direction,
+                'status': status,
+                'rate': float(rate) if rate else 1.0,
+                'shifts': {},
+                'daysOff': []
+            }
+
+            shifts_query = """
+                SELECT ws.id, ws.shift_date, ws.start_time, ws.end_time
+                FROM work_shifts ws
+                WHERE ws.operator_id = %s
+            """
+            shifts_params = [operator_id]
+            if start_date_obj:
+                shifts_query += " AND ws.shift_date >= %s"
+                shifts_params.append(start_date_obj)
+            if end_date_obj:
+                shifts_query += " AND ws.shift_date <= %s"
+                shifts_params.append(end_date_obj)
+            shifts_query += " ORDER BY ws.shift_date, ws.start_time"
+            cursor.execute(shifts_query, shifts_params)
+            shifts_rows = cursor.fetchall()
+
+            shift_ids = []
+            shift_ref = {}
+            for shift_id, shift_date, start_time_value, end_time_value in shifts_rows:
+                date_str = shift_date.strftime('%Y-%m-%d')
+                shift_item = {
+                    'id': shift_id,
+                    'start': start_time_value.strftime('%H:%M'),
+                    'end': end_time_value.strftime('%H:%M'),
+                    'breaks': []
+                }
+                result['shifts'].setdefault(date_str, []).append(shift_item)
+                shift_ids.append(shift_id)
+                shift_ref[shift_id] = shift_item
+
+            if shift_ids:
+                cursor.execute(
+                    """
+                    SELECT shift_id, start_minutes, end_minutes
+                    FROM shift_breaks
+                    WHERE shift_id = ANY(%s)
+                    ORDER BY shift_id, start_minutes, end_minutes
+                    """,
+                    (shift_ids,)
+                )
+                for shift_id, br_start, br_end in cursor.fetchall():
+                    item = shift_ref.get(shift_id)
+                    if item is None:
+                        continue
+                    item['breaks'].append({'start': int(br_start), 'end': int(br_end)})
+
+            for day_key, day_shifts in list(result['shifts'].items()):
+                result['shifts'][day_key] = _merge_shifts_for_date(day_shifts)
+
+            days_off_query = """
+                SELECT day_off_date
+                FROM days_off
+                WHERE operator_id = %s
+            """
+            days_off_params = [operator_id]
+            if start_date_obj:
+                days_off_query += " AND day_off_date >= %s"
+                days_off_params.append(start_date_obj)
+            if end_date_obj:
+                days_off_query += " AND day_off_date <= %s"
+                days_off_params.append(end_date_obj)
+            days_off_query += " ORDER BY day_off_date"
+            cursor.execute(days_off_query, days_off_params)
+            for (day_off_date,) in cursor.fetchall():
+                result['daysOff'].append(day_off_date.strftime('%Y-%m-%d'))
+
+            return result
+
     def save_shift(
         self,
         operator_id,
