@@ -4566,8 +4566,14 @@ const withAccessTokenHeader = (headers = {}) => {
             const [myScheduleError, setMyScheduleError] = useState('');
             const [expandedMyDayCards, setExpandedMyDayCards] = useState({});
             const [showOperatorMobileCalendar, setShowOperatorMobileCalendar] = useState(false);
+            const [breakReminderEnabled, setBreakReminderEnabled] = useState(false);
+            const [breakReminderPermissionState, setBreakReminderPermissionState] = useState(() => {
+                if (typeof window === 'undefined') return 'unsupported';
+                return ('Notification' in window) ? window.Notification.permission : 'unsupported';
+            });
             const [myNowTick, setMyNowTick] = useState(0);
             const dragState = useRef(null);
+            const breakReminderNotifiedRef = useRef(new Map());
             const plannerUiStateLoadedRef = useRef(false);
             const plannerUiStateStorageKey = useMemo(
                 () => `otp.work_schedules.ui_state.${user?.login || user?.name || user?.role || 'anonymous'}`,
@@ -4652,6 +4658,9 @@ const withAccessTokenHeader = (headers = {}) => {
                     if (Array.isArray(parsed?.breakDirectionGroups)) {
                         setBreakDirectionGroups(sanitizeBreakDirectionGroups(parsed.breakDirectionGroups));
                     }
+                    if (typeof parsed?.breakReminderEnabled === 'boolean') {
+                        setBreakReminderEnabled(parsed.breakReminderEnabled);
+                    }
                 } catch (e) {
                     console.error('Failed to restore work schedules UI state:', e);
                 } finally {
@@ -4672,7 +4681,8 @@ const withAccessTokenHeader = (headers = {}) => {
                             selectedSupervisors,
                             selectedStatuses,
                             selectedDirections,
-                            breakDirectionGroups
+                            breakDirectionGroups,
+                            breakReminderEnabled
                         })
                     );
                 } catch (e) {
@@ -4685,7 +4695,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 selectedSupervisors,
                 selectedStatuses,
                 selectedDirections,
-                breakDirectionGroups
+                breakDirectionGroups,
+                breakReminderEnabled
             ]);
 
             useEffect(() => {
@@ -5873,6 +5884,165 @@ const withAccessTokenHeader = (headers = {}) => {
                 const mins = Math.max(0, Math.round(Number(minutesValue) || 0));
                 return `${mins} мин`;
             };
+            const breakReminderCandidates = useMemo(() => {
+                const result = [];
+                const shiftsByDate = myScheduleData?.shifts;
+                if (!shiftsByDate || typeof shiftsByDate !== 'object') return result;
+
+                Object.entries(shiftsByDate).forEach(([dateStr, shiftList]) => {
+                    const baseDate = parseDateStr(dateStr);
+                    if (!(baseDate instanceof Date) || Number.isNaN(baseDate.getTime())) return;
+                    const dayStartMs = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate()).getTime();
+
+                    (Array.isArray(shiftList) ? shiftList : []).forEach((seg, segIndex) => {
+                        const startBase = Number.isFinite(seg?.__startMin) ? Number(seg.__startMin) : timeToMinutes(seg?.start);
+                        const endFallbackRaw = timeToMinutes(seg?.end);
+                        const endBase = Number.isFinite(seg?.__endMin)
+                            ? Number(seg.__endMin)
+                            : (Number.isFinite(endFallbackRaw) && Number.isFinite(startBase)
+                                ? (endFallbackRaw + (endFallbackRaw <= startBase ? 1440 : 0))
+                                : NaN);
+                        if (!Number.isFinite(startBase) || !Number.isFinite(endBase) || endBase <= startBase) return;
+
+                        const breaks = Array.isArray(seg?.breaks)
+                            ? seg.breaks
+                            : computeBreaksForShiftMinutes(startBase, endBase);
+                        const isCrossing = timeToMinutes(seg?.end) <= timeToMinutes(seg?.start) && seg?.end !== '00:00';
+                        const shiftLabel = `${seg?.start || '—'} — ${seg?.end || '—'}${isCrossing ? ' (+1)' : ''}`;
+
+                        (Array.isArray(breaks) ? breaks : []).forEach((b, breakIndex) => {
+                            const bStart = Number(b?.start);
+                            const bEnd = Number(b?.end);
+                            if (!Number.isFinite(bStart) || !Number.isFinite(bEnd) || bEnd <= bStart) return;
+
+                            result.push({
+                                id: `break:${dateStr}:${segIndex}:${breakIndex}:${bStart}:${bEnd}`,
+                                dateStr,
+                                shiftLabel,
+                                breakStart: bStart,
+                                breakEnd: bEnd,
+                                breakStartMs: dayStartMs + (bStart * 60000),
+                                breakEndMs: dayStartMs + (bEnd * 60000)
+                            });
+                        });
+                    });
+                });
+
+                return result.sort((a, b) => a.breakStartMs - b.breakStartMs);
+            }, [myScheduleData]);
+            const showOperatorReminderToast = (message, type = 'info') => {
+                try {
+                    if (typeof window !== 'undefined' && typeof window.showToast === 'function') {
+                        window.showToast(message, type);
+                    }
+                } catch (e) {
+                    console.warn('Failed to show reminder toast:', e);
+                }
+            };
+            const handleToggleBreakReminder = async () => {
+                const nextEnabled = !breakReminderEnabled;
+                if (!nextEnabled) {
+                    setBreakReminderEnabled(false);
+                    return;
+                }
+
+                if (typeof window === 'undefined' || !('Notification' in window)) {
+                    setBreakReminderPermissionState('unsupported');
+                    setBreakReminderEnabled(true);
+                    showOperatorReminderToast('Напоминания включены. Браузерные уведомления недоступны, будет только уведомление в приложении.', 'warning');
+                    breakReminderNotifiedRef.current = new Map();
+                    return;
+                }
+
+                let permission = window.Notification.permission;
+                if (permission === 'default') {
+                    try {
+                        permission = await window.Notification.requestPermission();
+                    } catch (e) {
+                        console.warn('Notification permission request failed:', e);
+                    }
+                }
+
+                setBreakReminderPermissionState(permission || 'default');
+                setBreakReminderEnabled(true);
+                breakReminderNotifiedRef.current = new Map();
+
+                if (permission === 'granted') {
+                    showOperatorReminderToast('Напоминания о перерывах включены', 'success');
+                } else if (permission === 'denied') {
+                    showOperatorReminderToast('Браузерные уведомления запрещены. Напоминания будут только внутри приложения.', 'warning');
+                } else {
+                    showOperatorReminderToast('Напоминания о перерывах включены', 'success');
+                }
+            };
+
+            useEffect(() => {
+                if (typeof window === 'undefined') return;
+                if (!('Notification' in window)) {
+                    setBreakReminderPermissionState('unsupported');
+                    return;
+                }
+                setBreakReminderPermissionState(window.Notification.permission);
+            }, []);
+
+            useEffect(() => {
+                if (user?.role !== 'operator') return;
+                if (!breakReminderEnabled) return;
+                if (!Array.isArray(breakReminderCandidates) || breakReminderCandidates.length === 0) return;
+
+                const sendReminder = (candidate, minutesLeft) => {
+                    const title = minutesLeft <= 1
+                        ? 'Скоро перерыв'
+                        : `Скоро перерыв через ${minutesLeft} мин`;
+                    const body = `${formatBreakMinuteWithDay(candidate.breakStart)} — ${formatBreakMinuteWithDay(candidate.breakEnd)} • смена ${candidate.shiftLabel}`;
+                    const toastText = `Перерыв через ${minutesLeft} мин: ${formatBreakMinuteWithDay(candidate.breakStart)} — ${formatBreakMinuteWithDay(candidate.breakEnd)}`;
+
+                    try {
+                        if (typeof window !== 'undefined' && 'Notification' in window && window.Notification.permission === 'granted') {
+                            const n = new window.Notification(title, {
+                                body,
+                                tag: candidate.id,
+                                renotify: false
+                            });
+                            setTimeout(() => {
+                                try { n.close(); } catch (_) {}
+                            }, 10000);
+                        }
+                    } catch (e) {
+                        console.warn('Failed to show browser notification:', e);
+                    }
+
+                    showOperatorReminderToast(toastText, 'warning');
+                };
+
+                const tick = () => {
+                    const nowMs = Date.now();
+                    const remindWindowMs = 5 * 60 * 1000;
+                    const notifiedMap = breakReminderNotifiedRef.current;
+
+                    for (const [key, meta] of Array.from(notifiedMap.entries())) {
+                        const breakStartMs = Number(meta?.breakStartMs);
+                        if (!Number.isFinite(breakStartMs) || (nowMs - breakStartMs) > (24 * 60 * 60 * 1000)) {
+                            notifiedMap.delete(key);
+                        }
+                    }
+
+                    breakReminderCandidates.forEach(candidate => {
+                        if (!candidate || !Number.isFinite(candidate.breakStartMs)) return;
+                        if (notifiedMap.has(candidate.id)) return;
+                        if (nowMs >= candidate.breakStartMs) return;
+                        if (nowMs < (candidate.breakStartMs - remindWindowMs)) return;
+
+                        const minutesLeft = Math.max(1, Math.ceil((candidate.breakStartMs - nowMs) / 60000));
+                        notifiedMap.set(candidate.id, { breakStartMs: candidate.breakStartMs });
+                        sendReminder(candidate, minutesLeft);
+                    });
+                };
+
+                tick();
+                const timer = setInterval(tick, 30000);
+                return () => clearInterval(timer);
+            }, [user?.role, breakReminderEnabled, breakReminderCandidates]);
 
             if (isOperatorSelfSchedules) {
                 return (
@@ -5950,6 +6120,31 @@ const withAccessTokenHeader = (headers = {}) => {
                                             )}
                                         </div>
                                         <div>
+                                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 mb-3">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <div className="min-w-0">
+                                                    <div className="text-sm font-semibold text-slate-900">Напоминание о перерыве</div>
+                                                    <div className="text-xs text-slate-500">За 5 минут до начала</div>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={handleToggleBreakReminder}
+                                                    className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors border ${
+                                                        breakReminderEnabled ? 'bg-blue-600 border-blue-600' : 'bg-white border-slate-300'
+                                                    }`}
+                                                    aria-pressed={breakReminderEnabled}
+                                                    aria-label={breakReminderEnabled ? 'Выключить напоминания о перерыве' : 'Включить напоминания о перерыве'}
+                                                >
+                                                    <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${breakReminderEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                                                </button>
+                                            </div>
+                                            <div className="mt-2 text-[11px] text-slate-500">
+                                                {breakReminderPermissionState === 'granted' && 'Браузерные уведомления разрешены'}
+                                                {breakReminderPermissionState === 'denied' && 'Браузерные уведомления запрещены (останутся только уведомления в приложении)'}
+                                                {breakReminderPermissionState === 'default' && 'Разрешение на браузерные уведомления будет запрошено при включении'}
+                                                {breakReminderPermissionState === 'unsupported' && 'Браузерные уведомления не поддерживаются'}
+                                            </div>
+                                        </div>
                                         <div className="pt-0 lg:pt-1">
                                             <div className="text-xs font-semibold text-slate-900 mb-2">Ближайшие смены</div>
                                             {myUpcomingShiftItems.length === 0 ? (
