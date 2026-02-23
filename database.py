@@ -209,6 +209,24 @@ SCHEDULE_DISMISSAL_REASONS: List[str] = [
     'слабый/не выполняет kpi'
 ]
 
+USER_STATUS_ALLOWED_VALUES: List[str] = [
+    'working',
+    'fired',
+    'unpaid_leave',
+    'bs',
+    'sick_leave',
+    'annual_leave',
+    'dismissal'
+]
+
+SCHEDULE_STATUS_TO_USER_STATUS: Dict[str, str] = {
+    'bs': 'bs',
+    'sick_leave': 'sick_leave',
+    'annual_leave': 'annual_leave',
+    # Для совместимости с остальными экранами "увольнение" продолжаем отражать как fired
+    'dismissal': 'fired'
+}
+
 def get_pool():
     global POOL
     if POOL is None:
@@ -264,7 +282,7 @@ class Database:
                     hours_table_url TEXT,
                     scores_table_url TEXT,
                     is_active BOOLEAN NOT NULL DEFAULT FALSE,
-                    status VARCHAR(20) NOT NULL DEFAULT 'working' CHECK(status IN ('working', 'fired', 'unpaid_leave')),
+                    status VARCHAR(20) NOT NULL DEFAULT 'working' CHECK(status IN ('working', 'fired', 'unpaid_leave', 'bs', 'sick_leave', 'annual_leave', 'dismissal')),
                     rate DECIMAL(3,2) NOT NULL DEFAULT 1.00 CHECK(rate IN (1.00, 0.75, 0.50)),
                     CONSTRAINT unique_name_role UNIQUE (name, role)
                 );
@@ -524,6 +542,15 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(operator_id, day_off_date)
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE users
+                DROP CONSTRAINT IF EXISTS users_status_check;
+            """)
+            cursor.execute("""
+                ALTER TABLE users
+                ADD CONSTRAINT users_status_check
+                CHECK (status IN ('working', 'fired', 'unpaid_leave', 'bs', 'sick_leave', 'annual_leave', 'dismissal'));
             """)
             # Special statuses by period (vacation/sick leave/unpaid leave/dismissal)
             cursor.execute("""
@@ -4367,6 +4394,7 @@ class Database:
         # Если на дату сохранённой смены приходился период "увольнение",
         # считаем увольнение прерванным (не продолжаем его после рабочего дня).
         self._interrupt_dismissal_period_by_work_day_tx(cursor, operator_id, shift_date)
+        self._sync_user_statuses_from_schedule_periods_tx(cursor, operator_ids=[operator_id])
 
         return shift_id
 
@@ -4476,6 +4504,97 @@ class Database:
             target['scheduleStatusPeriods'] = data.get('scheduleStatusPeriods', [])
             target['scheduleStatusDays'] = data.get('scheduleStatusDays', {})
 
+    def _sync_user_statuses_from_schedule_periods_tx(self, cursor, operator_ids=None, as_of_date=None):
+        """
+        Синхронизировать users.status по активным периодным статусам на дату.
+        Активные периодные статусы имеют приоритет; при их отсутствии временные статусные значения
+        (bs/sick_leave/annual_leave) сбрасываются в working.
+        """
+        as_of_date_obj = self._normalize_schedule_date(as_of_date) if as_of_date else datetime.now().date()
+
+        if operator_ids is None:
+            cursor.execute("""
+                SELECT id
+                FROM users
+                WHERE role = 'operator'
+            """)
+            target_operator_ids = [int(row[0]) for row in cursor.fetchall()]
+        else:
+            target_operator_ids = [int(v) for v in operator_ids if v is not None]
+
+        if not target_operator_ids:
+            return 0
+
+        cursor.execute("""
+            SELECT id, status
+            FROM users
+            WHERE id = ANY(%s)
+        """, (target_operator_ids,))
+        current_status_map = {int(row[0]): (row[1] or 'working') for row in cursor.fetchall()}
+        if not current_status_map:
+            return 0
+
+        cursor.execute("""
+            SELECT DISTINCT ON (operator_id) operator_id, status_code
+            FROM operator_schedule_status_periods
+            WHERE operator_id = ANY(%s)
+              AND start_date <= %s
+              AND COALESCE(end_date, DATE '9999-12-31') >= %s
+            ORDER BY operator_id, start_date DESC, id DESC
+        """, (target_operator_ids, as_of_date_obj, as_of_date_obj))
+        active_status_by_operator = {int(row[0]): str(row[1]) for row in cursor.fetchall()}
+
+        cursor.execute("""
+            SELECT DISTINCT operator_id
+            FROM operator_schedule_status_periods
+            WHERE operator_id = ANY(%s)
+              AND status_code = 'dismissal'
+        """, (target_operator_ids,))
+        has_dismissal_history = {int(row[0]) for row in cursor.fetchall()}
+
+        updated_count = 0
+        temporary_schedule_statuses = {'bs', 'sick_leave', 'annual_leave', 'dismissal'}
+        for op_id, current_status in current_status_map.items():
+            current_status_norm = str(current_status or 'working')
+            active_schedule_status = active_status_by_operator.get(op_id)
+            desired_status = None
+
+            if active_schedule_status:
+                desired_status = SCHEDULE_STATUS_TO_USER_STATUS.get(active_schedule_status, active_schedule_status)
+            else:
+                if current_status_norm in temporary_schedule_statuses:
+                    desired_status = 'working'
+                elif current_status_norm == 'fired' and op_id in has_dismissal_history:
+                    desired_status = 'working'
+
+            if not desired_status or desired_status == current_status_norm:
+                continue
+
+            cursor.execute("""
+                UPDATE users
+                SET status = %s
+                WHERE id = %s
+            """, (desired_status, op_id))
+            cursor.execute("""
+                INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (op_id, None, 'status', current_status_norm, desired_status))
+            updated_count += 1
+
+        return updated_count
+
+    def sync_user_statuses_from_schedule_periods(self, operator_ids=None, as_of_date=None):
+        """
+        Публичный wrapper для фонового/ручного запуска синхронизации users.status
+        по периодным статусам графика.
+        """
+        with self._get_cursor() as cursor:
+            return self._sync_user_statuses_from_schedule_periods_tx(
+                cursor=cursor,
+                operator_ids=operator_ids,
+                as_of_date=as_of_date
+            )
+
     def get_operators_with_shifts(self, start_date=None, end_date=None):
         """
         Получить всех операторов со сменами и выходными днями за период.
@@ -4485,6 +4604,7 @@ class Database:
         end_date_obj = self._normalize_schedule_date(end_date) if end_date else None
 
         with self._get_cursor() as cursor:
+            self._sync_user_statuses_from_schedule_periods_tx(cursor)
             cursor.execute("""
                 SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
                        d.name as direction, u.status, u.rate
@@ -4609,6 +4729,7 @@ class Database:
         end_date_obj = self._normalize_schedule_date(end_date) if end_date else None
 
         with self._get_cursor() as cursor:
+            self._sync_user_statuses_from_schedule_periods_tx(cursor, operator_ids=[operator_id])
             cursor.execute("""
                 SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
                        d.name as direction, u.status, u.rate
@@ -4932,6 +5053,7 @@ class Database:
                 created_by_id
             ))
             saved_row = cursor.fetchone()
+            self._sync_user_statuses_from_schedule_periods_tx(cursor, operator_ids=[operator_id])
             return self._serialize_schedule_status_period(saved_row)
 
     def _interrupt_dismissal_period_by_work_day_tx(self, cursor, operator_id, work_date):
@@ -4994,6 +5116,7 @@ class Database:
             row = cursor.fetchone()
             if not row:
                 return None
+            self._sync_user_statuses_from_schedule_periods_tx(cursor, operator_ids=[int(row[1])])
             return self._serialize_schedule_status_period(row)
 
     def save_shifts_bulk(self, operator_id, shifts_data):

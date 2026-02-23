@@ -6475,6 +6475,15 @@ async def generate_weekly_report():
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(executor_pool, sync_generate_weekly_report)
 
+def sync_schedule_statuses_to_user_statuses_job():
+    """Background job: sync users.status with active schedule status periods."""
+    try:
+        updated = db.sync_user_statuses_from_schedule_periods()
+        if updated:
+            logging.info("Auto status sync updated %s operator statuses", updated)
+    except Exception as e:
+        logging.exception("Error in auto status sync job: %s", e)
+
 # === Главный запуск =============================================================================================
 if __name__ == '__main__':
     # Инициализация администратора
@@ -6518,7 +6527,23 @@ if __name__ == '__main__':
         misfire_grace_time=3600
     )
 
+    # Автопереключение статусов операторов по периодным статусам графика (ежедневно в полночь)
+    scheduler.add_job(
+        sync_schedule_statuses_to_user_statuses_job,
+        CronTrigger(hour=0, minute=0),
+        id='sync_schedule_statuses_to_user_statuses',
+        misfire_grace_time=120,
+        max_instances=1,
+        coalesce=True
+    )
+
     scheduler.start()
+
+    # Стартовый прогон (не ждём первой минуты)
+    try:
+        sync_schedule_statuses_to_user_statuses_job()
+    except Exception:
+        logging.exception("Initial auto status sync failed")
     
     logging.info("🔄 Планировщик запущен")
     logging.info("🤖 Бот запущен")
