@@ -5914,8 +5914,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                     </div>
                                 </div>
 
-                                <div className="grid grid-cols-1 xl:grid-cols-3 gap-3 mb-3">
-                                    <div className="xl:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+                                <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 mb-3">
+                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
                                         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
                                             <div className="font-semibold text-slate-900">{myScheduleData?.name || user?.name || 'Оператор'}</div>
                                             <div className="text-slate-500">{myScheduleData?.direction || 'Без направления'}</div>
@@ -5924,24 +5924,6 @@ const withAccessTokenHeader = (headers = {}) => {
                                             )}
                                             <div className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-xs">
                                                 Период: {visibleRange[0] ? formatDateRuShort(visibleRange[0]) : '—'}{visibleRange.length > 1 ? ` — ${formatDateRuShort(visibleRange[visibleRange.length - 1])}` : ''}
-                                            </div>
-                                        </div>
-                                        <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
-                                            <div className="rounded-lg border border-slate-200 p-3 bg-slate-50">
-                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Смен</div>
-                                                <div className="text-xl font-bold text-slate-900 tabular-nums">{myScheduleSummary.shiftsCount}</div>
-                                            </div>
-                                            <div className="rounded-lg border border-slate-200 p-3 bg-slate-50">
-                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Рабочих дней</div>
-                                                <div className="text-xl font-bold text-slate-900 tabular-nums">{myScheduleSummary.daysWithShifts}</div>
-                                            </div>
-                                            <div className="rounded-lg border border-slate-200 p-3 bg-slate-50">
-                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Часы</div>
-                                                <div className="text-xl font-bold text-slate-900 tabular-nums">{(myScheduleSummary.totalWorkMin / 60).toFixed(2)}</div>
-                                            </div>
-                                            <div className="rounded-lg border border-amber-200 p-3 bg-amber-50">
-                                                <div className="text-[11px] uppercase tracking-wide text-amber-700">Перерывы</div>
-                                                <div className="text-xl font-bold text-amber-900 tabular-nums">{formatMinutesOnly(myScheduleSummary.totalBreakMin)}</div>
                                             </div>
                                         </div>
                                     </div>
@@ -6370,6 +6352,43 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     </div>
                                                 );
                                             })}
+                                            </div>
+                                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
+                                                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                                                    <div>
+                                                        <div className="text-sm font-semibold text-slate-900">Сводка за период</div>
+                                                        <div className="text-xs text-slate-500">
+                                                            {visibleRange[0] ? formatDateRuShort(visibleRange[0]) : '—'}
+                                                            {visibleRange.length > 1 ? ` — ${formatDateRuShort(visibleRange[visibleRange.length - 1])}` : ''}
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex flex-wrap gap-1.5 text-xs">
+                                                        <span className="px-2 py-1 rounded-md bg-slate-50 border border-slate-200 text-slate-700">
+                                                            Показано дней: <span className="font-semibold tabular-nums">{myScheduleVisibleDays.length}</span>
+                                                        </span>
+                                                        <span className="px-2 py-1 rounded-md bg-red-50 border border-red-200 text-red-700">
+                                                            Выходных: <span className="font-semibold tabular-nums">{myScheduleSummary.daysOffCount}</span>
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                                        <div className="text-[11px] uppercase tracking-wide text-slate-500">Смен</div>
+                                                        <div className="text-lg font-bold text-slate-900 tabular-nums">{myScheduleSummary.shiftsCount}</div>
+                                                    </div>
+                                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                                        <div className="text-[11px] uppercase tracking-wide text-slate-500">Рабочих дней</div>
+                                                        <div className="text-lg font-bold text-slate-900 tabular-nums">{myScheduleSummary.daysWithShifts}</div>
+                                                    </div>
+                                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                                        <div className="text-[11px] uppercase tracking-wide text-slate-500">Часы</div>
+                                                        <div className="text-lg font-bold text-slate-900 tabular-nums">{(myScheduleSummary.totalWorkMin / 60).toFixed(2)}</div>
+                                                    </div>
+                                                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                                                        <div className="text-[11px] uppercase tracking-wide text-amber-700">Перерывы</div>
+                                                        <div className="text-lg font-bold text-amber-900 tabular-nums">{formatMinutesOnly(myScheduleSummary.totalBreakMin)}</div>
+                                                    </div>
+                                                </div>
                                             </div>
                                         </div>
                                     )}
