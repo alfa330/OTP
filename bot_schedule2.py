@@ -1340,7 +1340,7 @@ def get_admin_users():
         requester_id = int(request.headers.get('X-User-Id'))
         with db._get_cursor() as cursor:
             cursor.execute("""
-                    SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role, u.status, u.rate, u.hire_date
+                    SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role, u.status, u.rate, u.hire_date, u.gender, u.birth_date
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -1358,7 +1358,9 @@ def get_admin_users():
                         "role": row[6],
                         "status": row[7],
                         "rate": float(row[8]),
-                        "hire_date": row[9].strftime('%d-%m-%Y') if row[9] else None  # Add this line
+                        "hire_date": row[9].strftime('%d-%m-%Y') if row[9] else None,
+                        "gender": row[10],
+                        "birth_date": row[11].strftime('%d-%m-%Y') if row[11] else None
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
@@ -1399,7 +1401,7 @@ def admin_update_user():
                     return jsonify({"error": "Invalid rate value"}), 400
             except ValueError:
                 return jsonify({"error": "Invalid rate format"}), 400
-        elif field == 'hire_date':
+        elif field in ['hire_date', 'birth_date']:
             if value:
                 try:
                     datetime.strptime(value, '%Y-%m-%d')
@@ -1407,6 +1409,11 @@ def admin_update_user():
                     return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
             else:
                 value = None  # Allow clearing the date
+        elif field == 'gender':
+            if value in [None, '']:
+                value = None
+            elif value not in ['male', 'female']:
+                return jsonify({"error": "Invalid gender value"}), 400
         else:
             return jsonify({"error": "Invalid field"}), 400
 
@@ -2500,6 +2507,20 @@ def add_user():
 
         rate = float(data['rate']) if data.get('rate') else 1.0
         direction_id = int(data['direction_id']) if data.get('direction_id') else None
+        gender = data.get('gender')
+        if gender in [None, '']:
+            gender = None
+        elif gender not in ['male', 'female']:
+            return jsonify({"error": "Invalid gender value"}), 400
+
+        birth_date = data.get('birth_date')
+        if birth_date:
+            try:
+                datetime.strptime(birth_date, '%Y-%m-%d')
+            except ValueError:
+                return jsonify({"error": "Invalid birth_date format. Use YYYY-MM-DD"}), 400
+        else:
+            birth_date = None
 
         login = f"user_{str(uuid.uuid4())[:8]}"
         password = str(uuid.uuid4())[:8]
@@ -2514,7 +2535,9 @@ def add_user():
             rate=rate,
             direction_id=direction_id,
             login=login,
-            password=password
+            password=password,
+            gender=gender,
+            birth_date=birth_date
         )
 
         return jsonify({
@@ -2713,19 +2736,23 @@ def get_sv_data():
                 operator_name = op.get("name") or op.get("operator_name")
                 direction_id = op.get("direction_id")
                 hire_date = op.get("hire_date")
+                birth_date = op.get("birth_date")
                 hours_table_url = op.get("hours_table_url")
                 scores_table_url = op.get("scores_table_url")
                 status = op.get("status")
                 rate = op.get("rate")
+                gender = op.get("gender")
             else:
                 operator_id = op[0] if len(op) > 0 else None
                 operator_name = op[1] if len(op) > 1 else None
                 direction_id = op[2] if len(op) > 2 else None
                 hire_date = op[3] if len(op) > 3 else None
+                birth_date = op[10] if len(op) > 10 else None
                 hours_table_url = op[4] if len(op) > 4 else None
                 scores_table_url = op[5] if len(op) > 5 else None
                 status = op[7] if len(op) > 7 else None
                 rate = op[8] if len(op) > 8 else None
+                gender = op[9] if len(op) > 9 else None
 
             # skip invalid rows
             if not operator_id:
@@ -2759,13 +2786,15 @@ def get_sv_data():
                 "id": operator_id,
                 "name": operator_name,
                 "hire_date": hire_date,
+                "birth_date": (birth_date.strftime('%d-%m-%Y') if hasattr(birth_date, 'strftime') else birth_date),
                 "direction_id": direction_id,
                 # number of actual evaluated calls (with scores)
                 "call_count": eval_count,
                 "avg_score": avg_score,
                 "scores_table_url": scores_table_url,
                 "status": status,
-                "rate": rate_val
+                "rate": rate_val,
+                "gender": gender
             })
 
         return jsonify(response_data), 200

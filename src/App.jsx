@@ -12740,6 +12740,16 @@ const withAccessTokenHeader = (headers = {}) => {
                 };
             
             const saveUserChanges = async (editedUser) => {
+                const normalizeDateForApi = (value) => {
+                    if (!value) return null;
+                    const str = String(value).trim();
+                    if (!str) return null;
+                    const datePart = str.split('T')[0];
+                    if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) return datePart;
+                    const match = datePart.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
+                    if (match) return `${match[3]}-${match[2]}-${match[1]}`;
+                    return datePart;
+                };
                 setIsLoading(true);
                 
                 try {
@@ -12764,7 +12774,9 @@ const withAccessTokenHeader = (headers = {}) => {
                             supervisor_id: editedUser.supervisor_id || null,
                             direction_id: editedUser.direction_id || null,
                             rate: editedUser.rate || 1.0,
-                            hire_date: editedUser.hire_date || null,
+                            hire_date: normalizeDateForApi(editedUser.hire_date),
+                            gender: editedUser.gender || null,
+                            birth_date: normalizeDateForApi(editedUser.birth_date),
                             status: editedUser.status || "working",
                             // если UI даёт new_login/new_password — можно передать их
                             new_login: editedUser.new_login || undefined,
@@ -12868,10 +12880,34 @@ const withAccessTokenHeader = (headers = {}) => {
                         });
                     }
                     if (editedUser.hire_date && editedUser.hire_date !== userToEdit.hire_date) {
+                        const nextHireDate = normalizeDateForApi(editedUser.hire_date);
+                        const prevHireDate = normalizeDateForApi(userToEdit?.hire_date);
+                        if (nextHireDate !== prevHireDate) {
+                            await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                                user_id: editedUser.id,
+                                field: 'hire_date',
+                                value: nextHireDate
+                            }, {
+                                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            });
+                        }
+                    }
+                    if ((editedUser.gender || '') !== (userToEdit?.gender || '')) {
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
                             user_id: editedUser.id,
-                            field: 'hire_date',
-                            value: editedUser.hire_date
+                            field: 'gender',
+                            value: editedUser.gender || null
+                        }, {
+                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextBirthDate = normalizeDateForApi(editedUser.birth_date);
+                    const prevBirthDate = normalizeDateForApi(userToEdit?.birth_date);
+                    if (nextBirthDate !== prevBirthDate) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'birth_date',
+                            value: nextBirthDate
                         }, {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
@@ -14576,7 +14612,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('manage_users'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_users' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-user-cog"></i> <span className="sidebar-text">Операторы</span>
+                                                <i className="fas fa-user-cog"></i> <span className="sidebar-text">Сотрудники</span>
                                             </button>
                                         </li>
                                         <li>
@@ -15579,7 +15615,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 {view === 'manage_users' && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex items-center justify-between mb-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
+                                    <h2 className="text-2xl font-semibold text-gray-800">Сотрудники</h2>
 
                                     <div className="flex items-center gap-3">
                                         <button
@@ -15597,7 +15633,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         }}
                                         className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
                                         >
-                                        <i className="fas fa-user-plus"></i> Добавить оператора
+                                        <i className="fas fa-user-plus"></i> Добавить сотрудника
                                         </button>
 
                                         {/* Generate Report Button */}

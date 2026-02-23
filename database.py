@@ -260,6 +260,11 @@ class Database:
                     END IF;
                 END $$;
             """)
+            cursor.execute("""
+                ALTER TABLE users
+                    ADD COLUMN IF NOT EXISTS gender VARCHAR(20) CHECK (gender IN ('male', 'female')),
+                    ADD COLUMN IF NOT EXISTS birth_date DATE;
+            """)
             # Calls table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_activity_logs (
@@ -546,7 +551,7 @@ class Database:
                     CREATE INDEX IF NOT EXISTS idx_baiga_daily_scores_operator ON baiga_daily_scores(operator_id);
             """)
 
-    def create_user(self, telegram_id, name, role, direction_id=None, rate=None, hire_date=None, supervisor_id=None, login=None, password=None, hours_table_url=None):
+    def create_user(self, telegram_id, name, role, direction_id=None, rate=None, hire_date=None, supervisor_id=None, login=None, password=None, hours_table_url=None, gender=None, birth_date=None):
         if login is None:
             base_login = f"user_{str(uuid.uuid4())[:8]}"
             with self._get_cursor() as cursor:
@@ -566,10 +571,10 @@ class Database:
             cursor.execute("SAVEPOINT before_insert")
             try:
                 cursor.execute("""
-                    INSERT INTO users (telegram_id, name, role, direction_id, rate, hire_date, supervisor_id, login, password_hash, hours_table_url)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO users (telegram_id, name, role, direction_id, rate, hire_date, supervisor_id, login, password_hash, hours_table_url, gender, birth_date)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
-                """, (telegram_id, name, role, direction_id, rate, hire_date, supervisor_id, login, password_hash, hours_table_url))
+                """, (telegram_id, name, role, direction_id, rate, hire_date, supervisor_id, login, password_hash, hours_table_url, gender, birth_date))
                 return cursor.fetchone()[0]
             except psycopg2.IntegrityError as e:
                 cursor.execute("ROLLBACK TO SAVEPOINT before_insert")
@@ -578,10 +583,12 @@ class Database:
                         UPDATE users
                         SET direction_id = COALESCE(%s, direction_id),
                             supervisor_id = COALESCE(%s, supervisor_id),
-                            hours_table_url = COALESCE(%s, hours_table_url)
+                            hours_table_url = COALESCE(%s, hours_table_url),
+                            gender = COALESCE(%s, gender),
+                            birth_date = COALESCE(%s, birth_date)
                         WHERE name = %s AND role = %s
                         RETURNING id
-                    """, (direction_id, supervisor_id, hours_table_url, name, role))
+                    """, (direction_id, supervisor_id, hours_table_url, gender, birth_date, name, role))
                     result = cursor.fetchone()
                     if result:
                         return result[0]
@@ -597,10 +604,12 @@ class Database:
                             supervisor_id = COALESCE(%s, supervisor_id),
                             login = %s,
                             password_hash = %s,
-                            hours_table_url = COALESCE(%s, hours_table_url)
+                            hours_table_url = COALESCE(%s, hours_table_url),
+                            gender = COALESCE(%s, gender),
+                            birth_date = COALESCE(%s, birth_date)
                         WHERE telegram_id = %s
                         RETURNING id
-                    """, (name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url, telegram_id))
+                    """, (name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url, gender, birth_date, telegram_id))
                     return cursor.fetchone()[0]
                 else:
                     raise
@@ -1405,7 +1414,7 @@ class Database:
                 params.append(value)
         
         query = f"""
-            SELECT u.id, u.telegram_id, u.name, u.role, d.name, u.hire_date, u.supervisor_id, u.login, u.hours_table_url, u.scores_table_url, u.is_active, u.status, u.rate  -- Add status and rate
+            SELECT u.id, u.telegram_id, u.name, u.role, d.name, u.hire_date, u.supervisor_id, u.login, u.hours_table_url, u.scores_table_url, u.is_active, u.status, u.rate, u.gender, u.birth_date
             FROM users u
             LEFT JOIN directions d ON u.direction_id = d.id
             WHERE {' AND '.join(conditions)}
@@ -1881,7 +1890,7 @@ class Database:
     def get_operators_by_supervisor(self, supervisor_id):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.name, u.direction_id, u.hire_date, u.hours_table_url, u.scores_table_url, s.name as supervisor_name, u.status, u.rate
+                SELECT u.id, u.name, u.direction_id, u.hire_date, u.hours_table_url, u.scores_table_url, s.name as supervisor_name, u.status, u.rate, u.gender, u.birth_date
                 FROM users u
                 LEFT JOIN directions d ON u.direction_id = d.id
                 LEFT JOIN users s ON u.supervisor_id = s.id
@@ -1897,7 +1906,9 @@ class Database:
                     'scores_table_url': row[5],
                     'supervisor_name': row[6],
                     'status': row[7],
-                    'rate': row[8]
+                    'rate': row[8],
+                    'gender': row[9],
+                    'birth_date': row[10].strftime('%d-%m-%Y') if row[10] else None
                 } for row in cursor.fetchall()
             ]
 
@@ -2547,7 +2558,7 @@ class Database:
             ]
 
     def update_user(self, user_id, field, value, changed_by=None):
-        allowed_fields = ['direction_id', 'supervisor_id', 'status', 'rate', 'hire_date', 'name']  # Add name support
+        allowed_fields = ['direction_id', 'supervisor_id', 'status', 'rate', 'hire_date', 'name', 'gender', 'birth_date']
         if field not in allowed_fields:
             raise ValueError("Invalid field to update")
         

@@ -6,6 +6,16 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const [modalError, setModalError] = useState("");
     const [createdCredentials, setCreatedCredentials] = useState(null); // { login, password }
     const nameRef = React.useRef(null);
+    const toDateInputValue = (value) => {
+        if (!value) return "";
+        const str = String(value).trim();
+        if (!str) return "";
+        const datePart = str.split("T")[0];
+        if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) return datePart;
+        const match = datePart.match(/^(\d{2})[-./](\d{2})[-./](\d{4})$/);
+        if (match) return `${match[3]}-${match[2]}-${match[1]}`;
+        return "";
+    };
 
     useEffect(() => {
         // Устанавливаем defaults при открытии для режима создания
@@ -15,6 +25,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         direction_id: base.direction_id ?? "",
         supervisor_id: base.supervisor_id ?? (user?.role === 'admin' ? "" : (user?.id ?? "")),
         status: base.status ?? "working",
+        gender: base.gender ?? "",
+        birth_date: base.birth_date ?? "",
         ...base,
         };
         setEditedUser(defaults);
@@ -47,6 +59,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         name: "",
         rate: 1.0,
         hire_date: "",
+        birth_date: "",
+        gender: "",
         direction_id: "",
         supervisor_id: user?.role === 'admin' ? "" : (user?.id ?? ""),
         status: "working",
@@ -159,7 +173,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 <div className="flex flex-col gap-0.5">
                     <h2 id="edit-user-title" className="text-2xl font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
                     {isCreateMode ?  <i className="fas fa-user-edit text-blue-600"></i> : <i className="fas fa-pen text-blue-600"></i>}
-                    {isCreateMode ? "Добавить оператора" : "Редактировать пользователя"}
+                    {isCreateMode ? "Добавить сотрудника" : "Редактировать сотрудника"}
                     </h2>
                     {editedUser?.name && !isCreateMode && (
                     <div className="mt-1 text-lg font-semibold text-blue-700 pl-9">{editedUser.name}</div>
@@ -197,10 +211,35 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 </div>
 
                 <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Пол</label>
+                    <select
+                    value={editedUser?.gender || ""}
+                    onChange={(e) => setEditedUser({ ...editedUser, gender: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                    disabled={isLoading || !!createdCredentials}
+                    >
+                    <option value="">Не указан</option>
+                    <option value="male">Мужской</option>
+                    <option value="female">Женский</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата рождения</label>
+                    <input
+                    type="date"
+                    value={toDateInputValue(editedUser?.birth_date)}
+                    onChange={(e) => setEditedUser({ ...editedUser, birth_date: e.target.value || null })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                    disabled={isLoading || !!createdCredentials}
+                    />
+                </div>
+
+                <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата найма</label>
                 <input
                     type="date"
-                    value={editedUser?.hire_date ? editedUser.hire_date.split("T")[0] : ""}
+                    value={toDateInputValue(editedUser?.hire_date)}
                     onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                     disabled={isLoading || !!createdCredentials}
@@ -276,6 +315,39 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         disabled={isLoading}
                         />
                     </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Пол</label>
+                        <select
+                        value={editedUser?.gender || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, gender: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading}
+                        >
+                        <option value="">Не указан</option>
+                        <option value="male">Мужской</option>
+                        <option value="female">Женский</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label htmlFor="birthDate" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                        Дата рождения
+                        </label>
+                        <div className="flex items-center gap-2">
+                        <input
+                            type="date"
+                            id="birthDate"
+                            value={toDateInputValue(editedUser?.birth_date)}
+                            onChange={(e) => setEditedUser({ ...editedUser, birth_date: e.target.value || null })}
+                            className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                        />
+                        {editedUser?.birth_date && (
+                            <span className="text-gray-600 text-xs whitespace-nowrap">
+                            Текущая: {toDateInputValue(editedUser.birth_date)}
+                            </span>
+                        )}
+                        </div>
+                    </div>
                     {/* Hire date */}
                     <div>
                         <label htmlFor="hireDate" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
@@ -285,14 +357,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <input
                             type="date"
                             id="hireDate"
-                            value={editedUser?.hire_date ? editedUser.hire_date.split("T")[0] : ""}
+                            value={toDateInputValue(editedUser?.hire_date)}
                             onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value || null })}
                             className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                             disabled={isLoading}
                         />
                         {editedUser?.hire_date && (
                             <span className="text-gray-600 text-xs whitespace-nowrap">
-                            Текущая: {editedUser.hire_date.split("T")[0]}
+                            Текущая: {toDateInputValue(editedUser.hire_date)}
                             </span>
                         )}
                         </div>
