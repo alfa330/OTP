@@ -5694,6 +5694,15 @@ const withAccessTokenHeader = (headers = {}) => {
                 const monthNames = ['янв.', 'февр.', 'мар.', 'апр.', 'мая', 'июн.', 'июл.', 'авг.', 'сент.', 'окт.', 'нояб.', 'дек.'];
                 return `${String(d.getDate()).padStart(2, '0')} ${monthNames[d.getMonth()] ?? ''} ${d.getFullYear()}`;
             };
+            const formatDateRuDayMonth = (value) => {
+                let d = null;
+                if (typeof value === 'string') d = parseDateStr(value);
+                else if (value instanceof Date) d = value;
+                else if (value) d = new Date(value);
+                if (!(d instanceof Date) || Number.isNaN(d.getTime())) return String(value ?? '');
+                const monthNames = ['янв.', 'февр.', 'мар.', 'апр.', 'мая', 'июн.', 'июл.', 'авг.', 'сент.', 'окт.', 'нояб.', 'дек.'];
+                return `${String(d.getDate()).padStart(2, '0')} ${monthNames[d.getMonth()] ?? ''}`;
+            };
             const formatWeekdayRu = (value, style = 'long') => {
                 let d = null;
                 if (typeof value === 'string') d = parseDateStr(value);
@@ -5899,7 +5908,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-left"></i></button>
                                         <div className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-center leading-tight">
                                             <div className="text-[11px] uppercase tracking-wide text-slate-500">{formatWeekdayRu(currentDate, 'short')}</div>
-                                            <div className="text-sm font-semibold text-slate-900">{formatDateRuShort(currentDate)}</div>
+                                            <div className="text-sm font-semibold text-slate-900">{formatDateRuDayMonth(currentDate)}</div>
                                         </div>
                                         <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-right"></i></button>
                                     </div>
@@ -6038,7 +6047,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             <div className="font-semibold text-slate-900 flex items-center gap-2">
                                                                 <i className="fas fa-chart-gantt text-blue-600"></i>
                                                                 Таймлайн дня
-                                                                <span className="text-sm font-normal text-slate-500">{formatDateRuShort(myCurrentDayCard.date)}</span>
+                                                                <span className="text-sm font-normal text-slate-500">{formatDateRuDayMonth(myCurrentDayCard.date)}</span>
                                                             </div>
                                                             <div className="flex items-center gap-2 text-xs">
                                                                 {myCurrentDayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold">Выходной</span>}
@@ -6209,45 +6218,28 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         >
                                                             <div className="flex items-start justify-between gap-3">
                                                                 <div className="min-w-0">
-                                                                    {viewMode === 'day' ? (
-                                                                        <>
-                                                                            <div className="flex flex-wrap items-center gap-2 mb-1.5">
-                                                                                <span className={`inline-flex items-center px-3 py-1 rounded-lg border text-sm font-semibold tabular-nums ${
-                                                                                    hasShifts
-                                                                                        ? 'bg-blue-50 border-blue-200 text-blue-900'
-                                                                                        : dayCard.isDayOff
-                                                                                            ? 'bg-red-50 border-red-200 text-red-700'
-                                                                                            : 'bg-slate-50 border-slate-200 text-slate-600'
-                                                                                }`}>
-                                                                                    {primaryShiftLabel}
-                                                                                </span>
-                                                                                {extraShiftCount > 0 && (
-                                                                                    <span className="px-2 py-0.5 rounded-md bg-slate-100 text-xs text-slate-700">
-                                                                                        +{extraShiftCount} смен
-                                                                                    </span>
-                                                                                )}
-                                                                            </div>
-                                                                            <div className="font-semibold text-slate-900">{formatDateRuShort(dayCard.date)}</div>
-                                                                            <div className="text-xs text-slate-500 capitalize">{weekdayLabel}</div>
-                                                                        </>
-                                                                    ) : (
-                                                                        <>
-                                                                            <div className="font-semibold text-slate-900">{formatDateRuShort(dayCard.date)}</div>
-                                                                            <div className="text-xs text-slate-500 capitalize">{weekdayLabel}</div>
-                                                                            {hasShifts && (
-                                                                                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                                                                                    <span className="px-2 py-0.5 rounded-md border border-blue-200 bg-blue-50 text-xs font-semibold text-blue-900 tabular-nums">
-                                                                                        {primaryShiftLabel}
-                                                                                    </span>
-                                                                                    {extraShiftCount > 0 && (
-                                                                                        <span className="px-2 py-0.5 rounded-md bg-slate-100 text-xs text-slate-600">
-                                                                                            +{extraShiftCount}
-                                                                                        </span>
-                                                                                    )}
-                                                                                </div>
-                                                                            )}
-                                                                        </>
-                                                                    )}
+                                                                    <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                                                                        <span className={`inline-flex items-center px-3 py-1 rounded-lg border font-semibold tabular-nums ${
+                                                                            viewMode === 'day' ? 'text-base' : 'text-sm'
+                                                                        } ${
+                                                                            hasShifts
+                                                                                ? 'bg-blue-50 border-blue-200 text-blue-900'
+                                                                                : dayCard.isDayOff
+                                                                                    ? 'bg-red-50 border-red-200 text-red-700'
+                                                                                    : 'bg-slate-50 border-slate-200 text-slate-600'
+                                                                        }`}>
+                                                                            {primaryShiftLabel}
+                                                                        </span>
+                                                                        {extraShiftCount > 0 && (
+                                                                            <span className="px-2 py-0.5 rounded-md bg-slate-100 text-xs text-slate-700">
+                                                                                +{extraShiftCount} смен
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                    <div className={`font-semibold text-slate-900 ${viewMode === 'day' ? 'text-base' : ''}`}>
+                                                                        {formatDateRuDayMonth(dayCard.date)}
+                                                                    </div>
+                                                                    <div className="text-xs text-slate-500 capitalize">{weekdayLabel}</div>
                                                                 </div>
                                                                 <div className="flex items-center gap-2">
                                                                     <div className="flex flex-wrap items-center justify-end gap-1">
@@ -6261,7 +6253,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 </div>
                                                             </div>
 
-                                                            <div className="mt-3 flex flex-wrap gap-1.5">
+                                                            <div className="mt-2 flex flex-wrap gap-1.5">
                                                                 {!dayCard.isDayOff && dayCard.shifts.length === 0 && (
                                                                     <span className="px-2 py-1 rounded-md border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-500">
                                                                         Смен нет
@@ -6273,17 +6265,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     </span>
                                                                 )}
                                                                 {dayCard.shifts.length > 0 && (
-                                                                    <>
-                                                                        <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50 text-xs text-slate-700">
-                                                                            Работа: <span className="font-semibold tabular-nums">{(dayWorkMin / 60).toFixed(2)} ч</span>
-                                                                        </span>
-                                                                        <span className="px-2 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-xs text-emerald-800">
-                                                                            Чистое: <span className="font-semibold tabular-nums">{formatHoursMinutes(dayNetMin)}</span>
-                                                                        </span>
-                                                                        <span className="px-2 py-1 rounded-md border border-amber-200 bg-amber-50 text-xs text-amber-800">
-                                                                            Перерывы: <span className="font-semibold tabular-nums">{formatMinutesOnly(dayBreakMin)}</span> ({dayBreakCount})
-                                                                        </span>
-                                                                    </>
+                                                                    <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50 text-xs text-slate-700">
+                                                                        {dayCard.shifts.length} смен за день
+                                                                    </span>
                                                                 )}
                                                             </div>
 
@@ -6361,6 +6345,25 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                             </div>
                                                                         );
                                                                     })}
+                                                                    {dayCard.shifts.length > 0 && (
+                                                                        <div className="pt-1">
+                                                                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                                                                <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                                                                    <div className="text-[11px] text-slate-500 uppercase tracking-wide">Работа</div>
+                                                                                    <div className="text-sm font-semibold text-slate-900 tabular-nums">{(dayWorkMin / 60).toFixed(2)} ч</div>
+                                                                                </div>
+                                                                                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
+                                                                                    <div className="text-[11px] text-emerald-700 uppercase tracking-wide">Чистое</div>
+                                                                                    <div className="text-sm font-semibold text-emerald-900 tabular-nums">{formatHoursMinutes(dayNetMin)}</div>
+                                                                                </div>
+                                                                                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                                                                                    <div className="text-[11px] text-amber-700 uppercase tracking-wide">Перерывы</div>
+                                                                                    <div className="text-sm font-semibold text-amber-900 tabular-nums">{formatMinutesOnly(dayBreakMin)}</div>
+                                                                                    <div className="text-[11px] text-amber-700/80 mt-0.5">{dayBreakCount} шт.</div>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
                                                                 </div>
                                                             </div>
                                                         )}
