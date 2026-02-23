@@ -4690,7 +4690,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     onClick={onClose}
                 />
                 <div
-                    className={`bg-white rounded p-4 z-60 w-[720px] shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`}
+                    className={`bg-white rounded p-4 z-60 w-[720px] max-w-[calc(100vw-1rem)] max-h-[calc(100vh-2rem)] overflow-y-auto overflow-x-hidden shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`}
                     role="dialog"
                     aria-modal="true"
                 >
