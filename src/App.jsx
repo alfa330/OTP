@@ -2940,10 +2940,33 @@ const withAccessTokenHeader = (headers = {}) => {
                 } finally { setLoadingOperators(false); }
             }
 
+            const normalizeSvOperatorStatusFilterValue = (status) => {
+                const value = String(status || '').trim().toLowerCase();
+                if (!value) return '';
+                // Legacy direct status is grouped into the new period B/S status in filters.
+                if (value === 'unpaid_leave') return 'bs';
+                return value;
+            };
+            const getSvOperatorStatusFilterLabel = (status) => {
+                const value = normalizeSvOperatorStatusFilterValue(status);
+                switch (value) {
+                    case 'working': return 'Работает';
+                    case 'bs': return 'Б/С';
+                    case 'sick_leave': return 'Больничный';
+                    case 'annual_leave': return 'Ежегодный отпуск';
+                    case 'dismissal': return 'Увольнение (период)';
+                    case 'fired': return 'Уволен';
+                    default: return status;
+                }
+            };
+
             // derive available statuses from loaded operators
             const statusOptions = React.useMemo(() => {
                 const setS = new Set();
-                svOperators.forEach(o => { if (o.status != null) setS.add(String(o.status).toLowerCase()); });
+                svOperators.forEach(o => {
+                    const normalized = normalizeSvOperatorStatusFilterValue(o?.status);
+                    if (normalized) setS.add(normalized);
+                });
                 return Array.from(setS).filter(Boolean);
             }, [svOperators]);
 
@@ -3026,7 +3049,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
             function toggleStatusSelection(status) {
                 const s = (selectedStatuses || []).slice();
-                const lower = String(status).toLowerCase();
+                const lower = normalizeSvOperatorStatusFilterValue(status);
                 if (s.includes('all')) {
                 if (lower === 'all') return setSelectedStatuses(['all']);
                 setSelectedStatuses([lower]);
@@ -3065,8 +3088,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (!selectedStatuses || selectedStatuses.length === 0 || selectedStatuses.includes('all')) {
                 // do nothing
                 } else {
-                const lowerSet = new Set(selectedStatuses.map(s=>String(s).toLowerCase()));
-                list = list.filter(op => lowerSet.has(String(op.status || '').toLowerCase()));
+                const lowerSet = new Set(selectedStatuses.map(s => normalizeSvOperatorStatusFilterValue(s)).filter(Boolean));
+                list = list.filter(op => lowerSet.has(normalizeSvOperatorStatusFilterValue(op?.status)));
                 }
                 if (!selectedDirections || selectedDirections.length === 0 || selectedDirections.includes('all')) {
                 // do nothing
@@ -3673,7 +3696,13 @@ const withAccessTokenHeader = (headers = {}) => {
                             <div className="mt-2 flex flex-wrap gap-2">
                             <button onClick={()=>setSelectedStatuses(['all'])} className={`px-2 py-1 text-xs rounded border ${selectedStatuses.includes('all') ? 'bg-blue-600 text-white' : ''}`}>Все</button>
                             {statusOptions.map(st => (
-                                <button key={st} onClick={()=>toggleStatusSelection(st)} className={`px-2 py-1 text-xs rounded border ${selectedStatuses.includes(st) ? 'bg-blue-600 text-white' : ''}`}>{st}</button>
+                                <button
+                                    key={st}
+                                    onClick={() => toggleStatusSelection(st)}
+                                    className={`px-2 py-1 text-xs rounded border ${selectedStatuses.some(s => normalizeSvOperatorStatusFilterValue(s) === st) ? 'bg-blue-600 text-white' : ''}`}
+                                >
+                                    {getSvOperatorStatusFilterLabel(st)}
+                                </button>
                             ))}
                             </div>
                         </div>
@@ -4952,8 +4981,15 @@ const withAccessTokenHeader = (headers = {}) => {
                         );
                     }
                     if (Array.isArray(parsed?.selectedStatuses)) {
-                        const allowed = new Set(['working', 'fired', 'unpaid_leave', 'bs', 'sick_leave', 'annual_leave', 'dismissal']);
-                        setSelectedStatuses(parsed.selectedStatuses.filter(v => typeof v === 'string' && allowed.has(v)));
+                        const allowed = new Set(['working', 'fired', 'bs', 'sick_leave', 'annual_leave', 'dismissal', 'unpaid_leave']);
+                        const normalized = [];
+                        (parsed.selectedStatuses || []).forEach(v => {
+                            if (typeof v !== 'string' || !allowed.has(v)) return;
+                            // Миграция старого фильтра unpaid_leave -> единый пункт Б/С (bs)
+                            const next = (v === 'unpaid_leave') ? 'bs' : v;
+                            if (!normalized.includes(next)) normalized.push(next);
+                        });
+                        setSelectedStatuses(normalized);
                     }
                     if (Array.isArray(parsed?.selectedDirections)) {
                         setSelectedDirections(parsed.selectedDirections.filter(v => typeof v === 'string'));
@@ -5166,7 +5202,13 @@ const withAccessTokenHeader = (headers = {}) => {
 
                 // Фильтр по статусам
                 if (selectedStatuses.length > 0) {
-                    filtered = filtered.filter(op => selectedStatuses.includes(op.status));
+                    filtered = filtered.filter(op => {
+                        const status = String(op?.status || '');
+                        return selectedStatuses.some(sel => {
+                            if (sel === 'bs') return status === 'bs' || status === 'unpaid_leave';
+                            return sel === status;
+                        });
+                    });
                 }
 
                 // Фильтр по направлениям
@@ -7277,21 +7319,6 @@ const withAccessTokenHeader = (headers = {}) => {
                                 <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
                                     <input
                                         type="checkbox"
-                                        checked={selectedStatuses.includes('unpaid_leave')}
-                                        onChange={(e) => {
-                                            if (e.target.checked) {
-                                                setSelectedStatuses(prev => [...prev, 'unpaid_leave']);
-                                            } else {
-                                                setSelectedStatuses(prev => prev.filter(s => s !== 'unpaid_leave'));
-                                            }
-                                        }}
-                                        className="rounded"
-                                    />
-                                    <span className="text-xs">БС</span>
-                                </label>
-                                <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
-                                    <input
-                                        type="checkbox"
                                         checked={selectedStatuses.includes('bs')}
                                         onChange={(e) => {
                                             if (e.target.checked) {
@@ -7302,7 +7329,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         }}
                                         className="rounded"
                                     />
-                                    <span className="text-xs">Б/С (статус)</span>
+                                    <span className="text-xs">Б/С</span>
                                 </label>
                                 <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
                                     <input
