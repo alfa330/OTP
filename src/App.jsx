@@ -4564,7 +4564,6 @@ const withAccessTokenHeader = (headers = {}) => {
             const [myScheduleData, setMyScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
             const [myScheduleError, setMyScheduleError] = useState('');
-            const [showMyEmptyDays, setShowMyEmptyDays] = useState(false);
             const [expandedMyDayCards, setExpandedMyDayCards] = useState({});
             const [showOperatorMobileCalendar, setShowOperatorMobileCalendar] = useState(false);
             const [myNowTick, setMyNowTick] = useState(0);
@@ -5593,10 +5592,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     };
                 });
             }, [myScheduleData, visibleRange]);
-            const myScheduleVisibleDays = useMemo(() => {
-                if (showMyEmptyDays) return myScheduleDayCards;
-                return myScheduleDayCards.filter(day => day.isDayOff || (day.shifts && day.shifts.length > 0));
-            }, [myScheduleDayCards, showMyEmptyDays]);
+            const myScheduleVisibleDays = useMemo(() => myScheduleDayCards, [myScheduleDayCards]);
             const myScheduleSummary = useMemo(() => {
                 let shiftsCount = 0;
                 let daysWithShifts = 0;
@@ -5954,30 +5950,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             )}
                                         </div>
                                         <div>
-                                        <div className="flex items-center justify-between mb-2">
-                                            <div className="text-sm font-semibold text-slate-900">Отображение</div>
-                                            <button
-                                                onClick={() => setShowMyEmptyDays(v => !v)}
-                                                className={`px-2 py-1 rounded text-xs border ${showMyEmptyDays ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300'}`}
-                                            >
-                                                {showMyEmptyDays ? 'Все дни' : 'Только смены'}
-                                            </button>
-                                        </div>
-                                        <div className="space-y-2 text-xs">
-                                            <div className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
-                                                <span className="text-slate-600">Выходных в периоде</span>
-                                                <span className="font-semibold text-red-700">{myScheduleSummary.daysOffCount}</span>
-                                            </div>
-                                            <div className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
-                                                <span className="text-slate-600">Перерывов за день</span>
-                                                <span className="font-semibold text-amber-700">{viewMode === 'day' ? myCurrentDayBreaksList.length : '—'}</span>
-                                            </div>
-                                            <div className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
-                                                <span className="text-slate-600">Дней показано</span>
-                                                <span className="font-semibold text-slate-900">{myScheduleVisibleDays.length}/{myScheduleDayCards.length}</span>
-                                            </div>
-                                        </div>
-                                        <div className="mt-3 pt-3 border-t border-slate-100">
+                                        <div className="pt-0 lg:pt-1">
                                             <div className="text-xs font-semibold text-slate-900 mb-2">Ближайшие смены</div>
                                             {myUpcomingShiftItems.length === 0 ? (
                                                 <div className="text-xs text-slate-400">Нет предстоящих смен в текущем периоде</div>
@@ -6166,14 +6139,6 @@ const withAccessTokenHeader = (headers = {}) => {
                                             {myScheduleVisibleDays.length === 0 && (
                                                 <div className="bg-white rounded-xl border border-dashed border-slate-300 p-6 text-center text-slate-500">
                                                     Нет дней для отображения в выбранном периоде.
-                                                    {!showMyEmptyDays && (
-                                                        <button
-                                                            onClick={() => setShowMyEmptyDays(true)}
-                                                            className="ml-2 px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-xs text-slate-700"
-                                                        >
-                                                            Показать все дни
-                                                        </button>
-                                                    )}
                                                 </div>
                                             )}
                                             {myScheduleVisibleDays.length > 0 && viewMode !== 'day' && (
