@@ -4928,6 +4928,33 @@ class Database:
             saved_row = cursor.fetchone()
             return self._serialize_schedule_status_period(saved_row)
 
+    def delete_schedule_status_period(self, status_period_id, operator_id=None):
+        """
+        Удалить специальный статус-период по id.
+        Если передан operator_id — удаление ограничивается этим оператором.
+        """
+        period_id = int(status_period_id)
+        operator_id_norm = int(operator_id) if operator_id is not None else None
+
+        with self._get_cursor() as cursor:
+            if operator_id_norm is None:
+                cursor.execute("""
+                    DELETE FROM operator_schedule_status_periods
+                    WHERE id = %s
+                    RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment
+                """, (period_id,))
+            else:
+                cursor.execute("""
+                    DELETE FROM operator_schedule_status_periods
+                    WHERE id = %s AND operator_id = %s
+                    RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment
+                """, (period_id, operator_id_norm))
+
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return self._serialize_schedule_status_period(row)
+
     def save_shifts_bulk(self, operator_id, shifts_data):
         """
         Массовое сохранение смен для оператора.
