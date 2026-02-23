@@ -5,6 +5,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const [isLoading, setIsLoading] = useState(false);
     const [modalError, setModalError] = useState("");
     const [createdCredentials, setCreatedCredentials] = useState(null); // { login, password }
+    const [activeTab, setActiveTab] = useState("data");
     const nameRef = React.useRef(null);
     const toDateInputValue = (value) => {
         if (!value) return "";
@@ -32,6 +33,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setEditedUser(defaults);
         setModalError("");
         setCreatedCredentials(null);
+        setActiveTab("data");
     }, [userToEdit, user]);
 
     useEffect(() => {
@@ -67,6 +69,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         });
         setModalError("");
         setCreatedCredentials(null);
+        setActiveTab("data");
         setTimeout(() => nameRef.current?.focus(), 50);
     };
 
@@ -110,6 +113,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             result?.password ?? result?.data?.password ?? result?.credentials?.password ?? null;
 
             if (login || password) {
+            setActiveTab("account");
             setCreatedCredentials({ login: login || "-", password: password || "-" });
             } else {
             // Если бэк не вернул креды — просто закрываем модалку / или можно показать сообщение
@@ -134,6 +138,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     if (!isOpen) return null;
 
     const isCreateMode = !editedUser?.id;
+    const tabs = [
+        { id: "general", label: "Общее" },
+        { id: "data", label: "Данные" },
+        { id: "account", label: "Аккаунт" }
+    ];
 
     return (
         <>
@@ -195,114 +204,28 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 </div>
 
                 <div className="mt-4 space-y-6">
-                {/* Если режим создания — показываем только Имя, Ставка, Направление */}
+                {!createdCredentials && (
+                    <div className="grid grid-cols-3 gap-2 rounded-xl bg-gray-100 p-1">
+                    {tabs.map((tab) => (
+                        <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setActiveTab(tab.id)}
+                        className={`px-3 py-2 rounded-lg text-sm font-medium transition ${
+                            activeTab === tab.id
+                            ? "bg-white text-blue-700 shadow-sm"
+                            : "text-gray-600 hover:text-gray-900"
+                        }`}
+                        aria-pressed={activeTab === tab.id}
+                        >
+                        {tab.label}
+                        </button>
+                    ))}
+                    </div>
+                )}
                 {isCreateMode &&(
                 <>
-                <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Имя</label>
-                    <input
-                    ref={nameRef}
-                    type="text"
-                    value={editedUser?.name || ""}
-                    onChange={(e) => setEditedUser({ ...editedUser, name: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                    disabled={isLoading || !!createdCredentials}
-                    />
-                </div>
-
-                <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Пол</label>
-                    <select
-                    value={editedUser?.gender || ""}
-                    onChange={(e) => setEditedUser({ ...editedUser, gender: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                    disabled={isLoading || !!createdCredentials}
-                    >
-                    <option value="">Не указан</option>
-                    <option value="male">Мужской</option>
-                    <option value="female">Женский</option>
-                    </select>
-                </div>
-
-                <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата рождения</label>
-                    <input
-                    type="date"
-                    value={toDateInputValue(editedUser?.birth_date)}
-                    onChange={(e) => setEditedUser({ ...editedUser, birth_date: e.target.value || null })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                    disabled={isLoading || !!createdCredentials}
-                    />
-                </div>
-
-                <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата найма</label>
-                <input
-                    type="date"
-                    value={toDateInputValue(editedUser?.hire_date)}
-                    onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                    disabled={isLoading || !!createdCredentials}
-                />
-                </div>
-                <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ставка</label>
-                    <select
-                    value={editedUser?.rate ?? 1.0}
-                    onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                    disabled={isLoading || !!createdCredentials}
-                    >
-                    <option value={1.0}>1.00</option>
-                    <option value={0.75}>0.75</option>
-                    <option value={0.5}>0.50</option>
-                    </select>
-                </div>
-
-                {user?.role === "admin" && (
-                <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
-                    <select
-                    value={editedUser?.supervisor_id || ""}
-                    onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                    disabled={isLoading || !!createdCredentials}
-                    >
-                    <option value="">Выберите супервайзера</option>
-                    {(svList || [])
-                        .filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status)
-                        .map((sv) => (
-                        <option key={sv.id} value={sv.id}>
-                            {sv.name}
-                        </option>
-                        ))}
-                    </select>
-                </div>
-                )}
-
-                {/* Направление */}
-                <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
-                    <select
-                    value={editedUser?.direction_id || ""}
-                    onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                    disabled={isLoading || !!createdCredentials}
-                    >
-                    <option value="">Выберите направление</option>
-                    {directions.map((dir) => (
-                        <option key={dir.id} value={dir.id}>
-                        {dir.name}
-                        </option>
-                    ))}
-                    </select>
-                </div>
-                </>
-                )}
-                
-
-                {/* --- Режим редактирования: показываем остальные поля как раньше --- */}
-                {!isCreateMode && (
+                {activeTab === "data" && (
                     <>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Имя</label>
@@ -312,72 +235,57 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         value={editedUser?.name || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, name: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                        disabled={isLoading}
+                        disabled={isLoading || !!createdCredentials}
                         />
                     </div>
+
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Пол</label>
                         <select
                         value={editedUser?.gender || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, gender: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                        disabled={isLoading}
+                        disabled={isLoading || !!createdCredentials}
                         >
                         <option value="">Не указан</option>
                         <option value="male">Мужской</option>
                         <option value="female">Женский</option>
                         </select>
                     </div>
+
                     <div>
-                        <label htmlFor="birthDate" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
-                        Дата рождения
-                        </label>
-                        <div className="flex items-center gap-2">
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата рождения</label>
                         <input
-                            type="date"
-                            id="birthDate"
-                            value={toDateInputValue(editedUser?.birth_date)}
-                            onChange={(e) => setEditedUser({ ...editedUser, birth_date: e.target.value || null })}
-                            className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                            disabled={isLoading}
+                        type="date"
+                        value={toDateInputValue(editedUser?.birth_date)}
+                        onChange={(e) => setEditedUser({ ...editedUser, birth_date: e.target.value || null })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
                         />
-                        {editedUser?.birth_date && (
-                            <span className="text-gray-600 text-xs whitespace-nowrap">
-                            Текущая: {toDateInputValue(editedUser.birth_date)}
-                            </span>
-                        )}
-                        </div>
-                    </div>
-                    {/* Hire date */}
-                    <div>
-                        <label htmlFor="hireDate" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
-                        Дата найма
-                        </label>
-                        <div className="flex items-center gap-2">
-                        <input
-                            type="date"
-                            id="hireDate"
-                            value={toDateInputValue(editedUser?.hire_date)}
-                            onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value || null })}
-                            className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                            disabled={isLoading}
-                        />
-                        {editedUser?.hire_date && (
-                            <span className="text-gray-600 text-xs whitespace-nowrap">
-                            Текущая: {toDateInputValue(editedUser.hire_date)}
-                            </span>
-                        )}
-                        </div>
                     </div>
 
-                    {/* Status */}
+                    <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата найма</label>
+                    <input
+                        type="date"
+                        value={toDateInputValue(editedUser?.hire_date)}
+                        onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                    />
+                    </div>
+                    </>
+                )}
+
+                {activeTab === "general" && (
+                    <>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Статус</label>
                         <select
                         value={editedUser?.status || "working"}
                         onChange={(e) => setEditedUser({ ...editedUser, status: e.target.value })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                        disabled={isLoading}
+                        disabled={isLoading || !!createdCredentials}
                         >
                         <option value="working">Работает</option>
                         <option value="fired">Уволен</option>
@@ -385,93 +293,253 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </select>
                     </div>
 
-                    {/* Supervisor, Rate и Direction (если применимо) */}
-                    {userToEdit?.role !== "sv" && (
-                        <>
-                        {user?.role === "admin" && (
-                            <div className="grid grid-cols-1 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
-                                <select
-                                value={editedUser?.supervisor_id || ""}
-                                onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                                disabled={isLoading}
-                                >
-                                <option value="">Выберите супервайзера</option>
-                                {(() => {
-                                    const all = svList || [];
-                                    const active = all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
-                                    const fired = all.filter(sv => sv.status === 'fired');
-                                    return (
-                                        <>
-                                            {active.map(sv => (
-                                            <option key={sv.id} value={sv.id}>{sv.name}</option>
-                                            ))}
-                                        </>
-                                    );
-                                })()}
-                                </select>
-                            </div>
+                    {user?.role === "admin" && (
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
+                        <select
+                        value={editedUser?.supervisor_id || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        >
+                        <option value="">Выберите супервайзера</option>
+                        {(svList || [])
+                            .filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status)
+                            .map((sv) => (
+                            <option key={sv.id} value={sv.id}>
+                                {sv.name}
+                            </option>
+                            ))}
+                        </select>
+                    </div>
+                    )}
 
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ставка</label>
-                                <select
-                                value={editedUser?.rate || 1.0}
-                                onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                                disabled={isLoading}
-                                >
-                                <option value={1.0}>1.00</option>
-                                <option value={0.75}>0.75</option>
-                                <option value={0.5}>0.50</option>
-                                </select>
-                            </div>
-                            </div>
-                        )}
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ставка</label>
+                        <select
+                        value={editedUser?.rate ?? 1.0}
+                        onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        >
+                        <option value={1.0}>1.00</option>
+                        <option value={0.75}>0.75</option>
+                        <option value={0.5}>0.50</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
+                        <select
+                        value={editedUser?.direction_id || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        >
+                        <option value="">Выберите направление</option>
+                        {directions.map((dir) => (
+                            <option key={dir.id} value={dir.id}>
+                            {dir.name}
+                            </option>
+                        ))}
+                        </select>
+                    </div>
+                    </>
+                )}
+
+                {activeTab === "account" && !createdCredentials && (
+                    <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+                    Логин и пароль будут сгенерированы автоматически после создания сотрудника и показаны в этой модалке.
+                    </div>
+                )}
+                </>
+                )}
+                
+
+                {/* --- Режим редактирования: показываем остальные поля как раньше --- */}
+                {!isCreateMode && (
+                    <>
+                    {activeTab === "data" && (
+                        <>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Имя</label>
+                            <input
+                            ref={nameRef}
+                            type="text"
+                            value={editedUser?.name || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, name: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Пол</label>
                             <select
-                            value={editedUser?.direction_id || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value })}
+                            value={editedUser?.gender || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, gender: e.target.value })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                             disabled={isLoading}
                             >
-                            <option value="">Выберите направление</option>
-                            {directions.map((dir) => (
-                                <option key={dir.id} value={dir.id}>
-                                {dir.name}
-                                </option>
-                            ))}
+                            <option value="">Не указан</option>
+                            <option value="male">Мужской</option>
+                            <option value="female">Женский</option>
                             </select>
+                        </div>
+
+                        <div>
+                            <label htmlFor="birthDate" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                            Дата рождения
+                            </label>
+                            <div className="flex items-center gap-2">
+                            <input
+                                type="date"
+                                id="birthDate"
+                                value={toDateInputValue(editedUser?.birth_date)}
+                                onChange={(e) => setEditedUser({ ...editedUser, birth_date: e.target.value || null })}
+                                className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                            />
+                            {editedUser?.birth_date && (
+                                <span className="text-gray-600 text-xs whitespace-nowrap">
+                                Текущая: {toDateInputValue(editedUser.birth_date)}
+                                </span>
+                            )}
+                            </div>
+                        </div>
+
+                        <div>
+                            <label htmlFor="hireDate" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                            Дата найма
+                            </label>
+                            <div className="flex items-center gap-2">
+                            <input
+                                type="date"
+                                id="hireDate"
+                                value={toDateInputValue(editedUser?.hire_date)}
+                                onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value || null })}
+                                className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                            />
+                            {editedUser?.hire_date && (
+                                <span className="text-gray-600 text-xs whitespace-nowrap">
+                                Текущая: {toDateInputValue(editedUser.hire_date)}
+                                </span>
+                            )}
+                            </div>
                         </div>
                         </>
                     )}
 
-                    {/* New login */}
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Новый логин</label>
-                        <input
-                        type="text"
-                        value={editedUser?.new_login || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, new_login: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                        disabled={isLoading}
-                        />
-                    </div>
+                    {activeTab === "general" && (
+                        <>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Статус</label>
+                            <select
+                            value={editedUser?.status || "working"}
+                            onChange={(e) => setEditedUser({ ...editedUser, status: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            >
+                            <option value="working">Работает</option>
+                            <option value="fired">Уволен</option>
+                            <option value="unpaid_leave">Без содержания</option>
+                            </select>
+                        </div>
 
-                    {/* New password */}
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Новый пароль</label>
-                        <input
-                        type="password"
-                        value={editedUser?.new_password || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, new_password: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
-                        disabled={isLoading}
-                        />
-                    </div>
+                        {userToEdit?.role !== "sv" && (
+                            <>
+                            {user?.role === "admin" && (
+                                <div className="grid grid-cols-1 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Супервайзер</label>
+                                    <select
+                                    value={editedUser?.supervisor_id || ""}
+                                    onChange={(e) => setEditedUser({ ...editedUser, supervisor_id: e.target.value })}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading}
+                                    >
+                                    <option value="">Выберите супервайзера</option>
+                                    {(() => {
+                                        const all = svList || [];
+                                        const active = all.filter(sv => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
+                                        return (
+                                            <>
+                                                {active.map(sv => (
+                                                <option key={sv.id} value={sv.id}>{sv.name}</option>
+                                                ))}
+                                            </>
+                                        );
+                                    })()}
+                                    </select>
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ставка</label>
+                                    <select
+                                    value={editedUser?.rate || 1.0}
+                                    onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading}
+                                    >
+                                    <option value={1.0}>1.00</option>
+                                    <option value={0.75}>0.75</option>
+                                    <option value={0.5}>0.50</option>
+                                    </select>
+                                </div>
+                                </div>
+                            )}
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
+                                <select
+                                value={editedUser?.direction_id || ""}
+                                onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value })}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                disabled={isLoading}
+                                >
+                                <option value="">Выберите направление</option>
+                                {directions.map((dir) => (
+                                    <option key={dir.id} value={dir.id}>
+                                    {dir.name}
+                                    </option>
+                                ))}
+                                </select>
+                            </div>
+                            </>
+                        )}
+                        </>
+                    )}
+
+                    {activeTab === "account" && (
+                        <>
+                        <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
+                            Оставьте поле пустым, если менять логин или пароль не нужно.
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Новый логин</label>
+                            <input
+                            type="text"
+                            value={editedUser?.new_login || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, new_login: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Новый пароль</label>
+                            <input
+                            type="password"
+                            value={editedUser?.new_password || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, new_password: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+                        </>
+                    )}
                     </>
                 )}
 
