@@ -11127,6 +11127,54 @@ const withAccessTokenHeader = (headers = {}) => {
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeOperatorsTab, setActiveOperatorsTab] = useState("active");
             const [activeSvTab, setActiveSvTab] = useState("active");
+            const normalizeEmployeeStatusCode = (status) => {
+                const value = String(status || '').trim().toLowerCase();
+                if (!value) return 'working';
+                if (value === 'unpaid_leave') return 'bs';
+                return value;
+            };
+            const getEmployeeStatusFilterKey = (status) => {
+                const normalized = normalizeEmployeeStatusCode(status);
+                if (normalized === 'dismissal') return 'fired';
+                return normalized;
+            };
+            const isEmployeeVisibleByStatusTab = (status, tabKey) => {
+                const key = getEmployeeStatusFilterKey(status);
+                if (tabKey === 'active') return key !== 'fired';
+                if (tabKey === 'fired') return key === 'fired';
+                return key === tabKey;
+            };
+            const USER_STATUS_FILTER_TABS = [
+                { key: 'active', label: 'Активные', activeClass: 'bg-green-600 text-white', idleClass: 'bg-gray-200 text-gray-700 hover:bg-gray-300' },
+                { key: 'working', label: 'Работает', activeClass: 'bg-green-700 text-white', idleClass: 'bg-gray-200 text-gray-700 hover:bg-gray-300' },
+                { key: 'bs', label: 'Б/С', activeClass: 'bg-amber-500 text-white', idleClass: 'bg-gray-200 text-gray-700 hover:bg-gray-300' },
+                { key: 'sick_leave', label: 'Больничный', activeClass: 'bg-emerald-600 text-white', idleClass: 'bg-gray-200 text-gray-700 hover:bg-gray-300' },
+                { key: 'annual_leave', label: 'Отпуск', activeClass: 'bg-orange-500 text-white', idleClass: 'bg-gray-200 text-gray-700 hover:bg-gray-300' },
+                { key: 'fired', label: 'Уволенные', activeClass: 'bg-red-600 text-white', idleClass: 'bg-gray-200 text-gray-700 hover:bg-gray-300' },
+            ];
+            const getEmployeeStatusBadgeMeta = (status) => {
+                const normalized = normalizeEmployeeStatusCode(status);
+                switch (normalized) {
+                    case 'working':
+                        return { label: 'Работает', className: 'border border-green-500 text-green-700 bg-green-50' };
+                    case 'bs':
+                        return { label: 'Б/С', className: 'border border-amber-400 text-amber-700 bg-amber-50' };
+                    case 'sick_leave':
+                        return { label: 'Больничный', className: 'border border-emerald-400 text-emerald-700 bg-emerald-50' };
+                    case 'annual_leave':
+                        return { label: 'Ежегодный отпуск', className: 'border border-orange-300 text-orange-700 bg-orange-50' };
+                    case 'dismissal':
+                        return { label: 'Увольнение', className: 'border border-rose-300 text-rose-700 bg-rose-50' };
+                    case 'fired':
+                        return { label: 'Уволен', className: 'border border-red-500 text-red-700 bg-red-50' };
+                    default:
+                        return { label: normalized || 'Не указан', className: 'border border-gray-400 text-gray-700 bg-gray-50' };
+                }
+            };
+            const renderEmployeeStatusBadge = (status) => {
+                const meta = getEmployeeStatusBadgeMeta(status);
+                return <span className={`${meta.className} px-2 py-1 rounded text-sm whitespace-nowrap`}>{meta.label}</span>;
+            };
             //SORTING
             const [sortField, setSortField] = useState('name'); // primary sort field
             const [sortDirection, setSortDirection] = useState('asc'); // 'asc' | 'desc'
@@ -15388,7 +15436,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('manage_operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-user-edit"></i> <span className="sidebar-text">Управлять операторами</span>
+                                                <i className="fas fa-user-edit"></i> <span className="sidebar-text">Мои сотрудники</span>
                                             </button>
                                         </li>
                                         <li>
@@ -16329,23 +16377,26 @@ const withAccessTokenHeader = (headers = {}) => {
                                     </div>
 
                                     {/* Tabs */}
-                                    <div className="flex space-x-4 mb-6">
-                                    <button
-                                        onClick={() => setActiveUserTab("active")}
-                                        className={`px-4 py-2 rounded-lg font-medium ${
-                                        activeUserTab === "active" ? "bg-green-600 text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                                        }`}
-                                    >
-                                        Активные
-                                    </button>
-                                    <button
-                                        onClick={() => setActiveUserTab("fired")}
-                                        className={`px-4 py-2 rounded-lg font-medium ${
-                                        activeUserTab === "fired" ? "bg-red-600 text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                                        }`}
-                                    >
-                                        Уволенные
-                                    </button>
+                                    <div className="flex flex-wrap gap-3 mb-6">
+                                    {(() => {
+                                        const allUsers = Array.isArray(users) ? users : [];
+                                        return USER_STATUS_FILTER_TABS.map((tab) => {
+                                            const count = allUsers.filter((u) => isEmployeeVisibleByStatusTab(u?.status, tab.key)).length;
+                                            const isActive = activeUserTab === tab.key;
+                                            return (
+                                                <button
+                                                    key={tab.key}
+                                                    onClick={() => setActiveUserTab(tab.key)}
+                                                    className={`px-4 py-2 rounded-lg font-medium text-sm transition ${isActive ? tab.activeClass : tab.idleClass}`}
+                                                >
+                                                    {tab.label}
+                                                    <span className={`ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded font-medium ${isActive ? 'bg-white/90 text-gray-800' : 'bg-white text-gray-700'}`}>
+                                                        {count}
+                                                    </span>
+                                                </button>
+                                            );
+                                        });
+                                    })()}
                                     </div>
 
                                     {isAdminDataLoading ? (
@@ -16353,10 +16404,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     ) : (
                                     (() => {
                                         // Фильтруем по статусу
-                                        const filteredByStatus =
-                                        activeUserTab === "active"
-                                            ? users.filter((u) => u.status === "working" || u.status === "unpaid_leave" || !u.status)
-                                            : users.filter((u) => u.status === "fired");
+                                        const filteredByStatus = (users || []).filter((u) => isEmployeeVisibleByStatusTab(u?.status, activeUserTab));
 
                                         if (filteredByStatus.length === 0) {
                                         return <p className="text-center text-gray-600">No users found.</p>;
@@ -16454,15 +16502,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <td className="px-6 py-4 truncate">{u.name}</td>
                                                         <td className="px-6 py-4">{u.direction || "-"}</td>
                                                         <td className="px-6 py-4">
-                                                            {u.status === "working" || !u.status ? (
-                                                            <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Работает</span>
-                                                            ) : u.status === "unpaid_leave" ? (
-                                                            <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">БС</span>
-                                                            ) : u.status === "fired" ? (
-                                                            <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Уволен</span>
-                                                            ) : (
-                                                            <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{u.status}</span>
-                                                            )}
+                                                            {renderEmployeeStatusBadge(u.status)}
                                                         </td>
                                                         <td className="px-6 py-4">
                                                             {u.hire_date
@@ -16805,7 +16845,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 {view === 'manage_operators' && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <div className="flex justify-between items-center mb-6">
-                                        <h2 className="text-2xl font-semibold text-gray-800">Управлять операторами</h2>
+                                        <h2 className="text-2xl font-semibold text-gray-800">Мои сотрудники</h2>
 
                                         <button
                                             onClick={() => {
@@ -16826,34 +16866,27 @@ const withAccessTokenHeader = (headers = {}) => {
                                         </div>
 
                                         {/* Tabs */}
-                                        <div className="flex items-center space-x-3 mb-6">
+                                        <div className="flex flex-wrap gap-3 mb-6">
                                         {(() => {
-                                            const all = svData?.operators ?? [];
-                                            const activeCount = all.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status).length;
-                                            const firedCount = all.filter(op => op.status === 'fired').length;
-                                            return (
-                                            <>
-                                                <button
-                                                onClick={() => setActiveTab('active')}
-                                                className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeTab === 'active' ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
-                                                role="tab"
-                                                aria-selected={activeTab === 'active'}
-                                                aria-controls="operators-active"
-                                                >
-                                                Активные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{activeCount}</span>
-                                                </button>
-
-                                                <button
-                                                onClick={() => setActiveTab('fired')}
-                                                className={`px-4 py-2 rounded-lg font-medium text-sm focus:outline-none ${activeTab === 'fired' ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
-                                                role="tab"
-                                                aria-selected={activeTab === 'fired'}
-                                                aria-controls="operators-fired"
-                                                >
-                                                Уволенные <span className="ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded bg-white text-gray-700 font-medium">{firedCount}</span>
-                                                </button>
-                                            </>
-                                            );
+                                            const allOps = Array.isArray(svData?.operators) ? svData.operators : [];
+                                            return USER_STATUS_FILTER_TABS.map((tab) => {
+                                                const count = allOps.filter((op) => isEmployeeVisibleByStatusTab(op?.status, tab.key)).length;
+                                                const isActive = activeTab === tab.key;
+                                                return (
+                                                    <button
+                                                        key={tab.key}
+                                                        onClick={() => setActiveTab(tab.key)}
+                                                        className={`px-4 py-2 rounded-lg font-medium text-sm transition ${isActive ? tab.activeClass : tab.idleClass}`}
+                                                        role="tab"
+                                                        aria-selected={isActive}
+                                                    >
+                                                        {tab.label}
+                                                        <span className={`ml-2 inline-flex items-center justify-center px-2 py-0.5 text-xs rounded font-medium ${isActive ? 'bg-white/90 text-gray-800' : 'bg-white text-gray-700'}`}>
+                                                            {count}
+                                                        </span>
+                                                    </button>
+                                                );
+                                            });
                                         })()}
                                         </div>
 
@@ -16862,10 +16895,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         ) : (
                                         (() => {
                                             const operators = svData?.operators ?? [];
-                                            const filteredByStatus =
-                                            activeTab === 'active'
-                                                ? operators.filter(op => op.status === 'working' || op.status === 'unpaid_leave' || !op.status)
-                                                : operators.filter(op => op.status === 'fired');
+                                            const filteredByStatus = operators.filter((op) => isEmployeeVisibleByStatusTab(op?.status, activeTab));
 
                                             if (!filteredByStatus || filteredByStatus.length === 0) {
                                             return <p className="text-center text-gray-600">Операторы не найдены.</p>;
@@ -16981,15 +17011,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             <td className="px-6 py-4 text-left truncate">{op.name}</td>
 
                                                             <td className="px-6 py-4 text-left">
-                                                            {op.status === "working" || !op.status ? (
-                                                                <span className="border border-green-500 text-green-700 px-2 py-1 rounded text-sm">Работает</span>
-                                                            ) : op.status === "unpaid_leave" ? (
-                                                                <span className="border border-yellow-500 text-yellow-700 px-2 py-1 rounded text-sm">БС</span>
-                                                            ) : op.status === "fired" ? (
-                                                                <span className="border border-red-500 text-red-700 px-2 py-1 rounded text-sm">Уволен</span>
-                                                            ) : (
-                                                                <span className="border border-gray-500 text-gray-700 px-2 py-1 rounded text-sm">{op.status}</span>
-                                                            )}
+                                                            {renderEmployeeStatusBadge(op.status)}
                                                             </td>
 
                                                             <td className="px-6 py-4 text-left">
