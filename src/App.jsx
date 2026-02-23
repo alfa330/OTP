@@ -4952,7 +4952,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         );
                     }
                     if (Array.isArray(parsed?.selectedStatuses)) {
-                        const allowed = new Set(['working', 'fired', 'unpaid_leave']);
+                        const allowed = new Set(['working', 'fired', 'unpaid_leave', 'bs', 'sick_leave', 'annual_leave', 'dismissal']);
                         setSelectedStatuses(parsed.selectedStatuses.filter(v => typeof v === 'string' && allowed.has(v)));
                     }
                     if (Array.isArray(parsed?.selectedDirections)) {
@@ -7288,6 +7288,51 @@ const withAccessTokenHeader = (headers = {}) => {
                                         className="rounded"
                                     />
                                     <span className="text-xs">БС</span>
+                                </label>
+                                <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
+                                    <input
+                                        type="checkbox"
+                                        checked={selectedStatuses.includes('bs')}
+                                        onChange={(e) => {
+                                            if (e.target.checked) {
+                                                setSelectedStatuses(prev => [...prev, 'bs']);
+                                            } else {
+                                                setSelectedStatuses(prev => prev.filter(s => s !== 'bs'));
+                                            }
+                                        }}
+                                        className="rounded"
+                                    />
+                                    <span className="text-xs">Б/С (статус)</span>
+                                </label>
+                                <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
+                                    <input
+                                        type="checkbox"
+                                        checked={selectedStatuses.includes('sick_leave')}
+                                        onChange={(e) => {
+                                            if (e.target.checked) {
+                                                setSelectedStatuses(prev => [...prev, 'sick_leave']);
+                                            } else {
+                                                setSelectedStatuses(prev => prev.filter(s => s !== 'sick_leave'));
+                                            }
+                                        }}
+                                        className="rounded"
+                                    />
+                                    <span className="text-xs">Больничный</span>
+                                </label>
+                                <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
+                                    <input
+                                        type="checkbox"
+                                        checked={selectedStatuses.includes('annual_leave')}
+                                        onChange={(e) => {
+                                            if (e.target.checked) {
+                                                setSelectedStatuses(prev => [...prev, 'annual_leave']);
+                                            } else {
+                                                setSelectedStatuses(prev => prev.filter(s => s !== 'annual_leave'));
+                                            }
+                                        }}
+                                        className="rounded"
+                                    />
+                                    <span className="text-xs">Ежегодный отпуск</span>
                                 </label>
                                 <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
                                     <input
