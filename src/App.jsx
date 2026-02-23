@@ -5314,11 +5314,12 @@ const withAccessTokenHeader = (headers = {}) => {
                 const op = operators.find(o => o.id === opId);
                 const activeStatus = getPlannerScheduleStatusForDate(op, fallbackDate);
                 const statusCode = activeStatus?.statusCode || '';
-                const isDismissal = statusCode === 'dismissal';
                 return {
                     statusCode,
                     statusStartDate: activeStatus?.startDate || fallbackDate,
-                    statusEndDate: isDismissal ? '' : (activeStatus?.endDate || fallbackDate),
+                    statusEndDate: statusCode === 'dismissal'
+                        ? (activeStatus?.endDate || '')
+                        : (activeStatus?.endDate || fallbackDate),
                     dismissalReason: activeStatus?.dismissalReason || '',
                     statusComment: activeStatus?.comment || '',
                     statusSaving: false,
@@ -5341,6 +5342,40 @@ const withAccessTokenHeader = (headers = {}) => {
                 }));
             };
 
+            const interruptLocalDismissalByWorkDate = (op, dateStr) => {
+                if (!op || !dateStr) return;
+                const periods = Array.isArray(op.scheduleStatusPeriods) ? op.scheduleStatusPeriods : [];
+                const targetPeriod = periods.find(period => {
+                    const code = period?.statusCode || period?.status_code;
+                    return code === 'dismissal' && isDateWithinStatusPeriod(dateStr, period);
+                });
+                if (!targetPeriod) return;
+
+                const targetId = Number(targetPeriod?.id);
+                const prevDayStr = todayDateStr(addDays(parseDateStr(dateStr), -1));
+                const periodStart = String(targetPeriod?.startDate || targetPeriod?.start_date || '');
+
+                if (!periodStart || periodStart >= String(dateStr)) {
+                    op.scheduleStatusPeriods = periods.filter(period => Number(period?.id) !== targetId);
+                    op.scheduleStatusDays = Object.fromEntries(
+                        Object.entries(op.scheduleStatusDays || {}).filter(([, v]) => Number(v?.id) !== targetId)
+                    );
+                    return;
+                }
+
+                op.scheduleStatusPeriods = periods.map(period => {
+                    if (Number(period?.id) !== targetId) return period;
+                    return {
+                        ...period,
+                        endDate: prevDayStr,
+                        end_date: prevDayStr
+                    };
+                });
+                op.scheduleStatusDays = Object.fromEntries(
+                    Object.entries(op.scheduleStatusDays || {}).filter(([dayKey, v]) => !(Number(v?.id) === targetId && String(dayKey) >= String(dateStr)))
+                );
+            };
+
             const saveScheduleStatusPeriod = async () => {
                 if (!modalState.opId || !modalState.date) return;
                 if (modalState.multipleDates || modalState.multipleTargets) return;
@@ -5348,7 +5383,10 @@ const withAccessTokenHeader = (headers = {}) => {
                 const statusCode = String(modalState.statusCode || '').trim();
                 const startDate = String(modalState.statusStartDate || modalState.date || '').trim();
                 const isDismissal = statusCode === 'dismissal';
-                const endDate = isDismissal ? null : String(modalState.statusEndDate || startDate || '').trim();
+                const endDateRaw = String(modalState.statusEndDate || '').trim();
+                const endDate = isDismissal
+                    ? (endDateRaw || null)
+                    : String(modalState.statusEndDate || startDate || '').trim();
                 const dismissalReason = isDismissal ? String(modalState.dismissalReason || '').trim() : null;
                 const statusComment = String(modalState.statusComment || '').trim();
 
@@ -5412,7 +5450,9 @@ const withAccessTokenHeader = (headers = {}) => {
                             isDayOff: Array.isArray(payload.operator?.daysOff) ? payload.operator.daysOff.includes(m.date) : m.isDayOff,
                             statusCode: selectedDayStatus?.statusCode || m.statusCode || statusCode,
                             statusStartDate: selectedDayStatus?.startDate || startDate,
-                            statusEndDate: (selectedDayStatus?.statusCode === 'dismissal') ? '' : (selectedDayStatus?.endDate || endDate || startDate),
+                            statusEndDate: (selectedDayStatus?.statusCode === 'dismissal')
+                                ? (selectedDayStatus?.endDate || '')
+                                : (selectedDayStatus?.endDate || endDate || startDate),
                             dismissalReason: selectedDayStatus?.dismissalReason || (isDismissal ? dismissalReason : ''),
                             statusComment: selectedDayStatus?.comment ?? (statusComment || '')
                         }));
@@ -5772,13 +5812,16 @@ const withAccessTokenHeader = (headers = {}) => {
                     const copy = prev.map(o => ({
                       ...o,
                       shifts: { ...(o.shifts || {}) },
-                      daysOff: Array.isArray(o.daysOff) ? [...o.daysOff] : []
+                      daysOff: Array.isArray(o.daysOff) ? [...o.daysOff] : [],
+                      scheduleStatusPeriods: Array.isArray(o.scheduleStatusPeriods) ? o.scheduleStatusPeriods.map(p => ({ ...(p || {}) })) : [],
+                      scheduleStatusDays: o.scheduleStatusDays ? Object.fromEntries(Object.entries(o.scheduleStatusDays).map(([k, v]) => [k, { ...(v || {}) }])) : {}
                     }));
                     const touchedPairs = new Set();
 
                     preparedTargets.forEach(target => {
                       const op = copy.find(x => x.id === target.opId);
                       if (!op) return;
+                      interruptLocalDismissalByWorkDate(op, target.date);
                       op.daysOff = op.daysOff.filter(d => d !== target.date);
                       const arr = op.shifts[target.date] ? ([...op.shifts[target.date]]) : [];
                       arr.push({ start, end });
@@ -5910,9 +5953,15 @@ const withAccessTokenHeader = (headers = {}) => {
               
                   // Обновляем локальное состояние (оставляем вашу логику обновления как было)
                   setOperators(prev => {
-                    const copy = prev.map(o => ({ ...o, shifts: { ...o.shifts } }));
+                    const copy = prev.map(o => ({
+                      ...o,
+                      shifts: { ...(o.shifts || {}) },
+                      scheduleStatusPeriods: Array.isArray(o.scheduleStatusPeriods) ? o.scheduleStatusPeriods.map(p => ({ ...(p || {}) })) : [],
+                      scheduleStatusDays: o.scheduleStatusDays ? Object.fromEntries(Object.entries(o.scheduleStatusDays).map(([k, v]) => [k, { ...(v || {}) }])) : {}
+                    }));
                     const op = copy.find(x => x.id === opId);
                     if (!op) return prev;
+                    interruptLocalDismissalByWorkDate(op, date);
                     const arr = op.shifts[date] ? ([...op.shifts[date]]) : [];
                     if (editIndex === null) {
                       arr.push({ start, end });
@@ -7801,7 +7850,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                     onChange={(e) => setModalState(m => ({
                                         ...m,
                                         statusCode: e.target.value,
-                                        statusEndDate: e.target.value === 'dismissal' ? '' : (m.statusEndDate || m.statusStartDate || m.date || ''),
+                                        statusEndDate: e.target.value === 'dismissal'
+                                            ? (m.statusEndDate || '')
+                                            : (m.statusEndDate || m.statusStartDate || m.date || ''),
                                         dismissalReason: e.target.value === 'dismissal' ? m.dismissalReason : '',
                                         statusComment: e.target.value === 'dismissal' ? m.statusComment : (m.statusComment || '')
                                     }))}
@@ -7822,7 +7873,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     onChange={(e) => setModalState(m => ({
                                         ...m,
                                         statusStartDate: e.target.value,
-                                        statusEndDate: (m.statusCode && m.statusCode !== 'dismissal' && (!m.statusEndDate || m.statusEndDate < e.target.value))
+                                        statusEndDate: (m.statusCode && (!m.statusEndDate || m.statusEndDate < e.target.value))
                                             ? e.target.value
                                             : m.statusEndDate
                                     }))}
@@ -7830,16 +7881,27 @@ const withAccessTokenHeader = (headers = {}) => {
                                 />
                             </div>
 
-                            {modalState.statusCode !== 'dismissal' && (
+                            {!!modalState.statusCode && (
                                 <div>
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">Дата окончания</label>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                                        {modalState.statusCode === 'dismissal' ? 'Дата окончания (необязательно)' : 'Дата окончания'}
+                                    </label>
                                     <input
                                         type="date"
-                                        value={modalState.statusEndDate || modalState.statusStartDate || modalState.date || ''}
+                                        value={modalState.statusEndDate || (modalState.statusCode === 'dismissal' ? '' : (modalState.statusStartDate || modalState.date || ''))}
                                         min={modalState.statusStartDate || modalState.date || ''}
                                         onChange={(e) => setModalState(m => ({ ...m, statusEndDate: e.target.value }))}
                                         className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                                     />
+                                    {modalState.statusCode === 'dismissal' && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setModalState(m => ({ ...m, statusEndDate: '' }))}
+                                            className="mt-1 text-xs text-slate-500 hover:text-slate-700 underline underline-offset-2"
+                                        >
+                                            Без даты окончания
+                                        </button>
+                                    )}
                                 </div>
                             )}
 
