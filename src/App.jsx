@@ -4561,6 +4561,9 @@ const withAccessTokenHeader = (headers = {}) => {
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
+            const [myScheduleData, setMyScheduleData] = useState(null);
+            const [myScheduleLoading, setMyScheduleLoading] = useState(false);
+            const [myScheduleError, setMyScheduleError] = useState('');
             const dragState = useRef(null);
             const plannerUiStateLoadedRef = useRef(false);
             const plannerUiStateStorageKey = useMemo(
@@ -4690,6 +4693,7 @@ const withAccessTokenHeader = (headers = {}) => {
             // Загрузка данных с сервера (с повторами при смене user и когда parent-дата пришла позже)
             useEffect(() => {
                 if (!user) return;
+                if (user?.role === 'operator') return;
                 let cancelled = false;
                 const loadSchedules = async () => {
                     try {
@@ -4880,6 +4884,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const minutesInDay = 24 * 60;
             const computeLeftPercent = (m) => (m / minutesInDay) * 100;
             const cellMinWidth = viewMode === 'month' ? 110 : viewMode === 'week' ? 110 : undefined;
+            const isOperatorSelfSchedules = user?.role === 'operator';
             const makeSelectedCellKey = (opId, date) => `${String(opId)}|${date}`;
             const sortSelectedTargets = (targets = []) => (
                 [...targets].sort((a, b) => {
@@ -4908,6 +4913,44 @@ const withAccessTokenHeader = (headers = {}) => {
                 () => new Set(selectedCells.map(target => target.opId)).size,
                 [selectedCells]
             );
+
+            useEffect(() => {
+                if (!isOperatorSelfSchedules || !user) return;
+                const startDate = visibleRange?.[0];
+                const endDate = visibleRange?.[visibleRange.length - 1];
+                if (!startDate || !endDate) return;
+
+                let cancelled = false;
+                const loadMySchedules = async () => {
+                    try {
+                        setMyScheduleLoading(true);
+                        setMyScheduleError('');
+                        const qs = new URLSearchParams({ start_date: startDate, end_date: endDate });
+                        const response = await fetch(`${API_BASE_URL}/api/work_schedules/my?${qs.toString()}`, {
+                            credentials: 'include',
+                            headers: withAccessTokenHeader()
+                        });
+
+                        if (!response.ok) {
+                            const text = await response.text().catch(() => '');
+                            throw new Error(text || `HTTP ${response.status}`);
+                        }
+
+                        const data = await response.json();
+                        if (cancelled) return;
+                        setMyScheduleData(data?.operator || null);
+                    } catch (error) {
+                        if (cancelled) return;
+                        console.error('Error loading my work schedules:', error);
+                        setMyScheduleError('Не удалось загрузить мои смены');
+                    } finally {
+                        if (!cancelled) setMyScheduleLoading(false);
+                    }
+                };
+
+                loadMySchedules();
+                return () => { cancelled = true; };
+            }, [isOperatorSelfSchedules, user, visibleRange]);
 
             const openEditModal = (opId, date, editIndex = null) => {
                 const op = operators.find(o => o.id === opId);
@@ -5516,6 +5559,144 @@ const withAccessTokenHeader = (headers = {}) => {
                 );
                 return { operatorsCount, breaksCount, totalMinutes };
             }, [dayBreaksByOperator]);
+
+            const myScheduleDayCards = useMemo(() => {
+                const daysOffSet = new Set(Array.isArray(myScheduleData?.daysOff) ? myScheduleData.daysOff : []);
+                return (visibleRange || []).map(dateStr => {
+                    const shifts = Array.isArray(myScheduleData?.shifts?.[dateStr]) ? myScheduleData.shifts[dateStr] : [];
+                    const normalizedShifts = shifts.map(seg => {
+                        const sMin = timeToMinutes(seg.start);
+                        let eMin = timeToMinutes(seg.end);
+                        if (eMin <= sMin) eMin += 1440;
+                        return {
+                            ...seg,
+                            durationMin: Math.max(0, eMin - sMin),
+                            breaks: Array.isArray(seg.breaks) ? seg.breaks : []
+                        };
+                    });
+                    return {
+                        date: dateStr,
+                        isDayOff: daysOffSet.has(dateStr),
+                        shifts: normalizedShifts
+                    };
+                });
+            }, [myScheduleData, visibleRange]);
+
+            const formatBreakMinuteWithDay = (minuteValue) => {
+                const val = Number(minuteValue);
+                if (!Number.isFinite(val)) return '—';
+                const dayOffset = Math.floor(val / 1440);
+                const base = minutesToTime(val % 1440);
+                return dayOffset > 0 ? `${base} (+${dayOffset})` : base;
+            };
+
+            if (isOperatorSelfSchedules) {
+                return (
+                    <div className="px-4 py-2 min-h-screen bg-slate-50">
+                        <div className="flex items-start gap-4 mb-0 h-[calc(100vh-1rem)]">
+                            <div className="flex flex-col gap-3">
+                                <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
+                            </div>
+
+                            <div className="flex-1 min-w-0 flex flex-col h-full">
+                                <div className="flex items-center justify-between mb-3">
+                                    <div className="flex gap-2 items-center">
+                                        <h2 className="text-2xl font-semibold flex items-center gap-2">
+                                            <i className="fas fa-calendar-user text-blue-600"></i>
+                                            Мои смены
+                                        </h2>
+                                        <div className="flex items-center gap-1 ml-4">
+                                            <button onClick={() => setViewMode('day')} className={`px-3 py-1 rounded ${viewMode === 'day' ? 'bg-slate-800 text-white' : 'bg-white'}`}>День</button>
+                                            <button onClick={() => setViewMode('week')} className={`px-3 py-1 rounded ${viewMode === 'week' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Неделя</button>
+                                            <button onClick={() => setViewMode('month')} className={`px-3 py-1 rounded ${viewMode === 'month' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Месяц</button>
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-2 items-center">
+                                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-left"></i></button>
+                                        <div className="text-sm">{currentDate.toLocaleDateString()}</div>
+                                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-right"></i></button>
+                                    </div>
+                                </div>
+
+                                <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 mb-3">
+                                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                                        <div className="font-semibold text-slate-900">{myScheduleData?.name || user?.name || 'Оператор'}</div>
+                                        <div className="text-slate-500">{myScheduleData?.direction || 'Без направления'}</div>
+                                        {myScheduleData?.rate !== undefined && myScheduleData?.rate !== null && (
+                                            <div className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-xs font-medium">Ставка: {myScheduleData.rate}</div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div className="flex-1 min-h-0 overflow-auto">
+                                    {myScheduleLoading && (
+                                        <div className="bg-white rounded-xl border border-slate-200 p-6 text-slate-600 text-sm">
+                                            <i className="fas fa-spinner fa-spin mr-2"></i>Загрузка смен...
+                                        </div>
+                                    )}
+
+                                    {!myScheduleLoading && myScheduleError && (
+                                        <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm">
+                                            {myScheduleError}
+                                        </div>
+                                    )}
+
+                                    {!myScheduleLoading && !myScheduleError && (
+                                        <div className="space-y-3 pb-2">
+                                            {myScheduleDayCards.map(dayCard => (
+                                                <div key={`my-shifts-${dayCard.date}`} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                                                    <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
+                                                        <div className="font-semibold text-slate-900">{dayCard.date}</div>
+                                                        {dayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold">Выходной</span>}
+                                                    </div>
+                                                    <div className="p-4">
+                                                        {!dayCard.isDayOff && dayCard.shifts.length === 0 && (
+                                                            <div className="text-sm text-slate-400">Смен нет</div>
+                                                        )}
+                                                        {dayCard.isDayOff && dayCard.shifts.length === 0 && (
+                                                            <div className="text-sm text-red-600">Отмечено как выходной</div>
+                                                        )}
+                                                        <div className="space-y-3">
+                                                            {dayCard.shifts.map((seg, idx) => {
+                                                                const isCrossing = timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00';
+                                                                return (
+                                                                    <div key={`${dayCard.date}-${idx}-${seg.start}-${seg.end}`} className="rounded-lg border border-slate-200 p-3 bg-slate-50">
+                                                                        <div className="flex flex-wrap items-center gap-2 mb-2">
+                                                                            <span className="font-semibold text-slate-900">{seg.start} — {seg.end}{isCrossing ? ' (+1)' : ''}</span>
+                                                                            <span className="text-xs text-slate-500">{(seg.durationMin / 60).toFixed(2)} ч</span>
+                                                                        </div>
+                                                                        <div>
+                                                                            <div className="text-xs font-medium text-slate-600 mb-1 flex items-center gap-2">
+                                                                                <i className="fas fa-mug-hot text-amber-600"></i>
+                                                                                Перерывы
+                                                                            </div>
+                                                                            {seg.breaks.length === 0 ? (
+                                                                                <div className="text-xs text-slate-400">Нет перерывов</div>
+                                                                            ) : (
+                                                                                <div className="flex flex-wrap gap-2">
+                                                                                    {seg.breaks.map((b, bi) => (
+                                                                                        <div key={`${dayCard.date}-${idx}-break-${bi}`} className="px-2 py-1 rounded border border-amber-200 bg-amber-50 text-xs text-amber-900">
+                                                                                            {formatBreakMinuteWithDay(b.start)} — {formatBreakMinuteWithDay(b.end)}
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
 
             return (
                 <div className="px-4 py-2 min-h-screen bg-slate-50">
@@ -13398,6 +13579,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                             </button>
                                         </li>
                                         <li>
+                                            <button onClick={() => { setView('work_schedules'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-calendar-alt"></i> <span className="sidebar-text">Мои смены</span>
+                                            </button>
+                                        </li>
+                                        <li>
                                             <button onClick={() => { setView('evaluation'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'evaluation' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-chart-bar"></i> <span className="sidebar-text">Мои оценки</span>
                                             </button>
@@ -15291,6 +15477,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         )}
                         {user.role === 'operator' && (
                             <>
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                                 {view === 'profile' && ( 
                                   <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 lg:mb-8 text-gray-900 flex items-center gap-2">
