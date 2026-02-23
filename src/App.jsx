@@ -4566,6 +4566,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [myScheduleError, setMyScheduleError] = useState('');
             const [showMyEmptyDays, setShowMyEmptyDays] = useState(false);
             const [expandedMyDayCards, setExpandedMyDayCards] = useState({});
+            const [showOperatorMobileCalendar, setShowOperatorMobileCalendar] = useState(false);
             const [myNowTick, setMyNowTick] = useState(0);
             const dragState = useRef(null);
             const plannerUiStateLoadedRef = useRef(false);
@@ -5879,34 +5880,53 @@ const withAccessTokenHeader = (headers = {}) => {
 
             if (isOperatorSelfSchedules) {
                 return (
-                    <div className="px-4 py-2 min-h-screen bg-slate-50">
-                        <div className="flex items-start gap-4 mb-0 h-[calc(100vh-1rem)]">
-                            <div className="flex flex-col gap-3">
+                    <div className="px-2 sm:px-4 py-2 min-h-screen bg-slate-50">
+                        <div className="flex flex-col lg:flex-row items-stretch lg:items-start gap-3 lg:gap-4 mb-0 lg:h-[calc(100vh-1rem)]">
+                            <div className="lg:hidden">
+                                <button
+                                    type="button"
+                                    onClick={() => setShowOperatorMobileCalendar(v => !v)}
+                                    className="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm"
+                                >
+                                    <span className="flex items-center gap-2">
+                                        <i className="fas fa-calendar-alt text-blue-600"></i>
+                                        Календарь
+                                    </span>
+                                    <i className={`fas ${showOperatorMobileCalendar ? 'fa-chevron-up' : 'fa-chevron-down'} text-xs text-slate-500`}></i>
+                                </button>
+                                {showOperatorMobileCalendar && (
+                                    <div className="mt-2 flex justify-center">
+                                        <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="hidden lg:flex flex-col gap-3">
                                 <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
                             </div>
 
-                            <div className="flex-1 min-w-0 flex flex-col h-full">
-                                <div className="flex items-center justify-between mb-3">
+                            <div className="flex-1 min-w-0 flex flex-col lg:h-full">
+                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
                                     <div className="flex flex-wrap gap-2 items-center">
-                                        <h2 className="text-2xl font-semibold flex items-center gap-2 mr-1">
+                                        <h2 className="text-xl sm:text-2xl font-semibold flex items-center gap-2 mr-0 sm:mr-1">
                                             <i className="fas fa-calendar-user text-blue-600"></i>
                                             Мои смены
                                         </h2>
-                                        <div className="flex items-center gap-1 ml-4">
-                                            <button onClick={() => setViewMode('day')} className={`px-3 py-1 rounded ${viewMode === 'day' ? 'bg-slate-800 text-white' : 'bg-white'}`}>День</button>
-                                            <button onClick={() => setViewMode('week')} className={`px-3 py-1 rounded ${viewMode === 'week' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Неделя</button>
-                                            <button onClick={() => setViewMode('month')} className={`px-3 py-1 rounded ${viewMode === 'month' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Месяц</button>
+                                        <div className="flex items-center gap-1 sm:ml-3">
+                                            <button onClick={() => setViewMode('day')} className={`px-2.5 sm:px-3 py-1 rounded text-sm ${viewMode === 'day' ? 'bg-slate-800 text-white' : 'bg-white'}`}>День</button>
+                                            <button onClick={() => setViewMode('week')} className={`px-2.5 sm:px-3 py-1 rounded text-sm ${viewMode === 'week' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Неделя</button>
+                                            <button onClick={() => setViewMode('month')} className={`px-2.5 sm:px-3 py-1 rounded text-sm ${viewMode === 'month' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Месяц</button>
                                         </div>
                                         <button
                                             onClick={() => setCurrentDate(new Date())}
-                                            className="ml-2 px-3 py-1 rounded bg-white border border-slate-200 hover:bg-slate-50 text-sm"
+                                            className="sm:ml-2 px-3 py-1 rounded bg-white border border-slate-200 hover:bg-slate-50 text-sm"
                                         >
                                             Сегодня
                                         </button>
                                     </div>
-                                    <div className="flex gap-2 items-center">
+                                    <div className="flex gap-2 items-center self-stretch sm:self-auto justify-between sm:justify-start">
                                         <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-left"></i></button>
-                                        <div className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-center leading-tight">
+                                        <div className="flex-1 sm:flex-none px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-center leading-tight">
                                             <div className="text-[11px] uppercase tracking-wide text-slate-500">{formatWeekdayRu(currentDate, 'short')}</div>
                                             <div className="text-sm font-semibold text-slate-900">{formatDateRuDayMonth(currentDate)}</div>
                                         </div>
@@ -5914,21 +5934,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                     </div>
                                 </div>
 
-                                <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 mb-3">
-                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-                                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-                                            <div className="font-semibold text-slate-900">{myScheduleData?.name || user?.name || 'Оператор'}</div>
-                                            <div className="text-slate-500">{myScheduleData?.direction || 'Без направления'}</div>
-                                            {myScheduleData?.rate !== undefined && myScheduleData?.rate !== null && (
-                                                <div className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-xs font-medium">Ставка: {myScheduleData.rate}</div>
-                                            )}
-                                            <div className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-xs">
-                                                Период: {visibleRange[0] ? formatDateRuShort(visibleRange[0]) : '—'}{visibleRange.length > 1 ? ` — ${formatDateRuShort(visibleRange[visibleRange.length - 1])}` : ''}
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-                                        <div className={`rounded-lg border p-3 mb-3 ${myNowStatus.panelClass}`}>
+                                <div className="grid grid-cols-1 gap-3 mb-3">
+                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-3 sm:p-4">
+                                        <div className="lg:grid lg:grid-cols-2 lg:gap-4">
+                                        <div className={`rounded-lg border p-3 mb-3 lg:mb-0 ${myNowStatus.panelClass}`}>
                                             <div className="flex items-center justify-between gap-2">
                                                 <div className="text-[11px] uppercase tracking-wide text-slate-600">Статус сейчас</div>
                                                 <div className={`px-2 py-0.5 rounded-full text-xs font-semibold ${myNowStatus.badgeClass}`}>
@@ -5944,6 +5953,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 </div>
                                             )}
                                         </div>
+                                        <div>
                                         <div className="flex items-center justify-between mb-2">
                                             <div className="text-sm font-semibold text-slate-900">Отображение</div>
                                             <button
@@ -6004,10 +6014,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 </div>
                                             )}
                                         </div>
+                                        </div>
+                                        </div>
                                     </div>
                                 </div>
 
-                                <div className="flex-1 min-h-0 overflow-auto">
+                                <div className="flex-1 min-h-0 overflow-visible lg:overflow-auto">
                                     {myScheduleLoading && (
                                         <div className="bg-white rounded-xl border border-slate-200 p-6 text-slate-600 text-sm">
                                             <i className="fas fa-spinner fa-spin mr-2"></i>Загрузка смен...
@@ -6048,71 +6060,75 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     <span className="w-2 h-2 rounded-sm bg-amber-300 border border-amber-500/70"></span> Перерыв
                                                                 </span>
                                                             </div>
-                                                            <div className="mb-2">
-                                                                <div className="relative h-7 px-1 isolate bg-white rounded">
-                                                                    <div className="absolute inset-0 flex items-end z-20">
-                                                                        {Array.from({ length: 24 }).map((_, i) => (
-                                                                            <div key={i} className="flex-1 text-center text-[11px] leading-[12px] text-slate-600">{pad(i)}</div>
-                                                                        ))}
-                                                                    </div>
-                                                                    <div className="absolute inset-0 flex z-10">
-                                                                        {Array.from({ length: 24 }).map((_, i) => (
-                                                                            <div key={i} className="flex-1 border-r last:border-r-0 border-slate-200" />
-                                                                        ))}
-                                                                    </div>
-                                                                </div>
-                                                                <div className="relative h-6 mt-1 px-1 isolate bg-white rounded">
-                                                                    <div className="absolute inset-0 flex items-start z-20">
-                                                                        {myTotalsPerHourForDay.map((t, hour) => (
-                                                                            <div key={hour} className={`flex-1 text-center text-[10px] tabular-nums ${t > 0 ? 'text-slate-700 font-medium' : 'text-slate-300'}`}>{t > 0 ? t.toFixed(1) : '0'}</div>
-                                                                        ))}
-                                                                    </div>
-                                                                    <div className="absolute inset-0 flex pointer-events-none z-10">
-                                                                        {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-200" />))}
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-                                                            <div className="relative h-20 rounded-lg border border-slate-200 bg-slate-50 overflow-hidden">
-                                                                <div className="absolute inset-0 flex">
-                                                                    {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-200/80" />))}
-                                                                </div>
-                                                                {myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
-                                                                    <div className="absolute inset-0 flex items-center justify-center text-sm font-medium text-red-600">Выходной</div>
-                                                                )}
-                                                                {!myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
-                                                                    <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">Нет смен</div>
-                                                                )}
-                                                                {myTimelineParts.map((p, idx) => {
-                                                                    const srcSeg = myTimelineOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex];
-                                                                    const isNight = srcSeg && (timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
-                                                                    const label = srcSeg
-                                                                        ? `${srcSeg.start} — ${srcSeg.end}${(isNight && srcSeg.end !== '00:00') ? ' (+1)' : ''}`
-                                                                        : `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
-                                                                    return (
-                                                                        <div
-                                                                            key={`my-timeline-${idx}`}
-                                                                            className="absolute top-4 h-12 rounded text-xs overflow-hidden flex items-start"
-                                                                            style={{
-                                                                                left: `${computeLeftPercent(p.start)}%`,
-                                                                                width: `${((p.end - p.start) / minutesInDay) * 100}%`,
-                                                                                background: isNight ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)",
-                                                                                color: "white"
-                                                                            }}
-                                                                        >
-                                                                            <div className="px-2 py-1 truncate text-[11px] border border-white/25 bg-white/10 rounded-sm mt-1 ml-1">{label}</div>
-                                                                            {(getBreakPartsForPart(myTimelineOperator, p, myCurrentDayCard.date) || []).map((b, bi) => (
-                                                                                <div
-                                                                                    key={`my-timeline-break-${idx}-${bi}`}
-                                                                                    className="absolute top-0 h-full border border-amber-500/80 bg-amber-300/95"
-                                                                                    style={{
-                                                                                        left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
-                                                                                        width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`
-                                                                                    }}
-                                                                                />
-                                                                            ))}
+                                                            <div className="overflow-x-auto">
+                                                                <div className="min-w-[720px]">
+                                                                    <div className="mb-2">
+                                                                        <div className="relative h-7 px-1 isolate bg-white rounded">
+                                                                            <div className="absolute inset-0 flex items-end z-20">
+                                                                                {Array.from({ length: 24 }).map((_, i) => (
+                                                                                    <div key={i} className="flex-1 text-center text-[11px] leading-[12px] text-slate-600">{pad(i)}</div>
+                                                                                ))}
+                                                                            </div>
+                                                                            <div className="absolute inset-0 flex z-10">
+                                                                                {Array.from({ length: 24 }).map((_, i) => (
+                                                                                    <div key={i} className="flex-1 border-r last:border-r-0 border-slate-200" />
+                                                                                ))}
+                                                                            </div>
                                                                         </div>
-                                                                    );
-                                                                })}
+                                                                        <div className="relative h-6 mt-1 px-1 isolate bg-white rounded">
+                                                                            <div className="absolute inset-0 flex items-start z-20">
+                                                                                {myTotalsPerHourForDay.map((t, hour) => (
+                                                                                    <div key={hour} className={`flex-1 text-center text-[10px] tabular-nums ${t > 0 ? 'text-slate-700 font-medium' : 'text-slate-300'}`}>{t > 0 ? t.toFixed(1) : '0'}</div>
+                                                                                ))}
+                                                                            </div>
+                                                                            <div className="absolute inset-0 flex pointer-events-none z-10">
+                                                                                {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-200" />))}
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="relative h-20 rounded-lg border border-slate-200 bg-slate-50 overflow-hidden">
+                                                                        <div className="absolute inset-0 flex">
+                                                                            {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-200/80" />))}
+                                                                        </div>
+                                                                        {myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
+                                                                            <div className="absolute inset-0 flex items-center justify-center text-sm font-medium text-red-600">Выходной</div>
+                                                                        )}
+                                                                        {!myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
+                                                                            <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">Нет смен</div>
+                                                                        )}
+                                                                        {myTimelineParts.map((p, idx) => {
+                                                                            const srcSeg = myTimelineOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                                                                            const isNight = srcSeg && (timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
+                                                                            const label = srcSeg
+                                                                                ? `${srcSeg.start} — ${srcSeg.end}${(isNight && srcSeg.end !== '00:00') ? ' (+1)' : ''}`
+                                                                                : `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                            return (
+                                                                                <div
+                                                                                    key={`my-timeline-${idx}`}
+                                                                                    className="absolute top-4 h-12 rounded text-xs overflow-hidden flex items-start"
+                                                                                    style={{
+                                                                                        left: `${computeLeftPercent(p.start)}%`,
+                                                                                        width: `${((p.end - p.start) / minutesInDay) * 100}%`,
+                                                                                        background: isNight ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)",
+                                                                                        color: "white"
+                                                                                    }}
+                                                                                >
+                                                                                    <div className="px-2 py-1 truncate text-[11px] border border-white/25 bg-white/10 rounded-sm mt-1 ml-1">{label}</div>
+                                                                                    {(getBreakPartsForPart(myTimelineOperator, p, myCurrentDayCard.date) || []).map((b, bi) => (
+                                                                                        <div
+                                                                                            key={`my-timeline-break-${idx}-${bi}`}
+                                                                                            className="absolute top-0 h-full border border-amber-500/80 bg-amber-300/95"
+                                                                                            style={{
+                                                                                                left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
+                                                                                                width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`
+                                                                                            }}
+                                                                                        />
+                                                                                    ))}
+                                                                                </div>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                </div>
                                                             </div>
                                                         </div>
                                                     </div>
@@ -6361,6 +6377,21 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             {visibleRange[0] ? formatDateRuShort(visibleRange[0]) : '—'}
                                                             {visibleRange.length > 1 ? ` — ${formatDateRuShort(visibleRange[visibleRange.length - 1])}` : ''}
                                                         </div>
+                                                        <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
+                                                            <span className="px-2 py-0.5 rounded-md bg-slate-50 border border-slate-200 text-slate-700">
+                                                                {myScheduleData?.name || user?.name || 'Оператор'}
+                                                            </span>
+                                                            {(myScheduleData?.direction || user?.direction) && (
+                                                                <span className="px-2 py-0.5 rounded-md bg-slate-50 border border-slate-200 text-slate-700">
+                                                                    {myScheduleData?.direction || user?.direction}
+                                                                </span>
+                                                            )}
+                                                            {(myScheduleData?.rate ?? null) !== null && (
+                                                                <span className="px-2 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-blue-700">
+                                                                    Ставка: {myScheduleData?.rate}
+                                                                </span>
+                                                            )}
+                                                        </div>
                                                     </div>
                                                     <div className="flex flex-wrap gap-1.5 text-xs">
                                                         <span className="px-2 py-1 rounded-md bg-slate-50 border border-slate-200 text-slate-700">
@@ -6371,7 +6402,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </span>
                                                     </div>
                                                 </div>
-                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
                                                     <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                                                         <div className="text-[11px] uppercase tracking-wide text-slate-500">Смен</div>
                                                         <div className="text-lg font-bold text-slate-900 tabular-nums">{myScheduleSummary.shiftsCount}</div>
