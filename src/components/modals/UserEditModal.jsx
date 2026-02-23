@@ -1,5 +1,22 @@
 ﻿import React, { useEffect, useState } from 'react';
 
+const PERIOD_STATUS_VALUES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
+const DISMISSAL_REASON_OPTIONS = [
+    'Б/С на летний период',
+    'Мошенничество',
+    'Нарушение дисциплины',
+    'не может совмещать с учебой',
+    'не может совмещать с работой',
+    'не нравится работа',
+    'выгорание',
+    'не устраивает доход',
+    'перевод в другой отдел',
+    'переезд',
+    'по состоянию здоровья',
+    'пропал',
+    'слабый/не выполняет kpi'
+];
+
 const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], onSave, user }) => {
     const [editedUser, setEditedUser] = useState(userToEdit || {});
     const [isLoading, setIsLoading] = useState(false);
@@ -17,17 +34,29 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         if (match) return `${match[3]}-${match[2]}-${match[1]}`;
         return "";
     };
+    const todayInputDate = () => {
+        const d = new Date();
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    const isPeriodStatus = (value) => PERIOD_STATUS_VALUES.has(String(value || ''));
 
     useEffect(() => {
         // Устанавливаем defaults при открытии для режима создания
         const base = userToEdit || {};
+        const initialStatus = base.status ?? "working";
+        const initialDate = todayInputDate();
         const defaults = {
         rate: base.rate ?? 1.0,
         direction_id: base.direction_id ?? "",
         supervisor_id: base.supervisor_id ?? (user?.role === 'admin' ? "" : (user?.id ?? "")),
-        status: base.status ?? "working",
+        status: initialStatus,
         gender: base.gender ?? "",
         birth_date: base.birth_date ?? "",
+        status_period_start_date: initialDate,
+        status_period_end_date: initialStatus === 'dismissal' ? "" : initialDate,
+        status_period_dismissal_reason: "",
+        status_period_comment: "",
+        use_schedule_status_period: false,
         ...base,
         };
         setEditedUser(defaults);
@@ -66,6 +95,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         direction_id: "",
         supervisor_id: user?.role === 'admin' ? "" : (user?.id ?? ""),
         status: "working",
+        status_period_start_date: todayInputDate(),
+        status_period_end_date: todayInputDate(),
+        status_period_dismissal_reason: "",
+        status_period_comment: "",
+        use_schedule_status_period: false,
         });
         setModalError("");
         setCreatedCredentials(null);
@@ -95,6 +129,29 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         if (!editedUser.hire_date) {
         setModalError("Дата найма обязательна.");
         return;
+        }
+
+        if (!isCreateMode && isPeriodStatus(editedUser?.status) && editedUser?.use_schedule_status_period) {
+        const startDate = String(editedUser?.status_period_start_date || "").trim();
+        const endDate = String(editedUser?.status_period_end_date || "").trim();
+        if (!startDate) {
+            setModalError("Для статусного периода укажите дату начала.");
+            return;
+        }
+        if (editedUser.status !== 'dismissal' && !endDate) {
+            setModalError("Для статусного периода укажите дату окончания.");
+            return;
+        }
+        if (editedUser.status === 'dismissal') {
+            if (!String(editedUser?.status_period_dismissal_reason || "").trim()) {
+                setModalError("Для увольнения укажите причину.");
+                return;
+            }
+            if (!String(editedUser?.status_period_comment || "").trim()) {
+                setModalError("Для увольнения комментарий обязателен.");
+                return;
+            }
+        }
         }
 
         setModalError("");
@@ -283,15 +340,97 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Статус</label>
                         <select
                         value={editedUser?.status || "working"}
-                        onChange={(e) => setEditedUser({ ...editedUser, status: e.target.value })}
+                        onChange={(e) => {
+                            const nextStatus = e.target.value;
+                            const currentStart = editedUser?.status_period_start_date || todayInputDate();
+                            setEditedUser({
+                                ...editedUser,
+                                status: nextStatus,
+                                status_period_start_date: currentStart,
+                                status_period_end_date: nextStatus === 'dismissal' ? "" : (editedUser?.status_period_end_date || currentStart),
+                                use_schedule_status_period: isPeriodStatus(nextStatus) ? true : editedUser?.use_schedule_status_period
+                            });
+                        }}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                         disabled={isLoading || !!createdCredentials}
                         >
                         <option value="working">Работает</option>
                         <option value="fired">Уволен</option>
                         <option value="unpaid_leave">Без содержания</option>
+                        <option value="bs">Б/С</option>
+                        <option value="sick_leave">Больничный</option>
+                        <option value="annual_leave">Ежегодный отпуск</option>
+                        <option value="dismissal">Увольнение (период)</option>
                         </select>
                     </div>
+
+                    {isPeriodStatus(editedUser?.status) && (
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
+                        <div className="text-xs text-slate-600">
+                            Для этих статусов используется логика планировщика: статус сохраняется как период.
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата начала</label>
+                                <input
+                                    type="date"
+                                    value={editedUser?.status_period_start_date || ""}
+                                    onChange={(e) => setEditedUser({
+                                        ...editedUser,
+                                        status_period_start_date: e.target.value,
+                                        use_schedule_status_period: true,
+                                        status_period_end_date: (editedUser?.status !== 'dismissal' && (!editedUser?.status_period_end_date || editedUser.status_period_end_date < e.target.value))
+                                            ? e.target.value
+                                            : editedUser?.status_period_end_date
+                                    })}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading || !!createdCredentials}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                                    {editedUser?.status === 'dismissal' ? 'Дата окончания (необязательно)' : 'Дата окончания'}
+                                </label>
+                                <input
+                                    type="date"
+                                    value={editedUser?.status_period_end_date || ""}
+                                    min={editedUser?.status_period_start_date || ""}
+                                    onChange={(e) => setEditedUser({ ...editedUser, status_period_end_date: e.target.value, use_schedule_status_period: true })}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading || !!createdCredentials}
+                                />
+                            </div>
+                        </div>
+                        {editedUser?.status === 'dismissal' && (
+                            <>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Причина увольнения</label>
+                                <select
+                                    value={editedUser?.status_period_dismissal_reason || ""}
+                                    onChange={(e) => setEditedUser({ ...editedUser, status_period_dismissal_reason: e.target.value, use_schedule_status_period: true })}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading || !!createdCredentials}
+                                >
+                                    <option value="">Выберите причину</option>
+                                    {DISMISSAL_REASON_OPTIONS.map(reason => (
+                                        <option key={reason} value={reason}>{reason}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Комментарий (обязательно)</label>
+                                <textarea
+                                    value={editedUser?.status_period_comment || ""}
+                                    onChange={(e) => setEditedUser({ ...editedUser, status_period_comment: e.target.value, use_schedule_status_period: true })}
+                                    rows={3}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    disabled={isLoading || !!createdCredentials}
+                                />
+                            </div>
+                            </>
+                        )}
+                    </div>
+                    )}
 
                     {user?.role === "admin" && (
                     <div>
@@ -437,15 +576,97 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Статус</label>
                             <select
                             value={editedUser?.status || "working"}
-                            onChange={(e) => setEditedUser({ ...editedUser, status: e.target.value })}
+                            onChange={(e) => {
+                                const nextStatus = e.target.value;
+                                const currentStart = editedUser?.status_period_start_date || todayInputDate();
+                                setEditedUser({
+                                    ...editedUser,
+                                    status: nextStatus,
+                                    status_period_start_date: currentStart,
+                                    status_period_end_date: nextStatus === 'dismissal' ? "" : (editedUser?.status_period_end_date || currentStart),
+                                    use_schedule_status_period: isPeriodStatus(nextStatus) ? true : editedUser?.use_schedule_status_period
+                                });
+                            }}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                             disabled={isLoading}
                             >
                             <option value="working">Работает</option>
                             <option value="fired">Уволен</option>
                             <option value="unpaid_leave">Без содержания</option>
+                            <option value="bs">Б/С</option>
+                            <option value="sick_leave">Больничный</option>
+                            <option value="annual_leave">Ежегодный отпуск</option>
+                            <option value="dismissal">Увольнение (период)</option>
                             </select>
                         </div>
+
+                        {isPeriodStatus(editedUser?.status) && (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
+                            <div className="text-xs text-slate-600">
+                                Статус будет сохранен как период графика (аналогично планировщику).
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата начала</label>
+                                    <input
+                                        type="date"
+                                        value={editedUser?.status_period_start_date || ""}
+                                        onChange={(e) => setEditedUser({
+                                            ...editedUser,
+                                            status_period_start_date: e.target.value,
+                                            use_schedule_status_period: true,
+                                            status_period_end_date: (editedUser?.status !== 'dismissal' && (!editedUser?.status_period_end_date || editedUser.status_period_end_date < e.target.value))
+                                                ? e.target.value
+                                                : editedUser?.status_period_end_date
+                                        })}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                        disabled={isLoading}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                                        {editedUser?.status === 'dismissal' ? 'Дата окончания (необязательно)' : 'Дата окончания'}
+                                    </label>
+                                    <input
+                                        type="date"
+                                        value={editedUser?.status_period_end_date || ""}
+                                        min={editedUser?.status_period_start_date || ""}
+                                        onChange={(e) => setEditedUser({ ...editedUser, status_period_end_date: e.target.value, use_schedule_status_period: true })}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                        disabled={isLoading}
+                                    />
+                                </div>
+                            </div>
+                            {editedUser?.status === 'dismissal' && (
+                                <>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Причина увольнения</label>
+                                    <select
+                                        value={editedUser?.status_period_dismissal_reason || ""}
+                                        onChange={(e) => setEditedUser({ ...editedUser, status_period_dismissal_reason: e.target.value, use_schedule_status_period: true })}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                        disabled={isLoading}
+                                    >
+                                        <option value="">Выберите причину</option>
+                                        {DISMISSAL_REASON_OPTIONS.map(reason => (
+                                            <option key={reason} value={reason}>{reason}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Комментарий (обязательно)</label>
+                                    <textarea
+                                        value={editedUser?.status_period_comment || ""}
+                                        onChange={(e) => setEditedUser({ ...editedUser, status_period_comment: e.target.value, use_schedule_status_period: true })}
+                                        rows={3}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                        disabled={isLoading}
+                                    />
+                                </div>
+                                </>
+                            )}
+                        </div>
+                        )}
 
                         {userToEdit?.role !== "sv" && (
                             <>

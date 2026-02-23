@@ -13344,6 +13344,44 @@ const withAccessTokenHeader = (headers = {}) => {
                     if (match) return `${match[3]}-${match[2]}-${match[1]}`;
                     return datePart;
                 };
+                const PERIOD_STATUSES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
+                const isPeriodStatusValue = (v) => PERIOD_STATUSES.has(String(v || '').trim());
+                const saveUserStatusPeriodViaPlannerApi = async (targetUserId, sourceUser) => {
+                    const statusCode = String(sourceUser?.status || '').trim();
+                    if (!isPeriodStatusValue(statusCode)) return;
+
+                    const startDate = normalizeDateForApi(sourceUser?.status_period_start_date);
+                    const endDate = normalizeDateForApi(sourceUser?.status_period_end_date);
+                    const dismissalReason = String(sourceUser?.status_period_dismissal_reason || '').trim() || null;
+                    const comment = String(sourceUser?.status_period_comment || '').trim() || null;
+
+                    if (!startDate) {
+                        throw new Error('Для статусного периода укажите дату начала');
+                    }
+                    if (statusCode !== 'dismissal' && !endDate) {
+                        throw new Error('Для статусного периода укажите дату окончания');
+                    }
+                    if (statusCode === 'dismissal') {
+                        if (!dismissalReason) throw new Error('Для увольнения укажите причину');
+                        if (!comment) throw new Error('Для увольнения комментарий обязателен');
+                    }
+
+                    await axios.post(`${API_BASE_URL}/api/work_schedules/status_period`, {
+                        operator_id: Number(targetUserId),
+                        status_code: statusCode,
+                        start_date: startDate,
+                        end_date: statusCode === 'dismissal' ? (endDate || null) : endDate,
+                        dismissal_reason: statusCode === 'dismissal' ? dismissalReason : null,
+                        comment: statusCode === 'dismissal' ? comment : (comment || null)
+                    }, {
+                        withCredentials: true,
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-API-Key': user.apiKey,
+                            'X-User-Id': user.id
+                        }
+                    });
+                };
                 setIsLoading(true);
                 
                 try {
@@ -13391,6 +13429,18 @@ const withAccessTokenHeader = (headers = {}) => {
 
                         const data = response.data;
                         if (data.status === 'success') {
+                            if (editedUser?.use_schedule_status_period && isPeriodStatusValue(editedUser?.status) && data?.id) {
+                                await saveUserStatusPeriodViaPlannerApi(data.id, editedUser);
+                            } else if (editedUser?.status && !isPeriodStatusValue(editedUser.status) && editedUser.status !== 'working' && data?.id) {
+                                // add_user currently creates operator with default status; apply selected direct status explicitly
+                                await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                                    user_id: data.id,
+                                    field: 'status',
+                                    value: editedUser.status
+                                }, {
+                                    headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                                });
+                            }
                             showToast('Оператор создан успешно', 'success');
                             // при создании обычно сервер возвращает логин/пароль — если есть, покажи их
                             if (data.login || data.password) {
@@ -13456,13 +13506,20 @@ const withAccessTokenHeader = (headers = {}) => {
                         });
                     }
                     if (editedUser.status && editedUser.status !== userToEdit.status) {
-                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
-                            user_id: editedUser.id,
-                            field: 'status',
-                            value: editedUser.status
-                        }, {
-                            headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
-                        });
+                        if (isPeriodStatusValue(editedUser.status)) {
+                            await saveUserStatusPeriodViaPlannerApi(editedUser.id, editedUser);
+                        } else {
+                            await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                                user_id: editedUser.id,
+                                field: 'status',
+                                value: editedUser.status
+                            }, {
+                                headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
+                            });
+                        }
+                    } else if (!editedUser.id ? false : (editedUser?.use_schedule_status_period && isPeriodStatusValue(editedUser?.status))) {
+                        // Позволяем повторно сохранить периодный статус из "Сотрудники", даже если users.status уже совпадает
+                        await saveUserStatusPeriodViaPlannerApi(editedUser.id, editedUser);
                     }
                     if (editedUser.rate && editedUser.rate !== userToEdit.rate) {
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {

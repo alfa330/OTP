@@ -1392,7 +1392,7 @@ def admin_update_user():
                 return jsonify({"error": "Name already in use by another user"}), 400
             value = new_name
         elif field == 'status':
-            if value not in ['working', 'fired', 'unpaid_leave']:
+            if value not in ['working', 'fired', 'unpaid_leave', 'bs', 'sick_leave', 'annual_leave', 'dismissal']:
                 return jsonify({"error": "Invalid status value"}), 400
         elif field == 'rate':
             try:
