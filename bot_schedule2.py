@@ -4377,6 +4377,65 @@ def save_work_schedule_status_period():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/work_schedules/status_period', methods=['DELETE'])
+@require_api_key
+def delete_work_schedule_status_period():
+    """
+    Удалить специальный статус оператора (период) по id.
+    Body: {
+        "status_period_id": int,
+        "operator_id": int,        # optional but recommended
+        "range_start": "YYYY-MM-DD",
+        "range_end": "YYYY-MM-DD"
+    }
+    """
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester_id = int(requester_id)
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+
+        if user_data[3] not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+
+        data = request.get_json(silent=True) or {}
+        status_period_id = data.get('status_period_id')
+        operator_id = data.get('operator_id')
+        range_start = data.get('range_start')
+        range_end = data.get('range_end')
+
+        if not status_period_id:
+            return jsonify({"error": "Missing status_period_id"}), 400
+
+        deleted_period = db.delete_schedule_status_period(
+            status_period_id=status_period_id,
+            operator_id=operator_id
+        )
+        if not deleted_period:
+            return jsonify({"error": "Status period not found"}), 404
+
+        target_operator_id = operator_id or deleted_period.get('operatorId')
+        operator_snapshot = None
+        if target_operator_id and range_start and range_end:
+            operator_snapshot = db.get_operator_with_shifts(target_operator_id, range_start, range_end)
+
+        return jsonify({
+            "message": "Status period deleted successfully",
+            "deleted_status_period": deleted_period,
+            "operator": operator_snapshot
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error deleting status period: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/work_schedules/shifts_bulk', methods=['POST'])
 @require_api_key
 def save_shifts_bulk():

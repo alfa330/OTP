@@ -4761,7 +4761,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 statusEndDate: '',
                 dismissalReason: '',
                 statusComment: '',
-                statusSaving: false
+                statusSaving: false,
+                statusDeleting: false
             });
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
@@ -5320,7 +5321,8 @@ const withAccessTokenHeader = (headers = {}) => {
                     statusEndDate: isDismissal ? '' : (activeStatus?.endDate || fallbackDate),
                     dismissalReason: activeStatus?.dismissalReason || '',
                     statusComment: activeStatus?.comment || '',
-                    statusSaving: false
+                    statusSaving: false,
+                    statusDeleting: false
                 };
             };
 
@@ -5432,6 +5434,65 @@ const withAccessTokenHeader = (headers = {}) => {
                     console.error('Error saving status period:', error);
                     setModalState(m => ({ ...m, statusSaving: false }));
                     alert(`Ошибка сохранения статуса: ${error?.message || error}`);
+                }
+            };
+
+            const deleteScheduleStatusPeriod = async (statusPeriod) => {
+                const periodId = Number(statusPeriod?.id);
+                if (!Number.isFinite(periodId) || periodId <= 0) return;
+                if (!modalState.opId) return;
+                const label = statusPeriod?.label || 'статус';
+                const confirmText = `Удалить статус "${label}"${statusPeriod?.startDate ? ` (${statusPeriod.startDate}${statusPeriod?.endDate ? ` — ${statusPeriod.endDate}` : ''})` : ''}?`;
+                if (typeof window !== 'undefined' && !window.confirm(confirmText)) return;
+
+                try {
+                    setModalState(m => ({ ...m, statusDeleting: true }));
+
+                    const rangeStart = visibleRange?.[0];
+                    const rangeEnd = visibleRange?.[visibleRange.length - 1];
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/status_period`, {
+                        method: 'DELETE',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({
+                            status_period_id: periodId,
+                            operator_id: modalState.opId,
+                            range_start: rangeStart || null,
+                            range_end: rangeEnd || null
+                        })
+                    });
+
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+
+                    if (payload?.operator) {
+                        applyOperatorScheduleSnapshot(payload.operator);
+                        setModalState(m => ({
+                            ...m,
+                            ...buildModalStatusDraftForDate(m.opId, m.date),
+                            isDayOff: Array.isArray(payload.operator?.daysOff) ? payload.operator.daysOff.includes(m.date) : m.isDayOff
+                        }));
+                    } else {
+                        setOperators(prev => prev.map(op => {
+                            if (op.id !== modalState.opId) return op;
+                            return clonePlannerOperator({
+                                ...op,
+                                scheduleStatusPeriods: (op.scheduleStatusPeriods || []).filter(p => Number(p?.id) !== periodId),
+                                scheduleStatusDays: Object.fromEntries(
+                                    Object.entries(op.scheduleStatusDays || {}).filter(([, v]) => Number(v?.id) !== periodId)
+                                )
+                            });
+                        }));
+                        setModalState(m => ({ ...m, ...buildModalStatusDraftForDate(m.opId, m.date) }));
+                    }
+                } catch (error) {
+                    console.error('Error deleting status period:', error);
+                    alert(`Ошибка удаления статуса: ${error?.message || error}`);
+                    setModalState(m => ({ ...m, statusDeleting: false }));
                 }
             };
 
@@ -5553,7 +5614,8 @@ const withAccessTokenHeader = (headers = {}) => {
                     statusEndDate: firstTarget.date,
                     dismissalReason: '',
                     statusComment: '',
-                    statusSaving: false
+                    statusSaving: false,
+                    statusDeleting: false
                 });
             };
             const openEditModalForMultipleDays = (opId, dates) => {
@@ -6012,6 +6074,12 @@ const withAccessTokenHeader = (headers = {}) => {
                 ? Array.from(new Set(modalBulkTargets.map(target => target.date))).sort()
                 : (Array.isArray(modalState?.multipleDates) ? [...modalState.multipleDates].sort() : []);
             const isBulkSelectionModal = modalBulkCount > 1;
+            const modalActiveScheduleStatus = useMemo(() => {
+                if (isBulkSelectionModal) return null;
+                if (!modalState?.opId || !modalState?.date) return null;
+                const op = operators.find(o => o.id === modalState.opId);
+                return getPlannerScheduleStatusForDate(op, modalState.date);
+            }, [isBulkSelectionModal, modalState?.opId, modalState?.date, operators]);
             const dayViewBreaksDateStr = todayDateStr(new Date(currentDate));
             const dayBreaksByOperator = useMemo(() => {
                 if (viewMode !== 'day') return [];
@@ -7696,17 +7764,34 @@ const withAccessTokenHeader = (headers = {}) => {
                                 Статус на период
                             </h4>
                             {(() => {
-                                const op = operators.find(o => o.id === modalState.opId);
-                                const activeStatus = getPlannerScheduleStatusForDate(op, modalState.date);
-                                if (!activeStatus) return null;
-                                const tone = getScheduleStatusTone(activeStatus.statusCode);
+                                if (!modalActiveScheduleStatus) return null;
+                                const tone = getScheduleStatusTone(modalActiveScheduleStatus.statusCode);
                                 return (
                                     <span className={`px-2 py-1 rounded-full border text-xs font-semibold ${tone.pill}`}>
-                                        {activeStatus.label}
+                                        {modalActiveScheduleStatus.label}
                                     </span>
                                 );
                             })()}
                         </div>
+
+                        {modalActiveScheduleStatus && (
+                            <div className="mb-3 p-2 rounded-lg border border-slate-200 bg-white text-xs text-slate-600">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span className="font-semibold text-slate-800">Активный статус:</span>
+                                    <span>{modalActiveScheduleStatus.startDate || '—'}{modalActiveScheduleStatus.endDate ? ` — ${modalActiveScheduleStatus.endDate}` : ''}</span>
+                                    {modalActiveScheduleStatus.statusCode === 'dismissal' && modalActiveScheduleStatus.dismissalReason && (
+                                        <span className="px-2 py-0.5 rounded-md border border-rose-200 bg-rose-50 text-rose-700">
+                                            {modalActiveScheduleStatus.dismissalReason}
+                                        </span>
+                                    )}
+                                </div>
+                                {modalActiveScheduleStatus.comment && (
+                                    <div className="mt-1 text-slate-500">
+                                        Комментарий: <span className="text-slate-700">{modalActiveScheduleStatus.comment}</span>
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div className="md:col-span-2">
@@ -7791,15 +7876,28 @@ const withAccessTokenHeader = (headers = {}) => {
                             <div className="text-xs text-slate-500">
                                 Статус выделяется цветом в ячейках на весь указанный период
                             </div>
-                            <button
-                                type="button"
-                                onClick={saveScheduleStatusPeriod}
-                                disabled={!!modalState.statusSaving}
-                                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                            >
-                                <i className={`fas ${modalState.statusSaving ? 'fa-spinner fa-spin' : 'fa-save'}`}></i>
-                                {modalState.statusSaving ? 'Сохраняем...' : 'Сохранить статус'}
-                            </button>
+                            <div className="flex items-center gap-2">
+                                {modalActiveScheduleStatus?.id && (
+                                    <button
+                                        type="button"
+                                        onClick={() => deleteScheduleStatusPeriod(modalActiveScheduleStatus)}
+                                        disabled={!!modalState.statusSaving || !!modalState.statusDeleting}
+                                        className="px-4 py-2 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-slate-700 text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                    >
+                                        <i className={`fas ${modalState.statusDeleting ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`}></i>
+                                        {modalState.statusDeleting ? 'Удаляем...' : 'Удалить статус'}
+                                    </button>
+                                )}
+                                <button
+                                    type="button"
+                                    onClick={saveScheduleStatusPeriod}
+                                    disabled={!!modalState.statusSaving || !!modalState.statusDeleting}
+                                    className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                >
+                                    <i className={`fas ${modalState.statusSaving ? 'fa-spinner fa-spin' : 'fa-save'}`}></i>
+                                    {modalState.statusSaving ? 'Сохраняем...' : 'Сохранить статус'}
+                                </button>
+                            </div>
                         </div>
                     </div>
                     )}
