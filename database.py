@@ -4364,6 +4364,10 @@ class Database:
             (operator_id, shift_date)
         )
 
+        # Если на дату сохранённой смены приходился период "увольнение",
+        # считаем увольнение прерванным (не продолжаем его после рабочего дня).
+        self._interrupt_dismissal_period_by_work_day_tx(cursor, operator_id, shift_date)
+
         return shift_id
 
     def _normalize_schedule_status_code(self, status_code):
@@ -4817,7 +4821,9 @@ class Database:
             comment_norm = comment_text or None
 
         if status_code_norm == 'dismissal':
-            end_date_obj = None
+            end_date_obj = self._normalize_schedule_date(end_date) if end_date else None
+            if end_date_obj is not None and end_date_obj < start_date_obj:
+                raise ValueError("end_date must be >= start_date")
             dismissal_reason_norm = str(dismissal_reason or '').strip()
             if dismissal_reason_norm not in set(SCHEDULE_DISMISSAL_REASONS):
                 raise ValueError("Invalid dismissal_reason")
@@ -4927,6 +4933,41 @@ class Database:
             ))
             saved_row = cursor.fetchone()
             return self._serialize_schedule_status_period(saved_row)
+
+    def _interrupt_dismissal_period_by_work_day_tx(self, cursor, operator_id, work_date):
+        """
+        Если на рабочую дату приходится статус "увольнение", обрываем его:
+        - если увольнение начинается в этот день -> удаляем период
+        - если началось раньше -> ставим конец на день раньше
+        """
+        operator_id = int(operator_id)
+        work_date_obj = self._normalize_schedule_date(work_date)
+
+        cursor.execute("""
+            SELECT id, start_date, end_date
+            FROM operator_schedule_status_periods
+            WHERE operator_id = %s
+              AND status_code = 'dismissal'
+              AND start_date <= %s
+              AND COALESCE(end_date, DATE '9999-12-31') >= %s
+            ORDER BY start_date, id
+        """, (operator_id, work_date_obj, work_date_obj))
+        rows = cursor.fetchall()
+
+        for period_id, start_date_value, end_date_value in rows:
+            if start_date_value >= work_date_obj:
+                cursor.execute("""
+                    DELETE FROM operator_schedule_status_periods
+                    WHERE id = %s
+                """, (period_id,))
+                continue
+
+            new_end_date = work_date_obj - timedelta(days=1)
+            cursor.execute("""
+                UPDATE operator_schedule_status_periods
+                SET end_date = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (new_end_date, period_id))
 
     def delete_schedule_status_period(self, status_period_id, operator_id=None):
         """

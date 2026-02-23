@@ -4317,7 +4317,7 @@ def save_work_schedule_status_period():
         "operator_id": int,
         "status_code": "bs" | "sick_leave" | "annual_leave" | "dismissal",
         "start_date": "YYYY-MM-DD",
-        "end_date": "YYYY-MM-DD",              # required except dismissal
+        "end_date": "YYYY-MM-DD",              # required except dismissal; for dismissal optional (прерывание)
         "dismissal_reason": "...",             # required for dismissal
         "comment": "..."                       # required for dismissal
         "range_start": "YYYY-MM-DD",           # optional: return operator snapshot for range
