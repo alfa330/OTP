@@ -5684,6 +5684,23 @@ const withAccessTokenHeader = (headers = {}) => {
                     });
                 }).sort((a, b) => (a.start - b.start) || (a.end - b.end));
             }, [myCurrentDayCard]);
+            const formatDateRuShort = (value) => {
+                let d = null;
+                if (typeof value === 'string') d = parseDateStr(value);
+                else if (value instanceof Date) d = value;
+                else if (value) d = new Date(value);
+                if (!(d instanceof Date) || Number.isNaN(d.getTime())) return String(value ?? '');
+                const monthNames = ['янв.', 'февр.', 'мар.', 'апр.', 'мая', 'июн.', 'июл.', 'авг.', 'сент.', 'окт.', 'нояб.', 'дек.'];
+                return `${String(d.getDate()).padStart(2, '0')} ${monthNames[d.getMonth()] ?? ''} ${d.getFullYear()}`;
+            };
+            const formatWeekdayRu = (value, style = 'long') => {
+                let d = null;
+                if (typeof value === 'string') d = parseDateStr(value);
+                else if (value instanceof Date) d = value;
+                else if (value) d = new Date(value);
+                if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '';
+                return d.toLocaleDateString('ru-RU', { weekday: style });
+            };
             const myUpcomingShiftItems = useMemo(() => {
                 const now = new Date();
                 const nowTs = now.getTime();
@@ -5780,7 +5797,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         badgeClass: 'bg-amber-100 text-amber-800',
                         panelClass: 'border-amber-200 bg-amber-50',
                         hint: `${formatMinuteWithDayLocal(activeBreak.start)} — ${formatMinuteWithDayLocal(activeBreak.end)}`,
-                        subHint: activeShift ? `Во время смены ${formatShiftLabel(activeShift)}${activePart.sourceDate !== nowDateStr ? ` (из ${activePart.sourceDate})` : ''}` : null
+                        subHint: activeShift ? `Во время смены ${formatShiftLabel(activeShift)}${activePart.sourceDate !== nowDateStr ? ` (из ${formatDateRuShort(activePart.sourceDate)})` : ''}` : null
                     };
                 }
 
@@ -5791,7 +5808,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         badgeClass: 'bg-emerald-100 text-emerald-800',
                         panelClass: 'border-emerald-200 bg-emerald-50',
                         hint: activeShift ? formatShiftLabel(activeShift) : `${minutesToTime(activePart.start)} — ${minutesToTime(activePart.end)}`,
-                        subHint: activePart.sourceDate !== nowDateStr ? `Смена началась ${activePart.sourceDate}` : 'Смена идет сейчас'
+                        subHint: activePart.sourceDate !== nowDateStr ? `Смена началась ${formatDateRuShort(activePart.sourceDate)}` : 'Смена идет сейчас'
                     };
                 }
 
@@ -5802,17 +5819,16 @@ const withAccessTokenHeader = (headers = {}) => {
                         badgeClass: 'bg-red-100 text-red-800',
                         panelClass: 'border-red-200 bg-red-50',
                         hint: 'Сегодня отмечен выходной',
-                        subHint: nextFutureShift ? `Следующая смена: ${nextFutureShift.date} ${nextFutureShift.start}` : null
+                        subHint: nextFutureShift ? `Следующая смена: ${formatDateRuShort(nextFutureShift.date)} ${nextFutureShift.start}` : null
                     };
                 }
 
                 if (nextFutureShift) {
-                    const nextDate = new Date(nextFutureShift.startTs);
                     const dayLabel = nextFutureShift.date === nowDateStr
                         ? 'Сегодня'
                         : nextFutureShift.date === todayDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1))
                             ? 'Завтра'
-                            : nextDate.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+                            : formatDateRuShort(nextFutureShift.date);
                     return {
                         key: 'free',
                         label: 'Вне смены',
@@ -5876,7 +5892,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                     </div>
                                     <div className="flex gap-2 items-center">
                                         <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-left"></i></button>
-                                        <div className="text-sm">{currentDate.toLocaleDateString()}</div>
+                                        <div className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-center leading-tight">
+                                            <div className="text-[11px] uppercase tracking-wide text-slate-500">{formatWeekdayRu(currentDate, 'short')}</div>
+                                            <div className="text-sm font-semibold text-slate-900">{formatDateRuShort(currentDate)}</div>
+                                        </div>
                                         <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-right"></i></button>
                                     </div>
                                 </div>
@@ -5890,25 +5909,25 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 <div className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-xs font-medium">Ставка: {myScheduleData.rate}</div>
                                             )}
                                             <div className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-xs">
-                                                Период: {visibleRange[0]}{visibleRange.length > 1 ? ` — ${visibleRange[visibleRange.length - 1]}` : ''}
+                                                Период: {visibleRange[0] ? formatDateRuShort(visibleRange[0]) : '—'}{visibleRange.length > 1 ? ` — ${formatDateRuShort(visibleRange[visibleRange.length - 1])}` : ''}
                                             </div>
                                         </div>
                                         <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
                                             <div className="rounded-lg border border-slate-200 p-3 bg-slate-50">
                                                 <div className="text-[11px] uppercase tracking-wide text-slate-500">Смен</div>
-                                                <div className="text-xl font-bold text-slate-900">{myScheduleSummary.shiftsCount}</div>
+                                                <div className="text-xl font-bold text-slate-900 tabular-nums">{myScheduleSummary.shiftsCount}</div>
                                             </div>
                                             <div className="rounded-lg border border-slate-200 p-3 bg-slate-50">
                                                 <div className="text-[11px] uppercase tracking-wide text-slate-500">Рабочих дней</div>
-                                                <div className="text-xl font-bold text-slate-900">{myScheduleSummary.daysWithShifts}</div>
+                                                <div className="text-xl font-bold text-slate-900 tabular-nums">{myScheduleSummary.daysWithShifts}</div>
                                             </div>
                                             <div className="rounded-lg border border-slate-200 p-3 bg-slate-50">
                                                 <div className="text-[11px] uppercase tracking-wide text-slate-500">Часы</div>
-                                                <div className="text-xl font-bold text-slate-900">{(myScheduleSummary.totalWorkMin / 60).toFixed(2)}</div>
+                                                <div className="text-xl font-bold text-slate-900 tabular-nums">{(myScheduleSummary.totalWorkMin / 60).toFixed(2)}</div>
                                             </div>
                                             <div className="rounded-lg border border-amber-200 p-3 bg-amber-50">
                                                 <div className="text-[11px] uppercase tracking-wide text-amber-700">Перерывы</div>
-                                                <div className="text-xl font-bold text-amber-900">{formatHoursMinutes(myScheduleSummary.totalBreakMin)}</div>
+                                                <div className="text-xl font-bold text-amber-900 tabular-nums">{formatHoursMinutes(myScheduleSummary.totalBreakMin)}</div>
                                             </div>
                                         </div>
                                     </div>
@@ -5959,22 +5978,29 @@ const withAccessTokenHeader = (headers = {}) => {
                                             ) : (
                                                 <div className="space-y-2">
                                                     {myUpcomingShiftItems.slice(0, 3).map(item => {
-                                                        const itemDate = new Date(item.startTs);
                                                         const isToday = item.date === todayDateStr(new Date());
                                                         const isTomorrow = item.date === todayDateStr(new Date(Date.now() + 86400000));
                                                         return (
                                                             <div key={`my-upcoming-${item.key}`} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                                                <div className="flex items-center justify-between gap-2">
-                                                                    <div className="text-xs font-semibold text-slate-900">
-                                                                        {isToday ? 'Сегодня' : isTomorrow ? 'Завтра' : itemDate.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })}
+                                                                <div className="flex items-start justify-between gap-2">
+                                                                    <div>
+                                                                        <div className="text-xs font-semibold text-slate-900">
+                                                                            {isToday ? 'Сегодня' : isTomorrow ? 'Завтра' : formatDateRuShort(item.date)}
+                                                                        </div>
+                                                                        <div className="text-[11px] text-slate-500">{formatWeekdayRu(item.date, 'short')}</div>
                                                                     </div>
-                                                                    <div className="text-[11px] text-slate-500">{(item.durationMin / 60).toFixed(2)} ч</div>
+                                                                    <div className="text-[11px] text-slate-500 tabular-nums">{(item.durationMin / 60).toFixed(2)} ч</div>
                                                                 </div>
-                                                                <div className="text-xs text-slate-700 mt-0.5">
-                                                                    {item.start} — {item.end}{item.isCrossing ? ' (+1)' : ''}
-                                                                </div>
-                                                                <div className="text-[11px] text-amber-700 mt-0.5">
-                                                                    Перерывы: {item.breakCount} ({formatHoursMinutes(item.breakMinutes)})
+                                                                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                                                    <span className="px-2 py-0.5 rounded-md bg-white border border-slate-200 text-xs text-slate-800 tabular-nums">
+                                                                        {item.start} — {item.end}{item.isCrossing ? ' (+1)' : ''}
+                                                                    </span>
+                                                                    <span className="px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-[11px] text-amber-800">
+                                                                        Перерывы: {item.breakCount}
+                                                                    </span>
+                                                                    <span className="text-[11px] text-amber-700 tabular-nums">
+                                                                        {formatHoursMinutes(item.breakMinutes)}
+                                                                    </span>
                                                                 </div>
                                                             </div>
                                                         );
@@ -6007,7 +6033,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             <div className="font-semibold text-slate-900 flex items-center gap-2">
                                                                 <i className="fas fa-chart-gantt text-blue-600"></i>
                                                                 Таймлайн дня
-                                                                <span className="text-sm font-normal text-slate-500">{myCurrentDayCard.date}</span>
+                                                                <span className="text-sm font-normal text-slate-500">{formatDateRuShort(myCurrentDayCard.date)}</span>
                                                             </div>
                                                             <div className="flex items-center gap-2 text-xs">
                                                                 {myCurrentDayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold">Выходной</span>}
@@ -6015,6 +6041,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             </div>
                                                         </div>
                                                         <div className="p-4">
+                                                            <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-blue-200 bg-blue-50 text-blue-700">
+                                                                    <span className="w-2 h-2 rounded-full bg-blue-500"></span> Дневная смена
+                                                                </span>
+                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-orange-200 bg-orange-50 text-orange-700">
+                                                                    <span className="w-2 h-2 rounded-full bg-orange-500"></span> Ночная смена
+                                                                </span>
+                                                                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-amber-200 bg-amber-50 text-amber-700">
+                                                                    <span className="w-2 h-2 rounded-sm bg-amber-300 border border-amber-500/70"></span> Перерыв
+                                                                </span>
+                                                            </div>
                                                             <div className="mb-2">
                                                                 <div className="relative h-7 px-1 isolate bg-white rounded">
                                                                     <div className="absolute inset-0 flex items-end z-20">
@@ -6031,7 +6068,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 <div className="relative h-6 mt-1 px-1 isolate bg-white rounded">
                                                                     <div className="absolute inset-0 flex items-start z-20">
                                                                         {myTotalsPerHourForDay.map((t, hour) => (
-                                                                            <div key={hour} className="flex-1 text-center text-[10px] text-slate-700">{t > 0 ? t.toFixed(1) : '0'}</div>
+                                                                            <div key={hour} className={`flex-1 text-center text-[10px] tabular-nums ${t > 0 ? 'text-slate-700 font-medium' : 'text-slate-300'}`}>{t > 0 ? t.toFixed(1) : '0'}</div>
                                                                         ))}
                                                                     </div>
                                                                     <div className="absolute inset-0 flex pointer-events-none z-10">
@@ -6094,10 +6131,18 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             ) : (
                                                                 <div className="space-y-2">
                                                                     {myCurrentDayBreaksList.map(item => (
-                                                                        <div key={item.key} className="rounded-lg border border-amber-200 bg-amber-50 p-2">
-                                                                            <div className="text-xs font-semibold text-amber-900">{formatBreakMinuteWithDay(item.start)} — {formatBreakMinuteWithDay(item.end)}</div>
-                                                                            <div className="text-[11px] text-amber-800/90 mt-0.5">{item.segText}</div>
-                                                                            <div className="text-[11px] text-amber-700/80">{formatHoursMinutes(item.durationMin)}</div>
+                                                                        <div key={item.key} className="rounded-lg border border-amber-200 bg-amber-50/70 p-2">
+                                                                            <div className="flex items-start justify-between gap-2">
+                                                                                <div className="text-xs font-semibold text-amber-900 tabular-nums">
+                                                                                    {formatBreakMinuteWithDay(item.start)} — {formatBreakMinuteWithDay(item.end)}
+                                                                                </div>
+                                                                                <div className="text-[11px] text-amber-800 font-medium tabular-nums whitespace-nowrap">
+                                                                                    {formatHoursMinutes(item.durationMin)}
+                                                                                </div>
+                                                                            </div>
+                                                                            <div className="mt-1 text-[11px] text-slate-600">
+                                                                                Смена: <span className="text-slate-700 tabular-nums">{item.segText}</span>
+                                                                            </div>
                                                                         </div>
                                                                     ))}
                                                                 </div>
@@ -6119,6 +6164,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     )}
                                                 </div>
                                             )}
+                                            {myScheduleVisibleDays.length > 0 && (
+                                                <div className="flex items-center justify-between px-1">
+                                                    <div className="text-sm font-semibold text-slate-900">Дни периода</div>
+                                                    <div className="text-xs text-slate-500">
+                                                        {myScheduleVisibleDays.length} из {myScheduleDayCards.length}
+                                                    </div>
+                                                </div>
+                                            )}
                                             <div className={viewMode === 'month'
                                                 ? 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
                                                 : viewMode === 'week'
@@ -6132,76 +6185,107 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 const dayBreakMin = (dayCard.shifts || []).reduce((acc, seg) => acc + (seg.breaks || []).reduce((s, b) => s + Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)), 0), 0);
                                                 const dayBreakCount = (dayCard.shifts || []).reduce((acc, seg) => acc + (Array.isArray(seg.breaks) ? seg.breaks.length : 0), 0);
                                                 const dayNetMin = Math.max(0, dayWorkMin - dayBreakMin);
+                                                const weekdayLabel = formatWeekdayRu(dateObj, 'long');
                                                 return (
-                                                <div key={`my-shifts-${dayCard.date}`} className={`bg-white rounded-xl border overflow-hidden ${isToday ? 'border-blue-300 ring-2 ring-blue-100' : 'border-slate-200'}`}>
-                                                    <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
-                                                        <div>
-                                                            <div className="font-semibold text-slate-900">{dayCard.date}</div>
-                                                            <div className="text-xs text-slate-500">{dateObj.toLocaleDateString('ru-RU', { weekday: 'long' })}</div>
-                                                        </div>
-                                                        <div className="flex flex-wrap items-center justify-end gap-1">
-                                                            {isToday && <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-semibold">Сегодня</span>}
-                                                            {dayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold">Выходной</span>}
-                                                            {!dayCard.isDayOff && dayCard.shifts.length > 0 && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{dayCard.shifts.length} смен</span>}
-                                                        </div>
-                                                    </div>
-                                                    <div className="p-4">
-                                                        {!dayCard.isDayOff && dayCard.shifts.length === 0 && (
-                                                            <div className="text-sm text-slate-400">Смен нет</div>
-                                                        )}
-                                                        {dayCard.isDayOff && dayCard.shifts.length === 0 && (
-                                                            <div className="text-sm text-red-600">Отмечено как выходной</div>
-                                                        )}
-                                                        {dayCard.shifts.length > 0 && (
-                                                            <div className="mb-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                                                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                                                    <div className="text-[11px] text-slate-500 uppercase">Работа</div>
-                                                                    <div className="text-sm font-semibold text-slate-900">{(dayWorkMin / 60).toFixed(2)} ч</div>
-                                                                </div>
-                                                                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
-                                                                    <div className="text-[11px] text-emerald-700 uppercase">Чистое</div>
-                                                                    <div className="text-sm font-semibold text-emerald-900">{formatHoursMinutes(dayNetMin)}</div>
-                                                                </div>
-                                                                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-                                                                    <div className="text-[11px] text-amber-700 uppercase">Перерывы</div>
-                                                                    <div className="text-sm font-semibold text-amber-900">{formatHoursMinutes(dayBreakMin)}</div>
-                                                                    <div className="text-[11px] text-amber-700/80 mt-0.5">{dayBreakCount} шт.</div>
-                                                                </div>
+                                                    <div key={`my-shifts-${dayCard.date}`} className={`bg-white rounded-xl border overflow-hidden shadow-sm ${isToday ? 'border-blue-300 ring-2 ring-blue-100' : 'border-slate-200'}`}>
+                                                        <div className="px-4 py-3 border-b border-slate-100 flex items-start justify-between gap-3">
+                                                            <div>
+                                                                <div className="font-semibold text-slate-900">{formatDateRuShort(dayCard.date)}</div>
+                                                                <div className="text-xs text-slate-500 capitalize">{weekdayLabel}</div>
                                                             </div>
-                                                        )}
-                                                        <div className="space-y-3">
-                                                            {dayCard.shifts.map((seg, idx) => {
-                                                                const isCrossing = timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00';
-                                                                return (
-                                                                    <div key={`${dayCard.date}-${idx}-${seg.start}-${seg.end}`} className="rounded-lg border border-slate-200 p-3 bg-slate-50">
-                                                                        <div className="flex flex-wrap items-center gap-2 mb-2">
-                                                                            <span className="font-semibold text-slate-900">{seg.start} — {seg.end}{isCrossing ? ' (+1)' : ''}</span>
-                                                                            <span className="text-xs text-slate-500">{(seg.durationMin / 60).toFixed(2)} ч</span>
-                                                                        </div>
-                                                                        <div>
-                                                                            <div className="text-xs font-medium text-slate-600 mb-1 flex items-center gap-2">
-                                                                                <i className="fas fa-mug-hot text-amber-600"></i>
-                                                                                Перерывы
-                                                                            </div>
-                                                                            {seg.breaks.length === 0 ? (
-                                                                                <div className="text-xs text-slate-400">Нет перерывов</div>
-                                                                            ) : (
-                                                                                <div className="flex flex-wrap gap-2">
-                                                                                    {seg.breaks.map((b, bi) => (
-                                                                                        <div key={`${dayCard.date}-${idx}-break-${bi}`} className="px-2 py-1 rounded border border-amber-200 bg-amber-50 text-xs text-amber-900">
-                                                                                            {formatBreakMinuteWithDay(b.start)} — {formatBreakMinuteWithDay(b.end)}
-                                                                                        </div>
-                                                                                    ))}
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
+                                                            <div className="flex flex-wrap items-center justify-end gap-1">
+                                                                {isToday && <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-semibold">Сегодня</span>}
+                                                                {dayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold">Выходной</span>}
+                                                                {!dayCard.isDayOff && dayCard.shifts.length > 0 && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{dayCard.shifts.length} смен</span>}
+                                                            </div>
+                                                        </div>
+                                                        <div className="p-4 space-y-3">
+                                                            {!dayCard.isDayOff && dayCard.shifts.length === 0 && (
+                                                                <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-500">
+                                                                    Смен нет
+                                                                </div>
+                                                            )}
+                                                            {dayCard.isDayOff && dayCard.shifts.length === 0 && (
+                                                                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                                                                    Отмечено как выходной
+                                                                </div>
+                                                            )}
+                                                            {dayCard.shifts.length > 0 && (
+                                                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                                                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                                                        <div className="text-[11px] text-slate-500 uppercase tracking-wide">Работа</div>
+                                                                        <div className="text-sm font-semibold text-slate-900 tabular-nums">{(dayWorkMin / 60).toFixed(2)} ч</div>
                                                                     </div>
-                                                                );
-                                                            })}
+                                                                    <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
+                                                                        <div className="text-[11px] text-emerald-700 uppercase tracking-wide">Чистое</div>
+                                                                        <div className="text-sm font-semibold text-emerald-900 tabular-nums">{formatHoursMinutes(dayNetMin)}</div>
+                                                                    </div>
+                                                                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                                                                        <div className="text-[11px] text-amber-700 uppercase tracking-wide">Перерывы</div>
+                                                                        <div className="text-sm font-semibold text-amber-900 tabular-nums">{formatHoursMinutes(dayBreakMin)}</div>
+                                                                        <div className="text-[11px] text-amber-700/80 mt-0.5">{dayBreakCount} шт.</div>
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                            <div className="space-y-2">
+                                                                {dayCard.shifts.map((seg, idx) => {
+                                                                    const isCrossing = timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00';
+                                                                    const segBreakCount = Array.isArray(seg.breaks) ? seg.breaks.length : 0;
+                                                                    const segBreakMin = (seg.breaks || []).reduce((acc, b) => acc + Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)), 0);
+                                                                    return (
+                                                                        <div key={`${dayCard.date}-${idx}-${seg.start}-${seg.end}`} className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+                                                                            <div className="px-3 py-2 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                                                                                <div className="flex items-center gap-2 min-w-0">
+                                                                                    <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${isCrossing ? 'bg-orange-500' : 'bg-blue-500'}`}></span>
+                                                                                    <span className="font-semibold text-slate-900 tabular-nums truncate">
+                                                                                        {seg.start} — {seg.end}{isCrossing ? ' (+1)' : ''}
+                                                                                    </span>
+                                                                                </div>
+                                                                                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                                                                                    <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 tabular-nums">
+                                                                                        {(seg.durationMin / 60).toFixed(2)} ч
+                                                                                    </span>
+                                                                                    <span className="px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-amber-800">
+                                                                                        {segBreakCount} пер.
+                                                                                    </span>
+                                                                                    <span className="text-[11px] text-amber-700 tabular-nums">
+                                                                                        {formatHoursMinutes(segBreakMin)}
+                                                                                    </span>
+                                                                                </div>
+                                                                            </div>
+                                                                            <div className="px-3 py-2">
+                                                                                <div className="text-[11px] font-medium text-slate-600 mb-1.5 flex items-center gap-2 uppercase tracking-wide">
+                                                                                    <i className="fas fa-mug-hot text-amber-600"></i>
+                                                                                    Перерывы
+                                                                                </div>
+                                                                                {segBreakCount === 0 ? (
+                                                                                    <div className="text-xs text-slate-400">Перерывов нет</div>
+                                                                                ) : (
+                                                                                    <div className="space-y-1.5">
+                                                                                        {(seg.breaks || []).map((b, bi) => {
+                                                                                            const breakDuration = Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0));
+                                                                                            return (
+                                                                                                <div key={`${dayCard.date}-${idx}-break-${bi}`} className="flex items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50/70 px-2 py-1">
+                                                                                                    <div className="text-xs text-amber-900 tabular-nums">
+                                                                                                        {formatBreakMinuteWithDay(b.start)} — {formatBreakMinuteWithDay(b.end)}
+                                                                                                    </div>
+                                                                                                    <div className="text-[11px] text-amber-800 font-medium tabular-nums whitespace-nowrap">
+                                                                                                        {formatHoursMinutes(breakDuration)}
+                                                                                                    </div>
+                                                                                                </div>
+                                                                                            );
+                                                                                        })}
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
                                                         </div>
                                                     </div>
-                                                </div>
-                                            )})}
+                                                );
+                                            })}
                                             </div>
                                         </div>
                                     )}
