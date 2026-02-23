@@ -6196,6 +6196,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     const crossing = timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00';
                                                     return `${seg.start} — ${seg.end}${crossing ? ' (+1)' : ''}`;
                                                 });
+                                                const hasShifts = shiftPreviewLabels.length > 0;
+                                                const primaryShiftLabel = hasShifts ? shiftPreviewLabels[0] : (dayCard.isDayOff ? 'Выходной' : 'Смен нет');
+                                                const extraShiftCount = hasShifts ? Math.max(0, shiftPreviewLabels.length - 1) : 0;
+                                                const tailShiftPreviewLabels = hasShifts ? shiftPreviewLabels.slice(1) : [];
                                                 return (
                                                     <div key={`my-shifts-${dayCard.date}`} className={`bg-white rounded-xl border overflow-hidden shadow-sm ${isToday ? 'border-blue-300 ring-2 ring-blue-100' : 'border-slate-200'}`}>
                                                         <button
@@ -6205,8 +6209,45 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         >
                                                             <div className="flex items-start justify-between gap-3">
                                                                 <div className="min-w-0">
-                                                                    <div className="font-semibold text-slate-900">{formatDateRuShort(dayCard.date)}</div>
-                                                                    <div className="text-xs text-slate-500 capitalize">{weekdayLabel}</div>
+                                                                    {viewMode === 'day' ? (
+                                                                        <>
+                                                                            <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                                                                                <span className={`inline-flex items-center px-3 py-1 rounded-lg border text-sm font-semibold tabular-nums ${
+                                                                                    hasShifts
+                                                                                        ? 'bg-blue-50 border-blue-200 text-blue-900'
+                                                                                        : dayCard.isDayOff
+                                                                                            ? 'bg-red-50 border-red-200 text-red-700'
+                                                                                            : 'bg-slate-50 border-slate-200 text-slate-600'
+                                                                                }`}>
+                                                                                    {primaryShiftLabel}
+                                                                                </span>
+                                                                                {extraShiftCount > 0 && (
+                                                                                    <span className="px-2 py-0.5 rounded-md bg-slate-100 text-xs text-slate-700">
+                                                                                        +{extraShiftCount} смен
+                                                                                    </span>
+                                                                                )}
+                                                                            </div>
+                                                                            <div className="font-semibold text-slate-900">{formatDateRuShort(dayCard.date)}</div>
+                                                                            <div className="text-xs text-slate-500 capitalize">{weekdayLabel}</div>
+                                                                        </>
+                                                                    ) : (
+                                                                        <>
+                                                                            <div className="font-semibold text-slate-900">{formatDateRuShort(dayCard.date)}</div>
+                                                                            <div className="text-xs text-slate-500 capitalize">{weekdayLabel}</div>
+                                                                            {hasShifts && (
+                                                                                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                                                                    <span className="px-2 py-0.5 rounded-md border border-blue-200 bg-blue-50 text-xs font-semibold text-blue-900 tabular-nums">
+                                                                                        {primaryShiftLabel}
+                                                                                    </span>
+                                                                                    {extraShiftCount > 0 && (
+                                                                                        <span className="px-2 py-0.5 rounded-md bg-slate-100 text-xs text-slate-600">
+                                                                                            +{extraShiftCount}
+                                                                                        </span>
+                                                                                    )}
+                                                                                </div>
+                                                                            )}
+                                                                        </>
+                                                                    )}
                                                                 </div>
                                                                 <div className="flex items-center gap-2">
                                                                     <div className="flex flex-wrap items-center justify-end gap-1">
@@ -6246,16 +6287,16 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 )}
                                                             </div>
 
-                                                            {shiftPreviewLabels.length > 0 && (
+                                                            {tailShiftPreviewLabels.length > 0 && viewMode !== 'day' && (
                                                                 <div className="mt-2 flex flex-wrap gap-1.5">
-                                                                    {shiftPreviewLabels.slice(0, isExpanded ? shiftPreviewLabels.length : 3).map((label, i) => (
+                                                                    {tailShiftPreviewLabels.slice(0, isExpanded ? tailShiftPreviewLabels.length : 2).map((label, i) => (
                                                                         <span key={`${dayCard.date}-preview-${i}`} className="px-2 py-0.5 rounded-md bg-white border border-slate-200 text-xs text-slate-700 tabular-nums">
                                                                             {label}
                                                                         </span>
                                                                     ))}
-                                                                    {!isExpanded && shiftPreviewLabels.length > 3 && (
+                                                                    {!isExpanded && tailShiftPreviewLabels.length > 2 && (
                                                                         <span className="px-2 py-0.5 rounded-md bg-slate-100 text-xs text-slate-600">
-                                                                            +{shiftPreviewLabels.length - 3} еще
+                                                                            +{tailShiftPreviewLabels.length - 2} еще
                                                                         </span>
                                                                     )}
                                                                 </div>
