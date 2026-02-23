@@ -4564,6 +4564,8 @@ const withAccessTokenHeader = (headers = {}) => {
             const [myScheduleData, setMyScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
             const [myScheduleError, setMyScheduleError] = useState('');
+            const [showMyEmptyDays, setShowMyEmptyDays] = useState(false);
+            const [myNowTick, setMyNowTick] = useState(0);
             const dragState = useRef(null);
             const plannerUiStateLoadedRef = useRef(false);
             const plannerUiStateStorageKey = useMemo(
@@ -4684,6 +4686,14 @@ const withAccessTokenHeader = (headers = {}) => {
                 selectedDirections,
                 breakDirectionGroups
             ]);
+
+            useEffect(() => {
+                if (!isOperatorSelfSchedules) return;
+                const timer = setInterval(() => {
+                    setMyNowTick(v => v + 1);
+                }, 60000);
+                return () => clearInterval(timer);
+            }, [isOperatorSelfSchedules]);
 
             // Синхронизация метаданных операторов из parent (`users`) без потери графиков
             useEffect(() => {
@@ -5581,6 +5591,247 @@ const withAccessTokenHeader = (headers = {}) => {
                     };
                 });
             }, [myScheduleData, visibleRange]);
+            const myScheduleVisibleDays = useMemo(() => {
+                if (showMyEmptyDays) return myScheduleDayCards;
+                return myScheduleDayCards.filter(day => day.isDayOff || (day.shifts && day.shifts.length > 0));
+            }, [myScheduleDayCards, showMyEmptyDays]);
+            const myScheduleSummary = useMemo(() => {
+                let shiftsCount = 0;
+                let daysWithShifts = 0;
+                let daysOffCount = 0;
+                let totalWorkMin = 0;
+                let totalBreakMin = 0;
+
+                (myScheduleDayCards || []).forEach(day => {
+                    if (day.isDayOff) daysOffCount += 1;
+                    if (day.shifts?.length) daysWithShifts += 1;
+                    (day.shifts || []).forEach(seg => {
+                        shiftsCount += 1;
+                        totalWorkMin += seg.durationMin || 0;
+                        (seg.breaks || []).forEach(b => {
+                            const start = Number(b?.start);
+                            const end = Number(b?.end);
+                            if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+                                totalBreakMin += (end - start);
+                            }
+                        });
+                    });
+                });
+
+                return {
+                    shiftsCount,
+                    daysWithShifts,
+                    daysOffCount,
+                    totalWorkMin,
+                    totalBreakMin
+                };
+            }, [myScheduleDayCards, myNowTick]);
+            const myCurrentDayCard = useMemo(
+                () => myScheduleDayCards.find(day => day.date === dayViewBreaksDateStr) || myScheduleDayCards[0] || null,
+                [myScheduleDayCards, dayViewBreaksDateStr]
+            );
+            const myTimelineOperator = useMemo(() => {
+                if (!myScheduleData) return null;
+                return {
+                    ...myScheduleData,
+                    shifts: myScheduleData.shifts || {}
+                };
+            }, [myScheduleData]);
+            const myTimelineParts = useMemo(() => {
+                if (viewMode !== 'day' || !myTimelineOperator || !myCurrentDayCard?.date) return [];
+                return getShiftPartsForDate(myTimelineOperator, myCurrentDayCard.date);
+            }, [viewMode, myTimelineOperator, myCurrentDayCard]);
+            const myTimelineBreaks = useMemo(() => {
+                if (viewMode !== 'day' || !myTimelineOperator || !myCurrentDayCard?.date) return [];
+                const result = [];
+                myTimelineParts.forEach(p => {
+                    const items = getBreakPartsForPart(myTimelineOperator, p, myCurrentDayCard.date) || [];
+                    items.forEach(b => {
+                        result.push({ ...b, part: p });
+                    });
+                });
+                return result;
+            }, [viewMode, myTimelineOperator, myCurrentDayCard, myTimelineParts]);
+            const myTotalsPerHourForDay = useMemo(() => {
+                if (viewMode !== 'day' || !myCurrentDayCard?.date || !myTimelineOperator) return Array.from({ length: 24 }).map(() => 0);
+                const totals = Array.from({ length: 24 }).map(() => 0);
+                const parts = getShiftPartsForDate(myTimelineOperator, myCurrentDayCard.date);
+                parts.forEach(p => {
+                    for (let hour = 0; hour < 24; hour++) {
+                        const hStart = hour * 60;
+                        const hEnd = hStart + 60;
+                        const overlap = Math.max(0, Math.min(p.end, hEnd) - Math.max(p.start, hStart));
+                        totals[hour] += overlap / 60;
+                    }
+                });
+                return totals;
+            }, [viewMode, myCurrentDayCard, myTimelineOperator]);
+            const myCurrentDayBreaksList = useMemo(() => {
+                const day = myCurrentDayCard;
+                if (!day) return [];
+                return (day.shifts || []).flatMap((seg, segIndex) => {
+                    const segText = `${seg.start} — ${seg.end}${(timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00') ? ' (+1)' : ''}`;
+                    return (seg.breaks || []).map((b, bi) => {
+                        const start = Number(b?.start);
+                        const end = Number(b?.end);
+                        return {
+                            key: `${day.date}-${segIndex}-${bi}`,
+                            start,
+                            end,
+                            durationMin: Number.isFinite(start) && Number.isFinite(end) && end > start ? (end - start) : 0,
+                            segText
+                        };
+                    });
+                }).sort((a, b) => (a.start - b.start) || (a.end - b.end));
+            }, [myCurrentDayCard]);
+            const myUpcomingShiftItems = useMemo(() => {
+                const now = new Date();
+                const nowTs = now.getTime();
+                const items = [];
+
+                (myScheduleDayCards || []).forEach(day => {
+                    const baseDate = parseDateStr(day.date);
+                    if (!(baseDate instanceof Date) || Number.isNaN(baseDate.getTime())) return;
+
+                    (day.shifts || []).forEach((seg, segIndex) => {
+                        const sMin = timeToMinutes(seg.start);
+                        let eMin = timeToMinutes(seg.end);
+                        if (eMin <= sMin) eMin += 1440;
+
+                        const startAt = new Date(baseDate);
+                        startAt.setHours(0, sMin, 0, 0);
+                        const endAt = new Date(baseDate);
+                        endAt.setHours(0, eMin, 0, 0);
+
+                        if (endAt.getTime() <= nowTs) return;
+
+                        const breakMinutes = (seg.breaks || []).reduce((acc, b) => {
+                            const start = Number(b?.start);
+                            const end = Number(b?.end);
+                            return acc + (Number.isFinite(start) && Number.isFinite(end) && end > start ? (end - start) : 0);
+                        }, 0);
+
+                        items.push({
+                            key: `${day.date}-${segIndex}-${seg.start}-${seg.end}`,
+                            date: day.date,
+                            start: seg.start,
+                            end: seg.end,
+                            isCrossing: timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00',
+                            breakCount: Array.isArray(seg.breaks) ? seg.breaks.length : 0,
+                            breakMinutes,
+                            durationMin: Math.max(0, eMin - sMin),
+                            startTs: startAt.getTime(),
+                            endTs: endAt.getTime()
+                        });
+                    });
+                });
+
+                return items.sort((a, b) => (a.startTs - b.startTs) || (a.endTs - b.endTs));
+            }, [myScheduleDayCards]);
+            const myNowStatus = useMemo(() => {
+                const now = new Date();
+                const nowTs = now.getTime();
+                const nowDateStr = todayDateStr(now);
+                const nowMin = now.getHours() * 60 + now.getMinutes();
+                const formatMinuteWithDayLocal = (minuteValue) => {
+                    const val = Number(minuteValue);
+                    if (!Number.isFinite(val)) return '—';
+                    const dayOffset = Math.floor(val / 1440);
+                    const base = minutesToTime(val % 1440);
+                    return dayOffset > 0 ? `${base} (+${dayOffset})` : base;
+                };
+                const todayIsDayOff = Array.isArray(myScheduleData?.daysOff) && myScheduleData.daysOff.includes(nowDateStr);
+                const nextFutureShift = myUpcomingShiftItems.find(item => item.startTs > nowTs) || null;
+
+                if (!myTimelineOperator) {
+                    return {
+                        key: 'idle',
+                        label: 'Нет данных',
+                        badgeClass: 'bg-slate-100 text-slate-700',
+                        panelClass: 'border-slate-200 bg-slate-50',
+                        hint: 'Загрузка или нет данных о графике'
+                    };
+                }
+
+                const todayParts = getShiftPartsForDate(myTimelineOperator, nowDateStr);
+                let activePart = null;
+                let activeBreak = null;
+                let activeShift = null;
+
+                for (const p of todayParts) {
+                    if (nowMin < p.start || nowMin >= p.end) continue;
+                    activePart = p;
+                    activeShift = myTimelineOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex] || null;
+                    const breaks = getBreakPartsForPart(myTimelineOperator, p, nowDateStr) || [];
+                    activeBreak = breaks.find(b => nowMin >= b.start && nowMin < b.end) || null;
+                    break;
+                }
+
+                const formatShiftLabel = (shift) => {
+                    if (!shift) return 'Смена';
+                    const isNight = timeToMinutes(shift.end) <= timeToMinutes(shift.start) && shift.end !== '00:00';
+                    return `${shift.start} — ${shift.end}${isNight ? ' (+1)' : ''}`;
+                };
+
+                if (activePart && activeBreak) {
+                    return {
+                        key: 'break',
+                        label: 'Перерыв',
+                        badgeClass: 'bg-amber-100 text-amber-800',
+                        panelClass: 'border-amber-200 bg-amber-50',
+                        hint: `${formatMinuteWithDayLocal(activeBreak.start)} — ${formatMinuteWithDayLocal(activeBreak.end)}`,
+                        subHint: activeShift ? `Во время смены ${formatShiftLabel(activeShift)}${activePart.sourceDate !== nowDateStr ? ` (из ${activePart.sourceDate})` : ''}` : null
+                    };
+                }
+
+                if (activePart) {
+                    return {
+                        key: 'work',
+                        label: 'На смене',
+                        badgeClass: 'bg-emerald-100 text-emerald-800',
+                        panelClass: 'border-emerald-200 bg-emerald-50',
+                        hint: activeShift ? formatShiftLabel(activeShift) : `${minutesToTime(activePart.start)} — ${minutesToTime(activePart.end)}`,
+                        subHint: activePart.sourceDate !== nowDateStr ? `Смена началась ${activePart.sourceDate}` : 'Смена идет сейчас'
+                    };
+                }
+
+                if (todayIsDayOff) {
+                    return {
+                        key: 'off',
+                        label: 'Выходной',
+                        badgeClass: 'bg-red-100 text-red-800',
+                        panelClass: 'border-red-200 bg-red-50',
+                        hint: 'Сегодня отмечен выходной',
+                        subHint: nextFutureShift ? `Следующая смена: ${nextFutureShift.date} ${nextFutureShift.start}` : null
+                    };
+                }
+
+                if (nextFutureShift) {
+                    const nextDate = new Date(nextFutureShift.startTs);
+                    const dayLabel = nextFutureShift.date === nowDateStr
+                        ? 'Сегодня'
+                        : nextFutureShift.date === todayDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1))
+                            ? 'Завтра'
+                            : nextDate.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+                    return {
+                        key: 'free',
+                        label: 'Вне смены',
+                        badgeClass: 'bg-slate-100 text-slate-800',
+                        panelClass: 'border-slate-200 bg-slate-50',
+                        hint: `Следующая смена: ${dayLabel}, ${nextFutureShift.start}`,
+                        subHint: `${nextFutureShift.start} — ${nextFutureShift.end}${nextFutureShift.isCrossing ? ' (+1)' : ''}`
+                    };
+                }
+
+                return {
+                    key: 'free',
+                    label: 'Вне смены',
+                    badgeClass: 'bg-slate-100 text-slate-800',
+                    panelClass: 'border-slate-200 bg-slate-50',
+                    hint: 'В текущем периоде смен больше нет',
+                    subHint: null
+                };
+            }, [myTimelineOperator, myScheduleData, myUpcomingShiftItems, myNowTick]);
 
             const formatBreakMinuteWithDay = (minuteValue) => {
                 const val = Number(minuteValue);
@@ -5588,6 +5839,12 @@ const withAccessTokenHeader = (headers = {}) => {
                 const dayOffset = Math.floor(val / 1440);
                 const base = minutesToTime(val % 1440);
                 return dayOffset > 0 ? `${base} (+${dayOffset})` : base;
+            };
+            const formatHoursMinutes = (minutesValue) => {
+                const mins = Math.max(0, Math.round(Number(minutesValue) || 0));
+                const h = Math.floor(mins / 60);
+                const m = mins % 60;
+                return `${h}ч ${String(m).padStart(2, '0')}м`;
             };
 
             if (isOperatorSelfSchedules) {
@@ -5600,8 +5857,8 @@ const withAccessTokenHeader = (headers = {}) => {
 
                             <div className="flex-1 min-w-0 flex flex-col h-full">
                                 <div className="flex items-center justify-between mb-3">
-                                    <div className="flex gap-2 items-center">
-                                        <h2 className="text-2xl font-semibold flex items-center gap-2">
+                                    <div className="flex flex-wrap gap-2 items-center">
+                                        <h2 className="text-2xl font-semibold flex items-center gap-2 mr-1">
                                             <i className="fas fa-calendar-user text-blue-600"></i>
                                             Мои смены
                                         </h2>
@@ -5610,6 +5867,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                             <button onClick={() => setViewMode('week')} className={`px-3 py-1 rounded ${viewMode === 'week' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Неделя</button>
                                             <button onClick={() => setViewMode('month')} className={`px-3 py-1 rounded ${viewMode === 'month' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Месяц</button>
                                         </div>
+                                        <button
+                                            onClick={() => setCurrentDate(new Date())}
+                                            className="ml-2 px-3 py-1 rounded bg-white border border-slate-200 hover:bg-slate-50 text-sm"
+                                        >
+                                            Сегодня
+                                        </button>
                                     </div>
                                     <div className="flex gap-2 items-center">
                                         <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-left"></i></button>
@@ -5618,13 +5881,107 @@ const withAccessTokenHeader = (headers = {}) => {
                                     </div>
                                 </div>
 
-                                <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 mb-3">
-                                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-                                        <div className="font-semibold text-slate-900">{myScheduleData?.name || user?.name || 'Оператор'}</div>
-                                        <div className="text-slate-500">{myScheduleData?.direction || 'Без направления'}</div>
-                                        {myScheduleData?.rate !== undefined && myScheduleData?.rate !== null && (
-                                            <div className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-xs font-medium">Ставка: {myScheduleData.rate}</div>
-                                        )}
+                                <div className="grid grid-cols-1 xl:grid-cols-3 gap-3 mb-3">
+                                    <div className="xl:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+                                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+                                            <div className="font-semibold text-slate-900">{myScheduleData?.name || user?.name || 'Оператор'}</div>
+                                            <div className="text-slate-500">{myScheduleData?.direction || 'Без направления'}</div>
+                                            {myScheduleData?.rate !== undefined && myScheduleData?.rate !== null && (
+                                                <div className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-xs font-medium">Ставка: {myScheduleData.rate}</div>
+                                            )}
+                                            <div className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-xs">
+                                                Период: {visibleRange[0]}{visibleRange.length > 1 ? ` — ${visibleRange[visibleRange.length - 1]}` : ''}
+                                            </div>
+                                        </div>
+                                        <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+                                            <div className="rounded-lg border border-slate-200 p-3 bg-slate-50">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Смен</div>
+                                                <div className="text-xl font-bold text-slate-900">{myScheduleSummary.shiftsCount}</div>
+                                            </div>
+                                            <div className="rounded-lg border border-slate-200 p-3 bg-slate-50">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Рабочих дней</div>
+                                                <div className="text-xl font-bold text-slate-900">{myScheduleSummary.daysWithShifts}</div>
+                                            </div>
+                                            <div className="rounded-lg border border-slate-200 p-3 bg-slate-50">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Часы</div>
+                                                <div className="text-xl font-bold text-slate-900">{(myScheduleSummary.totalWorkMin / 60).toFixed(2)}</div>
+                                            </div>
+                                            <div className="rounded-lg border border-amber-200 p-3 bg-amber-50">
+                                                <div className="text-[11px] uppercase tracking-wide text-amber-700">Перерывы</div>
+                                                <div className="text-xl font-bold text-amber-900">{formatHoursMinutes(myScheduleSummary.totalBreakMin)}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+                                        <div className={`rounded-lg border p-3 mb-3 ${myNowStatus.panelClass}`}>
+                                            <div className="flex items-center justify-between gap-2">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-600">Статус сейчас</div>
+                                                <div className={`px-2 py-0.5 rounded-full text-xs font-semibold ${myNowStatus.badgeClass}`}>
+                                                    {myNowStatus.label}
+                                                </div>
+                                            </div>
+                                            <div className="mt-2 text-sm font-medium text-slate-900">
+                                                {myNowStatus.hint}
+                                            </div>
+                                            {myNowStatus.subHint && (
+                                                <div className="mt-1 text-xs text-slate-600">
+                                                    {myNowStatus.subHint}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="flex items-center justify-between mb-2">
+                                            <div className="text-sm font-semibold text-slate-900">Отображение</div>
+                                            <button
+                                                onClick={() => setShowMyEmptyDays(v => !v)}
+                                                className={`px-2 py-1 rounded text-xs border ${showMyEmptyDays ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300'}`}
+                                            >
+                                                {showMyEmptyDays ? 'Все дни' : 'Только смены'}
+                                            </button>
+                                        </div>
+                                        <div className="space-y-2 text-xs">
+                                            <div className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+                                                <span className="text-slate-600">Выходных в периоде</span>
+                                                <span className="font-semibold text-red-700">{myScheduleSummary.daysOffCount}</span>
+                                            </div>
+                                            <div className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+                                                <span className="text-slate-600">Перерывов за день</span>
+                                                <span className="font-semibold text-amber-700">{viewMode === 'day' ? myCurrentDayBreaksList.length : '—'}</span>
+                                            </div>
+                                            <div className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+                                                <span className="text-slate-600">Дней показано</span>
+                                                <span className="font-semibold text-slate-900">{myScheduleVisibleDays.length}/{myScheduleDayCards.length}</span>
+                                            </div>
+                                        </div>
+                                        <div className="mt-3 pt-3 border-t border-slate-100">
+                                            <div className="text-xs font-semibold text-slate-900 mb-2">Ближайшие смены</div>
+                                            {myUpcomingShiftItems.length === 0 ? (
+                                                <div className="text-xs text-slate-400">Нет предстоящих смен в текущем периоде</div>
+                                            ) : (
+                                                <div className="space-y-2">
+                                                    {myUpcomingShiftItems.slice(0, 3).map(item => {
+                                                        const itemDate = new Date(item.startTs);
+                                                        const isToday = item.date === todayDateStr(new Date());
+                                                        const isTomorrow = item.date === todayDateStr(new Date(Date.now() + 86400000));
+                                                        return (
+                                                            <div key={`my-upcoming-${item.key}`} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                                                <div className="flex items-center justify-between gap-2">
+                                                                    <div className="text-xs font-semibold text-slate-900">
+                                                                        {isToday ? 'Сегодня' : isTomorrow ? 'Завтра' : itemDate.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })}
+                                                                    </div>
+                                                                    <div className="text-[11px] text-slate-500">{(item.durationMin / 60).toFixed(2)} ч</div>
+                                                                </div>
+                                                                <div className="text-xs text-slate-700 mt-0.5">
+                                                                    {item.start} — {item.end}{item.isCrossing ? ' (+1)' : ''}
+                                                                </div>
+                                                                <div className="text-[11px] text-amber-700 mt-0.5">
+                                                                    Перерывы: {item.breakCount} ({formatHoursMinutes(item.breakMinutes)})
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
 
@@ -5643,11 +6000,150 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                     {!myScheduleLoading && !myScheduleError && (
                                         <div className="space-y-3 pb-2">
-                                            {myScheduleDayCards.map(dayCard => (
-                                                <div key={`my-shifts-${dayCard.date}`} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                                            {viewMode === 'day' && myCurrentDayCard && (
+                                                <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
+                                                    <div className="xl:col-span-2 bg-white rounded-xl border border-slate-200 overflow-hidden">
+                                                        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
+                                                            <div className="font-semibold text-slate-900 flex items-center gap-2">
+                                                                <i className="fas fa-chart-gantt text-blue-600"></i>
+                                                                Таймлайн дня
+                                                                <span className="text-sm font-normal text-slate-500">{myCurrentDayCard.date}</span>
+                                                            </div>
+                                                            <div className="flex items-center gap-2 text-xs">
+                                                                {myCurrentDayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold">Выходной</span>}
+                                                                <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700">{myTimelineParts.length} фрагм.</span>
+                                                            </div>
+                                                        </div>
+                                                        <div className="p-4">
+                                                            <div className="mb-2">
+                                                                <div className="relative h-7 px-1 isolate bg-white rounded">
+                                                                    <div className="absolute inset-0 flex items-end z-20">
+                                                                        {Array.from({ length: 24 }).map((_, i) => (
+                                                                            <div key={i} className="flex-1 text-center text-[11px] leading-[12px] text-slate-600">{pad(i)}</div>
+                                                                        ))}
+                                                                    </div>
+                                                                    <div className="absolute inset-0 flex z-10">
+                                                                        {Array.from({ length: 24 }).map((_, i) => (
+                                                                            <div key={i} className="flex-1 border-r last:border-r-0 border-slate-200" />
+                                                                        ))}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="relative h-6 mt-1 px-1 isolate bg-white rounded">
+                                                                    <div className="absolute inset-0 flex items-start z-20">
+                                                                        {myTotalsPerHourForDay.map((t, hour) => (
+                                                                            <div key={hour} className="flex-1 text-center text-[10px] text-slate-700">{t > 0 ? t.toFixed(1) : '0'}</div>
+                                                                        ))}
+                                                                    </div>
+                                                                    <div className="absolute inset-0 flex pointer-events-none z-10">
+                                                                        {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-200" />))}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                            <div className="relative h-20 rounded-lg border border-slate-200 bg-slate-50 overflow-hidden">
+                                                                <div className="absolute inset-0 flex">
+                                                                    {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-200/80" />))}
+                                                                </div>
+                                                                {myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
+                                                                    <div className="absolute inset-0 flex items-center justify-center text-sm font-medium text-red-600">Выходной</div>
+                                                                )}
+                                                                {!myCurrentDayCard.isDayOff && myTimelineParts.length === 0 && (
+                                                                    <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">Нет смен</div>
+                                                                )}
+                                                                {myTimelineParts.map((p, idx) => {
+                                                                    const srcSeg = myTimelineOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                                                                    const isNight = srcSeg && (timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
+                                                                    const label = srcSeg
+                                                                        ? `${srcSeg.start} — ${srcSeg.end}${(isNight && srcSeg.end !== '00:00') ? ' (+1)' : ''}`
+                                                                        : `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                    return (
+                                                                        <div
+                                                                            key={`my-timeline-${idx}`}
+                                                                            className="absolute top-4 h-12 rounded text-xs overflow-hidden flex items-start"
+                                                                            style={{
+                                                                                left: `${computeLeftPercent(p.start)}%`,
+                                                                                width: `${((p.end - p.start) / minutesInDay) * 100}%`,
+                                                                                background: isNight ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)",
+                                                                                color: "white"
+                                                                            }}
+                                                                        >
+                                                                            <div className="px-2 py-1 truncate text-[11px] border border-white/25 bg-white/10 rounded-sm mt-1 ml-1">{label}</div>
+                                                                            {(getBreakPartsForPart(myTimelineOperator, p, myCurrentDayCard.date) || []).map((b, bi) => (
+                                                                                <div
+                                                                                    key={`my-timeline-break-${idx}-${bi}`}
+                                                                                    className="absolute top-0 h-full border border-amber-500/80 bg-amber-300/95"
+                                                                                    style={{
+                                                                                        left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
+                                                                                        width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`
+                                                                                    }}
+                                                                                />
+                                                                            ))}
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                                                        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                                                            <div className="font-semibold text-slate-900 flex items-center gap-2"><i className="fas fa-mug-hot text-amber-600"></i>Перерывы дня</div>
+                                                            <div className="text-xs text-slate-500">{myCurrentDayBreaksList.length}</div>
+                                                        </div>
+                                                        <div className="p-4 max-h-[330px] overflow-auto">
+                                                            {myCurrentDayBreaksList.length === 0 ? (
+                                                                <div className="text-sm text-slate-400">Нет перерывов на выбранный день</div>
+                                                            ) : (
+                                                                <div className="space-y-2">
+                                                                    {myCurrentDayBreaksList.map(item => (
+                                                                        <div key={item.key} className="rounded-lg border border-amber-200 bg-amber-50 p-2">
+                                                                            <div className="text-xs font-semibold text-amber-900">{formatBreakMinuteWithDay(item.start)} — {formatBreakMinuteWithDay(item.end)}</div>
+                                                                            <div className="text-[11px] text-amber-800/90 mt-0.5">{item.segText}</div>
+                                                                            <div className="text-[11px] text-amber-700/80">{formatHoursMinutes(item.durationMin)}</div>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {myScheduleVisibleDays.length === 0 && (
+                                                <div className="bg-white rounded-xl border border-dashed border-slate-300 p-6 text-center text-slate-500">
+                                                    Нет дней для отображения в выбранном периоде.
+                                                    {!showMyEmptyDays && (
+                                                        <button
+                                                            onClick={() => setShowMyEmptyDays(true)}
+                                                            className="ml-2 px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-xs text-slate-700"
+                                                        >
+                                                            Показать все дни
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            )}
+                                            <div className={viewMode === 'month'
+                                                ? 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3'
+                                                : viewMode === 'week'
+                                                    ? 'grid grid-cols-1 lg:grid-cols-2 gap-3'
+                                                    : 'space-y-3'
+                                            }>
+                                            {myScheduleVisibleDays.map(dayCard => {
+                                                const dateObj = parseDateStr(dayCard.date);
+                                                const isToday = dayCard.date === todayDateStr(new Date());
+                                                const dayWorkMin = (dayCard.shifts || []).reduce((acc, seg) => acc + (seg.durationMin || 0), 0);
+                                                const dayBreakMin = (dayCard.shifts || []).reduce((acc, seg) => acc + (seg.breaks || []).reduce((s, b) => s + Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)), 0), 0);
+                                                const dayBreakCount = (dayCard.shifts || []).reduce((acc, seg) => acc + (Array.isArray(seg.breaks) ? seg.breaks.length : 0), 0);
+                                                const dayNetMin = Math.max(0, dayWorkMin - dayBreakMin);
+                                                return (
+                                                <div key={`my-shifts-${dayCard.date}`} className={`bg-white rounded-xl border overflow-hidden ${isToday ? 'border-blue-300 ring-2 ring-blue-100' : 'border-slate-200'}`}>
                                                     <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
-                                                        <div className="font-semibold text-slate-900">{dayCard.date}</div>
-                                                        {dayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold">Выходной</span>}
+                                                        <div>
+                                                            <div className="font-semibold text-slate-900">{dayCard.date}</div>
+                                                            <div className="text-xs text-slate-500">{dateObj.toLocaleDateString('ru-RU', { weekday: 'long' })}</div>
+                                                        </div>
+                                                        <div className="flex flex-wrap items-center justify-end gap-1">
+                                                            {isToday && <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-semibold">Сегодня</span>}
+                                                            {dayCard.isDayOff && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold">Выходной</span>}
+                                                            {!dayCard.isDayOff && dayCard.shifts.length > 0 && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{dayCard.shifts.length} смен</span>}
+                                                        </div>
                                                     </div>
                                                     <div className="p-4">
                                                         {!dayCard.isDayOff && dayCard.shifts.length === 0 && (
@@ -5655,6 +6151,23 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         )}
                                                         {dayCard.isDayOff && dayCard.shifts.length === 0 && (
                                                             <div className="text-sm text-red-600">Отмечено как выходной</div>
+                                                        )}
+                                                        {dayCard.shifts.length > 0 && (
+                                                            <div className="mb-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                                                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                                                    <div className="text-[11px] text-slate-500 uppercase">Работа</div>
+                                                                    <div className="text-sm font-semibold text-slate-900">{(dayWorkMin / 60).toFixed(2)} ч</div>
+                                                                </div>
+                                                                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
+                                                                    <div className="text-[11px] text-emerald-700 uppercase">Чистое</div>
+                                                                    <div className="text-sm font-semibold text-emerald-900">{formatHoursMinutes(dayNetMin)}</div>
+                                                                </div>
+                                                                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                                                                    <div className="text-[11px] text-amber-700 uppercase">Перерывы</div>
+                                                                    <div className="text-sm font-semibold text-amber-900">{formatHoursMinutes(dayBreakMin)}</div>
+                                                                    <div className="text-[11px] text-amber-700/80 mt-0.5">{dayBreakCount} шт.</div>
+                                                                </div>
+                                                            </div>
                                                         )}
                                                         <div className="space-y-3">
                                                             {dayCard.shifts.map((seg, idx) => {
@@ -5688,7 +6201,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </div>
                                                     </div>
                                                 </div>
-                                            ))}
+                                            )})}
+                                            </div>
                                         </div>
                                     )}
                                 </div>
