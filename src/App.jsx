@@ -4562,6 +4562,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
             const [myScheduleData, setMyScheduleData] = useState(null);
+            const [myLiveScheduleData, setMyLiveScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
             const [myScheduleError, setMyScheduleError] = useState('');
             const [expandedMyDayCards, setExpandedMyDayCards] = useState({});
@@ -4907,6 +4908,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const computeLeftPercent = (m) => (m / minutesInDay) * 100;
             const cellMinWidth = viewMode === 'month' ? 110 : viewMode === 'week' ? 110 : undefined;
             const isOperatorSelfSchedules = user?.role === 'operator';
+            const operatorTodayKey = todayDateStr(new Date());
             const makeSelectedCellKey = (opId, date) => `${String(opId)}|${date}`;
             const sortSelectedTargets = (targets = []) => (
                 [...targets].sort((a, b) => {
@@ -4973,6 +4975,35 @@ const withAccessTokenHeader = (headers = {}) => {
                 loadMySchedules();
                 return () => { cancelled = true; };
             }, [isOperatorSelfSchedules, user, visibleRange]);
+
+            useEffect(() => {
+                if (!isOperatorSelfSchedules || !user) return;
+
+                let cancelled = false;
+                const now = new Date();
+                const liveStart = todayDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+                const liveEnd = todayDateStr(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 90));
+
+                const loadMyLiveSchedules = async () => {
+                    try {
+                        const qs = new URLSearchParams({ start_date: liveStart, end_date: liveEnd });
+                        const response = await fetch(`${API_BASE_URL}/api/work_schedules/my?${qs.toString()}`, {
+                            credentials: 'include',
+                            headers: withAccessTokenHeader()
+                        });
+                        if (!response.ok) return;
+                        const data = await response.json();
+                        if (cancelled) return;
+                        setMyLiveScheduleData(data?.operator || null);
+                    } catch (error) {
+                        if (cancelled) return;
+                        console.warn('Error loading my live work schedules:', error);
+                    }
+                };
+
+                loadMyLiveSchedules();
+                return () => { cancelled = true; };
+            }, [isOperatorSelfSchedules, user, operatorTodayKey]);
 
             const openEditModal = (opId, date, editIndex = null) => {
                 const op = operators.find(o => o.id === opId);
@@ -5646,6 +5677,14 @@ const withAccessTokenHeader = (headers = {}) => {
                     shifts: myScheduleData.shifts || {}
                 };
             }, [myScheduleData]);
+            const myLiveTimelineOperator = useMemo(() => {
+                const src = myLiveScheduleData || myScheduleData;
+                if (!src) return null;
+                return {
+                    ...src,
+                    shifts: src.shifts || {}
+                };
+            }, [myLiveScheduleData, myScheduleData]);
             const myTimelineParts = useMemo(() => {
                 if (viewMode !== 'day' || !myTimelineOperator || !myCurrentDayCard?.date) return [];
                 return getShiftPartsForDate(myTimelineOperator, myCurrentDayCard.date);
@@ -5723,14 +5762,21 @@ const withAccessTokenHeader = (headers = {}) => {
                 const now = new Date();
                 const nowTs = now.getTime();
                 const items = [];
+                const src = myLiveScheduleData || myScheduleData;
+                const shiftsByDate = src?.shifts;
+                if (!shiftsByDate || typeof shiftsByDate !== 'object') return items;
 
-                (myScheduleDayCards || []).forEach(day => {
-                    const baseDate = parseDateStr(day.date);
+                Object.entries(shiftsByDate).forEach(([dateStr, shiftList]) => {
+                    const baseDate = parseDateStr(dateStr);
                     if (!(baseDate instanceof Date) || Number.isNaN(baseDate.getTime())) return;
 
-                    (day.shifts || []).forEach((seg, segIndex) => {
-                        const sMin = timeToMinutes(seg.start);
-                        let eMin = timeToMinutes(seg.end);
+                    (Array.isArray(shiftList) ? shiftList : []).forEach((seg, segIndex) => {
+                        const sMin = Number.isFinite(seg?.__startMin) ? Number(seg.__startMin) : timeToMinutes(seg?.start);
+                        const endRaw = timeToMinutes(seg?.end);
+                        let eMin = Number.isFinite(seg?.__endMin)
+                            ? Number(seg.__endMin)
+                            : (Number.isFinite(endRaw) ? endRaw : NaN);
+                        if (!Number.isFinite(sMin) || !Number.isFinite(eMin)) return;
                         if (eMin <= sMin) eMin += 1440;
 
                         const startAt = new Date(baseDate);
@@ -5740,20 +5786,28 @@ const withAccessTokenHeader = (headers = {}) => {
 
                         if (endAt.getTime() <= nowTs) return;
 
-                        const breakMinutes = (seg.breaks || []).reduce((acc, b) => {
-                            const start = Number(b?.start);
-                            const end = Number(b?.end);
-                            return acc + (Number.isFinite(start) && Number.isFinite(end) && end > start ? (end - start) : 0);
-                        }, 0);
+                        const breaksSource = Array.isArray(seg?.breaks)
+                            ? seg.breaks
+                            : computeBreaksForShiftMinutes(sMin, eMin);
+                        const breaks = (Array.isArray(breaksSource) ? breaksSource : [])
+                            .map(b => {
+                                const start = Number(b?.start);
+                                const end = Number(b?.end);
+                                if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+                                return { start, end, durationMin: end - start };
+                            })
+                            .filter(Boolean);
+                        const breakMinutes = breaks.reduce((acc, b) => acc + (b.durationMin || 0), 0);
 
                         items.push({
-                            key: `${day.date}-${segIndex}-${seg.start}-${seg.end}`,
-                            date: day.date,
-                            start: seg.start,
-                            end: seg.end,
-                            isCrossing: timeToMinutes(seg.end) <= timeToMinutes(seg.start) && seg.end !== '00:00',
-                            breakCount: Array.isArray(seg.breaks) ? seg.breaks.length : 0,
+                            key: `${dateStr}-${segIndex}-${seg?.start}-${seg?.end}`,
+                            date: dateStr,
+                            start: seg?.start,
+                            end: seg?.end,
+                            isCrossing: timeToMinutes(seg?.end) <= timeToMinutes(seg?.start) && seg?.end !== '00:00',
+                            breakCount: breaks.length,
                             breakMinutes,
+                            breaks,
                             durationMin: Math.max(0, eMin - sMin),
                             startTs: startAt.getTime(),
                             endTs: endAt.getTime()
@@ -5762,7 +5816,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 });
 
                 return items.sort((a, b) => (a.startTs - b.startTs) || (a.endTs - b.endTs));
-            }, [myScheduleDayCards]);
+            }, [myLiveScheduleData, myScheduleData]);
             const myNowStatus = useMemo(() => {
                 const now = new Date();
                 const nowTs = now.getTime();
@@ -5775,10 +5829,11 @@ const withAccessTokenHeader = (headers = {}) => {
                     const base = minutesToTime(val % 1440);
                     return dayOffset > 0 ? `${base} (+${dayOffset})` : base;
                 };
-                const todayIsDayOff = Array.isArray(myScheduleData?.daysOff) && myScheduleData.daysOff.includes(nowDateStr);
+                const liveData = myLiveScheduleData || myScheduleData;
+                const todayIsDayOff = Array.isArray(liveData?.daysOff) && liveData.daysOff.includes(nowDateStr);
                 const nextFutureShift = myUpcomingShiftItems.find(item => item.startTs > nowTs) || null;
 
-                if (!myTimelineOperator) {
+                if (!myLiveTimelineOperator) {
                     return {
                         key: 'idle',
                         label: 'Нет данных',
@@ -5788,7 +5843,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     };
                 }
 
-                const todayParts = getShiftPartsForDate(myTimelineOperator, nowDateStr);
+                const todayParts = getShiftPartsForDate(myLiveTimelineOperator, nowDateStr);
                 let activePart = null;
                 let activeBreak = null;
                 let activeShift = null;
@@ -5796,8 +5851,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 for (const p of todayParts) {
                     if (nowMin < p.start || nowMin >= p.end) continue;
                     activePart = p;
-                    activeShift = myTimelineOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex] || null;
-                    const breaks = getBreakPartsForPart(myTimelineOperator, p, nowDateStr) || [];
+                    activeShift = myLiveTimelineOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex] || null;
+                    const breaks = getBreakPartsForPart(myLiveTimelineOperator, p, nowDateStr) || [];
                     activeBreak = breaks.find(b => nowMin >= b.start && nowMin < b.end) || null;
                     break;
                 }
@@ -5862,10 +5917,10 @@ const withAccessTokenHeader = (headers = {}) => {
                     label: 'Вне смены',
                     badgeClass: 'bg-slate-100 text-slate-800',
                     panelClass: 'border-slate-200 bg-slate-50',
-                    hint: 'В текущем периоде смен больше нет',
+                    hint: 'Ближайших смен не найдено',
                     subHint: null
                 };
-            }, [myTimelineOperator, myScheduleData, myUpcomingShiftItems, myNowTick]);
+            }, [myLiveTimelineOperator, myLiveScheduleData, myScheduleData, myUpcomingShiftItems, myNowTick]);
 
             const formatBreakMinuteWithDay = (minuteValue) => {
                 const val = Number(minuteValue);
@@ -5886,7 +5941,8 @@ const withAccessTokenHeader = (headers = {}) => {
             };
             const breakReminderCandidates = useMemo(() => {
                 const result = [];
-                const shiftsByDate = myScheduleData?.shifts;
+                const reminderSource = myLiveScheduleData || myScheduleData;
+                const shiftsByDate = reminderSource?.shifts;
                 if (!shiftsByDate || typeof shiftsByDate !== 'object') return result;
 
                 Object.entries(shiftsByDate).forEach(([dateStr, shiftList]) => {
@@ -5929,7 +5985,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 });
 
                 return result.sort((a, b) => a.breakStartMs - b.breakStartMs);
-            }, [myScheduleData]);
+            }, [myLiveScheduleData, myScheduleData]);
             const showOperatorReminderToast = (message, type = 'info') => {
                 try {
                     if (typeof window !== 'undefined' && typeof window.showToast === 'function') {
@@ -6148,7 +6204,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <div className="pt-0 lg:pt-1">
                                             <div className="text-xs font-semibold text-slate-900 mb-2">Ближайшие смены</div>
                                             {myUpcomingShiftItems.length === 0 ? (
-                                                <div className="text-xs text-slate-400">Нет предстоящих смен в текущем периоде</div>
+                                                <div className="text-xs text-slate-400">Нет предстоящих смен</div>
                                             ) : (
                                                 <div className="space-y-2">
                                                     {myUpcomingShiftItems.slice(0, 3).map(item => {
@@ -6175,6 +6231,22 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     <span className="text-[11px] text-amber-700 tabular-nums">
                                                                         {formatMinutesOnly(item.breakMinutes)}
                                                                     </span>
+                                                                </div>
+                                                                <div className="mt-2">
+                                                                    {Array.isArray(item.breaks) && item.breaks.length > 0 ? (
+                                                                        <div className="flex flex-wrap gap-1.5">
+                                                                            {item.breaks.map((b, bi) => (
+                                                                                <span
+                                                                                    key={`my-upcoming-break-${item.key}-${bi}`}
+                                                                                    className="px-2 py-0.5 rounded-md border border-amber-200 bg-amber-50/80 text-[11px] text-amber-900 tabular-nums"
+                                                                                >
+                                                                                    {formatBreakMinuteWithDay(b.start)} — {formatBreakMinuteWithDay(b.end)}
+                                                                                </span>
+                                                                            ))}
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div className="text-[11px] text-slate-400">Без перерывов</div>
+                                                                    )}
                                                                 </div>
                                                             </div>
                                                         );
