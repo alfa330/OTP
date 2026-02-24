@@ -7711,6 +7711,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             const isSelected = selectedDayKeySet.has(makeSelectedCellKey(op.id, d));
                                             let bgColor = ' bg-white';
                                             let borderClass = ' border-slate-300';
+                                            let emphasisClass = '';
                                             if (isSelected) {
                                                 bgColor = ' bg-green-100';
                                                 borderClass = ' border-green-500 border-2';
@@ -7720,10 +7721,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                             } else if (isDayOff) {
                                                 bgColor = ' bg-sky-50';
                                             } else if (hasShift) {
-                                                bgColor = ' bg-blue-50';
+                                                bgColor = ' bg-gradient-to-br from-blue-50 to-indigo-50';
+                                                borderClass = ' border-blue-300';
+                                                emphasisClass = ' ring-1 ring-blue-200 shadow-sm shadow-blue-100/70';
                                             }
                                             return (
-                                            <div key={d} className={"h-[56px] overflow-hidden border rounded p-1 relative" + borderClass + bgColor + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={(e) => handleDayClick(e, op.id, d)}>
+                                            <div key={d} className={"h-[56px] overflow-hidden border rounded p-1 relative" + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={(e) => handleDayClick(e, op.id, d)}>
                                                 {viewMode === 'day' ? (
                                                 <div className="relative h-12">
                                                     {cellScheduleStatus ? (
@@ -7798,11 +7801,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </div>
                                                     ) : labelList.length > 0 ? (
                                                     <div className="relative h-full pb-4">
-                                                        {labelList.slice(0,2).map((l, i) => <div key={i} className={"font-medium text-xs truncate " + (l.crossing ? 'text-amber-600' : '')}>{l.text}</div>)}
+                                                        {labelList.slice(0,2).map((l, i) => <div key={i} className={"font-semibold text-xs truncate " + (l.crossing ? 'text-amber-600' : 'text-blue-800')}>{l.text}</div>)}
                                                         {labelList.length > 2 && (
                                                         <div className="absolute right-1 bottom-[1px] text-xs text-slate-400">+{labelList.length - 2}</div>
                                                         )}
-                                                        <div className="absolute left-1 bottom-[1px] text-xs text-slate-500">{durationHours.toFixed(2)} ч</div>
+                                                        <div className="absolute left-1 bottom-[1px] text-xs text-blue-700">{durationHours.toFixed(2)} ч</div>
                                                     </div>
                                                     ) : (
                                                     <div className="text-xs text-slate-400">—</div>
