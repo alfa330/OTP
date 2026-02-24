@@ -332,6 +332,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <input
                         type="date"
                         value={toDateInputValue(editedUser?.birth_date)}
+                        max={todayInputDate()}
                         onChange={(e) => setEditedUser({ ...editedUser, birth_date: e.target.value || null })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                         disabled={isLoading || !!createdCredentials}
@@ -404,7 +405,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             </div>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
-                                    {isDismissalLikeStatus(editedUser?.status) ? 'Дата окончания (необязательно)' : 'Дата окончания'}
+                                    {isDismissalLikeStatus(editedUser?.status) ? 'Дата окончания (необ.)' : 'Дата окончания'}
                                 </label>
                                 <input
                                     type="date"
@@ -553,6 +554,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 type="date"
                                 id="birthDate"
                                 value={toDateInputValue(editedUser?.birth_date)}
+                                max={todayInputDate()}
                                 onChange={(e) => setEditedUser({ ...editedUser, birth_date: e.target.value || null })}
                                 className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                 disabled={isLoading}
