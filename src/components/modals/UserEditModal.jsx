@@ -15,7 +15,9 @@ const DISMISSAL_REASON_OPTIONS = [
     'Переезд',
     'По состоянию здоровья',
     'Пропал',
-    'Слабый/не выполняет kpi'
+    'Слабый/не выполняет kpi',
+    'Забрали в армию',
+    'Нашел работу по профессии'
 ];
 
 const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], onSave, user }) => {

@@ -4879,7 +4879,9 @@ const withAccessTokenHeader = (headers = {}) => {
                 'Переезд',
                 'По состоянию здоровья',
                 'Пропал',
-                'Слабый/не выполняет kpi'
+                'Слабый/не выполняет kpi',
+                'Забрали в армию',
+                'Нашел работу по профессии'
             ];
             const getScheduleStatusTone = (statusCode) => {
                 switch (statusCode) {
