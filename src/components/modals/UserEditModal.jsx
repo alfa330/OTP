@@ -17,7 +17,8 @@ const DISMISSAL_REASON_OPTIONS = [
     'Пропал',
     'Слабый/не выполняет kpi',
     'Забрали в армию',
-    'Нашел работу по профессии'
+    'Нашел работу по профессии',
+    'По семейным обстоятельствам'
 ];
 
 const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], onSave, user }) => {
@@ -56,6 +57,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const shouldShowStatusPeriodEndDate = (draft) => {
         if (!usesScheduleStatusPeriodForm(draft?.status)) return false;
         if (!isDismissalLikeStatus(draft?.status)) return true;
+        if (draft?.status_period_is_blacklist) return false;
         return String(draft?.status_period_dismissal_reason || '').trim() === DISMISSAL_REASON_WITH_END_DATE;
     };
 
@@ -74,6 +76,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         status_period_start_date: initialDate,
         status_period_end_date: isDismissalLikeStatus(initialStatus) ? "" : initialDate,
         status_period_dismissal_reason: "",
+        status_period_is_blacklist: !!(base.status_period_is_blacklist ?? base.isBlacklist ?? base.is_blacklist),
         status_period_comment: "",
         use_schedule_status_period: false,
         ...base,
@@ -123,6 +126,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         status_period_start_date: todayInputDate(),
         status_period_end_date: todayInputDate(),
         status_period_dismissal_reason: "",
+        status_period_is_blacklist: false,
         status_period_comment: "",
         use_schedule_status_period: false,
         });
@@ -159,12 +163,17 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         if (usesScheduleStatusPeriodForm(editedUser?.status) && editedUser?.use_schedule_status_period) {
         const startDate = String(editedUser?.status_period_start_date || "").trim();
         const endDate = String(editedUser?.status_period_end_date || "").trim();
+        const isBlacklistDismissal = isDismissalLikeStatus(editedUser?.status) && !!editedUser?.status_period_is_blacklist;
         if (!startDate) {
             setModalError("Для статусного периода укажите дату начала.");
             return;
         }
         if (!isDismissalLikeStatus(editedUser?.status) && !endDate) {
             setModalError("Для статусного периода укажите дату окончания.");
+            return;
+        }
+        if (isBlacklistDismissal && endDate) {
+            setModalError("Для ЧС-увольнения дата окончания не используется.");
             return;
         }
         if (isDismissalLikeStatus(editedUser?.status)) {
@@ -374,6 +383,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 status: nextStatus,
                                 status_period_start_date: currentStart,
                                 status_period_end_date: isDismissalLikeStatus(nextStatus) ? "" : (editedUser?.status_period_end_date || currentStart),
+                                status_period_is_blacklist: isDismissalLikeStatus(nextStatus) ? !!editedUser?.status_period_is_blacklist : false,
                                 use_schedule_status_period: usesScheduleStatusPeriodForm(nextStatus) ? true : editedUser?.use_schedule_status_period
                             });
                         }}
@@ -439,7 +449,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                             ...prev,
                                             status_period_dismissal_reason: nextReason,
                                             use_schedule_status_period: true,
-                                            status_period_end_date: nextReason === DISMISSAL_REASON_WITH_END_DATE
+                                            status_period_end_date: (!prev?.status_period_is_blacklist && nextReason === DISMISSAL_REASON_WITH_END_DATE)
                                                 ? (prev?.status_period_end_date || '')
                                                 : ''
                                         }));
@@ -452,6 +462,23 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                         <option key={reason} value={reason}>{reason}</option>
                                     ))}
                                 </select>
+                            </div>
+                            <div>
+                                <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={!!editedUser?.status_period_is_blacklist}
+                                        onChange={(e) => setEditedUser((prev) => ({
+                                            ...prev,
+                                            status_period_is_blacklist: e.target.checked,
+                                            use_schedule_status_period: true,
+                                            status_period_end_date: e.target.checked ? '' : prev?.status_period_end_date
+                                        }))}
+                                        className="rounded border-gray-300"
+                                        disabled={isLoading || !!createdCredentials}
+                                    />
+                                    <span>ЧС (без возможности восстановления)</span>
+                                </label>
                             </div>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Комментарий (обязательно)</label>
@@ -624,6 +651,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     status: nextStatus,
                                     status_period_start_date: currentStart,
                                     status_period_end_date: isDismissalLikeStatus(nextStatus) ? "" : (editedUser?.status_period_end_date || currentStart),
+                                    status_period_is_blacklist: isDismissalLikeStatus(nextStatus) ? !!editedUser?.status_period_is_blacklist : false,
                                     use_schedule_status_period: usesScheduleStatusPeriodForm(nextStatus) ? true : editedUser?.use_schedule_status_period
                                 });
                             }}
@@ -683,13 +711,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Причина увольнения</label>
                                     <select
                                         value={editedUser?.status_period_dismissal_reason || ""}
-                                        onChange={(e) => {
+                                    onChange={(e) => {
                                             const nextReason = e.target.value;
                                             setEditedUser((prev) => ({
                                                 ...prev,
                                                 status_period_dismissal_reason: nextReason,
                                                 use_schedule_status_period: true,
-                                                status_period_end_date: nextReason === DISMISSAL_REASON_WITH_END_DATE
+                                                status_period_end_date: (!prev?.status_period_is_blacklist && nextReason === DISMISSAL_REASON_WITH_END_DATE)
                                                     ? (prev?.status_period_end_date || '')
                                                     : ''
                                             }));
@@ -702,6 +730,23 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                             <option key={reason} value={reason}>{reason}</option>
                                         ))}
                                     </select>
+                                </div>
+                                <div>
+                                    <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={!!editedUser?.status_period_is_blacklist}
+                                            onChange={(e) => setEditedUser((prev) => ({
+                                                ...prev,
+                                                status_period_is_blacklist: e.target.checked,
+                                                use_schedule_status_period: true,
+                                                status_period_end_date: e.target.checked ? '' : prev?.status_period_end_date
+                                            }))}
+                                            className="rounded border-gray-300"
+                                            disabled={isLoading}
+                                        />
+                                        <span>ЧС (без возможности восстановления)</span>
+                                    </label>
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Комментарий (обязательно)</label>

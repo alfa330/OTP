@@ -4789,6 +4789,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 statusStartDate: '',
                 statusEndDate: '',
                 dismissalReason: '',
+                dismissalIsBlacklist: false,
                 statusComment: '',
                 statusSaving: false,
                 statusDeleting: false
@@ -4881,8 +4882,10 @@ const withAccessTokenHeader = (headers = {}) => {
                 'Пропал',
                 'Слабый/не выполняет kpi',
                 'Забрали в армию',
-                'Нашел работу по профессии'
+                'Нашел работу по профессии',
+                'По семейным обстоятельствам'
             ];
+            const dismissalReasonWithOptionalEndDate = 'Б/С на летний период';
             const getScheduleStatusTone = (statusCode) => {
                 switch (statusCode) {
                     case 'bs':
@@ -4955,7 +4958,8 @@ const withAccessTokenHeader = (headers = {}) => {
                     startDate: found.startDate || found.start_date || null,
                     endDate: found.endDate || found.end_date || null,
                     dismissalReason: found.dismissalReason || found.dismissal_reason || null,
-                    comment: found.comment || ''
+                    comment: found.comment || '',
+                    isBlacklist: !!(found.isBlacklist ?? found.is_blacklist)
                 } : null;
             };
 
@@ -5365,6 +5369,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         ? (activeStatus?.endDate || '')
                         : (activeStatus?.endDate || fallbackDate),
                     dismissalReason: activeStatus?.dismissalReason || '',
+                    dismissalIsBlacklist: !!activeStatus?.isBlacklist,
                     statusComment: activeStatus?.comment || '',
                     statusSaving: false,
                     statusDeleting: false
@@ -5394,6 +5399,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     return code === 'dismissal' && isDateWithinStatusPeriod(dateStr, period);
                 });
                 if (!targetPeriod) return;
+                if (targetPeriod?.isBlacklist || targetPeriod?.is_blacklist) return;
 
                 const targetId = Number(targetPeriod?.id);
                 const prevDayStr = todayDateStr(addDays(parseDateStr(dateStr), -1));
@@ -5427,9 +5433,10 @@ const withAccessTokenHeader = (headers = {}) => {
                 const statusCode = String(modalState.statusCode || '').trim();
                 const startDate = String(modalState.statusStartDate || modalState.date || '').trim();
                 const isDismissal = statusCode === 'dismissal';
+                const dismissalIsBlacklist = isDismissal ? !!modalState.dismissalIsBlacklist : false;
                 const endDateRaw = String(modalState.statusEndDate || '').trim();
                 const endDate = isDismissal
-                    ? (endDateRaw || null)
+                    ? (dismissalIsBlacklist ? null : (endDateRaw || null))
                     : String(modalState.statusEndDate || startDate || '').trim();
                 const dismissalReason = isDismissal ? String(modalState.dismissalReason || '').trim() : null;
                 const statusComment = String(modalState.statusComment || '').trim();
@@ -5449,6 +5456,10 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (isDismissal) {
                     if (!dismissalReason) {
                         alert('Укажите причину увольнения');
+                        return;
+                    }
+                    if (dismissalIsBlacklist && endDateRaw) {
+                        alert('Для ЧС-увольнения дата окончания не используется');
                         return;
                     }
                     if (!statusComment) {
@@ -5474,6 +5485,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             start_date: startDate,
                             end_date: endDate,
                             dismissal_reason: dismissalReason,
+                            is_blacklist: dismissalIsBlacklist,
                             comment: statusComment || null,
                             range_start: rangeStart || null,
                             range_end: rangeEnd || null
@@ -5498,6 +5510,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 ? (selectedDayStatus?.endDate || '')
                                 : (selectedDayStatus?.endDate || endDate || startDate),
                             dismissalReason: selectedDayStatus?.dismissalReason || (isDismissal ? dismissalReason : ''),
+                            dismissalIsBlacklist: !!selectedDayStatus?.isBlacklist,
                             statusComment: selectedDayStatus?.comment ?? (statusComment || '')
                         }));
                     } else if (payload?.status_period) {
@@ -5697,6 +5710,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     statusStartDate: firstTarget.date,
                     statusEndDate: firstTarget.date,
                     dismissalReason: '',
+                    dismissalIsBlacklist: false,
                     statusComment: '',
                     statusSaving: false,
                     statusDeleting: false
@@ -7907,6 +7921,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                             {modalActiveScheduleStatus.dismissalReason}
                                         </span>
                                     )}
+                                    {modalActiveScheduleStatus.statusCode === 'dismissal' && modalActiveScheduleStatus.isBlacklist && (
+                                        <span className="px-2 py-0.5 rounded-md border border-slate-400 bg-slate-100 text-slate-800 font-semibold">
+                                            ЧС
+                                        </span>
+                                    )}
                                 </div>
                                 {modalActiveScheduleStatus.comment && (
                                     <div className="mt-1 text-slate-500">
@@ -7928,6 +7947,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             ? (m.statusEndDate || '')
                                             : (m.statusEndDate || m.statusStartDate || m.date || ''),
                                         dismissalReason: e.target.value === 'dismissal' ? m.dismissalReason : '',
+                                        dismissalIsBlacklist: e.target.value === 'dismissal' ? !!m.dismissalIsBlacklist : false,
                                         statusComment: e.target.value === 'dismissal' ? m.statusComment : (m.statusComment || '')
                                     }))}
                                     className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -7955,7 +7975,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 />
                             </div>
 
-                            {!!modalState.statusCode && (
+                            {!!modalState.statusCode && !(modalState.statusCode === 'dismissal' && modalState.dismissalIsBlacklist) && (
                                 <div>
                                     <label className="block text-xs font-medium text-slate-600 mb-1">
                                         {modalState.statusCode === 'dismissal' ? 'Дата окончания (необ.)' : 'Дата окончания'}
@@ -7985,7 +8005,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                     <label className="block text-xs font-medium text-slate-600 mb-1">Причина увольнения</label>
                                     <select
                                         value={modalState.dismissalReason || ''}
-                                        onChange={(e) => setModalState(m => ({ ...m, dismissalReason: e.target.value }))}
+                                        onChange={(e) => setModalState(m => ({
+                                            ...m,
+                                            dismissalReason: e.target.value,
+                                            statusEndDate: (m.dismissalIsBlacklist || e.target.value !== dismissalReasonWithOptionalEndDate) ? '' : m.statusEndDate
+                                        }))}
                                         className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                                     >
                                         <option value="">Выберите причину</option>
@@ -7993,6 +8017,24 @@ const withAccessTokenHeader = (headers = {}) => {
                                             <option key={reason} value={reason}>{reason}</option>
                                         ))}
                                     </select>
+                                </div>
+                                <div className="md:col-span-2">
+                                    <label className="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={!!modalState.dismissalIsBlacklist}
+                                            onChange={(e) => setModalState(m => ({
+                                                ...m,
+                                                dismissalIsBlacklist: e.target.checked,
+                                                statusEndDate: e.target.checked ? '' : m.statusEndDate
+                                            }))}
+                                            className="rounded border-slate-300"
+                                        />
+                                        <span>ЧС (полное увольнение без восстановления)</span>
+                                    </label>
+                                    <div className="mt-1 text-xs text-slate-500">
+                                        Для ЧС-увольнения дата окончания не используется, сменой/статусом не прерывается.
+                                    </div>
                                 </div>
                                 <div className="md:col-span-2">
                                     <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий (обязательно)</label>
@@ -8017,8 +8059,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                     <button
                                         type="button"
                                         onClick={() => deleteScheduleStatusPeriod(modalActiveScheduleStatus)}
-                                        disabled={!!modalState.statusSaving || !!modalState.statusDeleting}
+                                        disabled={!!modalState.statusSaving || !!modalState.statusDeleting || !!(modalActiveScheduleStatus?.statusCode === 'dismissal' && modalActiveScheduleStatus?.isBlacklist)}
                                         className="px-4 py-2 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-slate-700 text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                        title={(modalActiveScheduleStatus?.statusCode === 'dismissal' && modalActiveScheduleStatus?.isBlacklist) ? 'ЧС-увольнение нельзя удалить' : ''}
                                     >
                                         <i className={`fas ${modalState.statusDeleting ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`}></i>
                                         {modalState.statusDeleting ? 'Удаляем...' : 'Удалить статус'}
@@ -13436,6 +13479,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     const startDate = normalizeDateForApi(sourceUser?.status_period_start_date);
                     const endDate = normalizeDateForApi(sourceUser?.status_period_end_date);
                     const dismissalReason = String(sourceUser?.status_period_dismissal_reason || '').trim() || null;
+                    const dismissalIsBlacklist = !!sourceUser?.status_period_is_blacklist;
                     const comment = String(sourceUser?.status_period_comment || '').trim() || null;
 
                     if (!startDate) {
@@ -13455,6 +13499,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         start_date: startDate,
                         end_date: statusCode === 'dismissal' ? (endDate || null) : endDate,
                         dismissal_reason: statusCode === 'dismissal' ? dismissalReason : null,
+                        is_blacklist: statusCode === 'dismissal' ? dismissalIsBlacklist : false,
                         comment: statusCode === 'dismissal' ? comment : (comment || null)
                     }, {
                         withCredentials: true,
