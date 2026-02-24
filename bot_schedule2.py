@@ -4496,6 +4496,47 @@ def save_shifts_bulk():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/work_schedules/bulk_actions', methods=['POST'])
+@require_api_key
+def apply_work_schedule_bulk_actions():
+    """
+    Атомарные массовые действия по графикам в одном запросе.
+    Body: {
+        "actions": [
+            {"action": "set_shift", "operator_id": 1, "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breaks": [...]},
+            {"action": "set_day_off", "operator_id": 1, "date": "YYYY-MM-DD"},
+            {"action": "delete_shifts", "operator_id": 1, "date": "YYYY-MM-DD"}
+        ]
+    }
+    """
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester_id = int(requester_id)
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+
+        if user_data[3] not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+
+        data = request.get_json(silent=True) or {}
+        actions = data.get('actions')
+        result = db.apply_work_schedule_bulk_actions(actions)
+        return jsonify({
+            "message": "Bulk work schedule actions applied successfully",
+            "result": result
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error applying bulk work schedule actions: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 8080)), debug=False, use_reloader=False)
 

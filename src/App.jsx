@@ -4797,6 +4797,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
+            const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
             const [myScheduleData, setMyScheduleData] = useState(null);
             const [myLiveScheduleData, setMyLiveScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
@@ -5742,7 +5743,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 }));
             };
 
-            const buildAdjustedShiftPayloadForDate = ({ opId, date, start, end, editIndex = null, breaks = null, simulatedOperators = null }) => {
+            const buildAdjustedShiftPayloadForDate = ({ opId, date, start, end, editIndex = null, breaks = null, simulatedOperators = null, replaceExistingOnDate = false }) => {
                 const hasExplicitBreaks = Array.isArray(breaks);
                 const simulated = simulatedOperators || cloneOperatorsForBreakSimulation(operators);
                 const simOp = simulated.find(x => x.id === opId);
@@ -5750,7 +5751,7 @@ const withAccessTokenHeader = (headers = {}) => {
                   return { start, end, breaks: hasExplicitBreaks ? breaks.map(b => ({ start: b.start, end: b.end })) : [] };
                 }
 
-                const existing = (simOp.shifts?.[date] ?? []).map(s => ({
+                const existing = (replaceExistingOnDate ? [] : (simOp.shifts?.[date] ?? [])).map(s => ({
                   ...s,
                   breaks: Array.isArray(s.breaks) ? s.breaks.map(b => ({ start: b.start, end: b.end })) : []
                 }));
@@ -5805,6 +5806,28 @@ const withAccessTokenHeader = (headers = {}) => {
                 };
             };
 
+            const runPlannerBulkActionsRequest = async (actions, actionKind = '') => {
+                if (!Array.isArray(actions) || actions.length === 0) return null;
+                setBulkActionState({ loading: true, action: actionKind || '' });
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/bulk_actions`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({ actions })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    return payload;
+                } finally {
+                    setBulkActionState({ loading: false, action: '' });
+                }
+            };
+
             const saveSegmentToMultipleTargets = async ({ targets, start, end, breaks = null }) => {
                 const normalizedTargets = normalizeBulkTargets(targets);
                 if (normalizedTargets.length === 0) return;
@@ -5821,7 +5844,8 @@ const withAccessTokenHeader = (headers = {}) => {
                       start,
                       end,
                       breaks: breaksForBulk,
-                      simulatedOperators: simulated
+                      simulatedOperators: simulated,
+                      replaceExistingOnDate: true
                     });
                     const simOp = simulated.find(x => x.id === target.opId);
                     if (simOp?.daysOff?.includes(target.date)) {
@@ -5837,33 +5861,17 @@ const withAccessTokenHeader = (headers = {}) => {
                     };
                   });
 
-                  const groupedByOperator = new Map();
-                  preparedTargets.forEach(target => {
-                    if (!groupedByOperator.has(target.opId)) groupedByOperator.set(target.opId, []);
-                    groupedByOperator.get(target.opId).push({
+                  await runPlannerBulkActionsRequest(
+                    preparedTargets.map(target => ({
+                      action: 'set_shift',
+                      operator_id: target.opId,
                       date: target.date,
                       start: target.startPrepared,
                       end: target.endPrepared,
                       breaks: target.breaksPrepared
-                    });
-                  });
-
-                  await Promise.all(Array.from(groupedByOperator.entries()).map(async ([bulkOpId, shifts]) => {
-                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shifts_bulk`, {
-                      method: 'POST',
-                      credentials: 'include',
-                      headers: withAccessTokenHeader({
-                        'Content-Type': 'application/json'
-                      }),
-                      body: JSON.stringify({
-                        operator_id: bulkOpId,
-                        shifts
-                      })
-                    });
-                    if (!response.ok) {
-                      throw new Error(`Failed to save shifts for operator ${bulkOpId}`);
-                    }
-                  }));
+                    })),
+                    'set_shift'
+                  );
 
                   // Обновляем локальное состояние
                   setOperators(prev => {
@@ -5881,14 +5889,11 @@ const withAccessTokenHeader = (headers = {}) => {
                       if (!op) return;
                       interruptLocalDismissalByWorkDate(op, target.date);
                       op.daysOff = op.daysOff.filter(d => d !== target.date);
-                      const arr = op.shifts[target.date] ? ([...op.shifts[target.date]]) : [];
-                      arr.push({ start, end });
-                      const merged = mergeSegments(arr);
-                      const seg = merged.find(s => s.start === target.startPrepared && s.end === target.endPrepared);
-                      if (seg) {
-                        seg.breaks = (target.breaksPrepared || []).map(b => ({ start: b.start, end: b.end }));
-                      }
-                      op.shifts[target.date] = merged;
+                      op.shifts[target.date] = [{
+                        start: target.startPrepared,
+                        end: target.endPrepared,
+                        breaks: (target.breaksPrepared || []).map(b => ({ start: b.start, end: b.end }))
+                      }];
                       touchedPairs.add(makeSelectedCellKey(target.opId, target.date));
                     });
 
@@ -5924,28 +5929,15 @@ const withAccessTokenHeader = (headers = {}) => {
                 const normalizedTargets = normalizeBulkTargets(targets);
                 if (normalizedTargets.length === 0) return;
 
-                const targetsToToggle = normalizedTargets.filter(target => {
-                    const op = operators.find(x => x.id === target.opId);
-                    return !(op?.daysOff?.includes?.(target.date));
-                });
-
                 try {
-                    await Promise.all(targetsToToggle.map(async (target) => {
-                        const response = await fetch(`${API_BASE_URL}/api/work_schedules/day_off`, {
-                            method: 'POST',
-                            credentials: 'include',
-                            headers: withAccessTokenHeader({
-                                'Content-Type': 'application/json'
-                            }),
-                            body: JSON.stringify({
-                                operator_id: target.opId,
-                                day_off_date: target.date
-                            })
-                        });
-                        if (!response.ok) {
-                            throw new Error(`Failed to set day off for ${target.opId}:${target.date}`);
-                        }
-                    }));
+                    await runPlannerBulkActionsRequest(
+                        normalizedTargets.map(target => ({
+                            action: 'set_day_off',
+                            operator_id: target.opId,
+                            date: target.date
+                        })),
+                        'set_day_off'
+                    );
 
                     setOperators(prev => {
                         const copy = prev.map(o => ({
@@ -5971,6 +5963,43 @@ const withAccessTokenHeader = (headers = {}) => {
                 } catch (error) {
                     console.error('Error setting multiple day offs:', error);
                     alert('Ошибка массового назначения выходного');
+                }
+            };
+
+            const deleteShiftsForMultipleTargets = async (targets) => {
+                const normalizedTargets = normalizeBulkTargets(targets);
+                if (normalizedTargets.length === 0) return;
+
+                try {
+                    await runPlannerBulkActionsRequest(
+                        normalizedTargets.map(target => ({
+                            action: 'delete_shifts',
+                            operator_id: target.opId,
+                            date: target.date
+                        })),
+                        'delete_shifts'
+                    );
+
+                    setOperators(prev => {
+                        const copy = prev.map(o => ({
+                            ...o,
+                            shifts: { ...(o.shifts || {}) }
+                        }));
+                        normalizedTargets.forEach(target => {
+                            const op = copy.find(x => x.id === target.opId);
+                            if (!op) return;
+                            if (op.shifts[target.date]) {
+                                delete op.shifts[target.date];
+                            }
+                        });
+                        return copy;
+                    });
+
+                    clearSelectedDays();
+                    setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], showAddPanel: false }));
+                } catch (error) {
+                    console.error('Error deleting multiple shifts:', error);
+                    alert('Ошибка массового удаления смен');
                 }
             };
 
@@ -8328,27 +8357,46 @@ const withAccessTokenHeader = (headers = {}) => {
                         <div className="flex gap-3 justify-end">
                             <button 
                                 className="px-5 py-3 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition-colors flex items-center gap-2"
-                                onClick={() => { setModalState((m) => ({ ...m, open: false })); clearSelectedDays(); }}
+                                onClick={() => { if (bulkActionState.loading) return; setModalState((m) => ({ ...m, open: false })); clearSelectedDays(); }}
+                                disabled={bulkActionState.loading}
                             >
                                 <i className="fas fa-times"></i>
                                 Закрыть
                             </button>
                             {isBulkSelectionModal && (
                                 <button 
-                                    className="px-5 py-3 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 font-semibold border border-sky-200 transition-colors flex items-center gap-2"
-                                    onClick={() => setDayOffForMultipleTargets(modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })))}
+                                    className="px-5 py-3 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold border border-rose-200 transition-colors flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                                    onClick={() => deleteShiftsForMultipleTargets(modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })))}
+                                    disabled={bulkActionState.loading}
                                 >
-                                    <i className="fas fa-calendar-times"></i>
-                                    Выходной всем ({modalBulkCount})
+                                    <i className={`fas ${bulkActionState.loading && bulkActionState.action === 'delete_shifts' ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`}></i>
+                                    {bulkActionState.loading && bulkActionState.action === 'delete_shifts'
+                                        ? 'Удаляем...'
+                                        : `Удалить смены (${modalBulkCount})`}
+                                </button>
+                            )}
+                            {isBulkSelectionModal && (
+                                <button 
+                                    className="px-5 py-3 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 font-semibold border border-sky-200 transition-colors flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                                    onClick={() => setDayOffForMultipleTargets(modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })))}
+                                    disabled={bulkActionState.loading}
+                                >
+                                    <i className={`fas ${bulkActionState.loading && bulkActionState.action === 'set_day_off' ? 'fa-spinner fa-spin' : 'fa-calendar-times'}`}></i>
+                                    {bulkActionState.loading && bulkActionState.action === 'set_day_off'
+                                        ? 'Проставляем выходные...'
+                                        : `Выходной всем (${modalBulkCount})`}
                                 </button>
                             )}
                             {!modalState.isDayOff && isBulkSelectionModal && (
                                 <button 
-                                    className="px-5 py-3 rounded-lg bg-gradient-to-r from-green-600 to-green-500 hover:from-green-700 hover:to-green-600 text-white font-semibold shadow-lg hover:shadow-xl transition-all flex items-center gap-2"
+                                    className="px-5 py-3 rounded-lg bg-gradient-to-r from-green-600 to-green-500 hover:from-green-700 hover:to-green-600 text-white font-semibold shadow-lg hover:shadow-xl transition-all flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
                                     onClick={() => saveSegmentToMultipleTargets({ targets: modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })), start: modalState.start, end: modalState.end, breaks: (modalState.breaks && modalState.breaks.length) ? modalState.breaks : null })}
+                                    disabled={bulkActionState.loading}
                                 >
-                                    <i className="fas fa-check-double"></i>
-                                    Применить ко всем ({modalBulkCount})
+                                    <i className={`fas ${bulkActionState.loading && bulkActionState.action === 'set_shift' ? 'fa-spinner fa-spin' : 'fa-check-double'}`}></i>
+                                    {bulkActionState.loading && bulkActionState.action === 'set_shift'
+                                        ? 'Применяем...'
+                                        : `Применить ко всем (${modalBulkCount})`}
                                 </button>
                             )}
                             {!modalState.isDayOff && !modalState.multipleDates && (modalState.editIndex !== null || modalState.showAddPanel) && (
