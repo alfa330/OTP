@@ -7767,8 +7767,9 @@ const withAccessTokenHeader = (headers = {}) => {
                         <strong>Совет:</strong> Удерживайте Ctrl (или Cmd на Mac) и кликайте по дням для множественного выбора
                     </div>
 
-                    {excelImportReport && user?.role !== 'operator' && (
-                        (() => {
+                    {user?.role !== 'operator' && (
+                        <SimpleModal open={!!excelImportReport} onClose={() => setExcelImportReport(null)}>
+                        {excelImportReport && (() => {
                             const report = excelImportReport;
                             const tone = report.kind === 'error'
                                 ? {
@@ -7807,7 +7808,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             const errorInvalidCount = Number(report?.details?.invalid_cells_total || (Array.isArray(report?.details?.invalid_cells) ? report.details.invalid_cells.length : 0) || 0);
 
                             return (
-                                <div className={`mb-3 p-3 border rounded-xl ${tone.box}`}>
+                                <div className={`p-3 border rounded-xl ${tone.box}`}>
                                     <div className="flex items-start justify-between gap-3">
                                         <div className="flex items-start gap-3 min-w-0">
                                             <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${tone.iconBg} flex-shrink-0`}>
@@ -7900,7 +7901,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                     )}
                                 </div>
                             );
-                        })()
+                        })()}
+                        </SimpleModal>
                     )}
 
                     <div className="flex gap-4 w-full flex-1 min-h-0">
