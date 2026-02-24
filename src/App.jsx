@@ -4475,19 +4475,23 @@ const withAccessTokenHeader = (headers = {}) => {
                 const s = snap5(center - size / 2);
                 breaks.push({ start: s, end: s + size });
             };
-            if (dur >= 6 * 60 && dur < 8 * 60) {
+            if (dur >= 5 * 60 && dur < 6 * 60) {
+                pushCentered(startMin + dur * 0.5, 15);
+            } else if (dur >= 6 * 60 && dur < 8 * 60) {
                 const centers = [startMin + dur / 3, startMin + 2 * dur / 3];
                 centers.forEach(c => pushCentered(c, 15));
-            } else if (dur >= 8 * 60 && dur < 9.5 * 60) {
+            } else if (dur >= 8 * 60 && dur < 11 * 60) {
                 const centers = [startMin + dur * 0.25, startMin + dur * 0.5, startMin + dur * 0.75];
                 const sizes = [15, 30, 15];
                 centers.forEach((c, i) => pushCentered(c, sizes[i]));
-            } else if (dur >= 9.5 * 60 && dur < 12 * 60) {
-                const centers = [startMin + dur * 0.25, startMin + dur * 0.5, startMin + dur * 0.75];
-                const sizes = [30, 15, 30];
+            } else if (dur >= 11 * 60) {
+                const centers = [startMin + dur * 0.2, startMin + dur * 0.45, startMin + dur * 0.7, startMin + dur * 0.87];
+                const sizes = [15, 30, 15, 15];
                 centers.forEach((c, i) => pushCentered(c, sizes[i]));
             }
-            return breaks.map(b => ({ start: Math.max(startMin, Math.min(endMin, snap5(b.start))), end: Math.max(startMin, Math.min(endMin, snap5(b.end))) }));
+            return breaks
+                .map(b => ({ start: Math.max(startMin, Math.min(endMin, snap5(b.start))), end: Math.max(startMin, Math.min(endMin, snap5(b.end))) }))
+                .filter(b => b.end > b.start);
             }
 
             const intervalsOverlap = (a, b) => a.start < b.end && b.start < a.end;
