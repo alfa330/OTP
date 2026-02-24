@@ -39,11 +39,22 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     };
     const isPeriodStatus = (value) => PERIOD_STATUS_VALUES.has(String(value || ''));
+    const isDismissalLikeStatus = (value) => {
+        const status = String(value || '').trim();
+        return status === 'dismissal' || status === 'fired';
+    };
+    const usesScheduleStatusPeriodForm = (value) => isPeriodStatus(value) || String(value || '').trim() === 'fired';
+    const normalizeModalStatusValue = (value) => {
+        const status = String(value ?? '').trim();
+        if (status === 'unpaid_leave') return 'bs';
+        if (status === 'dismissal') return 'fired';
+        return status || 'working';
+    };
 
     useEffect(() => {
         // Устанавливаем defaults при открытии для режима создания
         const base = userToEdit || {};
-        const initialStatus = (base.status === 'unpaid_leave' ? 'bs' : (base.status ?? "working"));
+        const initialStatus = normalizeModalStatusValue(base.status);
         const initialDate = todayInputDate();
         const defaults = {
         rate: base.rate ?? 1.0,
@@ -53,17 +64,17 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         gender: base.gender ?? "",
         birth_date: base.birth_date ?? "",
         status_period_start_date: initialDate,
-        status_period_end_date: initialStatus === 'dismissal' ? "" : initialDate,
+        status_period_end_date: isDismissalLikeStatus(initialStatus) ? "" : initialDate,
         status_period_dismissal_reason: "",
         status_period_comment: "",
         use_schedule_status_period: false,
         ...base,
         };
-        if (defaults.status === 'unpaid_leave') {
-            defaults.status = 'bs';
+        if (defaults.status === 'unpaid_leave' || defaults.status === 'dismissal') {
+            defaults.status = normalizeModalStatusValue(defaults.status);
             defaults.use_schedule_status_period = true;
             if (!defaults.status_period_start_date) defaults.status_period_start_date = initialDate;
-            if (!defaults.status_period_end_date) defaults.status_period_end_date = initialDate;
+            if (!defaults.status_period_end_date && !isDismissalLikeStatus(defaults.status)) defaults.status_period_end_date = initialDate;
         }
         setEditedUser(defaults);
         setModalError("");
@@ -137,18 +148,18 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return;
         }
 
-        if (!isCreateMode && isPeriodStatus(editedUser?.status) && editedUser?.use_schedule_status_period) {
+        if (usesScheduleStatusPeriodForm(editedUser?.status) && editedUser?.use_schedule_status_period) {
         const startDate = String(editedUser?.status_period_start_date || "").trim();
         const endDate = String(editedUser?.status_period_end_date || "").trim();
         if (!startDate) {
             setModalError("Для статусного периода укажите дату начала.");
             return;
         }
-        if (editedUser.status !== 'dismissal' && !endDate) {
+        if (!isDismissalLikeStatus(editedUser?.status) && !endDate) {
             setModalError("Для статусного периода укажите дату окончания.");
             return;
         }
-        if (editedUser.status === 'dismissal') {
+        if (isDismissalLikeStatus(editedUser?.status)) {
             if (!String(editedUser?.status_period_dismissal_reason || "").trim()) {
                 setModalError("Для увольнения укажите причину.");
                 return;
@@ -353,8 +364,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 ...editedUser,
                                 status: nextStatus,
                                 status_period_start_date: currentStart,
-                                status_period_end_date: nextStatus === 'dismissal' ? "" : (editedUser?.status_period_end_date || currentStart),
-                                use_schedule_status_period: isPeriodStatus(nextStatus) ? true : editedUser?.use_schedule_status_period
+                                status_period_end_date: isDismissalLikeStatus(nextStatus) ? "" : (editedUser?.status_period_end_date || currentStart),
+                                use_schedule_status_period: usesScheduleStatusPeriodForm(nextStatus) ? true : editedUser?.use_schedule_status_period
                             });
                         }}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
@@ -365,11 +376,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <option value="bs">Б/С</option>
                         <option value="sick_leave">Больничный</option>
                         <option value="annual_leave">Ежегодный отпуск</option>
-                        <option value="dismissal">Увольнение (период)</option>
                         </select>
                     </div>
 
-                    {isPeriodStatus(editedUser?.status) && (
+                    {usesScheduleStatusPeriodForm(editedUser?.status) && (
                     <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
                         <div className="text-xs text-slate-600">
                             Для этих статусов используется логика планировщика: статус сохраняется как период.
@@ -384,7 +394,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                         ...editedUser,
                                         status_period_start_date: e.target.value,
                                         use_schedule_status_period: true,
-                                        status_period_end_date: (editedUser?.status !== 'dismissal' && (!editedUser?.status_period_end_date || editedUser.status_period_end_date < e.target.value))
+                                        status_period_end_date: (!isDismissalLikeStatus(editedUser?.status) && (!editedUser?.status_period_end_date || editedUser.status_period_end_date < e.target.value))
                                             ? e.target.value
                                             : editedUser?.status_period_end_date
                                     })}
@@ -394,7 +404,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             </div>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
-                                    {editedUser?.status === 'dismissal' ? 'Дата окончания (необязательно)' : 'Дата окончания'}
+                                    {isDismissalLikeStatus(editedUser?.status) ? 'Дата окончания (необязательно)' : 'Дата окончания'}
                                 </label>
                                 <input
                                     type="date"
@@ -406,7 +416,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 />
                             </div>
                         </div>
-                        {editedUser?.status === 'dismissal' && (
+                        {isDismissalLikeStatus(editedUser?.status) && (
                             <>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Причина увольнения</label>
@@ -431,6 +441,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                     disabled={isLoading || !!createdCredentials}
                                 />
+                            </div>
+                            <div className="text-xs text-slate-500">
+                                Для увольнения обязательны дата начала, причина и комментарий.
                             </div>
                             </>
                         )}
@@ -588,8 +601,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     ...editedUser,
                                     status: nextStatus,
                                     status_period_start_date: currentStart,
-                                    status_period_end_date: nextStatus === 'dismissal' ? "" : (editedUser?.status_period_end_date || currentStart),
-                                    use_schedule_status_period: isPeriodStatus(nextStatus) ? true : editedUser?.use_schedule_status_period
+                                    status_period_end_date: isDismissalLikeStatus(nextStatus) ? "" : (editedUser?.status_period_end_date || currentStart),
+                                    use_schedule_status_period: usesScheduleStatusPeriodForm(nextStatus) ? true : editedUser?.use_schedule_status_period
                                 });
                             }}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
@@ -600,11 +613,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             <option value="bs">Б/С</option>
                             <option value="sick_leave">Больничный</option>
                             <option value="annual_leave">Ежегодный отпуск</option>
-                            <option value="dismissal">Увольнение (период)</option>
                             </select>
                         </div>
 
-                        {isPeriodStatus(editedUser?.status) && (
+                        {usesScheduleStatusPeriodForm(editedUser?.status) && (
                         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
                             <div className="text-xs text-slate-600">
                                 Статус будет сохранен как период графика (аналогично планировщику).
@@ -619,7 +631,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                             ...editedUser,
                                             status_period_start_date: e.target.value,
                                             use_schedule_status_period: true,
-                                            status_period_end_date: (editedUser?.status !== 'dismissal' && (!editedUser?.status_period_end_date || editedUser.status_period_end_date < e.target.value))
+                                            status_period_end_date: (!isDismissalLikeStatus(editedUser?.status) && (!editedUser?.status_period_end_date || editedUser.status_period_end_date < e.target.value))
                                                 ? e.target.value
                                                 : editedUser?.status_period_end_date
                                         })}
@@ -629,7 +641,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
-                                        {editedUser?.status === 'dismissal' ? 'Дата окончания (необязательно)' : 'Дата окончания'}
+                                        {isDismissalLikeStatus(editedUser?.status) ? 'Дата окончания (необязательно)' : 'Дата окончания'}
                                     </label>
                                     <input
                                         type="date"
@@ -641,7 +653,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     />
                                 </div>
                             </div>
-                            {editedUser?.status === 'dismissal' && (
+                            {isDismissalLikeStatus(editedUser?.status) && (
                                 <>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Причина увольнения</label>
@@ -666,6 +678,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                         disabled={isLoading}
                                     />
+                                </div>
+                                <div className="text-xs text-slate-500">
+                                    Для увольнения обязательны дата начала, причина и комментарий.
                                 </div>
                                 </>
                             )}
