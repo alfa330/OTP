@@ -4942,6 +4942,111 @@ class Database:
             """, (operator_id, day_off_date_obj))
             return True
 
+    def _delete_all_shifts_for_day_tx(self, cursor, operator_id, shift_date):
+        operator_id = int(operator_id)
+        shift_date_obj = self._normalize_schedule_date(shift_date)
+        cursor.execute("""
+            DELETE FROM work_shifts
+            WHERE operator_id = %s AND shift_date = %s
+            RETURNING id
+        """, (operator_id, shift_date_obj))
+        deleted_rows = cursor.fetchall() or []
+        return len(deleted_rows)
+
+    def _set_day_off_tx(self, cursor, operator_id, day_off_date):
+        operator_id = int(operator_id)
+        day_off_date_obj = self._normalize_schedule_date(day_off_date)
+        cursor.execute("""
+            INSERT INTO days_off (operator_id, day_off_date)
+            VALUES (%s, %s)
+            ON CONFLICT (operator_id, day_off_date) DO NOTHING
+        """, (operator_id, day_off_date_obj))
+        deleted_shifts = self._delete_all_shifts_for_day_tx(cursor, operator_id, day_off_date_obj)
+        return {
+            'operator_id': operator_id,
+            'date': day_off_date_obj.strftime('%Y-%m-%d'),
+            'deleted_shifts': deleted_shifts
+        }
+
+    def apply_work_schedule_bulk_actions(self, actions):
+        """
+        Атомарное выполнение массовых действий по графикам в одном запросе.
+        Поддерживаемые actions:
+        - {action: "set_shift", operator_id, date, start, end, breaks?}
+        - {action: "set_day_off", operator_id, date}
+        - {action: "delete_shifts", operator_id, date}
+        """
+        if not isinstance(actions, list) or not actions:
+            raise ValueError("actions must be a non-empty list")
+
+        summary = {
+            'total': 0,
+            'set_shift': 0,
+            'set_day_off': 0,
+            'delete_shifts': 0,
+            'deleted_shift_rows': 0,
+            'shift_ids': [],
+            'affected_operator_ids': []
+        }
+        affected_operator_ids = set()
+
+        with self._get_cursor() as cursor:
+            for item in actions:
+                if not isinstance(item, dict):
+                    raise ValueError("Each action must be an object")
+
+                action_type = str(item.get('action') or item.get('type') or '').strip()
+                operator_id = item.get('operator_id')
+                date_value = item.get('date') or item.get('shift_date') or item.get('day_off_date')
+
+                if not action_type:
+                    raise ValueError("Missing action type")
+                if operator_id is None:
+                    raise ValueError("Missing operator_id")
+                if not date_value:
+                    raise ValueError("Missing date")
+
+                operator_id = int(operator_id)
+                date_obj = self._normalize_schedule_date(date_value)
+                affected_operator_ids.add(operator_id)
+
+                if action_type == 'set_day_off':
+                    result = self._set_day_off_tx(cursor, operator_id, date_obj)
+                    summary['set_day_off'] += 1
+                    summary['deleted_shift_rows'] += int(result.get('deleted_shifts') or 0)
+                    summary['total'] += 1
+                    continue
+
+                if action_type == 'delete_shifts':
+                    deleted_count = self._delete_all_shifts_for_day_tx(cursor, operator_id, date_obj)
+                    summary['delete_shifts'] += 1
+                    summary['deleted_shift_rows'] += deleted_count
+                    summary['total'] += 1
+                    continue
+
+                if action_type == 'set_shift':
+                    start_time_obj = self._normalize_schedule_time(item.get('start') or item.get('start_time'), 'start')
+                    end_time_obj = self._normalize_schedule_time(item.get('end') or item.get('end_time'), 'end')
+                    deleted_count = self._delete_all_shifts_for_day_tx(cursor, operator_id, date_obj)
+                    shift_id = self._save_shift_tx(
+                        cursor=cursor,
+                        operator_id=operator_id,
+                        shift_date=date_obj,
+                        start_time=start_time_obj,
+                        end_time=end_time_obj,
+                        breaks=item.get('breaks')
+                    )
+                    summary['set_shift'] += 1
+                    summary['deleted_shift_rows'] += deleted_count
+                    summary['shift_ids'].append(int(shift_id))
+                    summary['total'] += 1
+                    continue
+
+                raise ValueError(f"Unsupported action type: {action_type}")
+
+        summary['affected_operator_ids'] = sorted(affected_operator_ids)
+        return summary
+
     def save_schedule_status_period(
         self,
         operator_id,
