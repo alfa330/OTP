@@ -4803,6 +4803,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [isLoading, setIsLoading] = useState(false);
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
             const [excelTransferState, setExcelTransferState] = useState({ importing: false, exporting: false });
+            const [excelImportReport, setExcelImportReport] = useState(null);
             const [myScheduleData, setMyScheduleData] = useState(null);
             const [myLiveScheduleData, setMyLiveScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
@@ -5916,6 +5917,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const handlePlannerExcelImportFileChange = async (event) => {
                 const file = event?.target?.files?.[0];
                 if (!file) return;
+                setExcelImportReport(null);
                 setExcelTransferState(prev => ({ ...prev, importing: true }));
                 try {
                     const formData = new FormData();
@@ -5933,7 +5935,8 @@ const withAccessTokenHeader = (headers = {}) => {
                         const details = Array.isArray(payload?.invalid_cells) && payload.invalid_cells.length
                             ? `\nНекорректных ячеек: ${payload.invalid_cells_total || payload.invalid_cells.length}`
                             : '';
-                        throw new Error((payload?.error || `HTTP ${response.status}`) + details);
+                        const errorMessage = (payload?.error || `HTTP ${response.status}`) + details;
+                        throw Object.assign(new Error(errorMessage), { payload });
                     }
 
                     await reloadPlannerSchedulesFromServer();
@@ -5943,18 +5946,27 @@ const withAccessTokenHeader = (headers = {}) => {
                     const unmatchedCount = Array.isArray(warnings.unmatched_rows) ? warnings.unmatched_rows.length : 0;
                     const ambiguousCount = Array.isArray(warnings.ambiguous_rows) ? warnings.ambiguous_rows.length : 0;
                     const invalidCellsCount = Number(warnings.invalid_cells_total || (Array.isArray(warnings.invalid_cells) ? warnings.invalid_cells.length : 0) || 0);
-                    alert(
-                        `Импорт завершен.\n` +
-                        `Обработано дней: ${result.days_processed ?? 0}\n` +
-                        `Смен сохранено: ${result.shift_rows_saved ?? 0}\n` +
-                        `Выходных проставлено: ${result.set_day_off_days ?? 0}` +
-                        `${invalidCellsCount ? `\nПропущено невалидных ячеек: ${invalidCellsCount}` : ''}` +
-                        `${unmatchedCount ? `\nНе найдены ФИО: ${unmatchedCount}` : ''}` +
-                        `${ambiguousCount ? `\nНеоднозначные ФИО: ${ambiguousCount}` : ''}`
-                    );
+                    const hasWarnings = (invalidCellsCount + unmatchedCount + ambiguousCount) > 0;
+                    const processedDays = Number(result.days_processed || 0);
+                    setExcelImportReport({
+                        kind: (processedDays > 0 && !hasWarnings) ? 'success' : 'warning',
+                        title: payload?.message || 'Импорт Excel завершен',
+                        fileName: file.name,
+                        breakAntiOverlapApplied: !!payload?.breakAntiOverlapApplied,
+                        result,
+                        warnings,
+                        createdAt: Date.now()
+                    });
                 } catch (error) {
                     console.error('Error importing excel schedule:', error);
-                    alert(`Ошибка импорта Excel: ${error?.message || error}`);
+                    setExcelImportReport({
+                        kind: 'error',
+                        title: 'Ошибка импорта Excel',
+                        fileName: file?.name || '',
+                        message: error?.message || String(error),
+                        details: error?.payload || null,
+                        createdAt: Date.now()
+                    });
                 } finally {
                     if (event?.target) event.target.value = '';
                     setExcelTransferState(prev => ({ ...prev, importing: false }));
@@ -7754,6 +7766,142 @@ const withAccessTokenHeader = (headers = {}) => {
                         <i className="fas fa-info-circle mr-1"></i>
                         <strong>Совет:</strong> Удерживайте Ctrl (или Cmd на Mac) и кликайте по дням для множественного выбора
                     </div>
+
+                    {excelImportReport && user?.role !== 'operator' && (
+                        (() => {
+                            const report = excelImportReport;
+                            const tone = report.kind === 'error'
+                                ? {
+                                    box: 'bg-rose-50 border-rose-200',
+                                    iconBg: 'bg-rose-100 text-rose-700',
+                                    title: 'text-rose-900',
+                                    text: 'text-rose-700',
+                                    chip: 'bg-rose-100 text-rose-800 border-rose-200'
+                                }
+                                : report.kind === 'warning'
+                                    ? {
+                                        box: 'bg-amber-50 border-amber-200',
+                                        iconBg: 'bg-amber-100 text-amber-700',
+                                        title: 'text-amber-900',
+                                        text: 'text-amber-700',
+                                        chip: 'bg-amber-100 text-amber-800 border-amber-200'
+                                    }
+                                    : {
+                                        box: 'bg-emerald-50 border-emerald-200',
+                                        iconBg: 'bg-emerald-100 text-emerald-700',
+                                        title: 'text-emerald-900',
+                                        text: 'text-emerald-700',
+                                        chip: 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                    };
+
+                            const warnings = report.warnings || {};
+                            const result = report.result || {};
+                            const unmatchedCount = Array.isArray(warnings.unmatched_rows) ? warnings.unmatched_rows.length : 0;
+                            const ambiguousCount = Array.isArray(warnings.ambiguous_rows) ? warnings.ambiguous_rows.length : 0;
+                            const invalidCellsCount = Number(warnings.invalid_cells_total || (Array.isArray(warnings.invalid_cells) ? warnings.invalid_cells.length : 0) || 0);
+                            const processedDays = Number(result.days_processed || 0);
+                            const shiftsSaved = Number(result.shift_rows_saved || 0);
+                            const dayOffDays = Number(result.set_day_off_days || 0);
+                            const reportTime = report.createdAt ? new Date(report.createdAt) : null;
+                            const invalidPreview = Array.isArray(warnings.invalid_cells) ? warnings.invalid_cells.slice(0, 3) : [];
+                            const errorInvalidCount = Number(report?.details?.invalid_cells_total || (Array.isArray(report?.details?.invalid_cells) ? report.details.invalid_cells.length : 0) || 0);
+
+                            return (
+                                <div className={`mb-3 p-3 border rounded-xl ${tone.box}`}>
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div className="flex items-start gap-3 min-w-0">
+                                            <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${tone.iconBg} flex-shrink-0`}>
+                                                <i className={`fas ${report.kind === 'error' ? 'fa-triangle-exclamation' : report.kind === 'warning' ? 'fa-circle-exclamation' : 'fa-circle-check'}`}></i>
+                                            </div>
+                                            <div className="min-w-0">
+                                                <div className={`text-sm font-semibold ${tone.title}`}>{report.title || 'Импорт Excel'}</div>
+                                                <div className={`text-xs ${tone.text} opacity-90`}>
+                                                    {report.fileName ? `Файл: ${report.fileName}` : 'Импорт Excel'}
+                                                    {reportTime && ` · ${reportTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`}
+                                                    {report.breakAntiOverlapApplied && ' · анти-пересечение перерывов применено'}
+                                                </div>
+                                                {report.message && (
+                                                    <div className={`mt-1 text-xs ${tone.text} whitespace-pre-wrap`}>{report.message}</div>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setExcelImportReport(null)}
+                                            className="px-2 py-1 text-xs rounded border border-black/10 bg-white/70 hover:bg-white text-slate-700 flex-shrink-0"
+                                            title="Скрыть"
+                                        >
+                                            <i className="fas fa-times"></i>
+                                        </button>
+                                    </div>
+
+                                    {report.kind !== 'error' && (
+                                        <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+                                            <div className="rounded-lg bg-white/80 border border-white px-2 py-1.5">
+                                                <div className="text-[10px] uppercase tracking-wide text-slate-500">Обработано дней</div>
+                                                <div className="text-sm font-semibold text-slate-900 tabular-nums">{processedDays}</div>
+                                            </div>
+                                            <div className="rounded-lg bg-white/80 border border-white px-2 py-1.5">
+                                                <div className="text-[10px] uppercase tracking-wide text-slate-500">Смен сохранено</div>
+                                                <div className="text-sm font-semibold text-slate-900 tabular-nums">{shiftsSaved}</div>
+                                            </div>
+                                            <div className="rounded-lg bg-white/80 border border-white px-2 py-1.5">
+                                                <div className="text-[10px] uppercase tracking-wide text-slate-500">Выходных</div>
+                                                <div className="text-sm font-semibold text-slate-900 tabular-nums">{dayOffDays}</div>
+                                            </div>
+                                            <div className="rounded-lg bg-white/80 border border-white px-2 py-1.5">
+                                                <div className="text-[10px] uppercase tracking-wide text-slate-500">Невалидных ячеек</div>
+                                                <div className="text-sm font-semibold text-slate-900 tabular-nums">{invalidCellsCount}</div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {report.kind !== 'error' && (invalidCellsCount > 0 || unmatchedCount > 0 || ambiguousCount > 0) && (
+                                        <div className="mt-3 flex flex-wrap gap-2">
+                                            {invalidCellsCount > 0 && (
+                                                <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
+                                                    Невалидные ячейки: {invalidCellsCount}
+                                                </span>
+                                            )}
+                                            {unmatchedCount > 0 && (
+                                                <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
+                                                    Не найдены ФИО: {unmatchedCount}
+                                                </span>
+                                            )}
+                                            {ambiguousCount > 0 && (
+                                                <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
+                                                    Неоднозначные ФИО: {ambiguousCount}
+                                                </span>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {report.kind !== 'error' && invalidPreview.length > 0 && (
+                                        <div className="mt-3">
+                                            <div className="text-[11px] font-medium text-slate-600 mb-1">Примеры пропущенных ячеек</div>
+                                            <div className="space-y-1">
+                                                {invalidPreview.map((item, idx) => (
+                                                    <div key={`invalid-preview-${idx}`} className="text-xs text-slate-700 bg-white/70 border border-white rounded px-2 py-1 flex flex-wrap gap-x-2 gap-y-1">
+                                                        <span className="font-medium">{item?.name || '—'}</span>
+                                                        <span>({item?.date || '—'})</span>
+                                                        <span className="text-rose-700">{item?.value || '—'}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {report.kind === 'error' && errorInvalidCount > 0 && (
+                                        <div className="mt-3">
+                                            <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
+                                                Некорректных ячеек: {errorInvalidCount}
+                                            </span>
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })()
+                    )}
 
                     <div className="flex gap-4 w-full flex-1 min-h-0">
                         <div className="flex-1 bg-white rounded shadow-sm p-2 w-full flex flex-col min-h-0 overflow-hidden">
