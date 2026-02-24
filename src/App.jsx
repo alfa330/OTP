@@ -7767,144 +7767,6 @@ const withAccessTokenHeader = (headers = {}) => {
                         <strong>Совет:</strong> Удерживайте Ctrl (или Cmd на Mac) и кликайте по дням для множественного выбора
                     </div>
 
-                    {user?.role !== 'operator' && (
-                        <SimpleModal open={!!excelImportReport} onClose={() => setExcelImportReport(null)}>
-                        {excelImportReport && (() => {
-                            const report = excelImportReport;
-                            const tone = report.kind === 'error'
-                                ? {
-                                    box: 'bg-rose-50 border-rose-200',
-                                    iconBg: 'bg-rose-100 text-rose-700',
-                                    title: 'text-rose-900',
-                                    text: 'text-rose-700',
-                                    chip: 'bg-rose-100 text-rose-800 border-rose-200'
-                                }
-                                : report.kind === 'warning'
-                                    ? {
-                                        box: 'bg-amber-50 border-amber-200',
-                                        iconBg: 'bg-amber-100 text-amber-700',
-                                        title: 'text-amber-900',
-                                        text: 'text-amber-700',
-                                        chip: 'bg-amber-100 text-amber-800 border-amber-200'
-                                    }
-                                    : {
-                                        box: 'bg-emerald-50 border-emerald-200',
-                                        iconBg: 'bg-emerald-100 text-emerald-700',
-                                        title: 'text-emerald-900',
-                                        text: 'text-emerald-700',
-                                        chip: 'bg-emerald-100 text-emerald-800 border-emerald-200'
-                                    };
-
-                            const warnings = report.warnings || {};
-                            const result = report.result || {};
-                            const unmatchedCount = Array.isArray(warnings.unmatched_rows) ? warnings.unmatched_rows.length : 0;
-                            const ambiguousCount = Array.isArray(warnings.ambiguous_rows) ? warnings.ambiguous_rows.length : 0;
-                            const invalidCellsCount = Number(warnings.invalid_cells_total || (Array.isArray(warnings.invalid_cells) ? warnings.invalid_cells.length : 0) || 0);
-                            const processedDays = Number(result.days_processed || 0);
-                            const shiftsSaved = Number(result.shift_rows_saved || 0);
-                            const dayOffDays = Number(result.set_day_off_days || 0);
-                            const reportTime = report.createdAt ? new Date(report.createdAt) : null;
-                            const invalidPreview = Array.isArray(warnings.invalid_cells) ? warnings.invalid_cells.slice(0, 3) : [];
-                            const errorInvalidCount = Number(report?.details?.invalid_cells_total || (Array.isArray(report?.details?.invalid_cells) ? report.details.invalid_cells.length : 0) || 0);
-
-                            return (
-                                <div className={`p-3 border rounded-xl ${tone.box}`}>
-                                    <div className="flex items-start justify-between gap-3">
-                                        <div className="flex items-start gap-3 min-w-0">
-                                            <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${tone.iconBg} flex-shrink-0`}>
-                                                <i className={`fas ${report.kind === 'error' ? 'fa-triangle-exclamation' : report.kind === 'warning' ? 'fa-circle-exclamation' : 'fa-circle-check'}`}></i>
-                                            </div>
-                                            <div className="min-w-0">
-                                                <div className={`text-sm font-semibold ${tone.title}`}>{report.title || 'Импорт Excel'}</div>
-                                                <div className={`text-xs ${tone.text} opacity-90`}>
-                                                    {report.fileName ? `Файл: ${report.fileName}` : 'Импорт Excel'}
-                                                    {reportTime && ` · ${reportTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`}
-                                                    {report.breakAntiOverlapApplied && ' · анти-пересечение перерывов применено'}
-                                                </div>
-                                                {report.message && (
-                                                    <div className={`mt-1 text-xs ${tone.text} whitespace-pre-wrap`}>{report.message}</div>
-                                                )}
-                                            </div>
-                                        </div>
-                                        <button
-                                            type="button"
-                                            onClick={() => setExcelImportReport(null)}
-                                            className="px-2 py-1 text-xs rounded border border-black/10 bg-white/70 hover:bg-white text-slate-700 flex-shrink-0"
-                                            title="Скрыть"
-                                        >
-                                            <i className="fas fa-times"></i>
-                                        </button>
-                                    </div>
-
-                                    {report.kind !== 'error' && (
-                                        <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
-                                            <div className="rounded-lg bg-white/80 border border-white px-2 py-1.5">
-                                                <div className="text-[10px] uppercase tracking-wide text-slate-500">Обработано дней</div>
-                                                <div className="text-sm font-semibold text-slate-900 tabular-nums">{processedDays}</div>
-                                            </div>
-                                            <div className="rounded-lg bg-white/80 border border-white px-2 py-1.5">
-                                                <div className="text-[10px] uppercase tracking-wide text-slate-500">Смен сохранено</div>
-                                                <div className="text-sm font-semibold text-slate-900 tabular-nums">{shiftsSaved}</div>
-                                            </div>
-                                            <div className="rounded-lg bg-white/80 border border-white px-2 py-1.5">
-                                                <div className="text-[10px] uppercase tracking-wide text-slate-500">Выходных</div>
-                                                <div className="text-sm font-semibold text-slate-900 tabular-nums">{dayOffDays}</div>
-                                            </div>
-                                            <div className="rounded-lg bg-white/80 border border-white px-2 py-1.5">
-                                                <div className="text-[10px] uppercase tracking-wide text-slate-500">Невалидных ячеек</div>
-                                                <div className="text-sm font-semibold text-slate-900 tabular-nums">{invalidCellsCount}</div>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {report.kind !== 'error' && (invalidCellsCount > 0 || unmatchedCount > 0 || ambiguousCount > 0) && (
-                                        <div className="mt-3 flex flex-wrap gap-2">
-                                            {invalidCellsCount > 0 && (
-                                                <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
-                                                    Невалидные ячейки: {invalidCellsCount}
-                                                </span>
-                                            )}
-                                            {unmatchedCount > 0 && (
-                                                <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
-                                                    Не найдены ФИО: {unmatchedCount}
-                                                </span>
-                                            )}
-                                            {ambiguousCount > 0 && (
-                                                <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
-                                                    Неоднозначные ФИО: {ambiguousCount}
-                                                </span>
-                                            )}
-                                        </div>
-                                    )}
-
-                                    {report.kind !== 'error' && invalidPreview.length > 0 && (
-                                        <div className="mt-3">
-                                            <div className="text-[11px] font-medium text-slate-600 mb-1">Примеры пропущенных ячеек</div>
-                                            <div className="space-y-1">
-                                                {invalidPreview.map((item, idx) => (
-                                                    <div key={`invalid-preview-${idx}`} className="text-xs text-slate-700 bg-white/70 border border-white rounded px-2 py-1 flex flex-wrap gap-x-2 gap-y-1">
-                                                        <span className="font-medium">{item?.name || '—'}</span>
-                                                        <span>({item?.date || '—'})</span>
-                                                        <span className="text-rose-700">{item?.value || '—'}</span>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {report.kind === 'error' && errorInvalidCount > 0 && (
-                                        <div className="mt-3">
-                                            <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
-                                                Некорректных ячеек: {errorInvalidCount}
-                                            </span>
-                                        </div>
-                                    )}
-                                </div>
-                            );
-                        })()}
-                        </SimpleModal>
-                    )}
-
                     <div className="flex gap-4 w-full flex-1 min-h-0">
                         <div className="flex-1 bg-white rounded shadow-sm p-2 w-full flex flex-col min-h-0 overflow-hidden">
                         <div className="table-scroll overflow-auto w-full flex-1 min-h-0" style={{ position: 'relative' }}>
@@ -8728,6 +8590,226 @@ const withAccessTokenHeader = (headers = {}) => {
                         </div>
                     </div>
                     </>
+                </SimpleModal>
+
+                <SimpleModal open={!!excelImportReport && user?.role !== 'operator'} onClose={() => setExcelImportReport(null)}>
+                    {excelImportReport && (() => {
+                        const report = excelImportReport;
+                        const tone = report.kind === 'error'
+                            ? {
+                                panel: 'border-rose-200 bg-rose-50',
+                                iconWrap: 'bg-rose-100 text-rose-700',
+                                title: 'text-rose-900',
+                                text: 'text-rose-700',
+                                chip: 'bg-rose-100 text-rose-800 border-rose-200',
+                                section: 'bg-white/70 border-rose-100'
+                            }
+                            : report.kind === 'warning'
+                                ? {
+                                    panel: 'border-amber-200 bg-amber-50',
+                                    iconWrap: 'bg-amber-100 text-amber-700',
+                                    title: 'text-amber-900',
+                                    text: 'text-amber-700',
+                                    chip: 'bg-amber-100 text-amber-800 border-amber-200',
+                                    section: 'bg-white/70 border-amber-100'
+                                }
+                                : {
+                                    panel: 'border-emerald-200 bg-emerald-50',
+                                    iconWrap: 'bg-emerald-100 text-emerald-700',
+                                    title: 'text-emerald-900',
+                                    text: 'text-emerald-700',
+                                    chip: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+                                    section: 'bg-white/70 border-emerald-100'
+                                };
+
+                        const result = report.result || {};
+                        const warnings = report.warnings || {};
+                        const processedDays = Number(result.days_processed || 0);
+                        const shiftsSaved = Number(result.shift_rows_saved || 0);
+                        const dayOffDays = Number(result.set_day_off_days || 0);
+                        const deletedShiftRows = Number(result.deleted_shift_rows || 0);
+                        const invalidCellsCount = Number(warnings.invalid_cells_total || (Array.isArray(warnings.invalid_cells) ? warnings.invalid_cells.length : 0) || 0);
+                        const unmatchedCount = Array.isArray(warnings.unmatched_rows) ? warnings.unmatched_rows.length : 0;
+                        const ambiguousCount = Array.isArray(warnings.ambiguous_rows) ? warnings.ambiguous_rows.length : 0;
+                        const invalidPreview = Array.isArray(warnings.invalid_cells) ? warnings.invalid_cells.slice(0, 5) : [];
+                        const unmatchedPreview = Array.isArray(warnings.unmatched_rows) ? warnings.unmatched_rows.slice(0, 5) : [];
+                        const ambiguousPreview = Array.isArray(warnings.ambiguous_rows) ? warnings.ambiguous_rows.slice(0, 5) : [];
+                        const errorInvalidCells = Array.isArray(report?.details?.invalid_cells) ? report.details.invalid_cells.slice(0, 5) : [];
+                        const errorInvalidCount = Number(report?.details?.invalid_cells_total || errorInvalidCells.length || 0);
+                        const reportTime = report.createdAt ? new Date(report.createdAt) : null;
+                        const hasWarnings = invalidCellsCount > 0 || unmatchedCount > 0 || ambiguousCount > 0;
+
+                        return (
+                            <>
+                                <div className={`mb-4 p-4 rounded-xl border ${tone.panel}`}>
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div className="flex items-start gap-3 min-w-0">
+                                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${tone.iconWrap}`}>
+                                                <i className={`fas ${report.kind === 'error' ? 'fa-triangle-exclamation' : report.kind === 'warning' ? 'fa-circle-exclamation' : 'fa-circle-check'}`}></i>
+                                            </div>
+                                            <div className="min-w-0">
+                                                <div className={`text-lg font-semibold ${tone.title}`}>
+                                                    {report.title || 'Итоги импорта Excel'}
+                                                </div>
+                                                <div className={`text-sm ${tone.text}`}>
+                                                    {report.fileName ? `Файл: ${report.fileName}` : 'Импорт Excel'}
+                                                    {reportTime && ` · ${reportTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`}
+                                                </div>
+                                                {report.breakAntiOverlapApplied && (
+                                                    <div className={`mt-1 text-xs ${tone.text}`}>
+                                                        Перерывы рассчитаны с анти-пересечением по правилам планировщика
+                                                    </div>
+                                                )}
+                                                {report.message && (
+                                                    <div className={`mt-1 text-sm ${tone.text} whitespace-pre-wrap`}>
+                                                        {report.message}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setExcelImportReport(null)}
+                                            className="w-9 h-9 rounded-lg hover:bg-white/80 border border-black/10 text-slate-500 hover:text-slate-700 flex items-center justify-center flex-shrink-0"
+                                            title="Закрыть"
+                                        >
+                                            <i className="fas fa-times"></i>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="max-h-[60vh] overflow-auto pr-1 space-y-4">
+                                    {report.kind !== 'error' && (
+                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                            <div className="rounded-xl border bg-white p-3">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Обработано дней</div>
+                                                <div className="mt-1 text-xl font-semibold text-slate-900 tabular-nums">{processedDays}</div>
+                                            </div>
+                                            <div className="rounded-xl border bg-white p-3">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Смен сохранено</div>
+                                                <div className="mt-1 text-xl font-semibold text-slate-900 tabular-nums">{shiftsSaved}</div>
+                                            </div>
+                                            <div className="rounded-xl border bg-white p-3">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Выходных</div>
+                                                <div className="mt-1 text-xl font-semibold text-slate-900 tabular-nums">{dayOffDays}</div>
+                                            </div>
+                                            <div className="rounded-xl border bg-white p-3">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Удалено старых смен</div>
+                                                <div className="mt-1 text-xl font-semibold text-slate-900 tabular-nums">{deletedShiftRows}</div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {report.kind !== 'error' && (
+                                        <div className={`rounded-xl border p-3 ${tone.section}`}>
+                                            <div className="text-sm font-semibold text-slate-900 mb-2">Предупреждения</div>
+                                            {!hasWarnings ? (
+                                                <div className="text-sm text-slate-600">Предупреждений нет.</div>
+                                            ) : (
+                                                <>
+                                                    <div className="flex flex-wrap gap-2 mb-3">
+                                                        {invalidCellsCount > 0 && (
+                                                            <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
+                                                                Невалидные ячейки: {invalidCellsCount}
+                                                            </span>
+                                                        )}
+                                                        {unmatchedCount > 0 && (
+                                                            <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
+                                                                Не найдены ФИО: {unmatchedCount}
+                                                            </span>
+                                                        )}
+                                                        {ambiguousCount > 0 && (
+                                                            <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
+                                                                Неоднозначные ФИО: {ambiguousCount}
+                                                            </span>
+                                                        )}
+                                                    </div>
+
+                                                    {invalidPreview.length > 0 && (
+                                                        <div className="mb-3">
+                                                            <div className="text-xs font-medium text-slate-700 mb-1">Примеры невалидных ячеек</div>
+                                                            <div className="space-y-1">
+                                                                {invalidPreview.map((item, idx) => (
+                                                                    <div key={`excel-invalid-${idx}`} className="text-xs bg-white border rounded px-2 py-1 flex flex-wrap gap-x-2 gap-y-1">
+                                                                        <span className="font-medium text-slate-900">{item?.name || '—'}</span>
+                                                                        <span className="text-slate-500">{item?.date || '—'}</span>
+                                                                        <span className="text-rose-700">{item?.value || '—'}</span>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {unmatchedPreview.length > 0 && (
+                                                        <div className="mb-3">
+                                                            <div className="text-xs font-medium text-slate-700 mb-1">Не найденные ФИО</div>
+                                                            <div className="flex flex-wrap gap-2">
+                                                                {unmatchedPreview.map((item, idx) => (
+                                                                    <span key={`excel-unmatched-${idx}`} className="px-2 py-1 rounded-md bg-white border text-xs text-slate-700">
+                                                                        {item?.name || '—'}
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {ambiguousPreview.length > 0 && (
+                                                        <div>
+                                                            <div className="text-xs font-medium text-slate-700 mb-1">Неоднозначные ФИО</div>
+                                                            <div className="space-y-1">
+                                                                {ambiguousPreview.map((item, idx) => (
+                                                                    <div key={`excel-ambiguous-${idx}`} className="text-xs bg-white border rounded px-2 py-1 text-slate-700">
+                                                                        {item?.name || '—'}{Number(item?.count) ? ` (${item.count})` : ''}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {report.kind === 'error' && (
+                                        <div className={`rounded-xl border p-3 ${tone.section}`}>
+                                            <div className="text-sm font-semibold text-slate-900 mb-2">Ошибка импорта</div>
+                                            <div className="text-sm text-slate-700 whitespace-pre-wrap">
+                                                {report.message || 'Не удалось импортировать файл'}
+                                            </div>
+                                            {errorInvalidCount > 0 && (
+                                                <div className="mt-3">
+                                                    <span className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}>
+                                                        Некорректных ячеек: {errorInvalidCount}
+                                                    </span>
+                                                </div>
+                                            )}
+                                            {errorInvalidCells.length > 0 && (
+                                                <div className="mt-3 space-y-1">
+                                                    {errorInvalidCells.map((item, idx) => (
+                                                        <div key={`excel-error-invalid-${idx}`} className="text-xs bg-white border rounded px-2 py-1 flex flex-wrap gap-x-2 gap-y-1">
+                                                            <span className="font-medium text-slate-900">{item?.name || '—'}</span>
+                                                            <span className="text-slate-500">{item?.date || '—'}</span>
+                                                            <span className="text-rose-700">{item?.value || '—'}</span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="mt-4 pt-3 border-t border-slate-200 flex justify-end">
+                                    <button
+                                        type="button"
+                                        onClick={() => setExcelImportReport(null)}
+                                        className="px-4 py-2 rounded-lg bg-slate-800 text-white hover:bg-slate-700 text-sm font-medium"
+                                    >
+                                        Закрыть
+                                    </button>
+                                </div>
+                            </>
+                        );
+                    })()}
                 </SimpleModal>
 
                 <SimpleModal open={showDayBreaksModal} onClose={() => setShowDayBreaksModal(false)}>
