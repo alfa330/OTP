@@ -643,7 +643,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 </div>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
-                                        {isDismissalLikeStatus(editedUser?.status) ? 'Дата окончания (необязательно)' : 'Дата окончания'}
+                                        {isDismissalLikeStatus(editedUser?.status) ? 'Дата окончания (необ.)' : 'Дата окончания'}
                                     </label>
                                     <input
                                         type="date"
