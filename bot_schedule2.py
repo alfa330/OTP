@@ -4319,6 +4319,7 @@ def save_work_schedule_status_period():
         "start_date": "YYYY-MM-DD",
         "end_date": "YYYY-MM-DD",              # required except dismissal; for dismissal optional (прерывание)
         "dismissal_reason": "...",             # required for dismissal
+        "is_blacklist": true|false,            # optional: only for dismissal (ЧС / без восстановления)
         "comment": "..."                       # required for dismissal
         "range_start": "YYYY-MM-DD",           # optional: return operator snapshot for range
         "range_end": "YYYY-MM-DD"              # optional
@@ -4343,6 +4344,7 @@ def save_work_schedule_status_period():
         start_date = data.get('start_date')
         end_date = data.get('end_date')
         dismissal_reason = data.get('dismissal_reason')
+        is_blacklist = data.get('is_blacklist')
         comment = data.get('comment')
         range_start = data.get('range_start')
         range_end = data.get('range_end')
@@ -4356,6 +4358,7 @@ def save_work_schedule_status_period():
             start_date=start_date,
             end_date=end_date,
             dismissal_reason=dismissal_reason,
+            is_blacklist=is_blacklist,
             comment=comment,
             created_by=requester_id
         )

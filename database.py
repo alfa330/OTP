@@ -208,7 +208,8 @@ SCHEDULE_DISMISSAL_REASONS: List[str] = [
     'Пропал',
     'Слабый/не выполняет kpi',
     'Забрали в армию',
-    'Нашел работу по профессии'
+    'Нашел работу по профессии',
+    'По семейным обстоятельствам'
 ]
 
 USER_STATUS_ALLOWED_VALUES: List[str] = [
@@ -563,11 +564,29 @@ class Database:
                     start_date DATE NOT NULL,
                     end_date DATE NULL,
                     dismissal_reason TEXT NULL,
+                    is_blacklist BOOLEAN NOT NULL DEFAULT FALSE,
                     comment TEXT NULL,
                     created_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_schedule_status_periods
+                ADD COLUMN IF NOT EXISTS is_blacklist BOOLEAN;
+            """)
+            cursor.execute("""
+                UPDATE operator_schedule_status_periods
+                SET is_blacklist = FALSE
+                WHERE is_blacklist IS NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_schedule_status_periods
+                ALTER COLUMN is_blacklist SET DEFAULT FALSE;
+            """)
+            cursor.execute("""
+                ALTER TABLE operator_schedule_status_periods
+                ALTER COLUMN is_blacklist SET NOT NULL;
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_shift_breaks_shift_id
@@ -4408,6 +4427,7 @@ class Database:
 
     def _serialize_schedule_status_period(self, row):
         period_id, operator_id, status_code, start_date_value, end_date_value, dismissal_reason, comment = row[:7]
+        is_blacklist = bool(row[7]) if len(row) > 7 else False
         meta = SCHEDULE_SPECIAL_STATUS_META.get(status_code, {})
         return {
             'id': int(period_id),
@@ -4418,7 +4438,9 @@ class Database:
             'startDate': start_date_value.strftime('%Y-%m-%d') if start_date_value else None,
             'endDate': end_date_value.strftime('%Y-%m-%d') if end_date_value else None,
             'dismissalReason': dismissal_reason,
-            'comment': comment or ''
+            'comment': comment or '',
+            'isBlacklist': is_blacklist,
+            'is_blacklist': is_blacklist
         }
 
     def _load_schedule_status_periods_for_operators(self, cursor, operator_ids, start_date_obj=None, end_date_obj=None):
@@ -4434,7 +4456,7 @@ class Database:
             return result
 
         query = """
-            SELECT id, operator_id, status_code, start_date, end_date, dismissal_reason, comment
+            SELECT id, operator_id, status_code, start_date, end_date, dismissal_reason, comment, COALESCE(is_blacklist, FALSE)
             FROM operator_schedule_status_periods
             WHERE operator_id = ANY(%s)
         """
@@ -4927,6 +4949,7 @@ class Database:
         start_date,
         end_date=None,
         dismissal_reason=None,
+        is_blacklist=False,
         comment=None,
         created_by=None
     ):
@@ -4950,6 +4973,12 @@ class Database:
             dismissal_reason_norm = str(dismissal_reason or '').strip()
             if dismissal_reason_norm not in set(SCHEDULE_DISMISSAL_REASONS):
                 raise ValueError("Invalid dismissal_reason")
+            if isinstance(is_blacklist, str):
+                is_blacklist_norm = str(is_blacklist).strip().lower() in ('1', 'true', 'yes', 'on')
+            else:
+                is_blacklist_norm = bool(is_blacklist)
+            if is_blacklist_norm and end_date_obj is not None:
+                raise ValueError("Blacklisted dismissal cannot have end_date")
             if not comment_norm:
                 raise ValueError("Comment is required for dismissal")
         else:
@@ -4957,6 +4986,7 @@ class Database:
             if end_date_obj < start_date_obj:
                 raise ValueError("end_date must be >= start_date")
             dismissal_reason_norm = None
+            is_blacklist_norm = False
 
         created_by_id = int(created_by) if created_by is not None else None
         infinite_date = date(9999, 12, 31)
@@ -4964,7 +4994,7 @@ class Database:
 
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, status_code, start_date, end_date, dismissal_reason, comment, created_by
+                SELECT id, status_code, start_date, end_date, dismissal_reason, comment, created_by, COALESCE(is_blacklist, FALSE)
                 FROM operator_schedule_status_periods
                 WHERE operator_id = %s
                   AND start_date <= %s
@@ -4972,6 +5002,13 @@ class Database:
                 ORDER BY start_date, id
             """, (operator_id, new_end_cmp, start_date_obj))
             overlapping = cursor.fetchall()
+
+            has_blacklist_dismissal_overlap = any(
+                str(row[1]) == 'dismissal' and bool(row[7])
+                for row in overlapping
+            )
+            if has_blacklist_dismissal_overlap:
+                raise ValueError("ЧС-увольнение нельзя изменить или перекрыть другим статусом")
 
             for row in overlapping:
                 (
@@ -4981,7 +5018,8 @@ class Database:
                     existing_end,
                     existing_dismissal_reason,
                     existing_comment,
-                    existing_created_by
+                    existing_created_by,
+                    existing_is_blacklist
                 ) = row
                 existing_end_cmp = existing_end or infinite_date
 
@@ -5001,15 +5039,16 @@ class Database:
                     cursor.execute("""
                         INSERT INTO operator_schedule_status_periods (
                             operator_id, status_code, start_date, end_date,
-                            dismissal_reason, comment, created_by, created_at, updated_at
+                            dismissal_reason, is_blacklist, comment, created_by, created_at, updated_at
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     """, (
                         operator_id,
                         existing_status_code,
                         right_start,
                         existing_end,
                         existing_dismissal_reason,
+                        bool(existing_is_blacklist),
                         existing_comment,
                         existing_created_by
                     ))
@@ -5041,16 +5080,17 @@ class Database:
             cursor.execute("""
                 INSERT INTO operator_schedule_status_periods (
                     operator_id, status_code, start_date, end_date,
-                    dismissal_reason, comment, created_by, created_at, updated_at
+                    dismissal_reason, is_blacklist, comment, created_by, created_at, updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment, is_blacklist
             """, (
                 operator_id,
                 status_code_norm,
                 start_date_obj,
                 end_date_obj,
                 dismissal_reason_norm,
+                is_blacklist_norm,
                 comment_norm,
                 created_by_id
             ))
@@ -5068,7 +5108,7 @@ class Database:
         work_date_obj = self._normalize_schedule_date(work_date)
 
         cursor.execute("""
-            SELECT id, start_date, end_date
+            SELECT id, start_date, end_date, COALESCE(is_blacklist, FALSE)
             FROM operator_schedule_status_periods
             WHERE operator_id = %s
               AND status_code = 'dismissal'
@@ -5078,7 +5118,9 @@ class Database:
         """, (operator_id, work_date_obj, work_date_obj))
         rows = cursor.fetchall()
 
-        for period_id, start_date_value, end_date_value in rows:
+        for period_id, start_date_value, end_date_value, is_blacklist_value in rows:
+            if bool(is_blacklist_value):
+                raise ValueError("ЧС-увольнение нельзя прервать сменой")
             if start_date_value >= work_date_obj:
                 cursor.execute("""
                     DELETE FROM operator_schedule_status_periods
@@ -5104,15 +5146,33 @@ class Database:
         with self._get_cursor() as cursor:
             if operator_id_norm is None:
                 cursor.execute("""
+                    SELECT id, operator_id, status_code, start_date, end_date, dismissal_reason, comment, COALESCE(is_blacklist, FALSE)
+                    FROM operator_schedule_status_periods
+                    WHERE id = %s
+                """, (period_id,))
+            else:
+                cursor.execute("""
+                    SELECT id, operator_id, status_code, start_date, end_date, dismissal_reason, comment, COALESCE(is_blacklist, FALSE)
+                    FROM operator_schedule_status_periods
+                    WHERE id = %s AND operator_id = %s
+                """, (period_id, operator_id_norm))
+            existing_row = cursor.fetchone()
+            if not existing_row:
+                return None
+            if str(existing_row[2]) == 'dismissal' and bool(existing_row[7]):
+                raise ValueError("ЧС-увольнение нельзя удалить")
+
+            if operator_id_norm is None:
+                cursor.execute("""
                     DELETE FROM operator_schedule_status_periods
                     WHERE id = %s
-                    RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment
+                    RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment, is_blacklist
                 """, (period_id,))
             else:
                 cursor.execute("""
                     DELETE FROM operator_schedule_status_periods
                     WHERE id = %s AND operator_id = %s
-                    RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment
+                    RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment, is_blacklist
                 """, (period_id, operator_id_norm))
 
             row = cursor.fetchone()
