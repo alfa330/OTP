@@ -1,8 +1,9 @@
 ﻿import React, { useEffect, useState } from 'react';
 
 const PERIOD_STATUS_VALUES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
+const DISMISSAL_REASON_WITH_END_DATE = 'Б/С на летний период';
 const DISMISSAL_REASON_OPTIONS = [
-    'Б/С на летний период',
+    DISMISSAL_REASON_WITH_END_DATE,
     'Мошенничество',
     'Нарушение дисциплины',
     'Не может совмещать с учебой',
@@ -49,6 +50,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         if (status === 'unpaid_leave') return 'bs';
         if (status === 'dismissal') return 'fired';
         return status || 'working';
+    };
+    const shouldShowStatusPeriodEndDate = (draft) => {
+        if (!usesScheduleStatusPeriodForm(draft?.status)) return false;
+        if (!isDismissalLikeStatus(draft?.status)) return true;
+        return String(draft?.status_period_dismissal_reason || '').trim() === DISMISSAL_REASON_WITH_END_DATE;
     };
 
     useEffect(() => {
@@ -385,7 +391,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <div className="text-xs text-slate-600">
                             Для этих статусов используется логика планировщика: статус сохраняется как период.
                         </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className={`grid grid-cols-1 ${shouldShowStatusPeriodEndDate(editedUser) ? 'sm:grid-cols-2' : ''} gap-3`}>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата начала</label>
                                 <input
@@ -403,6 +409,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     disabled={isLoading || !!createdCredentials}
                                 />
                             </div>
+                            {shouldShowStatusPeriodEndDate(editedUser) && (
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
                                     {isDismissalLikeStatus(editedUser?.status) ? 'Дата окончания (необ.)' : 'Дата окончания'}
@@ -416,6 +423,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     disabled={isLoading || !!createdCredentials}
                                 />
                             </div>
+                            )}
                         </div>
                         {isDismissalLikeStatus(editedUser?.status) && (
                             <>
@@ -423,7 +431,17 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Причина увольнения</label>
                                 <select
                                     value={editedUser?.status_period_dismissal_reason || ""}
-                                    onChange={(e) => setEditedUser({ ...editedUser, status_period_dismissal_reason: e.target.value, use_schedule_status_period: true })}
+                                    onChange={(e) => {
+                                        const nextReason = e.target.value;
+                                        setEditedUser((prev) => ({
+                                            ...prev,
+                                            status_period_dismissal_reason: nextReason,
+                                            use_schedule_status_period: true,
+                                            status_period_end_date: nextReason === DISMISSAL_REASON_WITH_END_DATE
+                                                ? (prev?.status_period_end_date || '')
+                                                : ''
+                                        }));
+                                    }}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                     disabled={isLoading || !!createdCredentials}
                                 >
@@ -623,7 +641,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             <div className="text-xs text-slate-600">
                                 Статус будет сохранен как период графика (аналогично планировщику).
                             </div>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div className={`grid grid-cols-1 ${shouldShowStatusPeriodEndDate(editedUser) ? 'sm:grid-cols-2' : ''} gap-3`}>
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата начала</label>
                                     <input
@@ -641,6 +659,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                         disabled={isLoading}
                                     />
                                 </div>
+                                {shouldShowStatusPeriodEndDate(editedUser) && (
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
                                         {isDismissalLikeStatus(editedUser?.status) ? 'Дата окончания (необ.)' : 'Дата окончания'}
@@ -654,6 +673,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                         disabled={isLoading}
                                     />
                                 </div>
+                                )}
                             </div>
                             {isDismissalLikeStatus(editedUser?.status) && (
                                 <>
@@ -661,7 +681,17 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Причина увольнения</label>
                                     <select
                                         value={editedUser?.status_period_dismissal_reason || ""}
-                                        onChange={(e) => setEditedUser({ ...editedUser, status_period_dismissal_reason: e.target.value, use_schedule_status_period: true })}
+                                        onChange={(e) => {
+                                            const nextReason = e.target.value;
+                                            setEditedUser((prev) => ({
+                                                ...prev,
+                                                status_period_dismissal_reason: nextReason,
+                                                use_schedule_status_period: true,
+                                                status_period_end_date: nextReason === DISMISSAL_REASON_WITH_END_DATE
+                                                    ? (prev?.status_period_end_date || '')
+                                                    : ''
+                                            }));
+                                        }}
                                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                         disabled={isLoading}
                                     >
