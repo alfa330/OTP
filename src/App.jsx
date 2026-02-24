@@ -7956,7 +7956,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             {!!modalState.statusCode && (
                                 <div>
                                     <label className="block text-xs font-medium text-slate-600 mb-1">
-                                        {modalState.statusCode === 'dismissal' ? 'Дата окончания (необязательно)' : 'Дата окончания'}
+                                        {modalState.statusCode === 'dismissal' ? 'Дата окончания (необ.)' : 'Дата окончания'}
                                     </label>
                                     <input
                                         type="date"
