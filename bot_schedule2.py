@@ -4505,7 +4505,7 @@ def apply_work_schedule_bulk_actions():
         "actions": [
             {"action": "set_shift", "operator_id": 1, "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM", "breaks": [...]},
             {"action": "set_day_off", "operator_id": 1, "date": "YYYY-MM-DD"},
-            {"action": "delete_shifts", "operator_id": 1, "date": "YYYY-MM-DD"}
+            {"action": "delete_shifts", "operator_id": 1, "date": "YYYY-MM-DD"}  # очистка дня: смены + выходной
         ]
     }
     """

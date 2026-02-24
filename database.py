@@ -4953,6 +4953,25 @@ class Database:
         deleted_rows = cursor.fetchall() or []
         return len(deleted_rows)
 
+    def _clear_day_schedule_tx(self, cursor, operator_id, target_date):
+        """
+        Очистка дня: удаляет все смены и снимает выходной на указанную дату.
+        """
+        operator_id = int(operator_id)
+        date_obj = self._normalize_schedule_date(target_date)
+        deleted_shifts = self._delete_all_shifts_for_day_tx(cursor, operator_id, date_obj)
+        cursor.execute("""
+            DELETE FROM days_off
+            WHERE operator_id = %s AND day_off_date = %s
+        """, (operator_id, date_obj))
+        deleted_day_off_rows = int(cursor.rowcount or 0)
+        return {
+            'operator_id': operator_id,
+            'date': date_obj.strftime('%Y-%m-%d'),
+            'deleted_shifts': deleted_shifts,
+            'deleted_day_off_rows': deleted_day_off_rows
+        }
+
     def _set_day_off_tx(self, cursor, operator_id, day_off_date):
         operator_id = int(operator_id)
         day_off_date_obj = self._normalize_schedule_date(day_off_date)
@@ -4974,7 +4993,7 @@ class Database:
         Поддерживаемые actions:
         - {action: "set_shift", operator_id, date, start, end, breaks?}
         - {action: "set_day_off", operator_id, date}
-        - {action: "delete_shifts", operator_id, date}
+        - {action: "delete_shifts", operator_id, date}  # очистка дня: удаляет смены и снимает выходной
         """
         if not isinstance(actions, list) or not actions:
             raise ValueError("actions must be a non-empty list")
@@ -4985,6 +5004,7 @@ class Database:
             'set_day_off': 0,
             'delete_shifts': 0,
             'deleted_shift_rows': 0,
+            'deleted_day_off_rows': 0,
             'shift_ids': [],
             'affected_operator_ids': []
         }
@@ -5018,9 +5038,10 @@ class Database:
                     continue
 
                 if action_type == 'delete_shifts':
-                    deleted_count = self._delete_all_shifts_for_day_tx(cursor, operator_id, date_obj)
+                    result = self._clear_day_schedule_tx(cursor, operator_id, date_obj)
                     summary['delete_shifts'] += 1
-                    summary['deleted_shift_rows'] += deleted_count
+                    summary['deleted_shift_rows'] += int(result.get('deleted_shifts') or 0)
+                    summary['deleted_day_off_rows'] += int(result.get('deleted_day_off_rows') or 0)
                     summary['total'] += 1
                     continue
 
