@@ -4325,6 +4325,57 @@ class Database:
             end_min += 24 * 60
         return start_min, end_min
 
+    def _compute_auto_shift_breaks_minutes(self, start_min, end_min):
+        """
+        Серверная автогенерация перерывов (зеркалит фронтенд-базовую логику по длительности смены).
+        Возвращает список интервалов в минутах от начала дня; для ночных смен end_min может быть > 1440.
+        """
+        start_min = int(start_min)
+        end_min = int(end_min)
+        dur = end_min - start_min
+        if dur <= 0:
+            return []
+
+        breaks = []
+
+        def snap5(x):
+            return int(round(float(x) / 5.0) * 5)
+
+        def push_centered(center, size):
+            center_snapped = snap5(center)
+            s = snap5(center_snapped - (size / 2))
+            e = s + int(size)
+            s = max(start_min, min(end_min, s))
+            e = max(start_min, min(end_min, e))
+            if e > s:
+                breaks.append({'start': s, 'end': e})
+
+        if dur >= 5 * 60 and dur < 6 * 60:
+            push_centered(start_min + dur * 0.5, 15)
+        elif dur >= 6 * 60 and dur < 8 * 60:
+            push_centered(start_min + dur / 3, 15)
+            push_centered(start_min + 2 * dur / 3, 15)
+        elif dur >= 8 * 60 and dur < 11 * 60:
+            centers = [start_min + dur * 0.25, start_min + dur * 0.5, start_min + dur * 0.75]
+            sizes = [15, 30, 15]
+            for c, sz in zip(centers, sizes):
+                push_centered(c, sz)
+        elif dur >= 11 * 60:
+            centers = [start_min + dur * 0.2, start_min + dur * 0.45, start_min + dur * 0.7, start_min + dur * 0.87]
+            sizes = [15, 30, 15, 15]
+            for c, sz in zip(centers, sizes):
+                push_centered(c, sz)
+
+        normalized = []
+        seen = set()
+        for b in sorted(breaks, key=lambda x: (x['start'], x['end'])):
+            key = (int(b['start']), int(b['end']))
+            if key[1] <= key[0] or key in seen:
+                continue
+            seen.add(key)
+            normalized.append({'start': key[0], 'end': key[1]})
+        return normalized
+
     def _insert_shift_breaks(self, cursor, shift_id, breaks):
         cursor.execute("DELETE FROM shift_breaks WHERE shift_id = %s", (shift_id,))
         if breaks:
@@ -4347,8 +4398,9 @@ class Database:
         previous_start_time=None,
         previous_end_time=None
     ):
-        breaks_norm = self._normalize_shift_breaks(breaks)
         new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
+        breaks_input = self._compute_auto_shift_breaks_minutes(new_start_min, new_end_min) if breaks is None else breaks
+        breaks_norm = self._normalize_shift_breaks(breaks_input)
 
         prev_start_obj = None
         prev_end_obj = None
@@ -5064,6 +5116,96 @@ class Database:
                     continue
 
                 raise ValueError(f"Unsupported action type: {action_type}")
+
+        summary['affected_operator_ids'] = sorted(affected_operator_ids)
+        return summary
+
+    def import_work_schedule_excel_entries(self, entries):
+        """
+        Импорт расписания из Excel-матрицы (ФИО x Даты), уже после парсинга.
+        Каждый entry:
+          {
+            "operator_id": int,
+            "date": "YYYY-MM-DD",
+            "is_day_off": bool,
+            "shifts": [{"start": "HH:MM", "end": "HH:MM", "breaks": [...]?}, ...]
+          }
+        Поведение: день заменяется целиком (очистка смен/выходного), затем вставляются смены или выходной.
+        """
+        if not isinstance(entries, list) or not entries:
+            raise ValueError("entries must be a non-empty list")
+
+        summary = {
+            'days_processed': 0,
+            'set_day_off_days': 0,
+            'set_shift_days': 0,
+            'shift_rows_saved': 0,
+            'deleted_shift_rows': 0,
+            'deleted_day_off_rows': 0,
+            'affected_operator_ids': []
+        }
+        affected_operator_ids = set()
+
+        with self._get_cursor() as cursor:
+            for item in entries:
+                if not isinstance(item, dict):
+                    raise ValueError("Each entry must be an object")
+
+                operator_id = item.get('operator_id')
+                date_value = item.get('date')
+                is_day_off = bool(item.get('is_day_off'))
+                shifts = item.get('shifts') or []
+
+                if operator_id is None:
+                    raise ValueError("Missing operator_id in entry")
+                if not date_value:
+                    raise ValueError("Missing date in entry")
+                if not is_day_off and not isinstance(shifts, list):
+                    raise ValueError("shifts must be a list")
+                if is_day_off and shifts:
+                    raise ValueError("Entry cannot have shifts when is_day_off is true")
+
+                operator_id = int(operator_id)
+                date_obj = self._normalize_schedule_date(date_value)
+                affected_operator_ids.add(operator_id)
+
+                cleared = self._clear_day_schedule_tx(cursor, operator_id, date_obj)
+                summary['deleted_shift_rows'] += int(cleared.get('deleted_shifts') or 0)
+                summary['deleted_day_off_rows'] += int(cleared.get('deleted_day_off_rows') or 0)
+
+                if is_day_off:
+                    cursor.execute("""
+                        INSERT INTO days_off (operator_id, day_off_date)
+                        VALUES (%s, %s)
+                        ON CONFLICT (operator_id, day_off_date) DO NOTHING
+                    """, (operator_id, date_obj))
+                    summary['set_day_off_days'] += 1
+                    summary['days_processed'] += 1
+                    continue
+
+                if not shifts:
+                    # Пустая очистка дня (если будет нужна) — считаем обработанным днем.
+                    summary['days_processed'] += 1
+                    continue
+
+                # Сохраняем несколько смен в один день после полной очистки этого дня.
+                for shift in shifts:
+                    if not isinstance(shift, dict):
+                        raise ValueError("Each shift must be an object")
+                    start_time_obj = self._normalize_schedule_time(shift.get('start') or shift.get('start_time'), 'start')
+                    end_time_obj = self._normalize_schedule_time(shift.get('end') or shift.get('end_time'), 'end')
+                    self._save_shift_tx(
+                        cursor=cursor,
+                        operator_id=operator_id,
+                        shift_date=date_obj,
+                        start_time=start_time_obj,
+                        end_time=end_time_obj,
+                        breaks=shift.get('breaks') if ('breaks' in shift) else None
+                    )
+                    summary['shift_rows_saved'] += 1
+
+                summary['set_shift_days'] += 1
+                summary['days_processed'] += 1
 
         summary['affected_operator_ids'] = sorted(affected_operator_ids)
         return summary

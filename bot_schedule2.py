@@ -19,7 +19,7 @@ from aiogram.dispatcher import FSMContext
 from flask import Flask, request, jsonify, send_file, g
 from flask_cors import CORS
 from functools import wraps
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
 import re
 import xlsxwriter
 import json
@@ -30,7 +30,7 @@ from passlib.hash import pbkdf2_sha256
 from werkzeug.utils import secure_filename
 from google.cloud import storage as gcs_storage
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as dt_date
 import time
 import math
 from urllib.parse import quote, urlparse, parse_qs
@@ -4079,6 +4079,403 @@ def delete_training(training_id):
 
 # ==================== Work Schedules API ====================
 
+WORK_SCHEDULE_EXCEL_SHIFT_RE = re.compile(
+    r'(?P<sh>\d{1,2})(?:[:/](?P<sm>\d{1,2}))?\s*\*\s*(?P<eh>\d{1,2})(?:[:/](?P<em>\d{1,2}))?'
+)
+
+
+def _normalize_schedule_excel_name_key(value):
+    return re.sub(r'\s+', ' ', str(value or '').strip()).replace('ё', 'е').replace('Ё', 'Е').lower()
+
+
+def _parse_schedule_excel_header_date(cell):
+    value = cell.value
+    if value is None:
+        return None
+
+    # openpyxl для xlsx чаще всего уже возвращает datetime/date при is_date=True
+    if getattr(cell, 'is_date', False):
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, dt_date):
+            return value
+
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, dt_date):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ('%d.%m.%Y', '%d.%m.%y', '%Y-%m-%d'):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except Exception:
+            continue
+    return None
+
+
+def _format_schedule_excel_compact_time(hhmm):
+    try:
+        hh, mm = str(hhmm).split(':', 1)
+        h = int(hh)
+        m = int(mm)
+    except Exception:
+        return str(hhmm or '')
+    if m == 0:
+        return str(h)
+    return f"{h}/{m:02d}"
+
+
+def _parse_schedule_excel_cell_value(raw_value):
+    """
+    Возвращает:
+      {'kind': 'empty'}
+      {'kind': 'day_off'}
+      {'kind': 'shifts', 'shifts': [{'start': 'HH:MM', 'end': 'HH:MM'}, ...]}
+      {'kind': 'invalid', 'error': '...'}
+    """
+    if raw_value is None:
+        return {'kind': 'empty'}
+
+    text = str(raw_value).strip()
+    if not text:
+        return {'kind': 'empty'}
+
+    lowered = text.lower()
+    shift_matches = list(WORK_SCHEDULE_EXCEL_SHIFT_RE.finditer(text))
+
+    if not shift_matches and 'выходн' in lowered:
+        return {'kind': 'day_off'}
+
+    shifts = []
+    seen = set()
+    for m in shift_matches:
+        try:
+            sh = int(m.group('sh'))
+            sm = int(m.group('sm') or 0)
+            eh = int(m.group('eh'))
+            em = int(m.group('em') or 0)
+        except Exception:
+            continue
+
+        if not (0 <= sh <= 23 and 0 <= eh <= 23 and 0 <= sm <= 59 and 0 <= em <= 59):
+            return {'kind': 'invalid', 'error': f'Некорректное время: {m.group(0)}'}
+
+        start = f"{sh:02d}:{sm:02d}"
+        end = f"{eh:02d}:{em:02d}"
+        key = (start, end)
+        if key in seen:
+            continue
+        seen.add(key)
+        shifts.append({'start': start, 'end': end})
+
+    if shifts:
+        return {'kind': 'shifts', 'shifts': shifts}
+
+    if 'выходн' in lowered:
+        return {'kind': 'day_off'}
+
+    return {'kind': 'invalid', 'error': 'Ячейка не похожа на смену или "Выходной"'}
+
+
+def _ws_time_to_minutes(value):
+    if value is None:
+        return 0
+    parts = str(value).strip().split(':')
+    try:
+        hh = int(parts[0])
+        mm = int(parts[1]) if len(parts) > 1 else 0
+    except Exception:
+        return 0
+    return hh * 60 + mm
+
+
+def _ws_minutes_to_time(minutes):
+    minutes = int(round(minutes)) % (24 * 60)
+    hh = minutes // 60
+    mm = minutes % 60
+    return f"{hh:02d}:{mm:02d}"
+
+
+def _ws_compute_breaks_for_shift_minutes(start_min, end_min):
+    dur = int(end_min) - int(start_min)
+    if dur <= 0:
+        return []
+    breaks = []
+
+    def snap5(x):
+        return int(round(float(x) / 5.0) * 5)
+
+    def push_centered(center, size):
+        center = snap5(center)
+        s = snap5(center - (size / 2))
+        e = s + int(size)
+        s = max(int(start_min), min(int(end_min), s))
+        e = max(int(start_min), min(int(end_min), e))
+        if e > s:
+            breaks.append({'start': s, 'end': e})
+
+    if dur >= 5 * 60 and dur < 6 * 60:
+        push_centered(start_min + dur * 0.5, 15)
+    elif dur >= 6 * 60 and dur < 8 * 60:
+        push_centered(start_min + dur / 3, 15)
+        push_centered(start_min + 2 * dur / 3, 15)
+    elif dur >= 8 * 60 and dur < 11 * 60:
+        centers = [start_min + dur * 0.25, start_min + dur * 0.5, start_min + dur * 0.75]
+        sizes = [15, 30, 15]
+        for c, sz in zip(centers, sizes):
+            push_centered(c, sz)
+    elif dur >= 11 * 60:
+        centers = [start_min + dur * 0.2, start_min + dur * 0.45, start_min + dur * 0.7, start_min + dur * 0.87]
+        sizes = [15, 30, 15, 15]
+        for c, sz in zip(centers, sizes):
+            push_centered(c, sz)
+
+    normalized = []
+    seen = set()
+    for b in sorted(breaks, key=lambda x: (int(x.get('start', 0)), int(x.get('end', 0)))):
+        s = int(b.get('start', 0))
+        e = int(b.get('end', 0))
+        if e <= s:
+            continue
+        key = (s, e)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append({'start': s, 'end': e})
+    return normalized
+
+
+def _ws_intervals_overlap(a, b):
+    return int(a['start']) < int(b['end']) and int(b['start']) < int(a['end'])
+
+
+def _ws_merge_intervals(items):
+    if not items:
+        return []
+    sorted_items = sorted(
+        [{'start': int(x['start']), 'end': int(x['end'])} for x in items if int(x.get('end', 0)) > int(x.get('start', 0))],
+        key=lambda x: (x['start'], x['end'])
+    )
+    if not sorted_items:
+        return []
+    res = [dict(sorted_items[0])]
+    for cur in sorted_items[1:]:
+        last = res[-1]
+        if cur['start'] <= last['end']:
+            last['end'] = max(last['end'], cur['end'])
+        else:
+            res.append(dict(cur))
+    return res
+
+
+def _ws_parse_date_str(value):
+    return datetime.strptime(str(value), '%Y-%m-%d').date()
+
+
+def _ws_date_str(value):
+    if isinstance(value, datetime):
+        return value.date().strftime('%Y-%m-%d')
+    if isinstance(value, dt_date):
+        return value.strftime('%Y-%m-%d')
+    return str(value)
+
+
+def _ws_add_days_str(date_str, delta_days):
+    return (_ws_parse_date_str(date_str) + timedelta(days=int(delta_days))).strftime('%Y-%m-%d')
+
+
+def _ws_clone_ops_for_break_simulation(operators):
+    cloned = []
+    for op in (operators or []):
+        shifts = {}
+        for d, segs in (op.get('shifts') or {}).items():
+            cloned_segs = []
+            for seg in (segs or []):
+                seg_copy = {
+                    'start': str(seg.get('start') or ''),
+                    'end': str(seg.get('end') or ''),
+                    'breaks': [ {'start': int(b.get('start')), 'end': int(b.get('end'))} for b in (seg.get('breaks') or []) if b is not None ]
+                }
+                smin = _ws_time_to_minutes(seg_copy['start'])
+                emin = _ws_time_to_minutes(seg_copy['end'])
+                if emin <= smin:
+                    emin += 1440
+                seg_copy['__startMin'] = smin
+                seg_copy['__endMin'] = emin
+                cloned_segs.append(seg_copy)
+            shifts[str(d)] = cloned_segs
+        cloned.append({
+            'id': op.get('id'),
+            'direction': op.get('direction'),
+            'shifts': shifts,
+            'daysOff': list(op.get('daysOff') or [])
+        })
+    return cloned
+
+
+def _ws_sanitize_break_direction_groups(groups):
+    if not isinstance(groups, list):
+        return []
+    used = set()
+    seen_groups = set()
+    result = []
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        normalized = []
+        local_keys = set()
+        for raw in group:
+            label = str(raw or '').strip()
+            key = label.lower()
+            if not key or key in used or key in local_keys:
+                continue
+            local_keys.add(key)
+            normalized.append(label)
+        if len(normalized) < 2:
+            continue
+        sig = '|'.join(sorted(x.lower() for x in normalized))
+        if sig in seen_groups:
+            continue
+        seen_groups.add(sig)
+        for x in normalized:
+            used.add(x.lower())
+        result.append(normalized)
+    return result
+
+
+def _ws_make_direction_scope_resolver(break_direction_groups):
+    scope_map = {}
+    for group in _ws_sanitize_break_direction_groups(break_direction_groups):
+        keys = sorted({str(x or '').strip().lower() for x in group if str(x or '').strip()})
+        if len(keys) < 2:
+            continue
+        scope_key = f"group:{'|'.join(keys)}"
+        for k in keys:
+            scope_map[k] = scope_key
+
+    def _resolver(direction_value):
+        key = str(direction_value or '').strip().lower()
+        if not key:
+            return 'dir:'
+        return scope_map.get(key) or f"dir:{key}"
+
+    return _resolver
+
+
+def _ws_build_occupied_intervals_for_date(all_operators, date_str, exclude_op_id, direction_scope, get_scope_key):
+    occupied = []
+    prev_str = _ws_add_days_str(date_str, -1)
+    next_str = _ws_add_days_str(date_str, 1)
+    target_scope = str(get_scope_key(direction_scope))
+
+    def clamp_push(s, e):
+        ns = max(0, min(2880, int(s)))
+        ne = max(0, min(2880, int(e)))
+        if ne > ns:
+            occupied.append({'start': ns, 'end': ne})
+
+    for op in (all_operators or []):
+        if int(op.get('id') or 0) == int(exclude_op_id or 0):
+            continue
+        if str(get_scope_key(op.get('direction'))) != target_scope:
+            continue
+
+        for seg in (op.get('shifts', {}).get(date_str) or []):
+            for b in (seg.get('breaks') or []):
+                clamp_push(b.get('start', 0), b.get('end', 0))
+
+        for seg in (op.get('shifts', {}).get(prev_str) or []):
+            for b in (seg.get('breaks') or []):
+                clamp_push(int(b.get('start', 0)) - 1440, int(b.get('end', 0)) - 1440)
+
+        for seg in (op.get('shifts', {}).get(next_str) or []):
+            for b in (seg.get('breaks') or []):
+                clamp_push(int(b.get('start', 0)) + 1440, int(b.get('end', 0)) + 1440)
+
+    return _ws_merge_intervals(occupied)
+
+
+def _ws_find_non_overlapping_start(desired_start, length, seg_start, seg_end, occupied_intervals):
+    step = 5
+    def snap(v):
+        return int(round(float(v) / step) * step)
+
+    desired_start = snap(desired_start)
+    candidates = [0]
+    max_shift = max(int(seg_end) - int(seg_start), 60)
+    for d in range(step, max_shift + step, step):
+        candidates.append(d)
+        candidates.append(-d)
+
+    for delta in candidates:
+        s = desired_start + delta
+        start = max(int(seg_start), min(int(seg_end) - int(length), s))
+        end = start + int(length)
+        if start < int(seg_start) or end > int(seg_end):
+            continue
+        test_iv = {'start': start, 'end': end}
+        if any(_ws_intervals_overlap(test_iv, occ) for occ in (occupied_intervals or [])):
+            continue
+        return start
+    return None
+
+
+def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_direction_scope_key):
+    segs = (op or {}).get('shifts', {}).get(date_str) or []
+    if not segs:
+        return
+    occupied = _ws_build_occupied_intervals_for_date(
+        all_operators=all_operators,
+        date_str=date_str,
+        exclude_op_id=op.get('id'),
+        direction_scope=op.get('direction'),
+        get_scope_key=get_direction_scope_key
+    )
+    for seg in segs:
+        raw_seg_start = int(seg.get('__startMin', _ws_time_to_minutes(seg.get('start'))))
+        seg_start_base = _ws_time_to_minutes(seg.get('start'))
+        seg_end_base = _ws_time_to_minutes(seg.get('end'))
+        raw_seg_end = int(seg.get('__endMin', seg_end_base + (1440 if seg_end_base <= seg_start_base else 0)))
+        if not isinstance(seg.get('breaks'), list):
+            seg['breaks'] = []
+        if len(seg['breaks']) == 0:
+            seg['breaks'] = _ws_compute_breaks_for_shift_minutes(raw_seg_start, raw_seg_end)
+
+        seg_start = max(0, raw_seg_start)
+        seg_end = max(seg_start, min(2880, raw_seg_end))
+        new_breaks = []
+        for b in (seg.get('breaks') or []):
+            b_start = int(b.get('start', 0))
+            b_end = int(b.get('end', 0))
+            length = b_end - b_start
+            if length <= 0 or (seg_end - seg_start) <= 0:
+                continue
+            desired_start = max(seg_start, min(seg_end - length, b_start))
+            found = _ws_find_non_overlapping_start(desired_start, length, seg_start, seg_end, occupied)
+            if found is not None:
+                nb = {'start': int(found), 'end': int(found) + int(length)}
+            else:
+                clamped_start = max(seg_start, min(seg_end - length, b_start))
+                clamped_end = max(seg_start, min(seg_end, b_end))
+                if clamped_end <= clamped_start:
+                    continue
+                nb = {'start': clamped_start, 'end': clamped_end}
+            new_breaks.append(nb)
+            occupied.append(nb)
+            occupied = _ws_merge_intervals(occupied)
+        seg['breaks'] = new_breaks
+
+
+def _iter_schedule_excel_dates(start_date_obj, end_date_obj):
+    cur = start_date_obj
+    while cur <= end_date_obj:
+        yield cur
+        cur = cur + timedelta(days=1)
+
+
 @app.route('/api/work_schedules/my', methods=['GET'])
 @require_api_key
 def get_my_work_schedules():
@@ -4534,6 +4931,372 @@ def apply_work_schedule_bulk_actions():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error applying bulk work schedule actions: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/work_schedules/export_excel', methods=['GET'])
+@require_api_key
+def export_work_schedules_excel():
+    """
+    Экспорт графика в Excel-матрицу:
+    ФИО | Ставка | YYYY-MM-DD даты (в файле выводятся как dd.mm.yyyy)
+    """
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester_id = int(requester_id)
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+        if user_data[3] not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        if not start_date or not end_date:
+            return jsonify({"error": "start_date and end_date are required"}), 400
+
+        start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+        if end_date_obj < start_date_obj:
+            return jsonify({"error": "end_date must be >= start_date"}), 400
+
+        operators = db.get_operators_with_shifts(start_date, end_date) or []
+        operators = sorted(operators, key=lambda op: str(op.get('name') or '').lower())
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'График'
+
+        ws.cell(row=1, column=1, value='ФИО')
+        ws.cell(row=1, column=2, value='Ставка')
+        date_list = list(_iter_schedule_excel_dates(start_date_obj, end_date_obj))
+        for idx, day_obj in enumerate(date_list, start=3):
+            cell = ws.cell(row=1, column=idx, value=day_obj)
+            cell.number_format = 'DD.MM.YYYY'
+
+        for col_idx in range(1, 3 + len(date_list)):
+            ws.cell(row=1, column=col_idx).font = ws.cell(row=1, column=col_idx).font.copy(bold=True)
+
+        def _format_shift_cell_segment(shift_item):
+            start = _format_schedule_excel_compact_time(shift_item.get('start'))
+            end = _format_schedule_excel_compact_time(shift_item.get('end'))
+            return f"{start}*{end}"
+
+        for row_idx, op in enumerate(operators, start=2):
+            ws.cell(row=row_idx, column=1, value=op.get('name') or '')
+            rate_val = op.get('rate')
+            ws.cell(row=row_idx, column=2, value=rate_val if rate_val is not None else '')
+
+            shifts_by_date = op.get('shifts') or {}
+            days_off_set = set(op.get('daysOff') or [])
+
+            for col_idx, day_obj in enumerate(date_list, start=3):
+                day_key = day_obj.strftime('%Y-%m-%d')
+                shifts = shifts_by_date.get(day_key) or []
+                if shifts:
+                    ws.cell(row=row_idx, column=col_idx, value=','.join(_format_shift_cell_segment(s) for s in shifts))
+                elif day_key in days_off_set:
+                    ws.cell(row=row_idx, column=col_idx, value='Выходной')
+                else:
+                    ws.cell(row=row_idx, column=col_idx, value='')
+
+        ws.freeze_panes = 'C2'
+        ws.auto_filter.ref = ws.dimensions
+        ws.column_dimensions['A'].width = 36
+        ws.column_dimensions['B'].width = 10
+        for i in range(len(date_list)):
+            col_letter = ws.cell(row=1, column=3 + i).column_letter
+            ws.column_dimensions[col_letter].width = 12
+
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+        filename = f"work_schedule_{start_date_obj.strftime('%Y%m%d')}_{end_date_obj.strftime('%Y%m%d')}.xlsx"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error exporting work schedules excel: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/work_schedules/import_excel', methods=['POST'])
+@require_api_key
+def import_work_schedules_excel():
+    """
+    Импорт графика из Excel-матрицы:
+    - Row 1: ФИО, Ставка, даты...
+    - Cells: "9*18", "10*16/30", "9*13,14*18" или "Выходной"
+    """
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester_id = int(requester_id)
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+        if user_data[3] not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+
+        file_storage = request.files.get('file')
+        if not file_storage:
+            return jsonify({"error": "file is required"}), 400
+
+        file_name = secure_filename(file_storage.filename or 'schedule.xlsx')
+        if not file_name.lower().endswith(('.xlsx', '.xlsm')):
+            return jsonify({"error": "Only .xlsx/.xlsm files are supported"}), 400
+
+        wb = load_workbook(filename=BytesIO(file_storage.read()), data_only=True)
+        ws = wb.active
+        if ws.max_row < 2 or ws.max_column < 3:
+            return jsonify({"error": "Excel file is too small for schedule import"}), 400
+
+        header_cells = list(ws[1])
+        fio_col_idx = None
+        for cell in header_cells:
+            header_text = str(cell.value or '').strip().lower()
+            if header_text == 'фио' or 'фио' in header_text:
+                fio_col_idx = cell.column
+                break
+        if fio_col_idx is None:
+            fio_col_idx = 1
+
+        date_columns = []
+        for cell in header_cells:
+            parsed_date = _parse_schedule_excel_header_date(cell)
+            if not parsed_date:
+                continue
+            date_columns.append((cell.column, parsed_date))
+
+        if not date_columns:
+            return jsonify({"error": "No date columns found in header row"}), 400
+
+        date_columns.sort(key=lambda item: item[0])
+        import_start = min(d for _, d in date_columns).strftime('%Y-%m-%d')
+        import_end = max(d for _, d in date_columns).strftime('%Y-%m-%d')
+
+        operators = db.get_operators_with_shifts(import_start, import_end) or []
+        operator_exact_map = {}
+        for op in operators:
+            key = _normalize_schedule_excel_name_key(op.get('name'))
+            if not key:
+                continue
+            operator_exact_map.setdefault(key, []).append(op)
+
+        parsed_entries = []
+        skipped_rows = 0
+        skipped_empty_cells = 0
+        unmatched_rows = []
+        ambiguous_rows = []
+        invalid_cells = []
+
+        for row_idx in range(2, ws.max_row + 1):
+            fio_value = ws.cell(row=row_idx, column=fio_col_idx).value
+            fio_text = str(fio_value or '').strip()
+            if not fio_text:
+                continue
+
+            op_match = None
+            exact_candidates = operator_exact_map.get(_normalize_schedule_excel_name_key(fio_text), [])
+            if len(exact_candidates) == 1:
+                op_match = exact_candidates[0]
+            elif len(exact_candidates) > 1:
+                ambiguous_rows.append({'row': row_idx, 'name': fio_text, 'count': len(exact_candidates)})
+                skipped_rows += 1
+                continue
+            else:
+                # fallback на существующий fuzzy finder
+                fuzzy = db.find_operator_by_name_fuzzy(fio_text)
+                if fuzzy:
+                    op_match = {
+                        'id': fuzzy[0],
+                        'name': fuzzy[2]
+                    }
+
+            if not op_match:
+                unmatched_rows.append({'row': row_idx, 'name': fio_text})
+                skipped_rows += 1
+                continue
+
+            operator_id = int(op_match['id'])
+            for col_idx, day_obj in date_columns:
+                raw_cell = ws.cell(row=row_idx, column=col_idx).value
+                parsed_cell = _parse_schedule_excel_cell_value(raw_cell)
+                kind = parsed_cell.get('kind')
+                if kind == 'empty':
+                    skipped_empty_cells += 1
+                    continue
+                if kind == 'invalid':
+                    invalid_cells.append({
+                        'row': row_idx,
+                        'column': int(col_idx),
+                        'date': day_obj.strftime('%Y-%m-%d'),
+                        'name': fio_text,
+                        'value': str(raw_cell or ''),
+                        'error': parsed_cell.get('error') or 'Invalid cell format'
+                    })
+                    continue
+
+                entry = {
+                    'operator_id': operator_id,
+                    'date': day_obj.strftime('%Y-%m-%d'),
+                    'is_day_off': (kind == 'day_off'),
+                    'shifts': []
+                }
+                if kind == 'shifts':
+                    entry['shifts'] = parsed_cell.get('shifts') or []
+                parsed_entries.append(entry)
+
+        if not parsed_entries and not invalid_cells:
+            return jsonify({
+                "message": "No schedule cells found to import",
+                "result": {
+                    "days_processed": 0,
+                    "set_day_off_days": 0,
+                    "set_shift_days": 0,
+                    "shift_rows_saved": 0,
+                    "deleted_shift_rows": 0,
+                    "deleted_day_off_rows": 0,
+                    "affected_operator_ids": []
+                },
+                "warnings": {
+                    "skipped_rows": skipped_rows,
+                    "skipped_empty_cells": skipped_empty_cells,
+                    "unmatched_rows": unmatched_rows,
+                    "ambiguous_rows": ambiguous_rows,
+                    "invalid_cells": invalid_cells
+                }
+            }), 200
+
+        if not parsed_entries and invalid_cells:
+            return jsonify({
+                "message": "No valid schedule cells found to import",
+                "result": {
+                    "days_processed": 0,
+                    "set_day_off_days": 0,
+                    "set_shift_days": 0,
+                    "shift_rows_saved": 0,
+                    "deleted_shift_rows": 0,
+                    "deleted_day_off_rows": 0,
+                    "affected_operator_ids": []
+                },
+                "warnings": {
+                    "skipped_rows": skipped_rows,
+                    "skipped_empty_cells": skipped_empty_cells,
+                    "unmatched_rows": unmatched_rows,
+                    "ambiguous_rows": ambiguous_rows,
+                    "invalid_cells": invalid_cells[:30],
+                    "invalid_cells_total": len(invalid_cells)
+                }
+            }), 200
+
+        break_direction_groups = []
+        try:
+            raw_groups = request.form.get('break_direction_groups')
+            if raw_groups:
+                parsed_groups = json.loads(raw_groups)
+                if isinstance(parsed_groups, list):
+                    break_direction_groups = parsed_groups
+        except Exception:
+            # Не валим импорт из-за битого optional-поля, просто игнорируем группы.
+            break_direction_groups = []
+
+        # Подготовка перерывов как во фронте: автогенерация + анти-пересечение между операторами
+        # (по направлению / группе направлений) на симуляции перед сохранением.
+        import_start_obj = datetime.strptime(import_start, '%Y-%m-%d').date()
+        import_end_obj = datetime.strptime(import_end, '%Y-%m-%d').date()
+        sim_start = (import_start_obj - timedelta(days=1)).strftime('%Y-%m-%d')
+        sim_end = (import_end_obj + timedelta(days=1)).strftime('%Y-%m-%d')
+        sim_source_operators = db.get_operators_with_shifts(sim_start, sim_end) or []
+        sim_operators = _ws_clone_ops_for_break_simulation(sim_source_operators)
+        sim_op_by_id = {int(op.get('id')): op for op in sim_operators if op.get('id') is not None}
+        scope_resolver = _ws_make_direction_scope_resolver(break_direction_groups)
+
+        for entry in parsed_entries:
+            op_id = int(entry.get('operator_id'))
+            date_str = str(entry.get('date'))
+            sim_op = sim_op_by_id.get(op_id)
+            if not sim_op:
+                sim_op = {'id': op_id, 'direction': None, 'shifts': {}, 'daysOff': []}
+                sim_operators.append(sim_op)
+                sim_op_by_id[op_id] = sim_op
+
+            sim_op['daysOff'] = [d for d in (sim_op.get('daysOff') or []) if str(d) != date_str]
+            sim_op.setdefault('shifts', {})
+            sim_op['shifts'].pop(date_str, None)
+
+            if entry.get('is_day_off'):
+                if date_str not in sim_op['daysOff']:
+                    sim_op['daysOff'].append(date_str)
+                entry['shifts'] = []
+                continue
+
+            prepared_shifts = []
+            for raw_shift in (entry.get('shifts') or []):
+                start_str = str(raw_shift.get('start') or raw_shift.get('start_time') or '').strip()
+                end_str = str(raw_shift.get('end') or raw_shift.get('end_time') or '').strip()
+                if not start_str or not end_str:
+                    continue
+                smin = _ws_time_to_minutes(start_str)
+                emin = _ws_time_to_minutes(end_str)
+                if emin <= smin:
+                    emin += 1440
+                prepared_shifts.append({
+                    'start': _ws_minutes_to_time(smin),
+                    'end': _ws_minutes_to_time(emin),
+                    '__startMin': smin,
+                    '__endMin': emin,
+                    'breaks': _ws_compute_breaks_for_shift_minutes(smin, emin)
+                })
+
+            sim_op['shifts'][date_str] = prepared_shifts
+            if prepared_shifts:
+                _ws_adjust_breaks_for_operator_on_date(sim_op, date_str, sim_operators, scope_resolver)
+
+            # Сохраняем в entry уже финальные перерывы после анти-пересечения
+            final_shifts = []
+            for seg in (sim_op.get('shifts', {}).get(date_str) or []):
+                final_shifts.append({
+                    'start': str(seg.get('start') or ''),
+                    'end': str(seg.get('end') or ''),
+                    'breaks': [
+                        {'start': int(b.get('start')), 'end': int(b.get('end'))}
+                        for b in (seg.get('breaks') or [])
+                        if b is not None and int(b.get('end', 0)) > int(b.get('start', 0))
+                    ]
+                })
+            entry['shifts'] = final_shifts
+
+        result = db.import_work_schedule_excel_entries(parsed_entries)
+        return jsonify({
+            "message": "Work schedules imported from Excel successfully",
+            "result": result,
+            "breakAntiOverlapApplied": True,
+            "warnings": {
+                "skipped_rows": skipped_rows,
+                "skipped_empty_cells": skipped_empty_cells,
+                "unmatched_rows": unmatched_rows,
+                "ambiguous_rows": ambiguous_rows,
+                "invalid_cells": invalid_cells[:30],
+                "invalid_cells_total": len(invalid_cells)
+            }
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error importing work schedules excel: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
