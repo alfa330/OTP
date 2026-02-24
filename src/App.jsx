@@ -5987,7 +5987,8 @@ const withAccessTokenHeader = (headers = {}) => {
                     setOperators(prev => {
                         const copy = prev.map(o => ({
                             ...o,
-                            shifts: { ...(o.shifts || {}) }
+                            shifts: { ...(o.shifts || {}) },
+                            daysOff: Array.isArray(o.daysOff) ? [...o.daysOff] : []
                         }));
                         normalizedTargets.forEach(target => {
                             const op = copy.find(x => x.id === target.opId);
@@ -5995,6 +5996,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             if (op.shifts[target.date]) {
                                 delete op.shifts[target.date];
                             }
+                            op.daysOff = op.daysOff.filter(d => d !== target.date);
                         });
                         return copy;
                     });
@@ -6003,7 +6005,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], showAddPanel: false }));
                 } catch (error) {
                     console.error('Error deleting multiple shifts:', error);
-                    alert('Ошибка массового удаления смен');
+                    alert('Ошибка массовой очистки дней');
                 }
             };
 
@@ -8375,8 +8377,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                 >
                                     <i className={`fas ${bulkActionState.loading && bulkActionState.action === 'delete_shifts' ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`}></i>
                                     {bulkActionState.loading && bulkActionState.action === 'delete_shifts'
-                                        ? 'Удаляем...'
-                                        : `Удалить смены (${modalBulkCount})`}
+                                        ? 'Очищаем...'
+                                        : `Очистить (${modalBulkCount})`}
                                 </button>
                             )}
                             {isBulkSelectionModal && (
