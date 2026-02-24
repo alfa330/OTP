@@ -4802,6 +4802,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
+            const [excelTransferState, setExcelTransferState] = useState({ importing: false, exporting: false });
             const [myScheduleData, setMyScheduleData] = useState(null);
             const [myLiveScheduleData, setMyLiveScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
@@ -4817,6 +4818,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const dragState = useRef(null);
             const breakReminderNotifiedRef = useRef(new Map());
             const plannerUiStateLoadedRef = useRef(false);
+            const plannerExcelImportInputRef = useRef(null);
             const plannerUiStateStorageKey = useMemo(
                 () => `otp.work_schedules.ui_state.${user?.login || user?.name || user?.role || 'anonymous'}`,
                 [user?.login, user?.name, user?.role]
@@ -5829,6 +5831,133 @@ const withAccessTokenHeader = (headers = {}) => {
                     return payload;
                 } finally {
                     setBulkActionState({ loading: false, action: '' });
+                }
+            };
+
+            const reloadPlannerSchedulesFromServer = async () => {
+                const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators`, {
+                    credentials: 'include',
+                    headers: withAccessTokenHeader()
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(data?.error || `HTTP ${response.status}`);
+                }
+                const serverOperators = Array.isArray(data?.operators) ? data.operators : [];
+                const serverMap = new Map(serverOperators.map(op => [op.id, op]));
+                setOperators(prevOps => {
+                    const base = mergePlannerOperators(
+                        (initialOperators && initialOperators.length) ? initialOperators : serverOperators,
+                        prevOps
+                    );
+                    const merged = base.map(op => {
+                        const serverOp = serverMap.get(op.id);
+                        if (!serverOp) return op;
+                        return clonePlannerOperator({
+                            ...serverOp,
+                            ...op,
+                            shifts: serverOp.shifts || {},
+                            daysOff: serverOp.daysOff || [],
+                            scheduleStatusPeriods: serverOp.scheduleStatusPeriods || [],
+                            scheduleStatusDays: serverOp.scheduleStatusDays || {}
+                        });
+                    });
+                    const seen = new Set(merged.map(op => op.id));
+                    serverOperators.forEach(serverOp => {
+                        if (!seen.has(serverOp.id)) merged.push(clonePlannerOperator(serverOp));
+                    });
+                    return merged;
+                });
+                return data;
+            };
+
+            const handlePlannerExcelExport = async () => {
+                if (user?.role === 'operator') return;
+                if (!Array.isArray(visibleRange) || visibleRange.length === 0) {
+                    alert('Нет дат для экспорта');
+                    return;
+                }
+                const sortedDates = [...visibleRange].sort();
+                const startDate = sortedDates[0];
+                const endDate = sortedDates[sortedDates.length - 1];
+                setExcelTransferState(prev => ({ ...prev, exporting: true }));
+                try {
+                    const query = new URLSearchParams({ start_date: startDate, end_date: endDate }).toString();
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/export_excel?${query}`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader()
+                    });
+                    if (!response.ok) {
+                        const payload = await response.json().catch(() => ({}));
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `work_schedule_${startDate}_${endDate}.xlsx`;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    window.URL.revokeObjectURL(url);
+                } catch (error) {
+                    console.error('Error exporting excel schedule:', error);
+                    alert(`Ошибка экспорта Excel: ${error?.message || error}`);
+                } finally {
+                    setExcelTransferState(prev => ({ ...prev, exporting: false }));
+                }
+            };
+
+            const triggerPlannerExcelImportSelect = () => {
+                if (excelTransferState.importing) return;
+                plannerExcelImportInputRef.current?.click?.();
+            };
+
+            const handlePlannerExcelImportFileChange = async (event) => {
+                const file = event?.target?.files?.[0];
+                if (!file) return;
+                setExcelTransferState(prev => ({ ...prev, importing: true }));
+                try {
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    formData.append('break_direction_groups', JSON.stringify(breakDirectionGroups || []));
+
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/import_excel`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader(),
+                        body: formData
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        const details = Array.isArray(payload?.invalid_cells) && payload.invalid_cells.length
+                            ? `\nНекорректных ячеек: ${payload.invalid_cells_total || payload.invalid_cells.length}`
+                            : '';
+                        throw new Error((payload?.error || `HTTP ${response.status}`) + details);
+                    }
+
+                    await reloadPlannerSchedulesFromServer();
+
+                    const result = payload?.result || {};
+                    const warnings = payload?.warnings || {};
+                    const unmatchedCount = Array.isArray(warnings.unmatched_rows) ? warnings.unmatched_rows.length : 0;
+                    const ambiguousCount = Array.isArray(warnings.ambiguous_rows) ? warnings.ambiguous_rows.length : 0;
+                    const invalidCellsCount = Number(warnings.invalid_cells_total || (Array.isArray(warnings.invalid_cells) ? warnings.invalid_cells.length : 0) || 0);
+                    alert(
+                        `Импорт завершен.\n` +
+                        `Обработано дней: ${result.days_processed ?? 0}\n` +
+                        `Смен сохранено: ${result.shift_rows_saved ?? 0}\n` +
+                        `Выходных проставлено: ${result.set_day_off_days ?? 0}` +
+                        `${invalidCellsCount ? `\nПропущено невалидных ячеек: ${invalidCellsCount}` : ''}` +
+                        `${unmatchedCount ? `\nНе найдены ФИО: ${unmatchedCount}` : ''}` +
+                        `${ambiguousCount ? `\nНеоднозначные ФИО: ${ambiguousCount}` : ''}`
+                    );
+                } catch (error) {
+                    console.error('Error importing excel schedule:', error);
+                    alert(`Ошибка импорта Excel: ${error?.message || error}`);
+                } finally {
+                    if (event?.target) event.target.value = '';
+                    setExcelTransferState(prev => ({ ...prev, importing: false }));
                 }
             };
 
@@ -7586,6 +7715,35 @@ const withAccessTokenHeader = (headers = {}) => {
                         )}
                         </div>
                         <div className="flex gap-2 items-center">
+                        {user?.role !== 'operator' && (
+                            <>
+                            <input
+                                ref={plannerExcelImportInputRef}
+                                type="file"
+                                accept=".xlsx,.xlsm"
+                                className="hidden"
+                                onChange={handlePlannerExcelImportFileChange}
+                            />
+                            <button
+                                onClick={handlePlannerExcelExport}
+                                disabled={excelTransferState.exporting || excelTransferState.importing}
+                                className="px-3 py-1 rounded border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                title="Экспортировать график (видимый диапазон дат) в Excel"
+                            >
+                                <i className={`fas ${excelTransferState.exporting ? 'fa-spinner fa-spin' : 'fa-file-excel'}`}></i>
+                                {excelTransferState.exporting ? 'Экспорт...' : 'Экспорт Excel'}
+                            </button>
+                            <button
+                                onClick={triggerPlannerExcelImportSelect}
+                                disabled={excelTransferState.importing || excelTransferState.exporting}
+                                className="px-3 py-1 rounded border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                title="Импортировать график из Excel (ФИО + даты)"
+                            >
+                                <i className={`fas ${excelTransferState.importing ? 'fa-spinner fa-spin' : 'fa-file-import'}`}></i>
+                                {excelTransferState.importing ? 'Импорт...' : 'Импорт Excel'}
+                            </button>
+                            </>
+                        )}
                         <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-left"></i></button>
                         <div className="text-sm">{currentDate.toLocaleDateString()}</div>
                         <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-right"></i></button>
