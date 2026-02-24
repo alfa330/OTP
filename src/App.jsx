@@ -13419,11 +13419,17 @@ const withAccessTokenHeader = (headers = {}) => {
                     if (match) return `${match[3]}-${match[2]}-${match[1]}`;
                     return datePart;
                 };
-                const PERIOD_STATUSES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
+                const PERIOD_STATUSES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal', 'fired']);
+                const normalizeUserStatusForPlannerPeriod = (v) => {
+                    const status = String(v || '').trim();
+                    if (status === 'fired') return 'dismissal';
+                    return status;
+                };
                 const isPeriodStatusValue = (v) => PERIOD_STATUSES.has(String(v || '').trim());
                 const saveUserStatusPeriodViaPlannerApi = async (targetUserId, sourceUser) => {
-                    const statusCode = String(sourceUser?.status || '').trim();
-                    if (!isPeriodStatusValue(statusCode)) return;
+                    const rawStatusCode = String(sourceUser?.status || '').trim();
+                    if (!isPeriodStatusValue(rawStatusCode)) return;
+                    const statusCode = normalizeUserStatusForPlannerPeriod(rawStatusCode);
 
                     const startDate = normalizeDateForApi(sourceUser?.status_period_start_date);
                     const endDate = normalizeDateForApi(sourceUser?.status_period_end_date);
@@ -13484,7 +13490,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             hire_date: normalizeDateForApi(editedUser.hire_date),
                             gender: editedUser.gender || null,
                             birth_date: normalizeDateForApi(editedUser.birth_date),
-                            status: editedUser.status || "working",
+                            status: isPeriodStatusValue(editedUser?.status) ? "working" : (editedUser.status || "working"),
                             // если UI даёт new_login/new_password — можно передать их
                             new_login: editedUser.new_login || undefined,
                             new_password: editedUser.new_password || undefined
