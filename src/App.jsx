@@ -4981,6 +4981,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [plannerStatusAnomalyFileName, setPlannerStatusAnomalyFileName] = useState('');
             const [plannerStatusAnomalyAnalysis, setPlannerStatusAnomalyAnalysis] = useState(null);
             const [plannerStatusAnomalyExpandedDays, setPlannerStatusAnomalyExpandedDays] = useState({});
+            const [plannerStatusAnomalyOnly, setPlannerStatusAnomalyOnly] = useState(false);
             const [myScheduleData, setMyScheduleData] = useState(null);
             const [myLiveScheduleData, setMyLiveScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
@@ -6108,6 +6109,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 setShowPlannerStatusAnomalyModal(true);
                 setPlannerStatusAnomalyLoading(true);
                 setPlannerStatusAnomalyError('');
+                setPlannerStatusAnomalyOnly(false);
                 try {
                     const csvText = await file.text();
                     if (!String(csvText || '').trim()) {
@@ -9054,6 +9056,13 @@ const withAccessTokenHeader = (headers = {}) => {
                         const invalidRowsPreview = Array.isArray(analysis?.invalidRowsPreview) ? analysis.invalidRowsPreview : [];
                         const parseErrorsPreview = Array.isArray(analysis?.parseErrorsPreview) ? analysis.parseErrorsPreview : [];
                         const expandedDays = plannerStatusAnomalyExpandedDays || {};
+                        const onlyAnomalies = !!plannerStatusAnomalyOnly;
+                        const overallOperatorsList = hasAnalysis
+                            ? (analysis.overallOperators || []).filter(op => !onlyAnomalies || Number(op?.noPhoneAnomalyCount || 0) > 0)
+                            : [];
+                        const dayList = hasAnalysis
+                            ? (analysis.days || []).filter(day => !onlyAnomalies || Number(day?.noPhoneAnomalyCount || 0) > 0)
+                            : [];
                         const anomalyOperatorsCount = hasAnalysis
                             ? (analysis.overallOperators || []).filter(op => Number(op?.noPhoneAnomalyCount || 0) > 0).length
                             : 0;
@@ -9096,11 +9105,23 @@ const withAccessTokenHeader = (headers = {}) => {
                                     {hasAnalysis && (
                                         <button
                                             type="button"
+                                            onClick={() => setPlannerStatusAnomalyOnly(v => !v)}
+                                            className={`px-3 py-2 rounded-lg border text-sm font-medium ${onlyAnomalies ? 'border-rose-300 bg-rose-100 text-rose-800' : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'}`}
+                                            title="Фильтровать список операторов и дней только по аномалиям"
+                                        >
+                                            <i className={`fas ${onlyAnomalies ? 'fa-filter-circle-xmark' : 'fa-filter'} mr-2`}></i>
+                                            {onlyAnomalies ? 'Показать все' : 'Показать только аномалии'}
+                                        </button>
+                                    )}
+                                    {hasAnalysis && (
+                                        <button
+                                            type="button"
                                             onClick={() => {
                                                 setPlannerStatusAnomalyAnalysis(null);
                                                 setPlannerStatusAnomalyError('');
                                                 setPlannerStatusAnomalyFileName('');
                                                 setPlannerStatusAnomalyExpandedDays({});
+                                                setPlannerStatusAnomalyOnly(false);
                                             }}
                                             className="px-3 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm"
                                         >
@@ -9193,7 +9214,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 </div>
                                             </div>
                                             <div className="max-h-64 overflow-auto">
-                                                {(analysis.overallOperators || []).length === 0 ? (
+                                                {overallOperatorsList.length === 0 ? (
                                                     <div className="p-4 text-sm text-slate-500">Нет данных.</div>
                                                 ) : (
                                                     <table className="w-full text-sm">
@@ -9206,7 +9227,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             </tr>
                                                         </thead>
                                                         <tbody>
-                                                            {(analysis.overallOperators || []).map((op, idx) => (
+                                                            {overallOperatorsList.map((op, idx) => (
                                                                 <tr key={`anomaly-op-${idx}-${op.operatorName}`} className="border-b last:border-b-0">
                                                                     <td className="px-3 py-2 font-medium text-slate-900">{op.operatorName}</td>
                                                                     <td className={`px-3 py-2 text-right tabular-nums ${Number(op.noPhoneSec || 0) > 0 ? 'text-rose-700 font-semibold' : 'text-slate-600'}`}>
@@ -9238,11 +9259,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 <div className="text-xs text-slate-500 mt-0.5">Нажмите на день для таймлайнов и итогов по операторам</div>
                                             </div>
                                             <div className="max-h-[46vh] overflow-auto p-3 space-y-3">
-                                                {(analysis.days || []).length === 0 && (
-                                                    <div className="text-sm text-slate-500">Нет дневных интервалов для отображения.</div>
+                                                {dayList.length === 0 && (
+                                                    <div className="text-sm text-slate-500">
+                                                        {onlyAnomalies ? 'Аномалий не найдено.' : 'Нет дневных интервалов для отображения.'}
+                                                    </div>
                                                 )}
-                                                {(analysis.days || []).map((day, idx) => {
+                                                {dayList.map((day, idx) => {
                                                     const expanded = !!expandedDays[day.dateKey];
+                                                    const dayOperatorsList = (day.operators || []).filter(op => !onlyAnomalies || Number(op?.noPhoneAnomalyCount || 0) > 0);
                                                     return (
                                                         <div key={`anomaly-day-${day.dateKey}-${idx}`} className="border rounded-lg overflow-hidden">
                                                             <button
@@ -9260,7 +9284,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                         )}
                                                                     </div>
                                                                     <div className="text-xs text-slate-500 mt-1 flex flex-wrap gap-x-3 gap-y-1">
-                                                                        <span>Операторов: {Array.isArray(day.operators) ? day.operators.length : 0}</span>
+                                                                        <span>Операторов: {dayOperatorsList.length}</span>
                                                                         <span>Без телефона: {plannerStatusFormatDuration(day.noPhoneSec || 0)}</span>
                                                                         <span>Всего: {plannerStatusFormatDuration(day.totalObservedSec || 0)}</span>
                                                                     </div>
@@ -9270,7 +9294,9 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                                             {expanded && (
                                                                 <div className="border-t bg-slate-50 p-3 space-y-3">
-                                                                    {(day.operators || []).map((op, opIdx) => (
+                                                                    {dayOperatorsList.map((op, opIdx) => {
+                                                                        const timelineList = (op.timeline || []).filter(seg => !onlyAnomalies || !!seg?.isNoPhoneAnomaly);
+                                                                        return (
                                                                         <div key={`anomaly-day-op-${day.dateKey}-${opIdx}`} className="rounded-lg border bg-white p-3">
                                                                             <div className="flex items-start justify-between gap-3 flex-wrap">
                                                                                 <div>
@@ -9293,7 +9319,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                 </div>
                                                                             </div>
                                                                             <div className="mt-3 space-y-1.5">
-                                                                                {(op.timeline || []).map((seg, segIdx) => (
+                                                                                {timelineList.map((seg, segIdx) => (
                                                                                     <div
                                                                                         key={`anomaly-seg-${day.dateKey}-${opIdx}-${segIdx}`}
                                                                                         className={`rounded-md border px-2 py-1.5 text-xs flex flex-wrap items-center gap-x-3 gap-y-1 ${seg.isNoPhoneAnomaly ? 'border-rose-200 bg-rose-50 text-rose-900' : seg.isNoPhone ? 'border-rose-100 bg-rose-50/50 text-rose-800' : 'border-slate-200 bg-white text-slate-700'}`}
@@ -9312,14 +9338,19 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                         )}
                                                                                     </div>
                                                                                 ))}
-                                                                                {(op.timeline || []).length === 0 && (
-                                                                                    <div className="text-xs text-slate-500">Нет интервалов.</div>
+                                                                                {timelineList.length === 0 && (
+                                                                                    <div className="text-xs text-slate-500">
+                                                                                        {onlyAnomalies ? 'Нет аномальных интервалов.' : 'Нет интервалов.'}
+                                                                                    </div>
                                                                                 )}
                                                                             </div>
                                                                         </div>
-                                                                    ))}
-                                                                    {(day.operators || []).length === 0 && (
-                                                                        <div className="text-sm text-slate-500">Нет данных по операторам за день.</div>
+                                                                    );
+                                                                    })}
+                                                                    {dayOperatorsList.length === 0 && (
+                                                                        <div className="text-sm text-slate-500">
+                                                                            {onlyAnomalies ? 'За этот день нет операторов с аномалиями.' : 'Нет данных по операторам за день.'}
+                                                                        </div>
                                                                     )}
                                                                 </div>
                                                             )}
