@@ -4619,8 +4619,12 @@ const withAccessTokenHeader = (headers = {}) => {
                 const cur = list[i];
                 const next = list[i + 1];
                 if (next.tsMs <= cur.tsMs) { zeroOrNegativeTransitions += 1; continue; }
+                const nextEventDayKey = plannerStatusDayKey(next.ts);
                 const parts = plannerStatusSplitSegmentByDay(cur.ts, next.ts);
                 for (const p of parts) {
+                    // Не учитываем "последний статус дня": куски, которые тянутся до полуночи
+                    // и завершаются уже событием в другой день.
+                    if (p.dateKey !== nextEventDayKey) continue;
                     const isNoPhone = cur.stateKey === PLANNER_STATUS_NO_PHONE_KEY;
                     const isNoPhoneAnomaly = isNoPhone && p.durationSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
                     const seg = { operatorName, stateName: cur.stateName, stateKey: cur.stateKey, ...p, isNoPhone, isNoPhoneAnomaly };
@@ -4866,7 +4870,7 @@ const withAccessTokenHeader = (headers = {}) => {
             );
             }
 
-            function SimpleModal({ open, onClose, children }) {
+            function SimpleModal({ open, onClose, children, panelClassName = '' }) {
             const [mounted, setMounted] = useState(open);
             const [show, setShow] = useState(false);
             useEffect(() => {
@@ -4890,7 +4894,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     onClick={onClose}
                 />
                 <div
-                    className={`bg-white rounded p-4 z-60 w-[720px] max-w-[calc(100vw-1rem)] max-h-[calc(100vh-2rem)] overflow-y-auto overflow-x-hidden shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`}
+                    className={`bg-white rounded p-4 z-60 ${panelClassName || 'w-[720px] max-w-[calc(100vw-1rem)]'} max-h-[calc(100vh-2rem)] overflow-y-auto overflow-x-hidden shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`}
                     role="dialog"
                     aria-modal="true"
                 >
@@ -9039,7 +9043,11 @@ const withAccessTokenHeader = (headers = {}) => {
                     })()}
                 </SimpleModal>
 
-                <SimpleModal open={!!showPlannerStatusAnomalyModal && user?.role !== 'operator'} onClose={() => setShowPlannerStatusAnomalyModal(false)}>
+                <SimpleModal
+                    open={!!showPlannerStatusAnomalyModal && user?.role !== 'operator'}
+                    onClose={() => setShowPlannerStatusAnomalyModal(false)}
+                    panelClassName="w-[calc(100vw-2rem)] max-w-[1400px]"
+                >
                     {(() => {
                         const analysis = plannerStatusAnomalyAnalysis;
                         const hasAnalysis = !!analysis;
