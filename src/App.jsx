@@ -4619,12 +4619,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 const cur = list[i];
                 const next = list[i + 1];
                 if (next.tsMs <= cur.tsMs) { zeroOrNegativeTransitions += 1; continue; }
-                const nextEventDayKey = plannerStatusDayKey(next.ts);
                 const parts = plannerStatusSplitSegmentByDay(cur.ts, next.ts);
                 for (const p of parts) {
-                    // Не учитываем "последний статус дня": куски, которые тянутся до полуночи
-                    // и завершаются уже событием в другой день.
-                    if (p.dateKey !== nextEventDayKey) continue;
                     const isNoPhone = cur.stateKey === PLANNER_STATUS_NO_PHONE_KEY;
                     const isNoPhoneAnomaly = isNoPhone && p.durationSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
                     const seg = { operatorName, stateName: cur.stateName, stateKey: cur.stateKey, ...p, isNoPhone, isNoPhoneAnomaly };
