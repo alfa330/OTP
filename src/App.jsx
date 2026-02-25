@@ -4587,7 +4587,29 @@ const withAccessTokenHeader = (headers = {}) => {
                 }
                 events.push({ row: i + 2, operatorName, stateName, stateKey: stateName.toLowerCase(), ts, tsMs: ts.getTime() });
             });
-            events.sort((a, b) => a.operatorName.localeCompare(b.operatorName, 'ru') || (a.tsMs - b.tsMs) || (a.row - b.row));
+            const sourceOrderHintByOperator = new Map();
+            const sourceEventsByOperator = new Map();
+            events.forEach(ev => {
+                if (!sourceEventsByOperator.has(ev.operatorName)) sourceEventsByOperator.set(ev.operatorName, []);
+                sourceEventsByOperator.get(ev.operatorName).push(ev);
+            });
+            sourceEventsByOperator.forEach((list, operatorName) => {
+                let ascCount = 0;
+                let descCount = 0;
+                for (let i = 1; i < list.length; i++) {
+                    const diff = (list[i]?.tsMs || 0) - (list[i - 1]?.tsMs || 0);
+                    if (diff > 0) ascCount += 1;
+                    else if (diff < 0) descCount += 1;
+                }
+                sourceOrderHintByOperator.set(operatorName, descCount > ascCount ? 'desc' : 'asc');
+            });
+            events.sort((a, b) => {
+                const nameCmp = a.operatorName.localeCompare(b.operatorName, 'ru');
+                if (nameCmp) return nameCmp;
+                if (a.tsMs !== b.tsMs) return a.tsMs - b.tsMs;
+                const sourceOrderHint = sourceOrderHintByOperator.get(a.operatorName);
+                return sourceOrderHint === 'desc' ? (b.row - a.row) : (a.row - b.row);
+            });
             const byOperator = new Map();
             events.forEach(ev => {
                 if (!byOperator.has(ev.operatorName)) byOperator.set(ev.operatorName, []);
