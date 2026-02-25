@@ -4507,6 +4507,173 @@ const withAccessTokenHeader = (headers = {}) => {
             return res;
             };
 
+            const PLANNER_STATUS_NO_PHONE_KEY = 'без телефона';
+            const PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS = 30;
+            const plannerStatusPad2 = (n) => String(n).padStart(2, '0');
+            const plannerStatusFormatDuration = (seconds) => {
+            const t = Math.max(0, Math.round(Number(seconds) || 0));
+            const h = Math.floor(t / 3600);
+            const m = Math.floor((t % 3600) / 60);
+            const s = t % 60;
+            return `${plannerStatusPad2(h)}:${plannerStatusPad2(m)}:${plannerStatusPad2(s)}`;
+            };
+            const plannerStatusFormatDateTime = (value) => {
+            const d = value instanceof Date ? value : new Date(value);
+            if (!d || Number.isNaN(d.getTime())) return '—';
+            return `${plannerStatusPad2(d.getDate())}.${plannerStatusPad2(d.getMonth() + 1)}.${d.getFullYear()} ${plannerStatusPad2(d.getHours())}:${plannerStatusPad2(d.getMinutes())}:${plannerStatusPad2(d.getSeconds())}`;
+            };
+            const plannerStatusDayKey = (value) => {
+            const d = value instanceof Date ? value : new Date(value);
+            if (!d || Number.isNaN(d.getTime())) return '';
+            return `${d.getFullYear()}-${plannerStatusPad2(d.getMonth() + 1)}-${plannerStatusPad2(d.getDate())}`;
+            };
+            const plannerStatusFormatDayLabel = (dayKey) => {
+            const d = new Date(`${dayKey}T00:00:00`);
+            if (!d || Number.isNaN(d.getTime())) return dayKey;
+            return `${plannerStatusPad2(d.getDate())}.${plannerStatusPad2(d.getMonth() + 1)}.${d.getFullYear()}`;
+            };
+            const plannerStatusParseDateTime = (raw) => {
+            const text = String(raw ?? '').trim();
+            const m = text.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+            if (!m) return null;
+            const d = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0), 0);
+            return Number.isNaN(d.getTime()) ? null : d;
+            };
+            const plannerStatusSplitSegmentByDay = (start, end) => {
+            const result = [];
+            let cursor = new Date(start);
+            const endDate = new Date(end);
+            while (cursor < endDate) {
+                const nextMidnight = new Date(cursor);
+                nextMidnight.setHours(24, 0, 0, 0);
+                const segEnd = nextMidnight < endDate ? nextMidnight : endDate;
+                const durationSec = Math.max(0, Math.round((segEnd.getTime() - cursor.getTime()) / 1000));
+                if (durationSec > 0) {
+                result.push({
+                    dateKey: plannerStatusDayKey(cursor),
+                    start: new Date(cursor),
+                    end: new Date(segEnd),
+                    durationSec
+                });
+                }
+                cursor = segEnd;
+            }
+            return result;
+            };
+            const analyzePlannerStatusTransitionsCsv = (csvText) => {
+            const parsed = Papa.parse(csvText, {
+                header: true,
+                delimiter: ';',
+                skipEmptyLines: 'greedy',
+                transformHeader: (h) => String(h ?? '').replace(/^\uFEFF/, '').trim().toLowerCase().replace(/[\s_-]+/g, '')
+            });
+            const rows = Array.isArray(parsed?.data) ? parsed.data : [];
+            const parseErrors = Array.isArray(parsed?.errors) ? parsed.errors.filter(e => e && e.code !== 'UndetectableDelimiter') : [];
+            const invalidRows = [];
+            const events = [];
+            rows.forEach((row, i) => {
+                const operatorName = String(row?.operatorname ?? row?.operator ?? row?.name ?? '').trim();
+                const stateName = String(row?.statename ?? row?.state ?? row?.status ?? '').trim();
+                const timeChange = String(row?.timechange ?? row?.time ?? row?.datetime ?? '').trim();
+                if (!operatorName && !stateName && !timeChange) return;
+                if (!operatorName || !stateName || !timeChange) {
+                invalidRows.push({ row: i + 2, reason: 'Отсутствуют обязательные поля', operatorName, stateName, timeChange });
+                return;
+                }
+                const ts = plannerStatusParseDateTime(timeChange);
+                if (!ts) {
+                invalidRows.push({ row: i + 2, reason: 'Некорректный формат TimeChange', operatorName, stateName, timeChange });
+                return;
+                }
+                events.push({ row: i + 2, operatorName, stateName, stateKey: stateName.toLowerCase(), ts, tsMs: ts.getTime() });
+            });
+            events.sort((a, b) => a.operatorName.localeCompare(b.operatorName, 'ru') || (a.tsMs - b.tsMs) || (a.row - b.row));
+            const byOperator = new Map();
+            events.forEach(ev => {
+                if (!byOperator.has(ev.operatorName)) byOperator.set(ev.operatorName, []);
+                byOperator.get(ev.operatorName).push(ev);
+            });
+            const overallByOperator = new Map();
+            const days = new Map();
+            let overallNoPhoneSec = 0;
+            let overallNoPhoneAnomalies = 0;
+            let openTailEvents = 0;
+            let zeroOrNegativeTransitions = 0;
+            const addTotals = (obj, state, sec) => { obj.statusTotals[state] = (obj.statusTotals[state] || 0) + sec; };
+            const ensureOverall = (name) => {
+                if (!overallByOperator.has(name)) overallByOperator.set(name, { operatorName: name, totalObservedSec: 0, noPhoneSec: 0, noPhoneAnomalyCount: 0, statusTotals: {} });
+                return overallByOperator.get(name);
+            };
+            const ensureDay = (dateKey) => {
+                if (!days.has(dateKey)) days.set(dateKey, { dateKey, totalObservedSec: 0, noPhoneSec: 0, noPhoneAnomalyCount: 0, statusTotals: {}, operators: new Map() });
+                return days.get(dateKey);
+            };
+            const ensureDayOperator = (dayObj, name) => {
+                if (!dayObj.operators.has(name)) dayObj.operators.set(name, { operatorName: name, totalObservedSec: 0, noPhoneSec: 0, noPhoneAnomalyCount: 0, statusTotals: {}, timeline: [] });
+                return dayObj.operators.get(name);
+            };
+            for (const [operatorName, list] of byOperator.entries()) {
+                if (!list.length) continue;
+                if (list.length === 1) { openTailEvents += 1; continue; }
+                for (let i = 0; i < list.length - 1; i++) {
+                const cur = list[i];
+                const next = list[i + 1];
+                if (next.tsMs <= cur.tsMs) { zeroOrNegativeTransitions += 1; continue; }
+                const parts = plannerStatusSplitSegmentByDay(cur.ts, next.ts);
+                for (const p of parts) {
+                    const isNoPhone = cur.stateKey === PLANNER_STATUS_NO_PHONE_KEY;
+                    const isNoPhoneAnomaly = isNoPhone && p.durationSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
+                    const seg = { operatorName, stateName: cur.stateName, stateKey: cur.stateKey, ...p, isNoPhone, isNoPhoneAnomaly };
+                    const overall = ensureOverall(operatorName);
+                    overall.totalObservedSec += p.durationSec;
+                    addTotals(overall, cur.stateName, p.durationSec);
+                    if (isNoPhone) overall.noPhoneSec += p.durationSec;
+                    if (isNoPhoneAnomaly) overall.noPhoneAnomalyCount += 1;
+                    const day = ensureDay(p.dateKey);
+                    day.totalObservedSec += p.durationSec;
+                    addTotals(day, cur.stateName, p.durationSec);
+                    if (isNoPhone) day.noPhoneSec += p.durationSec;
+                    if (isNoPhoneAnomaly) day.noPhoneAnomalyCount += 1;
+                    const dayOp = ensureDayOperator(day, operatorName);
+                    dayOp.totalObservedSec += p.durationSec;
+                    addTotals(dayOp, cur.stateName, p.durationSec);
+                    if (isNoPhone) dayOp.noPhoneSec += p.durationSec;
+                    if (isNoPhoneAnomaly) dayOp.noPhoneAnomalyCount += 1;
+                    dayOp.timeline.push(seg);
+                    if (isNoPhone) overallNoPhoneSec += p.durationSec;
+                    if (isNoPhoneAnomaly) overallNoPhoneAnomalies += 1;
+                }
+                }
+                openTailEvents += 1;
+            }
+            const daysArr = Array.from(days.values()).map(day => ({
+                ...day,
+                operators: Array.from(day.operators.values())
+                .map(op => ({ ...op, timeline: [...op.timeline].sort((a, b) => a.start - b.start), statusTotalsEntries: Object.entries(op.statusTotals).sort((a, b) => b[1] - a[1]) }))
+                .sort((a, b) => (b.noPhoneSec - a.noPhoneSec) || a.operatorName.localeCompare(b.operatorName, 'ru')),
+                statusTotalsEntries: Object.entries(day.statusTotals).sort((a, b) => b[1] - a[1])
+            })).sort((a, b) => b.dateKey.localeCompare(a.dateKey));
+            const overallOperators = Array.from(overallByOperator.values())
+                .map(op => ({ ...op, statusTotalsEntries: Object.entries(op.statusTotals).sort((a, b) => b[1] - a[1]) }))
+                .sort((a, b) => (b.noPhoneSec - a.noPhoneSec) || a.operatorName.localeCompare(b.operatorName, 'ru'));
+            return {
+                sourceRows: rows.length,
+                validEvents: events.length,
+                invalidRowsCount: invalidRows.length,
+                invalidRowsPreview: invalidRows.slice(0, 15),
+                parseErrorsCount: parseErrors.length,
+                parseErrorsPreview: parseErrors.slice(0, 10).map(e => ({ row: e.row, message: e.message })),
+                operatorsCount: byOperator.size,
+                daysCount: daysArr.length,
+                openTailEvents,
+                zeroOrNegativeTransitions,
+                overallNoPhoneSec,
+                overallNoPhoneAnomalies,
+                overallOperators,
+                days: daysArr
+            };
+            };
+
             function buildOccupiedIntervalsForDate(allOperators, dateStr, excludeOpId, directionScope, getDirectionBreakScopeKey) {
             const occupied = [];
             const dateObj = parseDateStr(dateStr);
@@ -4804,6 +4971,12 @@ const withAccessTokenHeader = (headers = {}) => {
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
             const [excelTransferState, setExcelTransferState] = useState({ importing: false, exporting: false });
             const [excelImportReport, setExcelImportReport] = useState(null);
+            const [showPlannerStatusAnomalyModal, setShowPlannerStatusAnomalyModal] = useState(false);
+            const [plannerStatusAnomalyLoading, setPlannerStatusAnomalyLoading] = useState(false);
+            const [plannerStatusAnomalyError, setPlannerStatusAnomalyError] = useState('');
+            const [plannerStatusAnomalyFileName, setPlannerStatusAnomalyFileName] = useState('');
+            const [plannerStatusAnomalyAnalysis, setPlannerStatusAnomalyAnalysis] = useState(null);
+            const [plannerStatusAnomalyExpandedDays, setPlannerStatusAnomalyExpandedDays] = useState({});
             const [myScheduleData, setMyScheduleData] = useState(null);
             const [myLiveScheduleData, setMyLiveScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
@@ -4820,6 +4993,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const breakReminderNotifiedRef = useRef(new Map());
             const plannerUiStateLoadedRef = useRef(false);
             const plannerExcelImportInputRef = useRef(null);
+            const plannerStatusAnomalyInputRef = useRef(null);
             const plannerUiStateStorageKey = useMemo(
                 () => `otp.work_schedules.ui_state.${user?.login || user?.name || user?.role || 'anonymous'}`,
                 [user?.login, user?.name, user?.role]
@@ -5912,6 +6086,44 @@ const withAccessTokenHeader = (headers = {}) => {
             const triggerPlannerExcelImportSelect = () => {
                 if (excelTransferState.importing) return;
                 plannerExcelImportInputRef.current?.click?.();
+            };
+
+            const triggerPlannerStatusAnomalyImportSelect = () => {
+                if (plannerStatusAnomalyLoading) return;
+                plannerStatusAnomalyInputRef.current?.click?.();
+            };
+
+            const togglePlannerStatusAnomalyDayExpanded = (dayKey) => {
+                if (!dayKey) return;
+                setPlannerStatusAnomalyExpandedDays(prev => ({ ...prev, [dayKey]: !prev?.[dayKey] }));
+            };
+
+            const handlePlannerStatusAnomalyFileChange = async (event) => {
+                const file = event?.target?.files?.[0];
+                if (!file) return;
+                setShowPlannerStatusAnomalyModal(true);
+                setPlannerStatusAnomalyLoading(true);
+                setPlannerStatusAnomalyError('');
+                try {
+                    const csvText = await file.text();
+                    if (!String(csvText || '').trim()) {
+                        throw new Error('Файл пустой');
+                    }
+                    const analysis = analyzePlannerStatusTransitionsCsv(csvText);
+                    setPlannerStatusAnomalyFileName(file.name || '');
+                    setPlannerStatusAnomalyAnalysis(analysis);
+                    const firstAnomalyDay = (analysis?.days || []).find(d => Number(d?.noPhoneAnomalyCount || 0) > 0)?.dateKey;
+                    const firstDay = analysis?.days?.[0]?.dateKey;
+                    setPlannerStatusAnomalyExpandedDays((firstAnomalyDay || firstDay) ? { [firstAnomalyDay || firstDay]: true } : {});
+                } catch (error) {
+                    console.error('Error analyzing status anomaly csv:', error);
+                    setPlannerStatusAnomalyAnalysis(null);
+                    setPlannerStatusAnomalyExpandedDays({});
+                    setPlannerStatusAnomalyError(error?.message || 'Не удалось обработать CSV');
+                } finally {
+                    setPlannerStatusAnomalyLoading(false);
+                    if (event?.target) event.target.value = '';
+                }
             };
 
             const handlePlannerExcelImportFileChange = async (event) => {
@@ -7736,6 +7948,13 @@ const withAccessTokenHeader = (headers = {}) => {
                                 className="hidden"
                                 onChange={handlePlannerExcelImportFileChange}
                             />
+                            <input
+                                ref={plannerStatusAnomalyInputRef}
+                                type="file"
+                                accept=".csv,text/csv"
+                                className="hidden"
+                                onChange={handlePlannerStatusAnomalyFileChange}
+                            />
                             <button
                                 onClick={handlePlannerExcelExport}
                                 disabled={excelTransferState.exporting || excelTransferState.importing}
@@ -7753,6 +7972,14 @@ const withAccessTokenHeader = (headers = {}) => {
                             >
                                 <i className={`fas ${excelTransferState.importing ? 'fa-spinner fa-spin' : 'fa-file-import'}`}></i>
                                 {excelTransferState.importing ? 'Импорт...' : 'Импорт Excel'}
+                            </button>
+                            <button
+                                onClick={() => setShowPlannerStatusAnomalyModal(true)}
+                                className="px-3 py-1 rounded border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium flex items-center gap-2"
+                                title="Анализ CSV переключений статусов операторов (поиск аномалий по статусу 'Без телефона')"
+                            >
+                                <i className="fas fa-search"></i>
+                                Поиск аномалий
                             </button>
                             </>
                         )}
@@ -8807,6 +9034,294 @@ const withAccessTokenHeader = (headers = {}) => {
                                         Закрыть
                                     </button>
                                 </div>
+                            </>
+                        );
+                    })()}
+                </SimpleModal>
+
+                <SimpleModal open={!!showPlannerStatusAnomalyModal && user?.role !== 'operator'} onClose={() => setShowPlannerStatusAnomalyModal(false)}>
+                    {(() => {
+                        const analysis = plannerStatusAnomalyAnalysis;
+                        const hasAnalysis = !!analysis;
+                        const invalidRowsPreview = Array.isArray(analysis?.invalidRowsPreview) ? analysis.invalidRowsPreview : [];
+                        const parseErrorsPreview = Array.isArray(analysis?.parseErrorsPreview) ? analysis.parseErrorsPreview : [];
+                        const expandedDays = plannerStatusAnomalyExpandedDays || {};
+                        const anomalyOperatorsCount = hasAnalysis
+                            ? (analysis.overallOperators || []).filter(op => Number(op?.noPhoneAnomalyCount || 0) > 0).length
+                            : 0;
+                        return (
+                            <>
+                                <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-slate-200">
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                            <i className="fas fa-search text-rose-600"></i>
+                                            Поиск аномалий по статусам
+                                        </h3>
+                                        <div className="text-sm text-slate-600 mt-1">
+                                            CSV с колонками <span className="font-medium">OperatorName;StateName;TimeChange</span>
+                                        </div>
+                                        <div className="text-xs text-slate-500 mt-1">
+                                            Аномалия: статус «Без телефона» дольше 30 секунд
+                                        </div>
+                                        {plannerStatusAnomalyFileName && (
+                                            <div className="text-xs text-slate-500 mt-1">Файл: {plannerStatusAnomalyFileName}</div>
+                                        )}
+                                    </div>
+                                    <button
+                                        onClick={() => setShowPlannerStatusAnomalyModal(false)}
+                                        className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
+                                    >
+                                        <i className="fas fa-times"></i>
+                                    </button>
+                                </div>
+
+                                <div className="mb-4 flex flex-wrap items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={triggerPlannerStatusAnomalyImportSelect}
+                                        disabled={plannerStatusAnomalyLoading}
+                                        className="px-3 py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                                    >
+                                        <i className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-file-csv'}`}></i>
+                                        {plannerStatusAnomalyLoading ? 'Анализируем...' : (hasAnalysis ? 'Загрузить другой CSV' : 'Загрузить CSV')}
+                                    </button>
+                                    {hasAnalysis && (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setPlannerStatusAnomalyAnalysis(null);
+                                                setPlannerStatusAnomalyError('');
+                                                setPlannerStatusAnomalyFileName('');
+                                                setPlannerStatusAnomalyExpandedDays({});
+                                            }}
+                                            className="px-3 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm"
+                                        >
+                                            Очистить результаты
+                                        </button>
+                                    )}
+                                </div>
+
+                                {plannerStatusAnomalyError && (
+                                    <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+                                        <div className="font-semibold mb-1">Ошибка анализа CSV</div>
+                                        <div>{plannerStatusAnomalyError}</div>
+                                    </div>
+                                )}
+
+                                {!hasAnalysis && !plannerStatusAnomalyError && (
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+                                        Загрузите CSV-файл с переключениями статусов, чтобы увидеть таймлайны и итоги по статусу «Без телефона».
+                                    </div>
+                                )}
+
+                                {hasAnalysis && (
+                                    <div className="space-y-4">
+                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                            <div className="rounded-xl border bg-white p-3">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Событий</div>
+                                                <div className="mt-1 text-xl font-semibold text-slate-900 tabular-nums">{analysis.validEvents || 0}</div>
+                                                <div className="text-[11px] text-slate-500 mt-1">Из строк: {analysis.sourceRows || 0}</div>
+                                            </div>
+                                            <div className="rounded-xl border bg-white p-3">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Операторов</div>
+                                                <div className="mt-1 text-xl font-semibold text-slate-900 tabular-nums">{analysis.operatorsCount || 0}</div>
+                                                <div className="text-[11px] text-slate-500 mt-1">Дней: {analysis.daysCount || 0}</div>
+                                            </div>
+                                            <div className="rounded-xl border bg-white p-3">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Без телефона</div>
+                                                <div className="mt-1 text-xl font-semibold text-rose-700 tabular-nums">
+                                                    {plannerStatusFormatDuration(analysis.overallNoPhoneSec || 0)}
+                                                </div>
+                                                <div className="text-[11px] text-slate-500 mt-1">
+                                                    Аномалий: {analysis.overallNoPhoneAnomalies || 0}
+                                                </div>
+                                            </div>
+                                            <div className="rounded-xl border bg-white p-3">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">Проблемы</div>
+                                                <div className="mt-1 text-xl font-semibold text-slate-900 tabular-nums">
+                                                    {(analysis.invalidRowsCount || 0) + (analysis.parseErrorsCount || 0)}
+                                                </div>
+                                                <div className="text-[11px] text-slate-500 mt-1">
+                                                    Хвостов: {analysis.openTailEvents || 0}
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {(invalidRowsPreview.length > 0 || parseErrorsPreview.length > 0) && (
+                                            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+                                                <div className="text-sm font-semibold text-amber-900 mb-2">Предупреждения по CSV</div>
+                                                {invalidRowsPreview.length > 0 && (
+                                                    <div className="space-y-1 mb-2">
+                                                        <div className="text-xs font-medium text-amber-900/90">
+                                                            Невалидные строки: {analysis.invalidRowsCount || invalidRowsPreview.length}
+                                                        </div>
+                                                        {invalidRowsPreview.slice(0, 6).map((row, idx) => (
+                                                            <div key={`anomaly-invalid-${idx}`} className="text-xs border border-amber-200 rounded bg-white px-2 py-1 text-amber-900">
+                                                                Строка {row?.row || '—'}: {row?.reason || 'Ошибка'}{row?.timeChange ? ` • ${row.timeChange}` : ''}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                {parseErrorsPreview.length > 0 && (
+                                                    <div className="space-y-1">
+                                                        <div className="text-xs font-medium text-amber-900/90">
+                                                            Ошибки парсинга: {analysis.parseErrorsCount || parseErrorsPreview.length}
+                                                        </div>
+                                                        {parseErrorsPreview.slice(0, 4).map((err, idx) => (
+                                                            <div key={`anomaly-parse-${idx}`} className="text-xs border border-amber-200 rounded bg-white px-2 py-1 text-amber-900">
+                                                                {typeof err?.row !== 'undefined' ? `Строка ${err.row}: ` : ''}{err?.message || 'Ошибка парсинга'}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        <div className="rounded-xl border bg-white overflow-hidden">
+                                            <div className="px-4 py-3 border-b bg-slate-50">
+                                                <div className="font-semibold text-slate-900">Итого по операторам (Без телефона)</div>
+                                                <div className="text-xs text-slate-500 mt-0.5">
+                                                    Операторов с аномалиями: {anomalyOperatorsCount}
+                                                </div>
+                                            </div>
+                                            <div className="max-h-64 overflow-auto">
+                                                {(analysis.overallOperators || []).length === 0 ? (
+                                                    <div className="p-4 text-sm text-slate-500">Нет данных.</div>
+                                                ) : (
+                                                    <table className="w-full text-sm">
+                                                        <thead className="sticky top-0 bg-white z-10">
+                                                            <tr className="border-b text-xs uppercase tracking-wide text-slate-500">
+                                                                <th className="text-left px-3 py-2">Оператор</th>
+                                                                <th className="text-right px-3 py-2">Без телефона</th>
+                                                                <th className="text-right px-3 py-2">Аномалий</th>
+                                                                <th className="text-right px-3 py-2">Всего</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {(analysis.overallOperators || []).map((op, idx) => (
+                                                                <tr key={`anomaly-op-${idx}-${op.operatorName}`} className="border-b last:border-b-0">
+                                                                    <td className="px-3 py-2 font-medium text-slate-900">{op.operatorName}</td>
+                                                                    <td className={`px-3 py-2 text-right tabular-nums ${Number(op.noPhoneSec || 0) > 0 ? 'text-rose-700 font-semibold' : 'text-slate-600'}`}>
+                                                                        {plannerStatusFormatDuration(op.noPhoneSec || 0)}
+                                                                    </td>
+                                                                    <td className="px-3 py-2 text-right tabular-nums">
+                                                                        {Number(op.noPhoneAnomalyCount || 0) > 0 ? (
+                                                                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs border border-rose-200 bg-rose-50 text-rose-700">
+                                                                                {op.noPhoneAnomalyCount}
+                                                                            </span>
+                                                                        ) : (
+                                                                            <span className="text-slate-500">0</span>
+                                                                        )}
+                                                                    </td>
+                                                                    <td className="px-3 py-2 text-right tabular-nums text-slate-600">
+                                                                        {plannerStatusFormatDuration(op.totalObservedSec || 0)}
+                                                                    </td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        <div className="rounded-xl border bg-white overflow-hidden">
+                                            <div className="px-4 py-3 border-b bg-slate-50">
+                                                <div className="font-semibold text-slate-900">Итоги по дням</div>
+                                                <div className="text-xs text-slate-500 mt-0.5">Нажмите на день для таймлайнов и итогов по операторам</div>
+                                            </div>
+                                            <div className="max-h-[46vh] overflow-auto p-3 space-y-3">
+                                                {(analysis.days || []).length === 0 && (
+                                                    <div className="text-sm text-slate-500">Нет дневных интервалов для отображения.</div>
+                                                )}
+                                                {(analysis.days || []).map((day, idx) => {
+                                                    const expanded = !!expandedDays[day.dateKey];
+                                                    return (
+                                                        <div key={`anomaly-day-${day.dateKey}-${idx}`} className="border rounded-lg overflow-hidden">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => togglePlannerStatusAnomalyDayExpanded(day.dateKey)}
+                                                                className="w-full px-3 py-3 bg-white hover:bg-slate-50 flex items-center justify-between gap-3 text-left"
+                                                            >
+                                                                <div className="min-w-0">
+                                                                    <div className="font-semibold text-slate-900 flex items-center gap-2 flex-wrap">
+                                                                        <span>{plannerStatusFormatDayLabel(day.dateKey)}</span>
+                                                                        {Number(day.noPhoneAnomalyCount || 0) > 0 && (
+                                                                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs border border-rose-200 bg-rose-50 text-rose-700">
+                                                                                {day.noPhoneAnomalyCount} аном.
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                    <div className="text-xs text-slate-500 mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                                                                        <span>Операторов: {Array.isArray(day.operators) ? day.operators.length : 0}</span>
+                                                                        <span>Без телефона: {plannerStatusFormatDuration(day.noPhoneSec || 0)}</span>
+                                                                        <span>Всего: {plannerStatusFormatDuration(day.totalObservedSec || 0)}</span>
+                                                                    </div>
+                                                                </div>
+                                                                <i className={`fas ${expanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-slate-400`}></i>
+                                                            </button>
+
+                                                            {expanded && (
+                                                                <div className="border-t bg-slate-50 p-3 space-y-3">
+                                                                    {(day.operators || []).map((op, opIdx) => (
+                                                                        <div key={`anomaly-day-op-${day.dateKey}-${opIdx}`} className="rounded-lg border bg-white p-3">
+                                                                            <div className="flex items-start justify-between gap-3 flex-wrap">
+                                                                                <div>
+                                                                                    <div className="font-semibold text-slate-900">{op.operatorName}</div>
+                                                                                    <div className="text-xs text-slate-500 mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                                                                                        <span>Без телефона: <strong className={Number(op.noPhoneSec || 0) > 0 ? 'text-rose-700' : 'text-slate-700'}>{plannerStatusFormatDuration(op.noPhoneSec || 0)}</strong></span>
+                                                                                        <span>Всего: <strong className="text-slate-700">{plannerStatusFormatDuration(op.totalObservedSec || 0)}</strong></span>
+                                                                                        <span>Аномалий: <strong className={Number(op.noPhoneAnomalyCount || 0) > 0 ? 'text-rose-700' : 'text-slate-700'}>{op.noPhoneAnomalyCount || 0}</strong></span>
+                                                                                    </div>
+                                                                                </div>
+                                                                                <div className="flex flex-wrap gap-1 max-w-full">
+                                                                                    {(op.statusTotalsEntries || []).slice(0, 5).map(([stateName, seconds], stIdx) => (
+                                                                                        <span
+                                                                                            key={`anomaly-op-total-${stIdx}`}
+                                                                                            className={`px-2 py-1 rounded-md border text-xs ${String(stateName || '').toLowerCase() === PLANNER_STATUS_NO_PHONE_KEY ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-700'}`}
+                                                                                        >
+                                                                                            {stateName}: {plannerStatusFormatDuration(seconds)}
+                                                                                        </span>
+                                                                                    ))}
+                                                                                </div>
+                                                                            </div>
+                                                                            <div className="mt-3 space-y-1.5">
+                                                                                {(op.timeline || []).map((seg, segIdx) => (
+                                                                                    <div
+                                                                                        key={`anomaly-seg-${day.dateKey}-${opIdx}-${segIdx}`}
+                                                                                        className={`rounded-md border px-2 py-1.5 text-xs flex flex-wrap items-center gap-x-3 gap-y-1 ${seg.isNoPhoneAnomaly ? 'border-rose-200 bg-rose-50 text-rose-900' : seg.isNoPhone ? 'border-rose-100 bg-rose-50/50 text-rose-800' : 'border-slate-200 bg-white text-slate-700'}`}
+                                                                                    >
+                                                                                        <span className="font-semibold">
+                                                                                            {plannerStatusFormatDateTime(seg.start)} - {plannerStatusFormatDateTime(seg.end)}
+                                                                                        </span>
+                                                                                        <span className={`px-1.5 py-0.5 rounded border ${seg.isNoPhone ? 'border-rose-200 bg-white text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>
+                                                                                            {seg.stateName}
+                                                                                        </span>
+                                                                                        <span className="tabular-nums">Длит.: {plannerStatusFormatDuration(seg.durationSec)}</span>
+                                                                                        {seg.isNoPhoneAnomaly && (
+                                                                                            <span className="px-1.5 py-0.5 rounded border border-rose-300 bg-white text-rose-700 font-semibold">
+                                                                                                Аномалия
+                                                                                            </span>
+                                                                                        )}
+                                                                                    </div>
+                                                                                ))}
+                                                                                {(op.timeline || []).length === 0 && (
+                                                                                    <div className="text-xs text-slate-500">Нет интервалов.</div>
+                                                                                )}
+                                                                            </div>
+                                                                        </div>
+                                                                    ))}
+                                                                    {(day.operators || []).length === 0 && (
+                                                                        <div className="text-sm text-slate-500">Нет данных по операторам за день.</div>
+                                                                    )}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
                             </>
                         );
                     })()}
