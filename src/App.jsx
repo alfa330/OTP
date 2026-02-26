@@ -5113,6 +5113,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [plannerStatusAnomalyAnalysis, setPlannerStatusAnomalyAnalysis] = useState(null);
             const [plannerStatusAnomalyExpandedDays, setPlannerStatusAnomalyExpandedDays] = useState({});
             const [plannerStatusAnomalyOnly, setPlannerStatusAnomalyOnly] = useState(false);
+            const [plannerStatusTimelineZoom, setPlannerStatusTimelineZoom] = useState(1);
             const [myScheduleData, setMyScheduleData] = useState(null);
             const [myLiveScheduleData, setMyLiveScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
@@ -6227,6 +6228,13 @@ const withAccessTokenHeader = (headers = {}) => {
             const triggerPlannerStatusAnomalyImportSelect = () => {
                 if (plannerStatusAnomalyLoading) return;
                 plannerStatusAnomalyInputRef.current?.click?.();
+            };
+
+            const changePlannerStatusTimelineZoom = (delta) => {
+                setPlannerStatusTimelineZoom(prev => {
+                    const next = Math.max(0.5, Math.min(4, Math.round((Number(prev || 1) + delta) * 100) / 100));
+                    return next;
+                });
             };
 
             const togglePlannerStatusAnomalyDayExpanded = (dayKey) => {
@@ -9256,6 +9264,35 @@ const withAccessTokenHeader = (headers = {}) => {
                                         {plannerStatusAnomalyLoading ? 'Анализируем...' : (hasAnalysis ? 'Загрузить другой CSV' : 'Загрузить CSV')}
                                     </button>
                                     {hasAnalysis && (
+                                        <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-1 py-1">
+                                            <span className="px-2 text-xs text-slate-500 hidden md:inline">Масштаб</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => changePlannerStatusTimelineZoom(-0.25)}
+                                                className="w-8 h-8 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
+                                                title="Уменьшить таймлайн"
+                                            >
+                                                <i className="fas fa-minus text-xs"></i>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => setPlannerStatusTimelineZoom(1)}
+                                                className="px-2 h-8 rounded-md border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-medium text-slate-700 tabular-nums"
+                                                title="Сбросить масштаб"
+                                            >
+                                                {Math.round((plannerStatusTimelineZoom || 1) * 100)}%
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => changePlannerStatusTimelineZoom(0.25)}
+                                                className="w-8 h-8 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
+                                                title="Увеличить таймлайн"
+                                            >
+                                                <i className="fas fa-plus text-xs"></i>
+                                            </button>
+                                        </div>
+                                    )}
+                                    {hasAnalysis && (
                                         <button
                                             type="button"
                                             onClick={() => setPlannerStatusAnomalyOnly(v => !v)}
@@ -9464,6 +9501,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                 return { ...seg, startMin: mins.start, endMin: mins.end };
                                                                             })
                                                                             .filter(Boolean);
+                                                                        const timelineTrackBaseWidth = 24 * 52;
+                                                                        const timelineTrackWidthPx = Math.max(timelineTrackBaseWidth, Math.round(timelineTrackBaseWidth * (plannerStatusTimelineZoom || 1)));
+                                                                        const timelineTrackStyle = { width: `${timelineTrackWidthPx}px`, minWidth: '100%' };
                                                                         return (
                                                                         <div key={`anomaly-day-op-${day.dateKey}-${opIdx}`} className="rounded-lg border bg-white p-3">
                                                                             <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -9493,80 +9533,83 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                             </div>
 
                                                                             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2">
-                                                                                <div className="relative h-5 mb-1 ml-16">
-                                                                                    <div className="absolute inset-0 flex items-end">
-                                                                                        {Array.from({ length: 24 }).map((_, h) => (
-                                                                                            <div key={`anomaly-hour-${h}`} className="flex-1 text-center text-[10px] leading-none text-slate-500">
-                                                                                                {h}
-                                                                                            </div>
-                                                                                        ))}
+                                                                                <div className="flex items-start gap-2">
+                                                                                    <div className="w-14 shrink-0">
+                                                                                        <div className="h-5 mb-1" />
+                                                                                        <div className="h-6 mb-2 text-[10px] font-semibold uppercase tracking-wide text-slate-500 flex items-center justify-end">График</div>
+                                                                                        <div className="h-6 text-[10px] font-semibold uppercase tracking-wide text-slate-500 flex items-center justify-end">Статусы</div>
                                                                                     </div>
-                                                                                </div>
+                                                                                    <div className="flex-1 overflow-x-auto pb-1">
+                                                                                        <div style={timelineTrackStyle} className="min-w-full">
+                                                                                            <div className="relative h-5 mb-1">
+                                                                                                <div className="absolute inset-0 flex items-end">
+                                                                                                    {Array.from({ length: 24 }).map((_, h) => (
+                                                                                                        <div key={`anomaly-hour-${h}`} className="flex-1 text-center text-[10px] leading-none text-slate-500">
+                                                                                                            {h}
+                                                                                                        </div>
+                                                                                                    ))}
+                                                                                                </div>
+                                                                                            </div>
 
-                                                                                <div className="space-y-2">
-                                                                                    <div className="flex items-center gap-2">
-                                                                                        <div className="w-14 text-[10px] font-semibold uppercase tracking-wide text-slate-500 text-right">График</div>
-                                                                                        <div className="relative flex-1 h-6 rounded border border-slate-200 bg-white overflow-hidden">
-                                                                                            <div className="absolute inset-0 flex pointer-events-none">
-                                                                                                {Array.from({ length: 24 }).map((_, h) => (
-                                                                                                    <div key={`anomaly-grid-shift-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
+                                                                                            <div className="relative h-6 rounded border border-slate-200 bg-white overflow-hidden mb-2">
+                                                                                                <div className="absolute inset-0 flex pointer-events-none">
+                                                                                                    {Array.from({ length: 24 }).map((_, h) => (
+                                                                                                        <div key={`anomaly-grid-shift-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
+                                                                                                    ))}
+                                                                                                </div>
+                                                                                                {plannedShiftParts.map((p, pIdx) => {
+                                                                                                    const srcSeg = matchedPlannerOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                                                                                                    const isNight = !!(srcSeg && timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
+                                                                                                    return (
+                                                                                                        <div
+                                                                                                            key={`anomaly-shift-bar-${pIdx}`}
+                                                                                                            className="absolute top-1 bottom-1 rounded-sm border border-white/60"
+                                                                                                            style={{
+                                                                                                                left: `${computeLeftPercent(p.start)}%`,
+                                                                                                                width: `${((p.end - p.start) / minutesInDay) * 100}%`,
+                                                                                                                background: isNight ? 'linear-gradient(90deg,#fb923c,#ea580c)' : 'linear-gradient(90deg,#60a5fa,#2563eb)'
+                                                                                                            }}
+                                                                                                            title={`${isNight ? 'Ночная смена' : 'Смена'} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
+                                                                                                        />
+                                                                                                    );
+                                                                                                })}
+                                                                                                {plannedBreakParts.map((b, bIdx) => (
+                                                                                                    <div
+                                                                                                        key={`anomaly-break-bar-${bIdx}`}
+                                                                                                        className="absolute top-[3px] bottom-[3px] rounded-sm border border-amber-200 bg-amber-300/90"
+                                                                                                        style={{
+                                                                                                            left: `${computeLeftPercent(b.start)}%`,
+                                                                                                            width: `${((b.end - b.start) / minutesInDay) * 100}%`
+                                                                                                        }}
+                                                                                                        title={`Перерыв • ${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
+                                                                                                    />
                                                                                                 ))}
                                                                                             </div>
-                                                                                            {plannedShiftParts.map((p, pIdx) => {
-                                                                                                const srcSeg = matchedPlannerOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex];
-                                                                                                const isNight = !!(srcSeg && timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
-                                                                                                return (
-                                                                                                    <div
-                                                                                                        key={`anomaly-shift-bar-${pIdx}`}
-                                                                                                        className="absolute top-1 bottom-1 rounded-sm border border-white/60"
-                                                                                                        style={{
-                                                                                                            left: `${computeLeftPercent(p.start)}%`,
-                                                                                                            width: `${((p.end - p.start) / minutesInDay) * 100}%`,
-                                                                                                            background: isNight ? 'linear-gradient(90deg,#fb923c,#ea580c)' : 'linear-gradient(90deg,#60a5fa,#2563eb)'
-                                                                                                        }}
-                                                                                                        title={`${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
-                                                                                                    />
-                                                                                                );
-                                                                                            })}
-                                                                                            {plannedBreakParts.map((b, bIdx) => (
-                                                                                                <div
-                                                                                                    key={`anomaly-break-bar-${bIdx}`}
-                                                                                                    className="absolute top-[3px] bottom-[3px] rounded-sm border border-amber-200 bg-amber-300/90"
-                                                                                                    style={{
-                                                                                                        left: `${computeLeftPercent(b.start)}%`,
-                                                                                                        width: `${((b.end - b.start) / minutesInDay) * 100}%`
-                                                                                                    }}
-                                                                                                    title={`Перерыв ${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
-                                                                                                />
-                                                                                            ))}
-                                                                                        </div>
-                                                                                    </div>
 
-                                                                                    <div className="flex items-center gap-2">
-                                                                                        <div className="w-14 text-[10px] font-semibold uppercase tracking-wide text-slate-500 text-right">Статусы</div>
-                                                                                        <div className="relative flex-1 h-6 rounded border border-slate-200 bg-white overflow-hidden">
-                                                                                            <div className="absolute inset-0 flex pointer-events-none">
-                                                                                                {Array.from({ length: 24 }).map((_, h) => (
-                                                                                                    <div key={`anomaly-grid-status-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
-                                                                                                ))}
+                                                                                            <div className="relative h-6 rounded border border-slate-200 bg-white overflow-hidden">
+                                                                                                <div className="absolute inset-0 flex pointer-events-none">
+                                                                                                    {Array.from({ length: 24 }).map((_, h) => (
+                                                                                                        <div key={`anomaly-grid-status-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
+                                                                                                    ))}
+                                                                                                </div>
+                                                                                                {statusTimelineBars.map((seg, segIdx) => {
+                                                                                                    const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
+                                                                                                    const borderColor = seg.isNoPhoneAnomaly ? '#e11d48' : 'rgba(255,255,255,0.75)';
+                                                                                                    return (
+                                                                                                        <div
+                                                                                                            key={`anomaly-status-bar-${segIdx}`}
+                                                                                                            className="absolute top-1 bottom-1 rounded-sm border"
+                                                                                                            style={{
+                                                                                                                left: `${computeLeftPercent(seg.startMin)}%`,
+                                                                                                                width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
+                                                                                                                background: tone.bar,
+                                                                                                                borderColor
+                                                                                                            }}
+                                                                                                            title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)} • ${plannerStatusFormatDuration(seg.durationSec)}`}
+                                                                                                        />
+                                                                                                    );
+                                                                                                })}
                                                                                             </div>
-                                                                                            {statusTimelineBars.map((seg, segIdx) => {
-                                                                                                const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
-                                                                                                const borderColor = seg.isNoPhoneAnomaly ? '#e11d48' : 'rgba(255,255,255,0.75)';
-                                                                                                return (
-                                                                                                    <div
-                                                                                                        key={`anomaly-status-bar-${segIdx}`}
-                                                                                                        className="absolute top-1 bottom-1 rounded-sm border"
-                                                                                                        style={{
-                                                                                                            left: `${computeLeftPercent(seg.startMin)}%`,
-                                                                                                            width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
-                                                                                                            background: tone.bar,
-                                                                                                            borderColor
-                                                                                                        }}
-                                                                                                        title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)} • ${plannerStatusFormatDuration(seg.durationSec)}`}
-                                                                                                    />
-                                                                                                );
-                                                                                            })}
                                                                                         </div>
                                                                                     </div>
                                                                                 </div>
