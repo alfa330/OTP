@@ -4511,6 +4511,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS = 30;
             const plannerStatusPad2 = (n) => String(n).padStart(2, '0');
             const plannerStatusNormalizeKey = (v) => String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+            const plannerStatusNormalizeOperatorName = (v) => String(v ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
             const plannerStatusResolveBreakNoteLabel = (stateNoteRaw) => {
             const noteKey = plannerStatusNormalizeKey(stateNoteRaw);
             if (!noteKey) return 'Перерыв';
@@ -4650,6 +4651,22 @@ const withAccessTokenHeader = (headers = {}) => {
                 cursor = segEnd;
             }
             return result;
+            };
+            const plannerStatusImportedSegmentToDayMinutes = (seg, dateKey) => {
+            if (!seg) return null;
+            const sDate = seg.start instanceof Date ? seg.start : new Date(seg.start);
+            const eDate = seg.end instanceof Date ? seg.end : new Date(seg.end);
+            if (Number.isNaN(sDate.getTime()) || Number.isNaN(eDate.getTime())) return null;
+            let startMin = (plannerStatusDayKey(sDate) === dateKey)
+                ? (sDate.getHours() * 60 + sDate.getMinutes() + (sDate.getSeconds() / 60))
+                : 0;
+            let endMin = (plannerStatusDayKey(eDate) === dateKey)
+                ? (eDate.getHours() * 60 + eDate.getMinutes() + (eDate.getSeconds() / 60))
+                : 1440;
+            startMin = Math.max(0, Math.min(1440, startMin));
+            endMin = Math.max(0, Math.min(1440, endMin));
+            if (endMin <= startMin) return null;
+            return { start: startMin, end: endMin };
             };
             const analyzePlannerStatusTransitionsCsv = (csvText) => {
             const parsed = Papa.parse(csvText, {
@@ -5114,6 +5131,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [plannerStatusAnomalyExpandedDays, setPlannerStatusAnomalyExpandedDays] = useState({});
             const [plannerStatusAnomalyOnly, setPlannerStatusAnomalyOnly] = useState(false);
             const [plannerStatusTimelineZoom, setPlannerStatusTimelineZoom] = useState(1);
+            const [plannerStatusSpecialViewEnabled, setPlannerStatusSpecialViewEnabled] = useState(false);
             const [myScheduleData, setMyScheduleData] = useState(null);
             const [myLiveScheduleData, setMyLiveScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
@@ -5578,6 +5596,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const minutesInDay = 24 * 60;
             const computeLeftPercent = (m) => (m / minutesInDay) * 100;
             const cellMinWidth = viewMode === 'month' ? 110 : viewMode === 'week' ? 110 : undefined;
+            const plannerStatusSpecialDayViewEnabled = viewMode === 'day' && !!plannerStatusSpecialViewEnabled;
             const isOperatorSelfSchedules = user?.role === 'operator';
             const operatorTodayKey = todayDateStr(new Date());
             const makeSelectedCellKey = (opId, date) => `${String(opId)}|${date}`;
@@ -5608,6 +5627,32 @@ const withAccessTokenHeader = (headers = {}) => {
                 () => new Set(selectedCells.map(target => target.opId)).size,
                 [selectedCells]
             );
+            const importedStatusTimelineByOperatorDateKey = useMemo(() => {
+                const map = new Map();
+                const days = Array.isArray(plannerStatusAnomalyAnalysis?.days) ? plannerStatusAnomalyAnalysis.days : [];
+                days.forEach(day => {
+                    const dateKey = String(day?.dateKey || '');
+                    if (!dateKey) return;
+                    (Array.isArray(day?.operators) ? day.operators : []).forEach(opItem => {
+                        const nameKey = plannerStatusNormalizeOperatorName(opItem?.operatorName);
+                        if (!nameKey) return;
+                        const timeline = (Array.isArray(opItem?.timeline) ? opItem.timeline : [])
+                            .map(seg => {
+                                const mins = plannerStatusImportedSegmentToDayMinutes(seg, dateKey);
+                                if (!mins) return null;
+                                return {
+                                    ...seg,
+                                    startMin: mins.start,
+                                    endMin: mins.end
+                                };
+                            })
+                            .filter(Boolean)
+                            .sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin));
+                        map.set(`${nameKey}|${dateKey}`, timeline);
+                    });
+                });
+                return map;
+            }, [plannerStatusAnomalyAnalysis]);
 
             useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
@@ -6245,7 +6290,6 @@ const withAccessTokenHeader = (headers = {}) => {
             const handlePlannerStatusAnomalyFileChange = async (event) => {
                 const file = event?.target?.files?.[0];
                 if (!file) return;
-                setShowPlannerStatusAnomalyModal(true);
                 setPlannerStatusAnomalyLoading(true);
                 setPlannerStatusAnomalyError('');
                 setPlannerStatusAnomalyOnly(false);
@@ -6257,12 +6301,14 @@ const withAccessTokenHeader = (headers = {}) => {
                     const analysis = analyzePlannerStatusTransitionsCsv(csvText);
                     setPlannerStatusAnomalyFileName(file.name || '');
                     setPlannerStatusAnomalyAnalysis(analysis);
+                    setPlannerStatusSpecialViewEnabled(true);
                     const firstAnomalyDay = (analysis?.days || []).find(d => Number(d?.noPhoneAnomalyCount || 0) > 0)?.dateKey;
                     const firstDay = analysis?.days?.[0]?.dateKey;
                     setPlannerStatusAnomalyExpandedDays((firstAnomalyDay || firstDay) ? { [firstAnomalyDay || firstDay]: true } : {});
                 } catch (error) {
                     console.error('Error analyzing status anomaly csv:', error);
                     setPlannerStatusAnomalyAnalysis(null);
+                    setPlannerStatusSpecialViewEnabled(false);
                     setPlannerStatusAnomalyExpandedDays({});
                     setPlannerStatusAnomalyError(error?.message || 'Не удалось обработать CSV');
                 } finally {
@@ -8119,13 +8165,69 @@ const withAccessTokenHeader = (headers = {}) => {
                                 {excelTransferState.importing ? 'Импорт...' : 'Импорт Excel'}
                             </button>
                             <button
-                                onClick={() => setShowPlannerStatusAnomalyModal(true)}
+                                onClick={triggerPlannerStatusAnomalyImportSelect}
+                                disabled={plannerStatusAnomalyLoading}
                                 className="px-3 py-1 rounded border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium flex items-center gap-2"
                                 title="Загрузить CSV переключений статусов операторов и построить таймлайн/аномалии"
                             >
-                                <i className="fas fa-upload"></i>
-                                Загрузить статусы
+                                <i className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-upload'}`}></i>
+                                {plannerStatusAnomalyLoading ? 'Загрузка...' : 'Загрузить статусы'}
                             </button>
+                            {viewMode === 'day' && (
+                                <button
+                                    onClick={() => setPlannerStatusSpecialViewEnabled(v => !v)}
+                                    disabled={!plannerStatusAnomalyAnalysis}
+                                    className={`px-3 py-1 rounded border text-sm font-medium flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${plannerStatusSpecialViewEnabled ? 'border-rose-300 bg-rose-100 text-rose-800' : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'}`}
+                                    title={plannerStatusAnomalyAnalysis ? 'Включить/выключить спецрежим просмотра статусов' : 'Сначала загрузите CSV со статусами'}
+                                >
+                                    <i className={`fas ${plannerStatusSpecialViewEnabled ? 'fa-toggle-on' : 'fa-toggle-off'}`}></i>
+                                    Режим статусов
+                                </button>
+                            )}
+                            {plannerStatusAnomalyAnalysis && (
+                                <button
+                                    onClick={() => {
+                                        setPlannerStatusAnomalyAnalysis(null);
+                                        setPlannerStatusAnomalyFileName('');
+                                        setPlannerStatusAnomalyError('');
+                                        setPlannerStatusSpecialViewEnabled(false);
+                                        setPlannerStatusAnomalyExpandedDays({});
+                                    }}
+                                    className="px-3 py-1 rounded border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium flex items-center gap-2"
+                                    title="Очистить загруженные статусы"
+                                >
+                                    <i className="fas fa-trash-alt"></i>
+                                    Очистить статусы
+                                </button>
+                            )}
+                            {viewMode === 'day' && plannerStatusSpecialViewEnabled && (
+                                <div className="flex items-center gap-1 rounded border border-slate-200 bg-white px-1 py-1">
+                                    <button
+                                        type="button"
+                                        onClick={() => changePlannerStatusTimelineZoom(-0.25)}
+                                        className="w-7 h-7 rounded border border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
+                                        title="Уменьшить таймлайн"
+                                    >
+                                        <i className="fas fa-minus text-[10px]"></i>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setPlannerStatusTimelineZoom(1)}
+                                        className="px-2 h-7 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 text-[11px] font-medium text-slate-700 tabular-nums"
+                                        title="Сбросить масштаб"
+                                    >
+                                        {Math.round((plannerStatusTimelineZoom || 1) * 100)}%
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => changePlannerStatusTimelineZoom(0.25)}
+                                        className="w-7 h-7 rounded border border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
+                                        title="Увеличить таймлайн"
+                                    >
+                                        <i className="fas fa-plus text-[10px]"></i>
+                                    </button>
+                                </div>
+                            )}
                             </>
                         )}
                         <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-left"></i></button>
@@ -8138,6 +8240,26 @@ const withAccessTokenHeader = (headers = {}) => {
                         <i className="fas fa-info-circle mr-1"></i>
                         <strong>Совет:</strong> Удерживайте Ctrl (или Cmd на Mac) и кликайте по дням для множественного выбора
                     </div>
+                    {(plannerStatusAnomalyFileName || plannerStatusAnomalyError) && (
+                        <div className={`mb-2 p-2 rounded text-xs border ${plannerStatusAnomalyError ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-rose-50 border-rose-200 text-rose-800'}`}>
+                            {plannerStatusAnomalyError ? (
+                                <>
+                                    <i className="fas fa-triangle-exclamation mr-1"></i>
+                                    Ошибка загрузки статусов: {plannerStatusAnomalyError}
+                                </>
+                            ) : (
+                                <>
+                                    <i className="fas fa-file-csv mr-1"></i>
+                                    Загружены статусы: <strong>{plannerStatusAnomalyFileName}</strong>
+                                    {plannerStatusSpecialDayViewEnabled ? (
+                                        <span className="ml-2 text-rose-700">• спецрежим включен</span>
+                                    ) : (
+                                        <span className="ml-2 text-rose-700/80">• включите «Режим статусов» в режиме День</span>
+                                    )}
+                                </>
+                            )}
+                        </div>
+                    )}
 
                     <div className="flex gap-4 w-full flex-1 min-h-0">
                         <div className="flex-1 bg-white rounded shadow-sm p-2 w-full flex flex-col min-h-0 overflow-hidden">
@@ -8200,7 +8322,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                             {filteredOperators.map(op => (
                                 <div key={op.id} className="flex items-center border-b"> 
-                                <div className="w-64 h-[4.5rem] pr-2 sticky left-0 z-40 bg-white border-r" style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
+                                <div className={`w-64 ${plannerStatusSpecialDayViewEnabled ? 'h-[6rem]' : 'h-[4.5rem]'} pr-2 sticky left-0 z-40 bg-white border-r`} style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
                                     <div className="font-medium">{op.name || '—'}</div>
                                     <div className="flex items-center justify-between mt-1">
                                         <div className="text-xs text-slate-500">{op.direction || '—'}</div>
@@ -8213,6 +8335,15 @@ const withAccessTokenHeader = (headers = {}) => {
                                     <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
                                         {visibleRange.map(d => {
                                             const parts = getShiftPartsForDate(op, d);
+                                            const importedStatusBarsForCell = plannerStatusSpecialDayViewEnabled
+                                                ? (importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(op?.name)}|${d}`) || [])
+                                                : [];
+                                            const specialStatusTimelineTrackBaseWidth = 24 * 40;
+                                            const specialStatusTimelineTrackWidthPx = Math.max(
+                                                specialStatusTimelineTrackBaseWidth,
+                                                Math.round(specialStatusTimelineTrackBaseWidth * (plannerStatusTimelineZoom || 1))
+                                            );
+                                            const specialStatusTimelineTrackStyle = { width: `${specialStatusTimelineTrackWidthPx}px`, minWidth: '100%' };
                                             const origArr = (op.shifts?.[d] ?? []).map((s, idx) => {
                                             const sM = timeToMinutes(s.start);
                                             const eM = timeToMinutes(s.end);
@@ -8268,9 +8399,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 emphasisClass = ' ring-1 ring-blue-200 shadow-sm shadow-blue-100/70';
                                             }
                                             return (
-                                            <div key={d} className={"h-[56px] overflow-hidden border rounded p-1 relative" + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={(e) => handleDayClick(e, op.id, d)}>
+                                            <div key={d} className={`${plannerStatusSpecialDayViewEnabled ? 'h-[86px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={(e) => handleDayClick(e, op.id, d)}>
                                                 {viewMode === 'day' ? (
-                                                <div className="relative h-12">
+                                                <div className={`relative ${plannerStatusSpecialDayViewEnabled ? 'h-[74px]' : 'h-12'}`}>
                                                     {cellScheduleStatus ? (
                                                         <div className="flex items-center justify-center h-full px-1">
                                                             <div className={`text-sm font-semibold truncate ${cellScheduleStatusTone?.text || 'text-slate-700'}`} title={cellScheduleStatus.label || 'Статус'}>
@@ -8283,49 +8414,144 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </div>
                                                     ) : (
                                                     <>
-                                                    <div className="absolute inset-0 flex">
-                                                    {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
-                                                    </div>
-                                                    {parts.map((p, idx) => (
-                                                    <div key={idx}
-                                                        className="absolute top-1/4 h-1/2 rounded text-xs overflow-hidden flex items-center justify-between"
-                                                        style={{
-                                                        left: `${computeLeftPercent(p.start)}%`,
-                                                        width: `${((p.end - p.start) / minutesInDay) * 100}%`,
-                                                        background: ((op.shifts?.[p.sourceDate]?.[p.sourceIndex] && timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].end) <= timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].start)) ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)"),
-                                                        color: "white",
-                                                        }}
-                                                    >
-                                                        <div className="px-1 truncate text-[11px] border border-white/30 bg-white/10 rounded-sm z-40" style={{ paddingLeft: 6, paddingRight: 6 }}>{(() => {
-                                                            const srcSeg = op.shifts?.[p.sourceDate]?.[p.sourceIndex];
-                                                            if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
-                                                            const srcStart = timeToMinutes(srcSeg.start);
-                                                            const srcEnd = timeToMinutes(srcSeg.end);
-                                                            const isCrossing = srcEnd <= srcStart;
-                                                            if (isCrossing && srcSeg.end !== '00:00') return `${srcSeg.start} — ${srcSeg.end} (+1)`;
-                                                            return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
-                                                        })()}</div>
-                                                        <button
-                                                        onClick={(e) => { e.stopPropagation(); openEditModal(op.id, p.sourceDate, p.sourceIndex); }}
-                                                        className="text-[10px] px-1 py-0.5 mr-1 rounded bg-white/20"
-                                                        >
-                                                        <i className="fas fa-pen"></i>
-                                                        </button>
-                                                        {getBreakPartsForPart(op, p, d).map((b, bi) => (
-                                                        <div key={bi}
-                                                            className="absolute top-0 h-full text-[10px] flex items-center justify-center z-30"
+                                                    {plannerStatusSpecialDayViewEnabled ? (
+                                                        <div className="h-full flex flex-col gap-1">
+                                                            <div className="flex items-center gap-1 h-[34px]">
+                                                                <div className="w-6 shrink-0 text-[9px] uppercase text-slate-500 font-semibold text-right">гр</div>
+                                                                <div className="flex-1 overflow-x-auto overflow-y-hidden" onClick={(e) => e.stopPropagation()}>
+                                                                    <div className="relative h-[34px] rounded border border-slate-200 bg-white" style={specialStatusTimelineTrackStyle}>
+                                                                        <div className="absolute inset-0 flex pointer-events-none">
+                                                                            {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
+                                                                        </div>
+                                                                        {parts.map((p, idx) => (
+                                                                            <React.Fragment key={`special-part-${idx}`}>
+                                                                                <div
+                                                                                    className="absolute top-1/2 -translate-y-1/2 h-5 rounded text-xs overflow-hidden flex items-center justify-between"
+                                                                                    style={{
+                                                                                        left: `${computeLeftPercent(p.start)}%`,
+                                                                                        width: `${((p.end - p.start) / minutesInDay) * 100}%`,
+                                                                                        background: ((op.shifts?.[p.sourceDate]?.[p.sourceIndex] && timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].end) <= timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].start)) ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)"),
+                                                                                        color: "white",
+                                                                                    }}
+                                                                                    title={(() => {
+                                                                                        const srcSeg = op.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                                                                                        if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                                        const srcStart = timeToMinutes(srcSeg.start);
+                                                                                        const srcEnd = timeToMinutes(srcSeg.end);
+                                                                                        const isCrossing = srcEnd <= srcStart;
+                                                                                        if (isCrossing && srcSeg.end !== '00:00') return `${srcSeg.start} — ${srcSeg.end} (+1)`;
+                                                                                        return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                                    })()}
+                                                                                >
+                                                                                    <button
+                                                                                        onClick={(e) => { e.stopPropagation(); openEditModal(op.id, p.sourceDate, p.sourceIndex); }}
+                                                                                        className="text-[10px] px-1 py-0.5 mr-1 rounded bg-white/20 ml-auto"
+                                                                                        title="Редактировать смену"
+                                                                                    >
+                                                                                        <i className="fas fa-pen"></i>
+                                                                                    </button>
+                                                                                </div>
+                                                                                {getBreakPartsForPart(op, p, d).map((b, bi) => (
+                                                                                    <div
+                                                                                        key={`special-break-${idx}-${bi}`}
+                                                                                        className="absolute top-1/2 -translate-y-1/2 h-5 rounded-sm z-30"
+                                                                                        style={{
+                                                                                            left: `${computeLeftPercent(b.start)}%`,
+                                                                                            width: `${((b.end - b.start) / minutesInDay) * 100}%`,
+                                                                                            background: "linear-gradient(90deg,#fde68a,#f59e0b)"
+                                                                                        }}
+                                                                                        title={`Перерыв • ${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
+                                                                                    />
+                                                                                ))}
+                                                                            </React.Fragment>
+                                                                        ))}
+                                                                        {parts.length === 0 && (
+                                                                            <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет смены</div>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+
+                                                            <div className="flex items-center gap-1 h-[34px]">
+                                                                <div className="w-6 shrink-0 text-[9px] uppercase text-slate-500 font-semibold text-right">ст</div>
+                                                                <div className="flex-1 overflow-x-auto overflow-y-hidden" onClick={(e) => e.stopPropagation()}>
+                                                                    <div className="relative h-[34px] rounded border border-slate-200 bg-white" style={specialStatusTimelineTrackStyle}>
+                                                                        <div className="absolute inset-0 flex pointer-events-none">
+                                                                            {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
+                                                                        </div>
+                                                                        {importedStatusBarsForCell.map((seg, segIdx) => {
+                                                                            const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
+                                                                            return (
+                                                                                <div
+                                                                                    key={`special-status-${segIdx}`}
+                                                                                    className="absolute top-1/2 -translate-y-1/2 h-5 rounded-sm border"
+                                                                                    style={{
+                                                                                        left: `${computeLeftPercent(seg.startMin)}%`,
+                                                                                        width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
+                                                                                        background: tone.bar,
+                                                                                        borderColor: seg.isNoPhoneAnomaly ? '#e11d48' : 'rgba(255,255,255,0.75)'
+                                                                                    }}
+                                                                                    title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
+                                                                                />
+                                                                            );
+                                                                        })}
+                                                                        {plannerStatusAnomalyAnalysis && importedStatusBarsForCell.length === 0 && (
+                                                                            <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет статусов</div>
+                                                                        )}
+                                                                        {!plannerStatusAnomalyAnalysis && (
+                                                                            <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Загрузите статусы</div>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ) : (
+                                                        <>
+                                                        <div className="absolute inset-0 flex">
+                                                        {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0" />))}
+                                                        </div>
+                                                        {parts.map((p, idx) => (
+                                                        <div key={idx}
+                                                            className="absolute top-1/4 h-1/2 rounded text-xs overflow-hidden flex items-center justify-between"
                                                             style={{
-                                                            left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
-                                                                width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`,
-                                                            background: "linear-gradient(90deg,#fde68a,#f59e0b)",
-                                                            color: "#5c3a00",
-                                                            fontWeight: 600,
+                                                            left: `${computeLeftPercent(p.start)}%`,
+                                                            width: `${((p.end - p.start) / minutesInDay) * 100}%`,
+                                                            background: ((op.shifts?.[p.sourceDate]?.[p.sourceIndex] && timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].end) <= timeToMinutes(op.shifts[p.sourceDate][p.sourceIndex].start)) ? "linear-gradient(90deg,#f97316,#ea580c)" : "linear-gradient(90deg,#60a5fa,#2563eb)"),
+                                                            color: "white",
                                                             }}
-                                                        />
+                                                        >
+                                                            <div className="px-1 truncate text-[11px] border border-white/30 bg-white/10 rounded-sm z-40" style={{ paddingLeft: 6, paddingRight: 6 }}>{(() => {
+                                                                const srcSeg = op.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                                                                if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                const srcStart = timeToMinutes(srcSeg.start);
+                                                                const srcEnd = timeToMinutes(srcSeg.end);
+                                                                const isCrossing = srcEnd <= srcStart;
+                                                                if (isCrossing && srcSeg.end !== '00:00') return `${srcSeg.start} — ${srcSeg.end} (+1)`;
+                                                                return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                            })()}</div>
+                                                            <button
+                                                            onClick={(e) => { e.stopPropagation(); openEditModal(op.id, p.sourceDate, p.sourceIndex); }}
+                                                            className="text-[10px] px-1 py-0.5 mr-1 rounded bg-white/20"
+                                                            >
+                                                            <i className="fas fa-pen"></i>
+                                                            </button>
+                                                            {getBreakPartsForPart(op, p, d).map((b, bi) => (
+                                                            <div key={bi}
+                                                                className="absolute top-0 h-full text-[10px] flex items-center justify-center z-30"
+                                                                style={{
+                                                                left: `${((b.start - p.start) / Math.max(1, p.end - p.start)) * 100}%`,
+                                                                    width: `${((b.end - b.start) / Math.max(1, p.end - p.start)) * 100}%`,
+                                                                background: "linear-gradient(90deg,#fde68a,#f59e0b)",
+                                                                color: "#5c3a00",
+                                                                fontWeight: 600,
+                                                                }}
+                                                            />
+                                                            ))}
+                                                        </div>
                                                         ))}
-                                                    </div>
-                                                    ))}
-                                                    {parts.length === 0 && <div className="text-[11px] text-slate-400">Нет смены</div>}
+                                                        {parts.length === 0 && <div className="text-[11px] text-slate-400">Нет смены</div>}
+                                                        </>
+                                                    )}
                                                     </>
                                                     )}
                                                 </div>
@@ -8354,7 +8580,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     )}
                                                 </div>
                                                 )}
-                                                {viewMode === 'day' && !cellScheduleStatus && durationHours > 0 && (
+                                                {viewMode === 'day' && !plannerStatusSpecialDayViewEnabled && !cellScheduleStatus && durationHours > 0 && (
                                                 <div className="absolute left-1 bottom-[1px] text-xs text-slate-500">{durationHours.toFixed(2)} ч</div>
                                                 )}
                                             </div>
