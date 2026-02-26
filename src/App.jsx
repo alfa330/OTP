@@ -5132,6 +5132,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [plannerStatusAnomalyOnly, setPlannerStatusAnomalyOnly] = useState(false);
             const [plannerStatusTimelineZoom, setPlannerStatusTimelineZoom] = useState(1);
             const [plannerStatusSpecialViewEnabled, setPlannerStatusSpecialViewEnabled] = useState(false);
+            const [plannerStatusModalFocus, setPlannerStatusModalFocus] = useState(null);
             const [myScheduleData, setMyScheduleData] = useState(null);
             const [myLiveScheduleData, setMyLiveScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
@@ -6334,6 +6335,16 @@ const withAccessTokenHeader = (headers = {}) => {
                 setPlannerStatusAnomalyExpandedDays(prev => ({ ...prev, [dayKey]: !prev?.[dayKey] }));
             };
 
+            const openPlannerStatusTransitionsModalForCell = (op, dateKey) => {
+                if (!plannerStatusAnomalyAnalysis || !dateKey) return;
+                setPlannerStatusModalFocus({
+                    dateKey: String(dateKey),
+                    operatorName: String(op?.name || '').trim()
+                });
+                setPlannerStatusAnomalyExpandedDays({ [String(dateKey)]: true });
+                setShowPlannerStatusAnomalyModal(true);
+            };
+
             const handlePlannerStatusAnomalyFileChange = async (event) => {
                 const file = event?.target?.files?.[0];
                 if (!file) return;
@@ -6348,6 +6359,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     const analysis = analyzePlannerStatusTransitionsCsv(csvText);
                     setPlannerStatusAnomalyFileName(file.name || '');
                     setPlannerStatusAnomalyAnalysis(analysis);
+                    setPlannerStatusModalFocus(null);
                     setPlannerStatusSpecialViewEnabled(true);
                     const firstAnomalyDay = (analysis?.days || []).find(d => Number(d?.noPhoneAnomalyCount || 0) > 0)?.dateKey;
                     const firstDay = analysis?.days?.[0]?.dateKey;
@@ -6355,6 +6367,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 } catch (error) {
                     console.error('Error analyzing status anomaly csv:', error);
                     setPlannerStatusAnomalyAnalysis(null);
+                    setPlannerStatusModalFocus(null);
                     setPlannerStatusSpecialViewEnabled(false);
                     setPlannerStatusAnomalyExpandedDays({});
                     setPlannerStatusAnomalyError(error?.message || 'Не удалось обработать CSV');
@@ -8238,6 +8251,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         setPlannerStatusAnomalyFileName('');
                                         setPlannerStatusAnomalyError('');
                                         setPlannerStatusSpecialViewEnabled(false);
+                                        setPlannerStatusModalFocus(null);
                                         setPlannerStatusAnomalyExpandedDays({});
                                     }}
                                     className="px-3 py-1 rounded border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium flex items-center gap-2"
@@ -8462,7 +8476,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     ) : (
                                                     <>
                                                     {plannerStatusSpecialDayViewEnabled ? (
-                                                        <div className="h-full flex flex-col gap-1">
+                                                        <div
+                                                            className="h-full flex flex-col gap-1"
+                                                            onDoubleClick={(e) => {
+                                                                e.stopPropagation();
+                                                                openPlannerStatusTransitionsModalForCell(op, d);
+                                                            }}
+                                                            title="Двойной клик — открыть переключения статусов в модалке"
+                                                        >
                                                             <div className="flex items-center gap-1 h-[34px]">
                                                                 <div className="w-6 shrink-0 text-[9px] uppercase text-slate-500 font-semibold text-right">гр</div>
                                                                 <div className="flex-1 overflow-x-auto overflow-y-hidden" onClick={(e) => e.stopPropagation()}>
@@ -9458,7 +9479,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                 <SimpleModal
                     open={!!showPlannerStatusAnomalyModal && user?.role !== 'operator'}
-                    onClose={() => setShowPlannerStatusAnomalyModal(false)}
+                    onClose={() => { setShowPlannerStatusAnomalyModal(false); setPlannerStatusModalFocus(null); }}
                     panelClassName="w-[calc(100vw-2rem)] max-w-[1400px]"
                 >
                     {(() => {
@@ -9468,12 +9489,18 @@ const withAccessTokenHeader = (headers = {}) => {
                         const parseErrorsPreview = Array.isArray(analysis?.parseErrorsPreview) ? analysis.parseErrorsPreview : [];
                         const expandedDays = plannerStatusAnomalyExpandedDays || {};
                         const onlyAnomalies = !!plannerStatusAnomalyOnly;
+                        const modalFocus = plannerStatusModalFocus && typeof plannerStatusModalFocus === 'object' ? plannerStatusModalFocus : null;
+                        const focusedDayKey = String(modalFocus?.dateKey || '');
+                        const focusedOperatorNameKey = plannerStatusNormalizeOperatorName(modalFocus?.operatorName || '');
                         const overallOperatorsList = hasAnalysis
                             ? (analysis.overallOperators || []).filter(op => !onlyAnomalies || Number(op?.noPhoneAnomalyCount || 0) > 0)
                             : [];
-                        const dayList = hasAnalysis
+                        const dayListBase = hasAnalysis
                             ? (analysis.days || []).filter(day => !onlyAnomalies || Number(day?.noPhoneAnomalyCount || 0) > 0)
                             : [];
+                        const dayList = focusedDayKey
+                            ? dayListBase.filter(day => String(day?.dateKey || '') === focusedDayKey)
+                            : dayListBase;
                         const anomalyOperatorsCount = hasAnalysis
                             ? (analysis.overallOperators || []).filter(op => Number(op?.noPhoneAnomalyCount || 0) > 0).length
                             : 0;
@@ -9576,12 +9603,25 @@ const withAccessTokenHeader = (headers = {}) => {
                                         </button>
                                     )}
                                     {hasAnalysis && (
+                                        focusedDayKey ? (
+                                            <button
+                                                type="button"
+                                                onClick={() => setPlannerStatusModalFocus(null)}
+                                                className="px-3 py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium"
+                                                title="Вернуться к полному отчету"
+                                            >
+                                                Показать весь отчет
+                                            </button>
+                                        ) : null
+                                    )}
+                                    {hasAnalysis && (
                                         <button
                                             type="button"
                                             onClick={() => {
                                                 setPlannerStatusAnomalyAnalysis(null);
                                                 setPlannerStatusAnomalyError('');
                                                 setPlannerStatusAnomalyFileName('');
+                                                setPlannerStatusModalFocus(null);
                                                 setPlannerStatusAnomalyExpandedDays({});
                                                 setPlannerStatusAnomalyOnly(false);
                                             }}
@@ -9607,6 +9647,15 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                 {hasAnalysis && (
                                     <div className="space-y-4">
+                                        {focusedDayKey && (
+                                            <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">
+                                                <div className="font-semibold">Фокус по таймлайну</div>
+                                                <div className="text-xs mt-1">
+                                                    День: {plannerStatusFormatDayLabel(focusedDayKey)}
+                                                    {focusedOperatorNameKey ? ` • Оператор: ${modalFocus?.operatorName || '—'}` : ''}
+                                                </div>
+                                            </div>
+                                        )}
                                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                                             <div className="rounded-xl border bg-white p-3">
                                                 <div className="text-[11px] uppercase tracking-wide text-slate-500">Событий</div>
@@ -9728,7 +9777,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 )}
                                                 {dayList.map((day, idx) => {
                                                     const expanded = !!expandedDays[day.dateKey];
-                                                    const dayOperatorsList = (day.operators || []).filter(op => !onlyAnomalies || Number(op?.noPhoneAnomalyCount || 0) > 0);
+                                                    const dayOperatorsList = (day.operators || []).filter(op => {
+                                                        if (onlyAnomalies && !(Number(op?.noPhoneAnomalyCount || 0) > 0)) return false;
+                                                        if (focusedOperatorNameKey && plannerStatusNormalizeOperatorName(op?.operatorName) !== focusedOperatorNameKey) return false;
+                                                        return true;
+                                                    });
                                                     return (
                                                         <div key={`anomaly-day-${day.dateKey}-${idx}`} className="border rounded-lg overflow-hidden">
                                                             <button
