@@ -6282,6 +6282,53 @@ const withAccessTokenHeader = (headers = {}) => {
                 });
             };
 
+            useEffect(() => {
+                const canHandleZoomHotkeys = !!plannerStatusAnomalyAnalysis && (plannerStatusSpecialDayViewEnabled || !!showPlannerStatusAnomalyModal);
+                if (!canHandleZoomHotkeys || typeof window === 'undefined') return;
+
+                const isEditableTarget = (target) => {
+                    const el = target instanceof Element ? target : null;
+                    if (!el) return false;
+                    const tag = String(el.tagName || '').toLowerCase();
+                    if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+                    if (el.isContentEditable) return true;
+                    return !!el.closest?.('[contenteditable="true"]');
+                };
+
+                const onKeyDown = (event) => {
+                    if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+                    if (isEditableTarget(event.target)) return;
+
+                    const key = String(event.key || '');
+                    const code = String(event.code || '');
+                    const isZoomIn = key === '+' || key === '=' || code === 'NumpadAdd';
+                    const isZoomOut = key === '-' || key === '_' || code === 'NumpadSubtract';
+                    const isReset = key === '0' || code === 'Digit0' || code === 'Numpad0';
+                    if (!isZoomIn && !isZoomOut && !isReset) return;
+
+                    event.preventDefault();
+                    event.stopPropagation();
+
+                    if (isZoomIn) {
+                        changePlannerStatusTimelineZoom(0.25);
+                        return;
+                    }
+                    if (isZoomOut) {
+                        changePlannerStatusTimelineZoom(-0.25);
+                        return;
+                    }
+                    setPlannerStatusTimelineZoom(1);
+                };
+
+                window.addEventListener('keydown', onKeyDown, true);
+                return () => window.removeEventListener('keydown', onKeyDown, true);
+            }, [
+                plannerStatusAnomalyAnalysis,
+                plannerStatusSpecialDayViewEnabled,
+                showPlannerStatusAnomalyModal,
+                changePlannerStatusTimelineZoom
+            ]);
+
             const togglePlannerStatusAnomalyDayExpanded = (dayKey) => {
                 if (!dayKey) return;
                 setPlannerStatusAnomalyExpandedDays(prev => ({ ...prev, [dayKey]: !prev?.[dayKey] }));
@@ -8484,12 +8531,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                             return (
                                                                                 <div
                                                                                     key={`special-status-${segIdx}`}
-                                                                                    className="absolute top-1/2 -translate-y-1/2 h-5 rounded-sm border"
+                                                                                    className="absolute top-1/2 -translate-y-1/2 h-5 rounded-sm"
                                                                                     style={{
                                                                                         left: `${computeLeftPercent(seg.startMin)}%`,
                                                                                         width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
-                                                                                        background: tone.bar,
-                                                                                        borderColor: seg.isNoPhoneAnomaly ? '#e11d48' : 'rgba(255,255,255,0.75)'
+                                                                                        background: tone.bar
                                                                                     }}
                                                                                     title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
                                                                                 />
@@ -9820,16 +9866,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                                 </div>
                                                                                                 {statusTimelineBars.map((seg, segIdx) => {
                                                                                                     const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
-                                                                                                    const borderColor = seg.isNoPhoneAnomaly ? '#e11d48' : 'rgba(255,255,255,0.75)';
                                                                                                     return (
                                                                                                         <div
                                                                                                             key={`anomaly-status-bar-${segIdx}`}
-                                                                                                            className="absolute top-1 bottom-1 rounded-sm border"
+                                                                                                            className="absolute top-1 bottom-1 rounded-sm"
                                                                                                             style={{
                                                                                                                 left: `${computeLeftPercent(seg.startMin)}%`,
                                                                                                                 width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
-                                                                                                                background: tone.bar,
-                                                                                                                borderColor
+                                                                                                                background: tone.bar
                                                                                                             }}
                                                                                                             title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)} • ${plannerStatusFormatDuration(seg.durationSec)}`}
                                                                                                         />
