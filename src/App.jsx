@@ -4510,6 +4510,97 @@ const withAccessTokenHeader = (headers = {}) => {
             const PLANNER_STATUS_NO_PHONE_KEY = 'без телефона';
             const PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS = 30;
             const plannerStatusPad2 = (n) => String(n).padStart(2, '0');
+            const plannerStatusNormalizeKey = (v) => String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+            const plannerStatusResolveBreakNoteLabel = (stateNoteRaw) => {
+            const noteKey = plannerStatusNormalizeKey(stateNoteRaw);
+            if (!noteKey) return 'Перерыв';
+            if (noteKey === 'вышел') return 'Вышел';
+            if (noteKey === 'авто') return 'Авто';
+            if (noteKey === 'перезвон') return 'Перезвон';
+            if (noteKey === 'тех причина' || noteKey === 'техпричина') return 'Тех причина';
+            if (noteKey === 'тренинг') return 'Тренинг';
+            return String(stateNoteRaw ?? '').trim() || 'Перерыв';
+            };
+            const plannerStatusResolveDisplayState = (stateNameRaw, stateNoteRaw) => {
+            const baseName = String(stateNameRaw ?? '').trim();
+            const baseKey = plannerStatusNormalizeKey(baseName);
+            if (baseKey === 'перерыв') {
+                const label = plannerStatusResolveBreakNoteLabel(stateNoteRaw);
+                return { label, key: plannerStatusNormalizeKey(label), baseKey, baseName };
+            }
+            return { label: baseName || '—', key: baseKey, baseKey, baseName };
+            };
+            const getPlannerImportedStatusTone = (statusNameOrKey) => {
+            const key = plannerStatusNormalizeKey(statusNameOrKey);
+            const byKey = (cfg) => ({
+                chip: cfg.chip,
+                pill: cfg.pill || cfg.chip,
+                row: cfg.row,
+                bar: cfg.bar
+            });
+            switch (key) {
+                case 'без телефона':
+                    return byKey({
+                        chip: 'border-rose-200 bg-rose-50 text-rose-700',
+                        row: 'border-rose-100 bg-rose-50/60 text-rose-800',
+                        bar: '#fb7185'
+                    });
+                case 'готов':
+                    return byKey({
+                        chip: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+                        row: 'border-emerald-100 bg-emerald-50/50 text-emerald-800',
+                        bar: '#22c55e'
+                    });
+                case 'отключен':
+                    return byKey({
+                        chip: 'border-slate-300 bg-slate-100 text-slate-700',
+                        row: 'border-slate-200 bg-slate-100/70 text-slate-700',
+                        bar: '#64748b'
+                    });
+                case 'перерыв':
+                    return byKey({
+                        chip: 'border-amber-200 bg-amber-50 text-amber-800',
+                        row: 'border-amber-100 bg-amber-50/60 text-amber-900',
+                        bar: '#f59e0b'
+                    });
+                case 'вышел':
+                    return byKey({
+                        chip: 'border-orange-200 bg-orange-50 text-orange-700',
+                        row: 'border-orange-100 bg-orange-50/60 text-orange-800',
+                        bar: '#f97316'
+                    });
+                case 'авто':
+                    return byKey({
+                        chip: 'border-cyan-200 bg-cyan-50 text-cyan-700',
+                        row: 'border-cyan-100 bg-cyan-50/60 text-cyan-800',
+                        bar: '#06b6d4'
+                    });
+                case 'перезвон':
+                    return byKey({
+                        chip: 'border-indigo-200 bg-indigo-50 text-indigo-700',
+                        row: 'border-indigo-100 bg-indigo-50/60 text-indigo-800',
+                        bar: '#6366f1'
+                    });
+                case 'тех причина':
+                    return byKey({
+                        chip: 'border-sky-200 bg-sky-50 text-sky-700',
+                        row: 'border-sky-100 bg-sky-50/60 text-sky-800',
+                        bar: '#0ea5e9'
+                    });
+                case 'тренинг':
+                    return byKey({
+                        chip: 'border-teal-200 bg-teal-50 text-teal-700',
+                        row: 'border-teal-100 bg-teal-50/60 text-teal-800',
+                        bar: '#14b8a6'
+                    });
+                default:
+                    return byKey({
+                        chip: 'border-slate-200 bg-slate-50 text-slate-700',
+                        row: 'border-slate-200 bg-white text-slate-700',
+                        bar: '#94a3b8'
+                    });
+            }
+            };
             const plannerStatusFormatDuration = (seconds) => {
             const t = Math.max(0, Math.round(Number(seconds) || 0));
             const h = Math.floor(t / 3600);
@@ -4573,19 +4664,31 @@ const withAccessTokenHeader = (headers = {}) => {
             const events = [];
             rows.forEach((row, i) => {
                 const operatorName = String(row?.operatorname ?? row?.operator ?? row?.name ?? '').trim();
-                const stateName = String(row?.statename ?? row?.state ?? row?.status ?? '').trim();
+                const rawStateName = String(row?.statename ?? row?.state ?? row?.status ?? '').trim();
+                const stateNote = String(row?.statenote ?? row?.statusnote ?? row?.note ?? '').trim();
                 const timeChange = String(row?.timechange ?? row?.time ?? row?.datetime ?? '').trim();
-                if (!operatorName && !stateName && !timeChange) return;
-                if (!operatorName || !stateName || !timeChange) {
-                invalidRows.push({ row: i + 2, reason: 'Отсутствуют обязательные поля', operatorName, stateName, timeChange });
+                if (!operatorName && !rawStateName && !timeChange && !stateNote) return;
+                if (!operatorName || !rawStateName || !timeChange) {
+                invalidRows.push({ row: i + 2, reason: 'Отсутствуют обязательные поля', operatorName, stateName: rawStateName, stateNote, timeChange });
                 return;
                 }
                 const ts = plannerStatusParseDateTime(timeChange);
                 if (!ts) {
-                invalidRows.push({ row: i + 2, reason: 'Некорректный формат TimeChange', operatorName, stateName, timeChange });
+                invalidRows.push({ row: i + 2, reason: 'Некорректный формат TimeChange', operatorName, stateName: rawStateName, stateNote, timeChange });
                 return;
                 }
-                events.push({ row: i + 2, operatorName, stateName, stateKey: stateName.toLowerCase(), ts, tsMs: ts.getTime() });
+                const resolvedState = plannerStatusResolveDisplayState(rawStateName, stateNote);
+                events.push({
+                row: i + 2,
+                operatorName,
+                stateName: resolvedState.label,
+                stateKey: resolvedState.key,
+                rawStateName,
+                rawStateKey: plannerStatusNormalizeKey(rawStateName),
+                stateNote,
+                ts,
+                tsMs: ts.getTime()
+                });
             });
             const sourceOrderHintByOperator = new Map();
             const sourceEventsByOperator = new Map();
@@ -4643,9 +4746,19 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (next.tsMs <= cur.tsMs) { zeroOrNegativeTransitions += 1; continue; }
                 const parts = plannerStatusSplitSegmentByDay(cur.ts, next.ts);
                 for (const p of parts) {
-                    const isNoPhone = cur.stateKey === PLANNER_STATUS_NO_PHONE_KEY;
+                    const isNoPhone = (cur.rawStateKey || cur.stateKey) === PLANNER_STATUS_NO_PHONE_KEY;
                     const isNoPhoneAnomaly = isNoPhone && p.durationSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
-                    const seg = { operatorName, stateName: cur.stateName, stateKey: cur.stateKey, ...p, isNoPhone, isNoPhoneAnomaly };
+                    const seg = {
+                    operatorName,
+                    stateName: cur.stateName,
+                    stateKey: cur.stateKey,
+                    rawStateName: cur.rawStateName || cur.stateName,
+                    rawStateKey: cur.rawStateKey || cur.stateKey,
+                    stateNote: cur.stateNote || '',
+                    ...p,
+                    isNoPhone,
+                    isNoPhoneAnomaly
+                    };
                     const overall = ensureOverall(operatorName);
                     overall.totalObservedSec += p.durationSec;
                     addTotals(overall, cur.stateName, p.durationSec);
@@ -8000,10 +8113,10 @@ const withAccessTokenHeader = (headers = {}) => {
                             <button
                                 onClick={() => setShowPlannerStatusAnomalyModal(true)}
                                 className="px-3 py-1 rounded border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium flex items-center gap-2"
-                                title="Анализ CSV переключений статусов операторов (поиск аномалий по статусу 'Без телефона')"
+                                title="Загрузить CSV переключений статусов операторов и построить таймлайн/аномалии"
                             >
-                                <i className="fas fa-search"></i>
-                                Поиск аномалий
+                                <i className="fas fa-upload"></i>
+                                Загрузить статусы
                             </button>
                             </>
                         )}
@@ -9084,19 +9197,41 @@ const withAccessTokenHeader = (headers = {}) => {
                         const anomalyOperatorsCount = hasAnalysis
                             ? (analysis.overallOperators || []).filter(op => Number(op?.noPhoneAnomalyCount || 0) > 0).length
                             : 0;
+                        const normalizeImportedOperatorName = (v) => String(v ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+                        const plannerOperatorByNameKey = new Map();
+                        (operators || []).forEach(op => {
+                            const key = normalizeImportedOperatorName(op?.name);
+                            if (!key || plannerOperatorByNameKey.has(key)) return;
+                            plannerOperatorByNameKey.set(key, op);
+                        });
+                        const importedSegmentToDayMinutes = (seg, dateKey) => {
+                            if (!seg) return null;
+                            const sDate = seg.start instanceof Date ? seg.start : new Date(seg.start);
+                            const eDate = seg.end instanceof Date ? seg.end : new Date(seg.end);
+                            if (Number.isNaN(sDate.getTime()) || Number.isNaN(eDate.getTime())) return null;
+                            let startMin = (plannerStatusDayKey(sDate) === dateKey) ? (sDate.getHours() * 60 + sDate.getMinutes() + (sDate.getSeconds() / 60)) : 0;
+                            let endMin = (plannerStatusDayKey(eDate) === dateKey) ? (eDate.getHours() * 60 + eDate.getMinutes() + (eDate.getSeconds() / 60)) : 1440;
+                            startMin = Math.max(0, Math.min(1440, startMin));
+                            endMin = Math.max(0, Math.min(1440, endMin));
+                            if (endMin <= startMin) return null;
+                            return { start: startMin, end: endMin };
+                        };
                         return (
                             <>
                                 <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-slate-200">
                                     <div>
                                         <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                                            <i className="fas fa-search text-rose-600"></i>
-                                            Поиск аномалий по статусам
+                                            <i className="fas fa-upload text-rose-600"></i>
+                                            Загрузка статусов операторов
                                         </h3>
                                         <div className="text-sm text-slate-600 mt-1">
-                                            CSV с колонками <span className="font-medium">OperatorName;StateName;TimeChange</span>
+                                            CSV с колонками <span className="font-medium">OperatorName;StateName;TimeChange</span> и опционально <span className="font-medium">StateNote</span>
                                         </div>
                                         <div className="text-xs text-slate-500 mt-1">
-                                            Аномалия: статус «Без телефона» дольше 30 секунд
+                                            Поддерживается <span className="font-medium">StateNote</span> (для «Перерыв»: Вышел / Авто / Перезвон / Тех причина / Тренинг / пусто = Перерыв)
+                                        </div>
+                                        <div className="text-xs text-slate-500 mt-1">
+                                            Аномалия: статус «Без телефона» дольше 30 секунд (подсветка в отчете)
                                         </div>
                                         {plannerStatusAnomalyFileName && (
                                             <div className="text-xs text-slate-500 mt-1">Файл: {plannerStatusAnomalyFileName}</div>
@@ -9314,6 +9449,21 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 <div className="border-t bg-slate-50 p-3 space-y-3">
                                                                     {dayOperatorsList.map((op, opIdx) => {
                                                                         const timelineList = (op.timeline || []).filter(seg => !onlyAnomalies || !!seg?.isNoPhoneAnomaly);
+                                                                        const matchedPlannerOperator = plannerOperatorByNameKey.get(normalizeImportedOperatorName(op.operatorName));
+                                                                        const plannedShiftParts = matchedPlannerOperator ? getShiftPartsForDate(matchedPlannerOperator, day.dateKey) : [];
+                                                                        const plannedBreakParts = matchedPlannerOperator
+                                                                            ? plannedShiftParts
+                                                                                .flatMap(p => getBreakPartsForPart(matchedPlannerOperator, p, day.dateKey))
+                                                                                .map(b => ({ start: Math.max(0, Math.min(1440, b.start)), end: Math.max(0, Math.min(1440, b.end)) }))
+                                                                                .filter(b => b.end > b.start)
+                                                                            : [];
+                                                                        const statusTimelineBars = timelineList
+                                                                            .map(seg => {
+                                                                                const mins = importedSegmentToDayMinutes(seg, day.dateKey);
+                                                                                if (!mins) return null;
+                                                                                return { ...seg, startMin: mins.start, endMin: mins.end };
+                                                                            })
+                                                                            .filter(Boolean);
                                                                         return (
                                                                         <div key={`anomaly-day-op-${day.dateKey}-${opIdx}`} className="rounded-lg border bg-white p-3">
                                                                             <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -9326,28 +9476,134 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                     </div>
                                                                                 </div>
                                                                                 <div className="flex flex-wrap gap-1 max-w-full">
-                                                                                    {(op.statusTotalsEntries || []).slice(0, 5).map(([stateName, seconds], stIdx) => (
+                                                                                    {(op.statusTotalsEntries || []).map(([stateName, seconds], stIdx) => (
+                                                                                        (() => {
+                                                                                            const tone = getPlannerImportedStatusTone(stateName);
+                                                                                            return (
                                                                                         <span
                                                                                             key={`anomaly-op-total-${stIdx}`}
-                                                                                            className={`px-2 py-1 rounded-md border text-xs ${String(stateName || '').toLowerCase() === PLANNER_STATUS_NO_PHONE_KEY ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-700'}`}
+                                                                                            className={`px-2 py-1 rounded-md border text-xs ${tone.chip}`}
                                                                                         >
                                                                                             {stateName}: {plannerStatusFormatDuration(seconds)}
                                                                                         </span>
+                                                                                            );
+                                                                                        })()
                                                                                     ))}
                                                                                 </div>
                                                                             </div>
+
+                                                                            <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2">
+                                                                                <div className="relative h-5 mb-1 ml-16">
+                                                                                    <div className="absolute inset-0 flex items-end">
+                                                                                        {Array.from({ length: 24 }).map((_, h) => (
+                                                                                            <div key={`anomaly-hour-${h}`} className="flex-1 text-center text-[10px] leading-none text-slate-500">
+                                                                                                {h}
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                </div>
+
+                                                                                <div className="space-y-2">
+                                                                                    <div className="flex items-center gap-2">
+                                                                                        <div className="w-14 text-[10px] font-semibold uppercase tracking-wide text-slate-500 text-right">График</div>
+                                                                                        <div className="relative flex-1 h-6 rounded border border-slate-200 bg-white overflow-hidden">
+                                                                                            <div className="absolute inset-0 flex pointer-events-none">
+                                                                                                {Array.from({ length: 24 }).map((_, h) => (
+                                                                                                    <div key={`anomaly-grid-shift-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
+                                                                                                ))}
+                                                                                            </div>
+                                                                                            {plannedShiftParts.map((p, pIdx) => {
+                                                                                                const srcSeg = matchedPlannerOperator?.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                                                                                                const isNight = !!(srcSeg && timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
+                                                                                                return (
+                                                                                                    <div
+                                                                                                        key={`anomaly-shift-bar-${pIdx}`}
+                                                                                                        className="absolute top-1 bottom-1 rounded-sm border border-white/60"
+                                                                                                        style={{
+                                                                                                            left: `${computeLeftPercent(p.start)}%`,
+                                                                                                            width: `${((p.end - p.start) / minutesInDay) * 100}%`,
+                                                                                                            background: isNight ? 'linear-gradient(90deg,#fb923c,#ea580c)' : 'linear-gradient(90deg,#60a5fa,#2563eb)'
+                                                                                                        }}
+                                                                                                        title={`${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
+                                                                                                    />
+                                                                                                );
+                                                                                            })}
+                                                                                            {plannedBreakParts.map((b, bIdx) => (
+                                                                                                <div
+                                                                                                    key={`anomaly-break-bar-${bIdx}`}
+                                                                                                    className="absolute top-[3px] bottom-[3px] rounded-sm border border-amber-200 bg-amber-300/90"
+                                                                                                    style={{
+                                                                                                        left: `${computeLeftPercent(b.start)}%`,
+                                                                                                        width: `${((b.end - b.start) / minutesInDay) * 100}%`
+                                                                                                    }}
+                                                                                                    title={`Перерыв ${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
+                                                                                                />
+                                                                                            ))}
+                                                                                        </div>
+                                                                                    </div>
+
+                                                                                    <div className="flex items-center gap-2">
+                                                                                        <div className="w-14 text-[10px] font-semibold uppercase tracking-wide text-slate-500 text-right">Статусы</div>
+                                                                                        <div className="relative flex-1 h-6 rounded border border-slate-200 bg-white overflow-hidden">
+                                                                                            <div className="absolute inset-0 flex pointer-events-none">
+                                                                                                {Array.from({ length: 24 }).map((_, h) => (
+                                                                                                    <div key={`anomaly-grid-status-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
+                                                                                                ))}
+                                                                                            </div>
+                                                                                            {statusTimelineBars.map((seg, segIdx) => {
+                                                                                                const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
+                                                                                                const borderColor = seg.isNoPhoneAnomaly ? '#e11d48' : 'rgba(255,255,255,0.75)';
+                                                                                                return (
+                                                                                                    <div
+                                                                                                        key={`anomaly-status-bar-${segIdx}`}
+                                                                                                        className="absolute top-1 bottom-1 rounded-sm border"
+                                                                                                        style={{
+                                                                                                            left: `${computeLeftPercent(seg.startMin)}%`,
+                                                                                                            width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
+                                                                                                            background: tone.bar,
+                                                                                                            borderColor
+                                                                                                        }}
+                                                                                                        title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)} • ${plannerStatusFormatDuration(seg.durationSec)}`}
+                                                                                                    />
+                                                                                                );
+                                                                                            })}
+                                                                                        </div>
+                                                                                    </div>
+                                                                                </div>
+
+                                                                                {!matchedPlannerOperator && (
+                                                                                    <div className="mt-2 text-[11px] text-slate-500">
+                                                                                        Оператор не найден в текущем списке планировщика по ФИО, верхняя линия графика недоступна.
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+
                                                                             <div className="mt-3 space-y-1.5">
                                                                                 {timelineList.map((seg, segIdx) => (
+                                                                                    (() => {
+                                                                                        const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
+                                                                                        const rowClass = seg.isNoPhoneAnomaly
+                                                                                            ? 'border-rose-200 bg-rose-50 text-rose-900'
+                                                                                            : tone.row;
+                                                                                        const pillClass = seg.isNoPhoneAnomaly
+                                                                                            ? 'border-rose-200 bg-white text-rose-700'
+                                                                                            : tone.pill;
+                                                                                        return (
                                                                                     <div
                                                                                         key={`anomaly-seg-${day.dateKey}-${opIdx}-${segIdx}`}
-                                                                                        className={`rounded-md border px-2 py-1.5 text-xs flex flex-wrap items-center gap-x-3 gap-y-1 ${seg.isNoPhoneAnomaly ? 'border-rose-200 bg-rose-50 text-rose-900' : seg.isNoPhone ? 'border-rose-100 bg-rose-50/50 text-rose-800' : 'border-slate-200 bg-white text-slate-700'}`}
+                                                                                        className={`rounded-md border px-2 py-1.5 text-xs flex flex-wrap items-center gap-x-3 gap-y-1 ${rowClass}`}
                                                                                     >
                                                                                         <span className="font-semibold">
                                                                                             {plannerStatusFormatDateTime(seg.start)} - {plannerStatusFormatDateTime(seg.end)}
                                                                                         </span>
-                                                                                        <span className={`px-1.5 py-0.5 rounded border ${seg.isNoPhone ? 'border-rose-200 bg-white text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>
+                                                                                        <span className={`px-1.5 py-0.5 rounded border ${pillClass}`}>
                                                                                             {seg.stateName}
                                                                                         </span>
+                                                                                        {seg.stateNote && plannerStatusNormalizeKey(seg.rawStateName) === 'перерыв' && (
+                                                                                            <span className="px-1.5 py-0.5 rounded border border-slate-200 bg-white text-slate-600">
+                                                                                                note: {seg.stateNote}
+                                                                                            </span>
+                                                                                        )}
                                                                                         <span className="tabular-nums">Длит.: {plannerStatusFormatDuration(seg.durationSec)}</span>
                                                                                         {seg.isNoPhoneAnomaly && (
                                                                                             <span className="px-1.5 py-0.5 rounded border border-rose-300 bg-white text-rose-700 font-semibold">
@@ -9355,6 +9611,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                             </span>
                                                                                         )}
                                                                                     </div>
+                                                                                        );
+                                                                                    })()
                                                                                 ))}
                                                                                 {timelineList.length === 0 && (
                                                                                     <div className="text-xs text-slate-500">
