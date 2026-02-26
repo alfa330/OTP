@@ -4552,6 +4552,13 @@ const withAccessTokenHeader = (headers = {}) => {
                         row: 'border-emerald-100 bg-emerald-50/50 text-emerald-800',
                         bar: '#22c55e'
                     });
+                case 'занят':
+                case 'занята':
+                    return byKey({
+                        chip: 'border-blue-200 bg-blue-50 text-blue-700',
+                        row: 'border-blue-100 bg-blue-50/60 text-blue-800',
+                        bar: '#3b82f6'
+                    });
                 case 'отключен':
                     return byKey({
                         chip: 'border-slate-300 bg-slate-100 text-slate-700',
@@ -4601,6 +4608,139 @@ const withAccessTokenHeader = (headers = {}) => {
                         bar: '#94a3b8'
                     });
             }
+            };
+            const PLANNER_IMPORTED_WORK_STATUS_KEYS = new Set(['готов', 'занят', 'занята', 'авто', 'перезвон']);
+            const PLANNER_IMPORTED_BREAK_STATUS_KEYS = new Set(['перерыв']);
+            const plannerIntervalsTotalMinutes = (arr = []) => (
+            (arr || []).reduce((sum, it) => sum + Math.max(0, Number(it?.end || 0) - Number(it?.start || 0)), 0)
+            );
+            const plannerSubtractIntervals = (baseIntervals = [], cutIntervals = []) => {
+            const cuts = mergeIntervals((cutIntervals || []).map(i => ({ start: Number(i?.start || 0), end: Number(i?.end || 0) }))).filter(i => i.end > i.start);
+            if (!cuts.length) return (baseIntervals || []).map(i => ({ start: Number(i?.start || 0), end: Number(i?.end || 0) })).filter(i => i.end > i.start);
+            const res = [];
+            (baseIntervals || []).forEach(baseRaw => {
+                let fragments = [{ start: Number(baseRaw?.start || 0), end: Number(baseRaw?.end || 0) }].filter(i => i.end > i.start);
+                cuts.forEach(cut => {
+                    fragments = fragments.flatMap(f => {
+                        if (cut.end <= f.start || cut.start >= f.end) return [f];
+                        const next = [];
+                        if (cut.start > f.start) next.push({ start: f.start, end: Math.min(cut.start, f.end) });
+                        if (cut.end < f.end) next.push({ start: Math.max(cut.end, f.start), end: f.end });
+                        return next;
+                    });
+                });
+                fragments.forEach(f => { if (f.end > f.start) res.push(f); });
+            });
+            return mergeIntervals(res);
+            };
+            const plannerIntersectIntervalWithList = (interval, list = []) => {
+            const aStart = Number(interval?.start || 0);
+            const aEnd = Number(interval?.end || 0);
+            if (aEnd <= aStart) return [];
+            const out = [];
+            (list || []).forEach(item => {
+                const s = Math.max(aStart, Number(item?.start || 0));
+                const e = Math.min(aEnd, Number(item?.end || 0));
+                if (e > s) out.push({ start: s, end: e });
+            });
+            return mergeIntervals(out);
+            };
+            const plannerOverlapMinutesBetweenIntervalSets = (aList = [], bList = []) => {
+            const bMerged = mergeIntervals((bList || []).map(i => ({ start: Number(i?.start || 0), end: Number(i?.end || 0) }))).filter(i => i.end > i.start);
+            if (!bMerged.length) return 0;
+            let total = 0;
+            (aList || []).forEach(a => {
+                const aStart = Number(a?.start || 0);
+                const aEnd = Number(a?.end || 0);
+                if (aEnd <= aStart) return;
+                bMerged.forEach(b => {
+                    total += Math.max(0, Math.min(aEnd, b.end) - Math.max(aStart, b.start));
+                });
+            });
+            return total;
+            };
+            const plannerComputeShiftStatusMatchMetrics = ({ shiftParts = [], breakParts = [], statusBars = [] } = {}) => {
+            const shiftIntervals = mergeIntervals((shiftParts || []).map(p => ({ start: Number(p?.start || 0), end: Number(p?.end || 0) }))).filter(i => i.end > i.start);
+            const breakIntervals = mergeIntervals((breakParts || []).map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))).filter(i => i.end > i.start);
+            const workScheduleIntervals = plannerSubtractIntervals(shiftIntervals, breakIntervals);
+            const bars = (statusBars || [])
+                .map(seg => ({
+                    ...seg,
+                    startMin: Number(seg?.startMin ?? seg?.start ?? 0),
+                    endMin: Number(seg?.endMin ?? seg?.end ?? 0),
+                    statusKeyNorm: plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || '')
+                }))
+                .filter(seg => seg.endMin > seg.startMin);
+            const workStatusIntervals = mergeIntervals(
+                bars
+                    .filter(seg => PLANNER_IMPORTED_WORK_STATUS_KEYS.has(seg.statusKeyNorm))
+                    .map(seg => ({ start: seg.startMin, end: seg.endMin }))
+            );
+            const breakStatusIntervals = mergeIntervals(
+                bars
+                    .filter(seg => PLANNER_IMPORTED_BREAK_STATUS_KEYS.has(seg.statusKeyNorm))
+                    .map(seg => ({ start: seg.startMin, end: seg.endMin }))
+            );
+
+            const totalScheduledMin = plannerIntervalsTotalMinutes(shiftIntervals);
+            const scheduledBreakMin = plannerIntervalsTotalMinutes(breakIntervals);
+            const scheduledWorkMin = plannerIntervalsTotalMinutes(workScheduleIntervals);
+            const matchedWorkMin = plannerOverlapMinutesBetweenIntervalSets(workScheduleIntervals, workStatusIntervals);
+            const matchedBreakMin = plannerOverlapMinutesBetweenIntervalSets(breakIntervals, breakStatusIntervals);
+            const matchedTotalMin = matchedWorkMin + matchedBreakMin;
+            const compliancePct = totalScheduledMin > 0 ? (matchedTotalMin / totalScheduledMin) * 100 : null;
+
+            const perShift = (shiftParts || []).map((part, idx) => {
+                const shiftInterval = { start: Number(part?.start || 0), end: Number(part?.end || 0) };
+                const shiftDurMin = Math.max(0, shiftInterval.end - shiftInterval.start);
+                const shiftBreakIntervals = plannerIntersectIntervalWithList(shiftInterval, breakIntervals);
+                const shiftWorkScheduleIntervals = plannerSubtractIntervals([shiftInterval], shiftBreakIntervals);
+                const shiftWorkStatusIntervals = plannerIntersectIntervalWithList(shiftInterval, workStatusIntervals);
+                const shiftBreakStatusIntervals = plannerIntersectIntervalWithList(shiftInterval, breakStatusIntervals);
+                const shiftMatchedWorkMin = plannerOverlapMinutesBetweenIntervalSets(shiftWorkScheduleIntervals, shiftWorkStatusIntervals);
+                const shiftMatchedBreakMin = plannerOverlapMinutesBetweenIntervalSets(shiftBreakIntervals, shiftBreakStatusIntervals);
+                const shiftMatchedTotalMin = shiftMatchedWorkMin + shiftMatchedBreakMin;
+                const shiftCompliancePct = shiftDurMin > 0 ? (shiftMatchedTotalMin / shiftDurMin) * 100 : null;
+                let lateMin = 0;
+                let earlyLeaveMin = 0;
+                const hasWorkStatus = shiftWorkStatusIntervals.length > 0;
+                if (hasWorkStatus) {
+                    const firstWorkStart = shiftWorkStatusIntervals[0].start;
+                    const lastWorkEnd = shiftWorkStatusIntervals[shiftWorkStatusIntervals.length - 1].end;
+                    lateMin = Math.max(0, firstWorkStart - shiftInterval.start);
+                    earlyLeaveMin = Math.max(0, shiftInterval.end - lastWorkEnd);
+                }
+                return {
+                    id: `${String(part?.sourceDate || '')}:${Number(part?.sourceIndex ?? idx)}`,
+                    sourceDate: part?.sourceDate || null,
+                    sourceIndex: part?.sourceIndex ?? idx,
+                    start: shiftInterval.start,
+                    end: shiftInterval.end,
+                    durationMin: shiftDurMin,
+                    matchedWorkMin: shiftMatchedWorkMin,
+                    matchedBreakMin: shiftMatchedBreakMin,
+                    matchedTotalMin: shiftMatchedTotalMin,
+                    compliancePct: shiftCompliancePct,
+                    lateMin,
+                    earlyLeaveMin,
+                    hasWorkStatus
+                };
+            }).sort((a, b) => a.start - b.start);
+
+            const lateTotalMin = perShift.reduce((s, it) => s + (Number(it?.lateMin || 0)), 0);
+            const earlyLeaveTotalMin = perShift.reduce((s, it) => s + (Number(it?.earlyLeaveMin || 0)), 0);
+            return {
+                totalScheduledMin,
+                scheduledWorkMin,
+                scheduledBreakMin,
+                matchedWorkMin,
+                matchedBreakMin,
+                matchedTotalMin,
+                compliancePct,
+                lateTotalMin,
+                earlyLeaveTotalMin,
+                perShift
+            };
             };
             const plannerStatusFormatDuration = (seconds) => {
             const t = Math.max(0, Math.round(Number(seconds) || 0));
@@ -8383,7 +8523,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                             {filteredOperators.map(op => (
                                 <div key={op.id} className="flex items-center border-b"> 
-                                <div className={`w-64 ${plannerStatusSpecialDayViewEnabled ? 'h-[6rem]' : 'h-[4.5rem]'} pr-2 sticky left-0 z-40 bg-white border-r`} style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
+                                <div className={`w-64 ${plannerStatusSpecialDayViewEnabled ? 'h-[6.25rem]' : 'h-[4.5rem]'} pr-2 sticky left-0 z-40 bg-white border-r`} style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
                                     <div className="font-medium">{op.name || '—'}</div>
                                     <div className="flex items-center justify-between mt-1">
                                         <div className="text-xs text-slate-500">{op.direction || '—'}</div>
@@ -8399,6 +8539,16 @@ const withAccessTokenHeader = (headers = {}) => {
                                             const importedStatusBarsForCell = plannerStatusSpecialDayViewEnabled
                                                 ? (importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(op?.name)}|${d}`) || [])
                                                 : [];
+                                            const specialStatusBreakPartsForCell = plannerStatusSpecialDayViewEnabled
+                                                ? parts.flatMap(p => getBreakPartsForPart(op, p, d)).map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) })).filter(b => b.end > b.start)
+                                                : [];
+                                            const specialStatusMatchMetrics = plannerStatusSpecialDayViewEnabled
+                                                ? plannerComputeShiftStatusMatchMetrics({
+                                                    shiftParts: parts,
+                                                    breakParts: specialStatusBreakPartsForCell,
+                                                    statusBars: importedStatusBarsForCell
+                                                })
+                                                : null;
                                             const specialStatusTimelineTrackBaseWidth = 24 * 40;
                                             const specialStatusTimelineTrackWidthPx = Math.max(
                                                 specialStatusTimelineTrackBaseWidth,
@@ -8460,9 +8610,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 emphasisClass = ' ring-1 ring-blue-200 shadow-sm shadow-blue-100/70';
                                             }
                                             return (
-                                            <div key={d} className={`${plannerStatusSpecialDayViewEnabled ? 'h-[86px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={(e) => handleDayClick(e, op.id, d)}>
+                                            <div key={d} className={`${plannerStatusSpecialDayViewEnabled ? 'h-[100px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={(e) => handleDayClick(e, op.id, d)}>
                                                 {viewMode === 'day' ? (
-                                                <div className={`relative ${plannerStatusSpecialDayViewEnabled ? 'h-[74px]' : 'h-12'}`}>
+                                                <div className={`relative ${plannerStatusSpecialDayViewEnabled ? 'h-[88px]' : 'h-12'}`}>
                                                     {cellScheduleStatus ? (
                                                         <div className="flex items-center justify-center h-full px-1">
                                                             <div className={`text-sm font-semibold truncate ${cellScheduleStatusTone?.text || 'text-slate-700'}`} title={cellScheduleStatus.label || 'Статус'}>
@@ -8571,6 +8721,26 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     </div>
                                                                 </div>
                                                             </div>
+
+                                                            {specialStatusMatchMetrics && specialStatusMatchMetrics.totalScheduledMin > 0 && (
+                                                                <div className="mt-0.5 px-1 text-[10px] leading-tight text-slate-600 flex flex-wrap gap-x-2 gap-y-0.5">
+                                                                    <span className="font-semibold text-slate-700">
+                                                                        {`Совп.: ${specialStatusMatchMetrics.compliancePct != null ? specialStatusMatchMetrics.compliancePct.toFixed(0) : '—'}%`}
+                                                                    </span>
+                                                                    <span className="text-slate-600">
+                                                                        {`Работа: ${specialStatusMatchMetrics.scheduledWorkMin > 0 ? ((specialStatusMatchMetrics.matchedWorkMin / specialStatusMatchMetrics.scheduledWorkMin) * 100).toFixed(0) : '—'}%`}
+                                                                    </span>
+                                                                    <span className="text-slate-600">
+                                                                        {`Перерыв: ${specialStatusMatchMetrics.scheduledBreakMin > 0 ? ((specialStatusMatchMetrics.matchedBreakMin / specialStatusMatchMetrics.scheduledBreakMin) * 100).toFixed(0) : '—'}%`}
+                                                                    </span>
+                                                                    <span className={specialStatusMatchMetrics.lateTotalMin > 0 ? 'text-rose-700 font-medium' : 'text-slate-500'}>
+                                                                        {`Опозд.: ${Math.round(specialStatusMatchMetrics.lateTotalMin)}м`}
+                                                                    </span>
+                                                                    <span className={specialStatusMatchMetrics.earlyLeaveTotalMin > 0 ? 'text-rose-700 font-medium' : 'text-slate-500'}>
+                                                                        {`Уход: ${Math.round(specialStatusMatchMetrics.earlyLeaveTotalMin)}м`}
+                                                                    </span>
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     ) : (
                                                         <>
@@ -9826,6 +9996,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                 return { ...seg, startMin: mins.start, endMin: mins.end };
                                                                             })
                                                                             .filter(Boolean);
+                                                                        const shiftStatusMatchMetrics = plannerComputeShiftStatusMatchMetrics({
+                                                                            shiftParts: plannedShiftParts,
+                                                                            breakParts: plannedBreakParts,
+                                                                            statusBars: statusTimelineBars
+                                                                        });
                                                                         const timelineTrackBaseWidth = 24 * 52;
                                                                         const timelineTrackWidthPx = Math.max(timelineTrackBaseWidth, Math.round(timelineTrackBaseWidth * (plannerStatusTimelineZoom || 1)));
                                                                         const timelineTrackStyle = { width: `${timelineTrackWidthPx}px`, minWidth: '100%' };
@@ -9856,6 +10031,26 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                     ))}
                                                                                 </div>
                                                                             </div>
+
+                                                                            {shiftStatusMatchMetrics.totalScheduledMin > 0 && (
+                                                                                <div className="mt-2 flex flex-wrap gap-1.5">
+                                                                                    <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50 text-xs text-slate-700">
+                                                                                        Совпадение смены: <strong className="tabular-nums">{shiftStatusMatchMetrics.compliancePct != null ? shiftStatusMatchMetrics.compliancePct.toFixed(0) : '—'}%</strong>
+                                                                                    </span>
+                                                                                    <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50 text-xs text-slate-700">
+                                                                                        Работа: <strong className="tabular-nums">{shiftStatusMatchMetrics.scheduledWorkMin > 0 ? ((shiftStatusMatchMetrics.matchedWorkMin / shiftStatusMatchMetrics.scheduledWorkMin) * 100).toFixed(0) : '—'}%</strong>
+                                                                                    </span>
+                                                                                    <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50 text-xs text-slate-700">
+                                                                                        Перерыв: <strong className="tabular-nums">{shiftStatusMatchMetrics.scheduledBreakMin > 0 ? ((shiftStatusMatchMetrics.matchedBreakMin / shiftStatusMatchMetrics.scheduledBreakMin) * 100).toFixed(0) : '—'}%</strong>
+                                                                                    </span>
+                                                                                    <span className={`px-2 py-1 rounded-md border text-xs ${shiftStatusMatchMetrics.lateTotalMin > 0 ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+                                                                                        Опоздание: <strong className="tabular-nums">{Math.round(shiftStatusMatchMetrics.lateTotalMin)} мин</strong>
+                                                                                    </span>
+                                                                                    <span className={`px-2 py-1 rounded-md border text-xs ${shiftStatusMatchMetrics.earlyLeaveTotalMin > 0 ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+                                                                                        Ранний уход: <strong className="tabular-nums">{Math.round(shiftStatusMatchMetrics.earlyLeaveTotalMin)} мин</strong>
+                                                                                    </span>
+                                                                                </div>
+                                                                            )}
 
                                                                             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2">
                                                                                 <div className="flex items-start gap-2">
@@ -9943,6 +10138,30 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                     </div>
                                                                                 )}
                                                                             </div>
+
+                                                                            {shiftStatusMatchMetrics.totalScheduledMin > 0 && shiftStatusMatchMetrics.perShift.length > 0 && (
+                                                                                <div className="mt-3 space-y-1">
+                                                                                    {shiftStatusMatchMetrics.perShift.map((sh, shIdx) => (
+                                                                                        <div key={`shift-match-row-${sh.id || shIdx}`} className="text-xs rounded border border-slate-200 bg-slate-50 px-2 py-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                                                                                            <span className="font-semibold text-slate-800 tabular-nums">
+                                                                                                Смена {minutesToTime(sh.start)} — {minutesToTime(sh.end)}
+                                                                                            </span>
+                                                                                            <span className="text-slate-600">
+                                                                                                Совп.: <strong className="tabular-nums text-slate-800">{sh.compliancePct != null ? sh.compliancePct.toFixed(0) : '—'}%</strong>
+                                                                                            </span>
+                                                                                            <span className={sh.lateMin > 0 ? 'text-rose-700' : 'text-slate-500'}>
+                                                                                                Опозд.: <strong className="tabular-nums">{Math.round(sh.lateMin)}м</strong>
+                                                                                            </span>
+                                                                                            <span className={sh.earlyLeaveMin > 0 ? 'text-rose-700' : 'text-slate-500'}>
+                                                                                                Уход: <strong className="tabular-nums">{Math.round(sh.earlyLeaveMin)}м</strong>
+                                                                                            </span>
+                                                                                            {!sh.hasWorkStatus && (
+                                                                                                <span className="text-rose-700 font-medium">Нет статуса смены</span>
+                                                                                            )}
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
 
                                                                             <div className="mt-3 space-y-1.5">
                                                                                 {timelineList.map((seg, segIdx) => (
