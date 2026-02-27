@@ -5296,7 +5296,6 @@ const withAccessTokenHeader = (headers = {}) => {
                 statusDeleting: false
             });
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
-            const [statusTimelinePreviewCell, setStatusTimelinePreviewCell] = useState(null);
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
@@ -6240,16 +6239,10 @@ const withAccessTokenHeader = (headers = {}) => {
                         return { cells: sortSelectedTargets(nextCells) };
                     });
                 } else {
-                    if (viewMode !== 'day' && selectedCells.length === 0) {
-                        setStatusTimelinePreviewCell({ opId, date });
-                        return;
-                    }
                     // Обычный клик по уже выбранной ячейке открывает массовое редактирование всего текущего выбора
                     if (selectedCells.length > 0 && selectedDayKeySet.has(cellKey)) {
-                        setStatusTimelinePreviewCell(null);
                         openEditModalForMultipleTargets(selectedCells);
                     } else {
-                        setStatusTimelinePreviewCell(null);
                         openEditModal(opId, date);
                     }
                 }
@@ -8877,12 +8870,6 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 className={`${plannerStatusSpecialDayViewEnabled ? 'h-[100px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')}
                                                 style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }}
                                                 onClick={(e) => handleDayClick(e, op.id, d)}
-                                                onDoubleClick={(e) => {
-                                                    if (viewMode === 'day') return;
-                                                    e.stopPropagation();
-                                                    setStatusTimelinePreviewCell(null);
-                                                    openEditModal(op.id, d);
-                                                }}
                                             >
                                                 {(hasDefectMarker || hasOvertimeMarker) && (
                                                     <span className="absolute top-1 right-1 z-50 flex items-center gap-1" title={markerTooltipText || 'Есть недочеты/переработка'}>
@@ -9145,217 +9132,6 @@ const withAccessTokenHeader = (headers = {}) => {
                     </div>
                     </div>
                 </div>
-                {viewMode !== 'day' && statusTimelinePreviewCell && (() => {
-                    const previewOp = operators.find(o => o.id === statusTimelinePreviewCell.opId);
-                    if (!previewOp) return null;
-                    const previewDate = String(statusTimelinePreviewCell.date || '');
-                    if (!previewDate) return null;
-
-                    const previewParts = getShiftPartsForDate(previewOp, previewDate);
-                    const previewBreakParts = previewParts
-                        .flatMap(p => getBreakPartsForPart(previewOp, p, previewDate))
-                        .map(b => ({ start: Math.max(0, Math.min(1440, Number(b?.start || 0))), end: Math.max(0, Math.min(1440, Number(b?.end || 0))) }))
-                        .filter(b => b.end > b.start);
-                    const previewStatusBars = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(previewOp?.name)}|${previewDate}`) || [];
-                    const previewMetrics = (previewParts.length > 0 && previewStatusBars.length > 0)
-                        ? plannerComputeShiftStatusMatchMetrics({
-                            shiftParts: previewParts,
-                            breakParts: previewBreakParts,
-                            statusBars: previewStatusBars
-                        })
-                        : null;
-                    const previewLateBars = (previewMetrics?.perShift || [])
-                        .map(sh => {
-                            const lateMin = Number(sh?.lateMin || 0);
-                            if (lateMin <= 0) return null;
-                            const start = Number(sh?.start || 0);
-                            const end = Math.min(Number(sh?.end || 0), start + lateMin);
-                            if (end <= start) return null;
-                            return { start, end, lateMin };
-                        })
-                        .filter(Boolean);
-                    const previewOvertimeBars = (previewMetrics?.workOutsideShiftIntervals || [])
-                        .map((interval, idx) => {
-                            const start = Math.max(0, Number(interval?.start || 0));
-                            const end = Math.min(1440, Number(interval?.end || 0));
-                            if (end <= start) return null;
-                            return { id: idx, start, end, min: end - start };
-                        })
-                        .filter(Boolean);
-                    const timelineTrackBaseWidth = 24 * 52;
-                    const timelineTrackWidthPx = Math.max(timelineTrackBaseWidth, Math.round(timelineTrackBaseWidth * (plannerStatusTimelineZoom || 1)));
-                    const timelineTrackStyle = { width: `${timelineTrackWidthPx}px`, minWidth: '100%' };
-                    const previewDateLabel = (() => {
-                        const d = parseDateStr(previewDate);
-                        return d.toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', year: 'numeric' });
-                    })();
-                    return (
-                        <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3">
-                            <div className="flex items-start justify-between gap-3 flex-wrap">
-                                <div>
-                                    <div className="font-semibold text-slate-900">{previewOp.name}</div>
-                                    <div className="text-xs text-slate-500 mt-1 flex flex-wrap gap-x-3 gap-y-1">
-                                        <span>{previewDateLabel}</span>
-                                        <span>{previewOp.direction || 'Без направления'}</span>
-                                    </div>
-                                </div>
-                                <div className="flex flex-wrap gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={() => { setViewMode('day'); setCurrentDate(parseDateStr(previewDate)); }}
-                                        className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs text-slate-700"
-                                    >
-                                        Открыть день
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => openEditModal(previewOp.id, previewDate)}
-                                        className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs text-slate-700"
-                                    >
-                                        Редактировать
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setStatusTimelinePreviewCell(null)}
-                                        className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs text-slate-700"
-                                    >
-                                        Скрыть
-                                    </button>
-                                </div>
-                            </div>
-
-                            {previewMetrics && previewMetrics.totalScheduledMin > 0 && (
-                                <div className="mt-2 flex flex-wrap gap-1.5">
-                                    <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50 text-xs text-slate-700">
-                                        Совпадение: <strong className="tabular-nums">{previewMetrics.compliancePct != null ? previewMetrics.compliancePct.toFixed(0) : '—'}%</strong>
-                                    </span>
-                                    <span className={`px-2 py-1 rounded-md border text-xs ${previewMetrics.lateTotalMin > 0 ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
-                                        Опоздание: <strong className="tabular-nums">{Math.round(previewMetrics.lateTotalMin)} мин</strong>
-                                    </span>
-                                    <span className={`px-2 py-1 rounded-md border text-xs ${previewMetrics.earlyLeaveTotalMin > 0 ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
-                                        Ранний уход: <strong className="tabular-nums">{Math.round(previewMetrics.earlyLeaveTotalMin)} мин</strong>
-                                    </span>
-                                    <span className={`px-2 py-1 rounded-md border text-xs ${previewMetrics.workOutsideShiftMin > 10 ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
-                                        Переработка: <strong className="tabular-nums">{Math.round(previewMetrics.workOutsideShiftMin || 0)} мин</strong>
-                                    </span>
-                                </div>
-                            )}
-
-                            <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2">
-                                <div className="flex items-start gap-2">
-                                    <div className="w-14 shrink-0">
-                                        <div className="h-5 mb-1" />
-                                        <div className="h-6 mb-2 text-[10px] font-semibold uppercase tracking-wide text-slate-500 flex items-center justify-end">График</div>
-                                        <div className="h-6 text-[10px] font-semibold uppercase tracking-wide text-slate-500 flex items-center justify-end">Статусы</div>
-                                    </div>
-                                    <div className="flex-1 overflow-x-auto pb-1">
-                                        <div style={timelineTrackStyle} className="min-w-full">
-                                            <div className="relative h-5 mb-1">
-                                                <div className="absolute inset-0 flex items-end">
-                                                    {Array.from({ length: 24 }).map((_, h) => (
-                                                        <div key={`preview-hour-${h}`} className="flex-1 text-center text-[10px] leading-none text-slate-500">
-                                                            {h}
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-
-                                            <div className="relative h-6 border border-slate-200 bg-white overflow-hidden mb-2">
-                                                <div className="absolute inset-0 flex pointer-events-none">
-                                                    {Array.from({ length: 24 }).map((_, h) => (
-                                                        <div key={`preview-grid-shift-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
-                                                    ))}
-                                                </div>
-                                                {previewParts.map((p, pIdx) => {
-                                                    const srcSeg = previewOp?.shifts?.[p.sourceDate]?.[p.sourceIndex];
-                                                    const isNight = !!(srcSeg && timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
-                                                    return (
-                                                        <div
-                                                            key={`preview-shift-bar-${pIdx}`}
-                                                            className="absolute top-1 bottom-1 border border-white/60"
-                                                            style={{
-                                                                left: `${computeLeftPercent(p.start)}%`,
-                                                                width: `${((p.end - p.start) / minutesInDay) * 100}%`,
-                                                                background: isNight ? 'linear-gradient(90deg,#fb923c,#ea580c)' : 'linear-gradient(90deg,#60a5fa,#2563eb)'
-                                                            }}
-                                                            title={`${isNight ? 'Ночная смена' : 'Смена'} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
-                                                        />
-                                                    );
-                                                })}
-                                                {previewBreakParts.map((b, bIdx) => (
-                                                    <div
-                                                        key={`preview-break-bar-${bIdx}`}
-                                                        className="absolute top-[3px] bottom-[3px] border border-amber-200 bg-amber-300/90"
-                                                        style={{
-                                                            left: `${computeLeftPercent(b.start)}%`,
-                                                            width: `${((b.end - b.start) / minutesInDay) * 100}%`
-                                                        }}
-                                                        title={`Перерыв • ${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
-                                                    />
-                                                ))}
-                                                {previewLateBars.map((late, lateIdx) => (
-                                                    <div
-                                                        key={`preview-late-bar-${lateIdx}`}
-                                                        className="absolute top-0 bottom-0 z-40 border-l border-rose-700/80 bg-rose-500/35"
-                                                        style={{
-                                                            left: `${computeLeftPercent(late.start)}%`,
-                                                            width: `${((late.end - late.start) / minutesInDay) * 100}%`
-                                                        }}
-                                                        title={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
-                                                    />
-                                                ))}
-                                                {previewOvertimeBars.map((ot) => (
-                                                    <div
-                                                        key={`preview-overtime-bar-${ot.id}`}
-                                                        className="absolute top-0 bottom-0 z-40 border-l border-emerald-700/80 bg-emerald-500/35"
-                                                        style={{
-                                                            left: `${computeLeftPercent(ot.start)}%`,
-                                                            width: `${((ot.end - ot.start) / minutesInDay) * 100}%`
-                                                        }}
-                                                        title={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
-                                                    />
-                                                ))}
-                                                {previewParts.length === 0 && (
-                                                    <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет смены</div>
-                                                )}
-                                            </div>
-
-                                            <div className="relative h-6 border border-slate-200 bg-white overflow-hidden">
-                                                <div className="absolute inset-0 flex pointer-events-none">
-                                                    {Array.from({ length: 24 }).map((_, h) => (
-                                                        <div key={`preview-grid-status-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
-                                                    ))}
-                                                </div>
-                                                {previewStatusBars.map((seg, segIdx) => {
-                                                    const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
-                                                    return (
-                                                        <div
-                                                            key={`preview-status-bar-${segIdx}`}
-                                                            className="absolute top-1 bottom-1"
-                                                            style={{
-                                                                left: `${computeLeftPercent(seg.startMin)}%`,
-                                                                width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
-                                                                background: tone.bar
-                                                            }}
-                                                            title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
-                                                        />
-                                                    );
-                                                })}
-                                                {plannerStatusAnomalyAnalysis && previewStatusBars.length === 0 && (
-                                                    <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет статусов</div>
-                                                )}
-                                                {!plannerStatusAnomalyAnalysis && (
-                                                    <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Загрузите статусы</div>
-                                                )}
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    );
-                })()}
-
                 <SimpleModal open={modalState.open} onClose={() => { setModalState((m) => ({ ...m, open: false })); clearSelectedDays(); }}>
                     {/* Шапка с информацией об операторе */}
                     <div className="mb-6 pb-4 border-b border-slate-200">
@@ -9874,6 +9650,160 @@ const withAccessTokenHeader = (headers = {}) => {
                     )}
                     </>
                     )}
+
+                    {!isBulkSelectionModal && modalState.opId && modalState.date && (() => {
+                        const modalPreviewOp = operators.find(o => o.id === modalState.opId);
+                        const modalPreviewDate = String(modalState.date || '');
+                        if (!modalPreviewOp || !modalPreviewDate) return null;
+                        const previewParts = getShiftPartsForDate(modalPreviewOp, modalPreviewDate);
+                        const previewBreakParts = previewParts
+                            .flatMap(p => getBreakPartsForPart(modalPreviewOp, p, modalPreviewDate))
+                            .map(b => ({ start: Math.max(0, Math.min(1440, Number(b?.start || 0))), end: Math.max(0, Math.min(1440, Number(b?.end || 0))) }))
+                            .filter(b => b.end > b.start);
+                        const previewStatusBars = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(modalPreviewOp?.name)}|${modalPreviewDate}`) || [];
+                        const previewMetrics = (previewParts.length > 0 && previewStatusBars.length > 0)
+                            ? plannerComputeShiftStatusMatchMetrics({
+                                shiftParts: previewParts,
+                                breakParts: previewBreakParts,
+                                statusBars: previewStatusBars
+                            })
+                            : null;
+                        const previewLateBars = (previewMetrics?.perShift || [])
+                            .map(sh => {
+                                const lateMin = Number(sh?.lateMin || 0);
+                                if (lateMin <= 0) return null;
+                                const start = Number(sh?.start || 0);
+                                const end = Math.min(Number(sh?.end || 0), start + lateMin);
+                                if (end <= start) return null;
+                                return { start, end, lateMin };
+                            })
+                            .filter(Boolean);
+                        const previewOvertimeBars = (previewMetrics?.workOutsideShiftIntervals || [])
+                            .map((interval, idx) => {
+                                const start = Math.max(0, Number(interval?.start || 0));
+                                const end = Math.min(1440, Number(interval?.end || 0));
+                                if (end <= start) return null;
+                                return { id: idx, start, end, min: end - start };
+                            })
+                            .filter(Boolean);
+                        const timelineTrackBaseWidth = 24 * 52;
+                        const timelineTrackWidthPx = Math.max(timelineTrackBaseWidth, Math.round(timelineTrackBaseWidth * (plannerStatusTimelineZoom || 1)));
+                        const timelineTrackStyle = { width: `${timelineTrackWidthPx}px`, minWidth: '100%' };
+                        return (
+                            <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                                <div className="text-sm font-semibold text-slate-800 mb-2">Таймлайн статусов за день</div>
+                                <div className="flex items-start gap-2">
+                                    <div className="w-14 shrink-0">
+                                        <div className="h-5 mb-1" />
+                                        <div className="h-6 mb-2 text-[10px] font-semibold uppercase tracking-wide text-slate-500 flex items-center justify-end">График</div>
+                                        <div className="h-6 text-[10px] font-semibold uppercase tracking-wide text-slate-500 flex items-center justify-end">Статусы</div>
+                                    </div>
+                                    <div className="flex-1 overflow-x-auto pb-1">
+                                        <div style={timelineTrackStyle} className="min-w-full">
+                                            <div className="relative h-5 mb-1">
+                                                <div className="absolute inset-0 flex items-end">
+                                                    {Array.from({ length: 24 }).map((_, h) => (
+                                                        <div key={`modal-preview-hour-${h}`} className="flex-1 text-center text-[10px] leading-none text-slate-500">
+                                                            {h}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+
+                                            <div className="relative h-6 border border-slate-200 bg-white overflow-hidden mb-2">
+                                                <div className="absolute inset-0 flex pointer-events-none">
+                                                    {Array.from({ length: 24 }).map((_, h) => (
+                                                        <div key={`modal-preview-grid-shift-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
+                                                    ))}
+                                                </div>
+                                                {previewParts.map((p, pIdx) => {
+                                                    const srcSeg = modalPreviewOp?.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                                                    const isNight = !!(srcSeg && timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
+                                                    return (
+                                                        <div
+                                                            key={`modal-preview-shift-bar-${pIdx}`}
+                                                            className="absolute top-1 bottom-1 border border-white/60"
+                                                            style={{
+                                                                left: `${computeLeftPercent(p.start)}%`,
+                                                                width: `${((p.end - p.start) / minutesInDay) * 100}%`,
+                                                                background: isNight ? 'linear-gradient(90deg,#fb923c,#ea580c)' : 'linear-gradient(90deg,#60a5fa,#2563eb)'
+                                                            }}
+                                                            title={`${isNight ? 'Ночная смена' : 'Смена'} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
+                                                        />
+                                                    );
+                                                })}
+                                                {previewBreakParts.map((b, bIdx) => (
+                                                    <div
+                                                        key={`modal-preview-break-bar-${bIdx}`}
+                                                        className="absolute top-[3px] bottom-[3px] border border-amber-200 bg-amber-300/90"
+                                                        style={{
+                                                            left: `${computeLeftPercent(b.start)}%`,
+                                                            width: `${((b.end - b.start) / minutesInDay) * 100}%`
+                                                        }}
+                                                        title={`Перерыв • ${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
+                                                    />
+                                                ))}
+                                                {previewLateBars.map((late, lateIdx) => (
+                                                    <div
+                                                        key={`modal-preview-late-bar-${lateIdx}`}
+                                                        className="absolute top-0 bottom-0 z-40 border-l border-rose-700/80 bg-rose-500/35"
+                                                        style={{
+                                                            left: `${computeLeftPercent(late.start)}%`,
+                                                            width: `${((late.end - late.start) / minutesInDay) * 100}%`
+                                                        }}
+                                                        title={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
+                                                    />
+                                                ))}
+                                                {previewOvertimeBars.map((ot) => (
+                                                    <div
+                                                        key={`modal-preview-overtime-bar-${ot.id}`}
+                                                        className="absolute top-0 bottom-0 z-40 border-l border-emerald-700/80 bg-emerald-500/35"
+                                                        style={{
+                                                            left: `${computeLeftPercent(ot.start)}%`,
+                                                            width: `${((ot.end - ot.start) / minutesInDay) * 100}%`
+                                                        }}
+                                                        title={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
+                                                    />
+                                                ))}
+                                                {previewParts.length === 0 && (
+                                                    <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет смены</div>
+                                                )}
+                                            </div>
+
+                                            <div className="relative h-6 border border-slate-200 bg-white overflow-hidden">
+                                                <div className="absolute inset-0 flex pointer-events-none">
+                                                    {Array.from({ length: 24 }).map((_, h) => (
+                                                        <div key={`modal-preview-grid-status-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
+                                                    ))}
+                                                </div>
+                                                {previewStatusBars.map((seg, segIdx) => {
+                                                    const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
+                                                    return (
+                                                        <div
+                                                            key={`modal-preview-status-bar-${segIdx}`}
+                                                            className="absolute top-1 bottom-1"
+                                                            style={{
+                                                                left: `${computeLeftPercent(seg.startMin)}%`,
+                                                                width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
+                                                                background: tone.bar
+                                                            }}
+                                                            title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
+                                                        />
+                                                    );
+                                                })}
+                                                {plannerStatusAnomalyAnalysis && previewStatusBars.length === 0 && (
+                                                    <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет статусов</div>
+                                                )}
+                                                {!plannerStatusAnomalyAnalysis && (
+                                                    <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Загрузите статусы</div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })()}
 
                     {/* Нижняя панель с кнопками */}
                     <div className="mt-6 pt-4 border-t border-slate-200">
