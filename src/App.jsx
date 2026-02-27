@@ -5337,6 +5337,8 @@ const withAccessTokenHeader = (headers = {}) => {
             const breakReminderNotifiedRef = useRef(new Map());
             const editTimelineScrollRef = useRef(null);
             const editTimelineStatusNodeMapRef = useRef(new Map());
+            const editJournalScrollRef = useRef(null);
+            const editJournalStatusNodeMapRef = useRef(new Map());
             const plannerUiStateLoadedRef = useRef(false);
             const plannerExcelImportInputRef = useRef(null);
             const plannerStatusAnomalyInputRef = useRef(null);
@@ -5873,6 +5875,17 @@ const withAccessTokenHeader = (headers = {}) => {
                 return true;
             };
 
+            const scrollEditJournalToFocusedStatus = (focusKey, behavior = 'smooth') => {
+                if (!focusKey) return false;
+                const scroller = editJournalScrollRef.current;
+                const targetNode = editJournalStatusNodeMapRef.current.get(focusKey);
+                if (!scroller || !targetNode) return false;
+                const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+                const targetTop = Math.max(0, Math.min(maxTop, targetNode.offsetTop - 8));
+                scroller.scrollTo({ top: targetTop, behavior });
+                return true;
+            };
+
             const focusEditTimelineStatusSegment = (seg, idx = 0) => {
                 if (!seg) return;
                 const focusKey = buildEditTimelineStatusFocusKey(seg, idx);
@@ -5886,6 +5899,19 @@ const withAccessTokenHeader = (headers = {}) => {
                 });
             };
 
+            const focusEditJournalStatusSegment = (seg, idx = 0) => {
+                if (!seg) return;
+                const focusKey = buildEditTimelineStatusFocusKey(seg, idx);
+                setEditTimelineFocusedStatusKey(focusKey);
+                if (!showEditStatusJournal) setShowEditStatusJournal(true);
+                const scrollAttempts = [0, 70, 140, 220];
+                scrollAttempts.forEach((delay, attemptIdx) => {
+                    setTimeout(() => {
+                        scrollEditJournalToFocusedStatus(focusKey, attemptIdx === 0 ? 'auto' : 'smooth');
+                    }, delay);
+                });
+            };
+
             useEffect(() => {
                 if (!showEditTimelineModal || !editTimelineFocusedStatusKey) return;
                 const timers = [
@@ -5894,6 +5920,15 @@ const withAccessTokenHeader = (headers = {}) => {
                 ];
                 return () => timers.forEach(t => clearTimeout(t));
             }, [showEditTimelineModal, editTimelineFocusedStatusKey, modalState.open, modalState.opId, modalState.date]);
+
+            useEffect(() => {
+                if (!showEditStatusJournal || !editTimelineFocusedStatusKey) return;
+                const timers = [
+                    setTimeout(() => scrollEditJournalToFocusedStatus(editTimelineFocusedStatusKey, 'auto'), 0),
+                    setTimeout(() => scrollEditJournalToFocusedStatus(editTimelineFocusedStatusKey, 'smooth'), 80)
+                ];
+                return () => timers.forEach(t => clearTimeout(t));
+            }, [showEditStatusJournal, editTimelineFocusedStatusKey, modalState.open, modalState.opId, modalState.date]);
 
             useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
@@ -9807,7 +9842,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     const journalRows = importedStatusTimelineByOperatorDateKey.get(`${journalOperatorNameKey}|${journalDate}`) || [];
                     return (
                         <div className={`fixed inset-0 z-[65] flex justify-end p-2 sm:p-3 pointer-events-none ${showEditTimelineModal ? 'items-start pt-2' : 'items-center'}`}>
-                            <div className={`w-[360px] max-w-[calc(100vw-1rem)] ${showEditTimelineModal ? 'max-h-[52vh]' : 'max-h-[calc(100vh-4rem)]'} bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden pointer-events-auto`}>
+                            <div className={`w-[360px] max-w-[calc(100vw-1rem)] ${showEditTimelineModal ? 'max-h-[62vh]' : 'max-h-[calc(100vh-4rem)]'} bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden pointer-events-auto`}>
                                 <div className="px-3 py-2.5 border-b border-slate-200 bg-slate-50 flex items-start justify-between gap-2">
                                     <div className="min-w-0">
                                         <div className="text-sm font-semibold text-slate-900">Журнал статусов</div>
@@ -9824,7 +9859,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <i className="fas fa-times text-xs"></i>
                                     </button>
                                 </div>
-                                <div className={`${showEditTimelineModal ? 'max-h-[calc(52vh-3rem)]' : 'max-h-[calc(100vh-10rem)]'} overflow-auto p-2 space-y-1.5`}>
+                                <div ref={editJournalScrollRef} className={`${showEditTimelineModal ? 'max-h-[calc(62vh-3rem)]' : 'max-h-[calc(100vh-10rem)]'} overflow-auto p-2 space-y-1.5`}>
                                     {journalRows.length === 0 && (
                                         <div className="text-xs text-slate-500 border border-slate-200 rounded-lg p-2 bg-slate-50">
                                             Нет переключений статусов за этот день.
@@ -9839,6 +9874,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                             <button
                                                 type="button"
                                                 key={`edit-journal-row-${idx}`}
+                                                ref={(node) => {
+                                                    if (node) editJournalStatusNodeMapRef.current.set(rowFocusKey, node);
+                                                    else editJournalStatusNodeMapRef.current.delete(rowFocusKey);
+                                                }}
                                                 onClick={() => focusEditTimelineStatusSegment(seg, idx)}
                                                 className={`w-full text-left rounded-lg border px-2 py-1.5 text-xs transition ${tone.row} ${isFocusedRow ? 'ring-2 ring-sky-400 border-sky-300' : 'hover:border-slate-300'}`}
                                                 title="Перейти к этому статусу на таймлайне"
@@ -10124,7 +10163,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
                                                                     background: tone.bar
                                                                 }}
-                                                                onClick={() => setEditTimelineFocusedStatusKey(segFocusKey)}
+                                                                onClick={() => focusEditJournalStatusSegment(seg, segIdx)}
                                                                 title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
                                                             />
                                                         );
