@@ -9817,7 +9817,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                     return (
                         <div
-                            className="fixed inset-0 z-[45] flex items-end justify-center p-2 sm:p-3 pointer-events-none"
+                            className="fixed inset-0 z-[55] flex items-end justify-center p-2 sm:p-3 pointer-events-none"
                         >
                             <div
                                 className="w-full max-w-[1700px] rounded-t-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden pointer-events-auto"
