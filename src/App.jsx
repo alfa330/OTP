@@ -10026,9 +10026,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                     </div>
 
                                     {previewMetrics && previewMetrics.totalScheduledMin > 0 && previewPerShiftWithBreak.length > 0 && (
-                                        <div className="mt-3 space-y-1">
+                                        <div className="mt-3 flex flex-wrap gap-1.5">
                                             {previewPerShiftWithBreak.map((sh, shIdx) => (
-                                                <div key={`modal-sheet-shift-match-${sh.id || shIdx}`} className="text-xs rounded border border-slate-200 bg-white px-2 py-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                                                <div key={`modal-sheet-shift-match-${sh.id || shIdx}`} className="text-xs rounded border border-slate-200 bg-white px-2 py-1 inline-flex flex-wrap items-center gap-x-3 gap-y-1">
                                                     <span className="font-semibold text-slate-800 tabular-nums">
                                                         Смена {minutesToTime(sh.start)} — {minutesToTime(sh.end)}
                                                     </span>
