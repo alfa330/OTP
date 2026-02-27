@@ -4672,6 +4672,9 @@ const withAccessTokenHeader = (headers = {}) => {
             const scheduledWorkMin = plannerIntervalsTotalMinutes(workScheduleIntervals);
             const matchedWorkMin = plannerOverlapMinutesBetweenIntervalSets(workScheduleIntervals, workStatusIntervals);
             const matchedBreakMin = plannerOverlapMinutesBetweenIntervalSets(breakIntervals, breakStatusIntervals);
+            const workStatusTotalMin = plannerIntervalsTotalMinutes(workStatusIntervals);
+            const workInsideShiftMin = plannerOverlapMinutesBetweenIntervalSets(workStatusIntervals, shiftIntervals);
+            const workOutsideShiftMin = Math.max(0, workStatusTotalMin - workInsideShiftMin);
             const matchedTotalMin = matchedWorkMin + matchedBreakMin;
             const compliancePct = totalScheduledMin > 0 ? (matchedTotalMin / totalScheduledMin) * 100 : null;
 
@@ -4720,6 +4723,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 scheduledBreakMin,
                 matchedWorkMin,
                 matchedBreakMin,
+                workOutsideShiftMin,
                 matchedTotalMin,
                 compliancePct,
                 lateTotalMin,
@@ -8739,7 +8743,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 .flatMap(p => getBreakPartsForPart(op, p, d))
                                                 .map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))
                                                 .filter(b => b.end > b.start);
-                                            const shouldComputeDefectMetrics = (viewMode === 'day' || viewMode === 'month') && parts.length > 0 && importedStatusBarsForCell.length > 0;
+                                            const shouldComputeDefectMetrics = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && parts.length > 0 && importedStatusBarsForCell.length > 0;
                                             const statusMatchMetricsForCell = shouldComputeDefectMetrics
                                                 ? plannerComputeShiftStatusMatchMetrics({
                                                     shiftParts: parts,
@@ -8761,16 +8765,19 @@ const withAccessTokenHeader = (headers = {}) => {
                                             const defectLateMin = Number(statusMatchMetricsForCell?.lateTotalMin || 0);
                                             const defectEarlyLeaveMin = Number(statusMatchMetricsForCell?.earlyLeaveTotalMin || 0);
                                             const defectNoPhoneSec = Number(noPhoneShiftMetricsForCell?.noPhoneSec || 0);
-                                            const hasDefectMarker = (viewMode === 'day' || viewMode === 'month') && (
+                                            const overtimeOutsideShiftMin = Number(statusMatchMetricsForCell?.workOutsideShiftMin || 0);
+                                            const hasDefectMarker = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && (
                                                 defectLateMin > 0 ||
                                                 defectEarlyLeaveMin > 0 ||
                                                 defectNoPhoneSec > 60
                                             );
+                                            const hasOvertimeMarker = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && overtimeOutsideShiftMin > 10;
                                             const defectMarkerTitle = [
                                                 defectLateMin > 0 ? `Опоздание: ${Math.round(defectLateMin)} мин` : '',
                                                 defectEarlyLeaveMin > 0 ? `Ранний уход: ${Math.round(defectEarlyLeaveMin)} мин` : '',
                                                 defectNoPhoneSec > 60 ? `Без телефона в смене: ${Math.round(defectNoPhoneSec / 60)} мин` : ''
                                             ].filter(Boolean).join(' • ') || 'Есть недочеты по смене';
+                                            const overtimeMarkerTitle = `Переработка вне смены: ${Math.round(overtimeOutsideShiftMin)} мин`;
                                             const specialStatusLateBars = (specialStatusMatchMetrics?.perShift || [])
                                                 .map(sh => {
                                                     const lateMin = Number(sh?.lateMin || 0);
@@ -8843,11 +8850,21 @@ const withAccessTokenHeader = (headers = {}) => {
                                             }
                                             return (
                                             <div key={d} className={`${plannerStatusSpecialDayViewEnabled ? 'h-[100px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={(e) => handleDayClick(e, op.id, d)}>
-                                                {hasDefectMarker && (
-                                                    <span
-                                                        className="absolute top-1 right-1 z-50 w-2.5 h-2.5 rounded-full bg-rose-600 border border-white shadow-sm pointer-events-none"
-                                                        title={defectMarkerTitle}
-                                                    />
+                                                {(hasDefectMarker || hasOvertimeMarker) && (
+                                                    <span className="absolute top-1 right-1 z-50 flex items-center gap-1 pointer-events-none">
+                                                        {hasOvertimeMarker && (
+                                                            <span
+                                                                className="w-2.5 h-2.5 rounded-full bg-emerald-600 border border-white shadow-sm"
+                                                                title={overtimeMarkerTitle}
+                                                            />
+                                                        )}
+                                                        {hasDefectMarker && (
+                                                            <span
+                                                                className="w-2.5 h-2.5 rounded-full bg-rose-600 border border-white shadow-sm"
+                                                                title={defectMarkerTitle}
+                                                            />
+                                                        )}
+                                                    </span>
                                                 )}
                                                 {viewMode === 'day' ? (
                                                 <div className={`relative ${plannerStatusSpecialDayViewEnabled ? 'h-[88px]' : 'h-12'}`}>
