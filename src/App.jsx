@@ -5298,6 +5298,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
             const [showEditTimelineModal, setShowEditTimelineModal] = useState(false);
             const [showEditStatusJournal, setShowEditStatusJournal] = useState(false);
+            const [editTimelineFocusedStatusKey, setEditTimelineFocusedStatusKey] = useState('');
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
@@ -5334,6 +5335,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [myNowTick, setMyNowTick] = useState(0);
             const dragState = useRef(null);
             const breakReminderNotifiedRef = useRef(new Map());
+            const editTimelineScrollRef = useRef(null);
             const plannerUiStateLoadedRef = useRef(false);
             const plannerExcelImportInputRef = useRef(null);
             const plannerStatusAnomalyInputRef = useRef(null);
@@ -5854,6 +5856,28 @@ const withAccessTokenHeader = (headers = {}) => {
                 });
                 return map;
             }, [plannerStatusAnomalyAnalysis]);
+
+            const buildEditTimelineStatusFocusKey = (seg, idx = 0) => (
+                `${Number(seg?.startMin ?? seg?.start ?? 0)}:${Number(seg?.endMin ?? seg?.end ?? 0)}:${plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || '')}:${idx}`
+            );
+
+            const focusEditTimelineStatusSegment = (seg, idx = 0) => {
+                if (!seg) return;
+                const focusKey = buildEditTimelineStatusFocusKey(seg, idx);
+                setEditTimelineFocusedStatusKey(focusKey);
+                if (!showEditTimelineModal) setShowEditTimelineModal(true);
+
+                const startMinRaw = Number(seg?.startMin ?? seg?.start ?? 0);
+                const startMin = Number.isFinite(startMinRaw) ? Math.max(0, Math.min(1440, startMinRaw)) : 0;
+                setTimeout(() => {
+                    const scroller = editTimelineScrollRef.current;
+                    if (!scroller) return;
+                    const scrollable = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+                    const targetPx = (startMin / 1440) * scroller.scrollWidth;
+                    const targetLeft = Math.max(0, Math.min(scrollable, targetPx - (scroller.clientWidth * 0.35)));
+                    scroller.scrollTo({ left: targetLeft, behavior: 'smooth' });
+                }, 60);
+            };
 
             useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
@@ -9136,7 +9160,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 </div>
                 <SimpleModal
                     open={modalState.open}
-                    onClose={() => { setModalState((m) => ({ ...m, open: false })); setShowEditTimelineModal(false); setShowEditStatusJournal(false); clearSelectedDays(); }}
+                    onClose={() => { setModalState((m) => ({ ...m, open: false })); setShowEditTimelineModal(false); setShowEditStatusJournal(false); setEditTimelineFocusedStatusKey(''); clearSelectedDays(); }}
                     panelClassName={`w-[720px] max-w-[calc(100vw-1rem)] ${(showEditTimelineModal && !isBulkSelectionModal) ? 'mb-[22vh] sm:mb-[26vh]' : ''} ${(showEditStatusJournal && !isBulkSelectionModal) ? 'lg:-translate-x-[120px]' : ''}`}
                 >
                     {/* Шапка с информацией об операторе */}
@@ -9179,7 +9203,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 </div>
                             </div>
                             <button 
-                                onClick={() => { setModalState(m => ({ ...m, open: false })); setShowEditTimelineModal(false); setShowEditStatusJournal(false); clearSelectedDays(); }} 
+                                onClick={() => { setModalState(m => ({ ...m, open: false })); setShowEditTimelineModal(false); setShowEditStatusJournal(false); setEditTimelineFocusedStatusKey(''); clearSelectedDays(); }} 
                                 className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
                             >
                                 <i className="fas fa-times text-lg"></i>
@@ -9199,7 +9223,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                 <div className="ml-auto flex items-center gap-2">
                                     <button
                                         type="button"
-                                        onClick={() => setShowEditTimelineModal(v => !v)}
+                                        onClick={() => setShowEditTimelineModal(v => {
+                                            const next = !v;
+                                            if (!next) setEditTimelineFocusedStatusKey('');
+                                            return next;
+                                        })}
                                         className="px-2.5 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 flex items-center gap-1.5"
                                         title={showEditTimelineModal ? 'Скрыть таймлайн за день' : 'Показать таймлайн за день'}
                                     >
@@ -9700,7 +9728,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         <div className="flex gap-3 justify-end">
                             <button 
                                 className="px-5 py-3 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition-colors flex items-center gap-2"
-                                onClick={() => { if (bulkActionState.loading) return; setModalState((m) => ({ ...m, open: false })); setShowEditTimelineModal(false); setShowEditStatusJournal(false); clearSelectedDays(); }}
+                                onClick={() => { if (bulkActionState.loading) return; setModalState((m) => ({ ...m, open: false })); setShowEditTimelineModal(false); setShowEditStatusJournal(false); setEditTimelineFocusedStatusKey(''); clearSelectedDays(); }}
                                 disabled={bulkActionState.loading}
                             >
                                 <i className="fas fa-times"></i>
@@ -9762,8 +9790,8 @@ const withAccessTokenHeader = (headers = {}) => {
                     const journalOperatorNameKey = plannerStatusNormalizeOperatorName(journalOp?.name);
                     const journalRows = importedStatusTimelineByOperatorDateKey.get(`${journalOperatorNameKey}|${journalDate}`) || [];
                     return (
-                        <div className="fixed inset-0 z-[65] flex items-center justify-end p-2 sm:p-3 pointer-events-none">
-                            <div className="w-[360px] max-w-[calc(100vw-1rem)] max-h-[calc(100vh-4rem)] bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden pointer-events-auto">
+                        <div className={`fixed inset-0 z-[65] flex justify-end p-2 sm:p-3 pointer-events-none ${showEditTimelineModal ? 'items-start pt-2' : 'items-center'}`}>
+                            <div className={`w-[360px] max-w-[calc(100vw-1rem)] ${showEditTimelineModal ? 'max-h-[38vh]' : 'max-h-[calc(100vh-4rem)]'} bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden pointer-events-auto`}>
                                 <div className="px-3 py-2.5 border-b border-slate-200 bg-slate-50 flex items-start justify-between gap-2">
                                     <div className="min-w-0">
                                         <div className="text-sm font-semibold text-slate-900">Журнал статусов</div>
@@ -9780,7 +9808,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <i className="fas fa-times text-xs"></i>
                                     </button>
                                 </div>
-                                <div className="max-h-[calc(100vh-10rem)] overflow-auto p-2 space-y-1.5">
+                                <div className={`${showEditTimelineModal ? 'max-h-[calc(38vh-3rem)]' : 'max-h-[calc(100vh-10rem)]'} overflow-auto p-2 space-y-1.5`}>
                                     {journalRows.length === 0 && (
                                         <div className="text-xs text-slate-500 border border-slate-200 rounded-lg p-2 bg-slate-50">
                                             Нет переключений статусов за этот день.
@@ -9789,8 +9817,16 @@ const withAccessTokenHeader = (headers = {}) => {
                                     {journalRows.map((seg, idx) => {
                                         const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
                                         const segDurationMin = Math.max(0, Number(seg?.endMin || 0) - Number(seg?.startMin || 0));
+                                        const rowFocusKey = buildEditTimelineStatusFocusKey(seg, idx);
+                                        const isFocusedRow = rowFocusKey === editTimelineFocusedStatusKey;
                                         return (
-                                            <div key={`edit-journal-row-${idx}`} className={`rounded-lg border px-2 py-1.5 text-xs ${tone.row}`}>
+                                            <button
+                                                type="button"
+                                                key={`edit-journal-row-${idx}`}
+                                                onClick={() => focusEditTimelineStatusSegment(seg, idx)}
+                                                className={`w-full text-left rounded-lg border px-2 py-1.5 text-xs transition ${tone.row} ${isFocusedRow ? 'ring-2 ring-sky-400 border-sky-300' : 'hover:border-slate-300'}`}
+                                                title="Перейти к этому статусу на таймлайне"
+                                            >
                                                 <div className="flex items-center justify-between gap-2">
                                                     <span className={`px-1.5 py-0.5 rounded border ${tone.pill}`}>{seg.stateName || seg.stateKey || 'Статус'}</span>
                                                     <span className="tabular-nums text-slate-600">{formatMinutesOnly(segDurationMin)}</span>
@@ -9803,7 +9839,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         note: {seg.stateNote}
                                                     </div>
                                                 )}
-                                            </div>
+                                            </button>
                                         );
                                     })}
                                 </div>
@@ -9902,7 +9938,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     </div>
                                     <button
                                         type="button"
-                                        onClick={() => setShowEditTimelineModal(false)}
+                                        onClick={() => { setShowEditTimelineModal(false); setEditTimelineFocusedStatusKey(''); }}
                                         className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-200 text-slate-500 hover:text-slate-700 transition-colors"
                                     >
                                         <i className="fas fa-times"></i>
@@ -9977,7 +10013,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             <div className="h-6 mb-2 text-[10px] font-semibold uppercase tracking-wide text-slate-500 flex items-center justify-end">График</div>
                                             <div className="h-6 text-[10px] font-semibold uppercase tracking-wide text-slate-500 flex items-center justify-end">Статусы</div>
                                         </div>
-                                        <div className="flex-1 overflow-x-auto pb-1">
+                                        <div className="flex-1 overflow-x-auto pb-1" ref={editTimelineScrollRef}>
                                             <div style={timelineTrackStyle} className="min-w-full">
                                                 <div className="relative h-5 mb-1">
                                                     <div className="absolute inset-0 flex items-end">
@@ -10057,15 +10093,18 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     </div>
                                                     {previewStatusBars.map((seg, segIdx) => {
                                                         const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
+                                                        const segFocusKey = buildEditTimelineStatusFocusKey(seg, segIdx);
+                                                        const isFocusedSeg = segFocusKey === editTimelineFocusedStatusKey;
                                                         return (
                                                             <div
                                                                 key={`modal-sheet-status-bar-${segIdx}`}
-                                                                className="absolute top-1 bottom-1"
+                                                                className={`absolute top-1 bottom-1 border ${isFocusedSeg ? 'z-50 border-sky-700' : 'border-transparent'}`}
                                                                 style={{
                                                                     left: `${computeLeftPercent(seg.startMin)}%`,
                                                                     width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
                                                                     background: tone.bar
                                                                 }}
+                                                                onClick={() => setEditTimelineFocusedStatusKey(segFocusKey)}
                                                                 title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
                                                             />
                                                         );
