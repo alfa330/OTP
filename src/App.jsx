@@ -8734,19 +8734,43 @@ const withAccessTokenHeader = (headers = {}) => {
                                     <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
                                         {visibleRange.map(d => {
                                             const parts = getShiftPartsForDate(op, d);
-                                            const importedStatusBarsForCell = plannerStatusSpecialDayViewEnabled
-                                                ? (importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(op?.name)}|${d}`) || [])
-                                                : [];
-                                            const specialStatusBreakPartsForCell = plannerStatusSpecialDayViewEnabled
-                                                ? parts.flatMap(p => getBreakPartsForPart(op, p, d)).map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) })).filter(b => b.end > b.start)
-                                                : [];
-                                            const specialStatusMatchMetrics = plannerStatusSpecialDayViewEnabled
+                                            const importedStatusBarsForCell = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(op?.name)}|${d}`) || [];
+                                            const breakPartsForCell = parts
+                                                .flatMap(p => getBreakPartsForPart(op, p, d))
+                                                .map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))
+                                                .filter(b => b.end > b.start);
+                                            const shouldComputeDefectMetrics = (viewMode === 'day' || viewMode === 'month') && parts.length > 0 && importedStatusBarsForCell.length > 0;
+                                            const statusMatchMetricsForCell = shouldComputeDefectMetrics
                                                 ? plannerComputeShiftStatusMatchMetrics({
                                                     shiftParts: parts,
-                                                    breakParts: specialStatusBreakPartsForCell,
+                                                    breakParts: breakPartsForCell,
                                                     statusBars: importedStatusBarsForCell
                                                 })
                                                 : null;
+                                            const noPhoneShiftMetricsForCell = shouldComputeDefectMetrics
+                                                ? plannerNoPhoneShiftMetricsForTimeline({
+                                                    timeline: importedStatusBarsForCell,
+                                                    dateKey: d,
+                                                    shiftParts: parts
+                                                })
+                                                : null;
+                                            const specialStatusBreakPartsForCell = breakPartsForCell;
+                                            const specialStatusMatchMetrics = plannerStatusSpecialDayViewEnabled
+                                                ? statusMatchMetricsForCell
+                                                : null;
+                                            const defectLateMin = Number(statusMatchMetricsForCell?.lateTotalMin || 0);
+                                            const defectEarlyLeaveMin = Number(statusMatchMetricsForCell?.earlyLeaveTotalMin || 0);
+                                            const defectNoPhoneSec = Number(noPhoneShiftMetricsForCell?.noPhoneSec || 0);
+                                            const hasDefectMarker = (viewMode === 'day' || viewMode === 'month') && (
+                                                defectLateMin > 0 ||
+                                                defectEarlyLeaveMin > 0 ||
+                                                defectNoPhoneSec > 60
+                                            );
+                                            const defectMarkerTitle = [
+                                                defectLateMin > 0 ? `Опоздание: ${Math.round(defectLateMin)} мин` : '',
+                                                defectEarlyLeaveMin > 0 ? `Ранний уход: ${Math.round(defectEarlyLeaveMin)} мин` : '',
+                                                defectNoPhoneSec > 60 ? `Без телефона в смене: ${Math.round(defectNoPhoneSec / 60)} мин` : ''
+                                            ].filter(Boolean).join(' • ') || 'Есть недочеты по смене';
                                             const specialStatusLateBars = (specialStatusMatchMetrics?.perShift || [])
                                                 .map(sh => {
                                                     const lateMin = Number(sh?.lateMin || 0);
@@ -8819,6 +8843,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                             }
                                             return (
                                             <div key={d} className={`${plannerStatusSpecialDayViewEnabled ? 'h-[100px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={(e) => handleDayClick(e, op.id, d)}>
+                                                {hasDefectMarker && (
+                                                    <span
+                                                        className="absolute top-1 right-1 z-50 w-2.5 h-2.5 rounded-full bg-rose-600 border border-white shadow-sm pointer-events-none"
+                                                        title={defectMarkerTitle}
+                                                    />
+                                                )}
                                                 {viewMode === 'day' ? (
                                                 <div className={`relative ${plannerStatusSpecialDayViewEnabled ? 'h-[88px]' : 'h-12'}`}>
                                                     {cellScheduleStatus ? (
