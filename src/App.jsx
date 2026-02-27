@@ -4547,17 +4547,14 @@ const withAccessTokenHeader = (headers = {}) => {
                         bar: '#fb7185'
                     });
                 case 'готов':
-                    return byKey({
-                        chip: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-                        row: 'border-emerald-100 bg-emerald-50/50 text-emerald-800',
-                        bar: '#22c55e'
-                    });
                 case 'занят':
                 case 'занята':
+                case 'авто':
+                case 'перезвон':
                     return byKey({
-                        chip: 'border-blue-200 bg-blue-50 text-blue-700',
-                        row: 'border-blue-100 bg-blue-50/60 text-blue-800',
-                        bar: '#3b82f6'
+                        chip: 'border-sky-200 bg-sky-50 text-sky-700',
+                        row: 'border-sky-100 bg-sky-50/60 text-sky-800',
+                        bar: '#0ea5e9'
                     });
                 case 'отключен':
                     return byKey({
@@ -4576,18 +4573,6 @@ const withAccessTokenHeader = (headers = {}) => {
                         chip: 'border-orange-200 bg-orange-50 text-orange-700',
                         row: 'border-orange-100 bg-orange-50/60 text-orange-800',
                         bar: '#f97316'
-                    });
-                case 'авто':
-                    return byKey({
-                        chip: 'border-cyan-200 bg-cyan-50 text-cyan-700',
-                        row: 'border-cyan-100 bg-cyan-50/60 text-cyan-800',
-                        bar: '#06b6d4'
-                    });
-                case 'перезвон':
-                    return byKey({
-                        chip: 'border-indigo-200 bg-indigo-50 text-indigo-700',
-                        row: 'border-indigo-100 bg-indigo-50/60 text-indigo-800',
-                        bar: '#6366f1'
                     });
                 case 'тех причина':
                     return byKey({
@@ -4807,6 +4792,53 @@ const withAccessTokenHeader = (headers = {}) => {
             endMin = Math.max(0, Math.min(1440, endMin));
             if (endMin <= startMin) return null;
             return { start: startMin, end: endMin };
+            };
+            const plannerNoPhoneShiftMetricsForTimeline = ({ timeline = [], dateKey = '', shiftParts = [] } = {}) => {
+            const shiftIntervals = mergeIntervals(
+                (shiftParts || [])
+                    .map(p => ({ start: Number(p?.start || 0), end: Number(p?.end || 0) }))
+                    .filter(i => i.end > i.start)
+            );
+            let noPhoneSec = 0;
+            let noPhoneAnomalyCount = 0;
+            const timelineDecorated = (Array.isArray(timeline) ? timeline : []).map(seg => {
+                const statusKeyNorm = plannerStatusNormalizeKey(seg?.rawStateKey || seg?.stateKey || seg?.rawStateName || seg?.stateName || '');
+                const isNoPhone = statusKeyNorm === PLANNER_STATUS_NO_PHONE_KEY;
+                if (!isNoPhone || !dateKey || shiftIntervals.length === 0) {
+                    return {
+                        ...seg,
+                        noPhoneShiftSec: 0,
+                        isNoPhoneInShift: false,
+                        isNoPhoneAnomalyInShift: false
+                    };
+                }
+                const mins = plannerStatusImportedSegmentToDayMinutes(seg, dateKey);
+                if (!mins) {
+                    return {
+                        ...seg,
+                        noPhoneShiftSec: 0,
+                        isNoPhoneInShift: false,
+                        isNoPhoneAnomalyInShift: false
+                    };
+                }
+                const overlapIntervals = plannerIntersectIntervalWithList({ start: mins.start, end: mins.end }, shiftIntervals);
+                const overlapSec = overlapIntervals.reduce((sum, part) => (
+                    sum + Math.max(0, Math.round((Number(part?.end || 0) - Number(part?.start || 0)) * 60))
+                ), 0);
+                const isNoPhoneInShift = overlapSec > 0;
+                const isNoPhoneAnomalyInShift = overlapSec > PLANNER_STATUS_NO_PHONE_ANOMALY_SECONDS;
+                if (isNoPhoneInShift) {
+                    noPhoneSec += overlapSec;
+                    if (isNoPhoneAnomalyInShift) noPhoneAnomalyCount += 1;
+                }
+                return {
+                    ...seg,
+                    noPhoneShiftSec: overlapSec,
+                    isNoPhoneInShift,
+                    isNoPhoneAnomalyInShift
+                };
+            });
+            return { noPhoneSec, noPhoneAnomalyCount, timelineDecorated };
             };
             const analyzePlannerStatusTransitionsCsv = (csvText) => {
             const parsed = Papa.parse(csvText, {
@@ -8715,6 +8747,16 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     statusBars: importedStatusBarsForCell
                                                 })
                                                 : null;
+                                            const specialStatusLateBars = (specialStatusMatchMetrics?.perShift || [])
+                                                .map(sh => {
+                                                    const lateMin = Number(sh?.lateMin || 0);
+                                                    if (lateMin <= 0) return null;
+                                                    const start = Number(sh?.start || 0);
+                                                    const end = Math.min(Number(sh?.end || 0), start + lateMin);
+                                                    if (end <= start) return null;
+                                                    return { start, end, lateMin };
+                                                })
+                                                .filter(Boolean);
                                             const specialStatusTimelineTrackBaseWidth = 24 * 40;
                                             const specialStatusTimelineTrackWidthPx = Math.max(
                                                 specialStatusTimelineTrackBaseWidth,
@@ -8803,14 +8845,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             <div className="flex items-center gap-1 h-[34px]">
                                                                 <div className="w-6 shrink-0 text-[9px] uppercase text-slate-500 font-semibold text-right">гр</div>
                                                                 <div className="flex-1 overflow-x-auto overflow-y-hidden" onClick={(e) => e.stopPropagation()}>
-                                                                    <div className="relative h-[34px] rounded border border-slate-200 bg-white" style={specialStatusTimelineTrackStyle}>
+                                                                    <div className="relative h-[34px] border border-slate-200 bg-white" style={specialStatusTimelineTrackStyle}>
                                                                         <div className="absolute inset-0 flex pointer-events-none">
                                                                             {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
                                                                         </div>
                                                                         {parts.map((p, idx) => (
                                                                             <React.Fragment key={`special-part-${idx}`}>
                                                                                 <div
-                                                                                    className="absolute top-1/2 -translate-y-1/2 h-5 rounded text-xs overflow-hidden flex items-center justify-between"
+                                                                                    className="absolute top-1/2 -translate-y-1/2 h-5 text-xs overflow-hidden flex items-center justify-between"
                                                                                     style={{
                                                                                         left: `${computeLeftPercent(p.start)}%`,
                                                                                         width: `${((p.end - p.start) / minutesInDay) * 100}%`,
@@ -8838,7 +8880,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                 {getBreakPartsForPart(op, p, d).map((b, bi) => (
                                                                                     <div
                                                                                         key={`special-break-${idx}-${bi}`}
-                                                                                        className="absolute top-1/2 -translate-y-1/2 h-5 rounded-sm z-30"
+                                                                                        className="absolute top-1/2 -translate-y-1/2 h-5 z-30"
                                                                                         style={{
                                                                                             left: `${computeLeftPercent(b.start)}%`,
                                                                                             width: `${((b.end - b.start) / minutesInDay) * 100}%`,
@@ -8848,6 +8890,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                     />
                                                                                 ))}
                                                                             </React.Fragment>
+                                                                        ))}
+                                                                        {specialStatusLateBars.map((late, lateIdx) => (
+                                                                            <div
+                                                                                key={`special-late-${lateIdx}`}
+                                                                                className="absolute top-0 bottom-0 z-40 border-l border-rose-700/80 bg-rose-500/35"
+                                                                                style={{
+                                                                                    left: `${computeLeftPercent(late.start)}%`,
+                                                                                    width: `${((late.end - late.start) / minutesInDay) * 100}%`
+                                                                                }}
+                                                                                title={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
+                                                                            />
                                                                         ))}
                                                                         {parts.length === 0 && (
                                                                             <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет смены</div>
@@ -8859,7 +8912,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             <div className="flex items-center gap-1 h-[34px]">
                                                                 <div className="w-6 shrink-0 text-[9px] uppercase text-slate-500 font-semibold text-right">ст</div>
                                                                 <div className="flex-1 overflow-x-auto overflow-y-hidden" onClick={(e) => e.stopPropagation()}>
-                                                                    <div className="relative h-[34px] rounded border border-slate-200 bg-white" style={specialStatusTimelineTrackStyle}>
+                                                                    <div className="relative h-[34px] border border-slate-200 bg-white" style={specialStatusTimelineTrackStyle}>
                                                                         <div className="absolute inset-0 flex pointer-events-none">
                                                                             {Array.from({ length: 24 }).map((_, i) => (<div key={i} className="flex-1 border-r last:border-r-0 border-slate-100" />))}
                                                                         </div>
@@ -8868,7 +8921,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                             return (
                                                                                 <div
                                                                                     key={`special-status-${segIdx}`}
-                                                                                    className="absolute top-1/2 -translate-y-1/2 h-5 rounded-sm"
+                                                                                    className="absolute top-1/2 -translate-y-1/2 h-5"
                                                                                     style={{
                                                                                         left: `${computeLeftPercent(seg.startMin)}%`,
                                                                                         width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
@@ -9828,18 +9881,6 @@ const withAccessTokenHeader = (headers = {}) => {
                         const modalFocus = plannerStatusModalFocus && typeof plannerStatusModalFocus === 'object' ? plannerStatusModalFocus : null;
                         const focusedDayKey = String(modalFocus?.dateKey || '');
                         const focusedOperatorNameKey = plannerStatusNormalizeOperatorName(modalFocus?.operatorName || '');
-                        const overallOperatorsList = hasAnalysis
-                            ? (analysis.overallOperators || []).filter(op => !onlyAnomalies || Number(op?.noPhoneAnomalyCount || 0) > 0)
-                            : [];
-                        const dayListBase = hasAnalysis
-                            ? (analysis.days || []).filter(day => !onlyAnomalies || Number(day?.noPhoneAnomalyCount || 0) > 0)
-                            : [];
-                        const dayList = focusedDayKey
-                            ? dayListBase.filter(day => String(day?.dateKey || '') === focusedDayKey)
-                            : dayListBase;
-                        const anomalyOperatorsCount = hasAnalysis
-                            ? (analysis.overallOperators || []).filter(op => Number(op?.noPhoneAnomalyCount || 0) > 0).length
-                            : 0;
                         const normalizeImportedOperatorName = (v) => String(v ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
                         const plannerOperatorByNameKey = new Map();
                         (operators || []).forEach(op => {
@@ -9859,6 +9900,74 @@ const withAccessTokenHeader = (headers = {}) => {
                             if (endMin <= startMin) return null;
                             return { start: startMin, end: endMin };
                         };
+                        const dayListPrepared = hasAnalysis
+                            ? (analysis.days || []).map(day => {
+                                const dateKey = String(day?.dateKey || '');
+                                let dayNoPhoneSec = 0;
+                                let dayNoPhoneAnomalyCount = 0;
+                                const preparedOperators = (Array.isArray(day?.operators) ? day.operators : [])
+                                    .map(op => {
+                                        const matchedPlannerOperator = plannerOperatorByNameKey.get(normalizeImportedOperatorName(op?.operatorName));
+                                        const shiftPartsForDay = matchedPlannerOperator ? getShiftPartsForDate(matchedPlannerOperator, dateKey) : [];
+                                        const noPhoneMetrics = plannerNoPhoneShiftMetricsForTimeline({
+                                            timeline: Array.isArray(op?.timeline) ? op.timeline : [],
+                                            dateKey,
+                                            shiftParts: shiftPartsForDay
+                                        });
+                                        dayNoPhoneSec += Number(noPhoneMetrics?.noPhoneSec || 0);
+                                        dayNoPhoneAnomalyCount += Number(noPhoneMetrics?.noPhoneAnomalyCount || 0);
+                                        return {
+                                            ...op,
+                                            noPhoneSec: Number(noPhoneMetrics?.noPhoneSec || 0),
+                                            noPhoneAnomalyCount: Number(noPhoneMetrics?.noPhoneAnomalyCount || 0),
+                                            timeline: noPhoneMetrics?.timelineDecorated || []
+                                        };
+                                    })
+                                    .sort((a, b) => (Number(b?.noPhoneSec || 0) - Number(a?.noPhoneSec || 0)) || String(a?.operatorName || '').localeCompare(String(b?.operatorName || ''), 'ru'));
+                                return {
+                                    ...day,
+                                    noPhoneSec: dayNoPhoneSec,
+                                    noPhoneAnomalyCount: dayNoPhoneAnomalyCount,
+                                    operators: preparedOperators
+                                };
+                            })
+                            : [];
+                        const dayListBase = dayListPrepared.filter(day => !onlyAnomalies || Number(day?.noPhoneAnomalyCount || 0) > 0);
+                        const dayList = focusedDayKey
+                            ? dayListBase.filter(day => String(day?.dateKey || '') === focusedDayKey)
+                            : dayListBase;
+                        const overallByOperatorPrepared = (() => {
+                            const map = new Map();
+                            const baseOverallByNameKey = new Map();
+                            (analysis?.overallOperators || []).forEach(op => {
+                                const key = plannerStatusNormalizeOperatorName(op?.operatorName || '');
+                                if (!key) return;
+                                baseOverallByNameKey.set(key, op);
+                            });
+                            dayListPrepared.forEach(day => {
+                                (Array.isArray(day?.operators) ? day.operators : []).forEach(op => {
+                                    const key = plannerStatusNormalizeOperatorName(op?.operatorName || '');
+                                    if (!key) return;
+                                    if (!map.has(key)) {
+                                        const base = baseOverallByNameKey.get(key);
+                                        map.set(key, {
+                                            operatorName: op?.operatorName || base?.operatorName || '—',
+                                            totalObservedSec: Number(base?.totalObservedSec || op?.totalObservedSec || 0),
+                                            noPhoneSec: 0,
+                                            noPhoneAnomalyCount: 0
+                                        });
+                                    }
+                                    const target = map.get(key);
+                                    target.noPhoneSec += Number(op?.noPhoneSec || 0);
+                                    target.noPhoneAnomalyCount += Number(op?.noPhoneAnomalyCount || 0);
+                                });
+                            });
+                            return Array.from(map.values()).sort((a, b) => (Number(b?.noPhoneSec || 0) - Number(a?.noPhoneSec || 0)) || String(a?.operatorName || '').localeCompare(String(b?.operatorName || ''), 'ru'));
+                        })();
+                        const overallOperatorsList = overallByOperatorPrepared.filter(op => !onlyAnomalies || Number(op?.noPhoneAnomalyCount || 0) > 0);
+                        const anomalyOperatorsCount = overallByOperatorPrepared.filter(op => Number(op?.noPhoneAnomalyCount || 0) > 0).length;
+                        const overallNoPhoneSec = overallByOperatorPrepared.reduce((sum, op) => sum + Number(op?.noPhoneSec || 0), 0);
+                        const overallNoPhoneAnomalies = overallByOperatorPrepared.reduce((sum, op) => sum + Number(op?.noPhoneAnomalyCount || 0), 0);
                         return (
                             <>
                                 <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-slate-200">
@@ -10006,10 +10115,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                             <div className="rounded-xl border bg-white p-3">
                                                 <div className="text-[11px] uppercase tracking-wide text-slate-500">Без телефона</div>
                                                 <div className="mt-1 text-xl font-semibold text-rose-700 tabular-nums">
-                                                    {plannerStatusFormatDuration(analysis.overallNoPhoneSec || 0)}
+                                                    {plannerStatusFormatDuration(overallNoPhoneSec || 0)}
                                                 </div>
                                                 <div className="text-[11px] text-slate-500 mt-1">
-                                                    Аномалий: {analysis.overallNoPhoneAnomalies || 0}
+                                                    Аномалий: {overallNoPhoneAnomalies || 0}
                                                 </div>
                                             </div>
                                             <div className="rounded-xl border bg-white p-3">
@@ -10146,7 +10255,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             {expanded && (
                                                                 <div className="border-t bg-slate-50 p-3 space-y-3">
                                                                     {dayOperatorsList.map((op, opIdx) => {
-                                                                        const timelineList = (op.timeline || []).filter(seg => !onlyAnomalies || !!seg?.isNoPhoneAnomaly);
+                                                                        const timelineList = (op.timeline || []).filter(seg => !onlyAnomalies || !!seg?.isNoPhoneAnomalyInShift);
                                                                         const matchedPlannerOperator = plannerOperatorByNameKey.get(normalizeImportedOperatorName(op.operatorName));
                                                                         const plannedShiftParts = matchedPlannerOperator ? getShiftPartsForDate(matchedPlannerOperator, day.dateKey) : [];
                                                                         const plannedBreakParts = matchedPlannerOperator
@@ -10167,6 +10276,16 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                             breakParts: plannedBreakParts,
                                                                             statusBars: statusTimelineBars
                                                                         });
+                                                                        const shiftLateBars = (shiftStatusMatchMetrics?.perShift || [])
+                                                                            .map(sh => {
+                                                                                const lateMin = Number(sh?.lateMin || 0);
+                                                                                if (lateMin <= 0) return null;
+                                                                                const start = Number(sh?.start || 0);
+                                                                                const end = Math.min(Number(sh?.end || 0), start + lateMin);
+                                                                                if (end <= start) return null;
+                                                                                return { start, end, lateMin };
+                                                                            })
+                                                                            .filter(Boolean);
                                                                         const timelineTrackBaseWidth = 24 * 52;
                                                                         const timelineTrackWidthPx = Math.max(timelineTrackBaseWidth, Math.round(timelineTrackBaseWidth * (plannerStatusTimelineZoom || 1)));
                                                                         const timelineTrackStyle = { width: `${timelineTrackWidthPx}px`, minWidth: '100%' };
@@ -10237,7 +10356,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                                 </div>
                                                                                             </div>
 
-                                                                                            <div className="relative h-6 rounded border border-slate-200 bg-white overflow-hidden mb-2">
+                                                                                            <div className="relative h-6 border border-slate-200 bg-white overflow-hidden mb-2">
                                                                                                 <div className="absolute inset-0 flex pointer-events-none">
                                                                                                     {Array.from({ length: 24 }).map((_, h) => (
                                                                                                         <div key={`anomaly-grid-shift-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
@@ -10249,7 +10368,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                                     return (
                                                                                                         <div
                                                                                                             key={`anomaly-shift-bar-${pIdx}`}
-                                                                                                            className="absolute top-1 bottom-1 rounded-sm border border-white/60"
+                                                                                                            className="absolute top-1 bottom-1 border border-white/60"
                                                                                                             style={{
                                                                                                                 left: `${computeLeftPercent(p.start)}%`,
                                                                                                                 width: `${((p.end - p.start) / minutesInDay) * 100}%`,
@@ -10262,7 +10381,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                                 {plannedBreakParts.map((b, bIdx) => (
                                                                                                     <div
                                                                                                         key={`anomaly-break-bar-${bIdx}`}
-                                                                                                        className="absolute top-[3px] bottom-[3px] rounded-sm border border-amber-200 bg-amber-300/90"
+                                                                                                        className="absolute top-[3px] bottom-[3px] border border-amber-200 bg-amber-300/90"
                                                                                                         style={{
                                                                                                             left: `${computeLeftPercent(b.start)}%`,
                                                                                                             width: `${((b.end - b.start) / minutesInDay) * 100}%`
@@ -10270,9 +10389,20 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                                         title={`Перерыв • ${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
                                                                                                     />
                                                                                                 ))}
+                                                                                                {shiftLateBars.map((late, lateIdx) => (
+                                                                                                    <div
+                                                                                                        key={`anomaly-late-bar-${lateIdx}`}
+                                                                                                        className="absolute top-0 bottom-0 z-40 border-l border-rose-700/80 bg-rose-500/35"
+                                                                                                        style={{
+                                                                                                            left: `${computeLeftPercent(late.start)}%`,
+                                                                                                            width: `${((late.end - late.start) / minutesInDay) * 100}%`
+                                                                                                        }}
+                                                                                                        title={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
+                                                                                                    />
+                                                                                                ))}
                                                                                             </div>
 
-                                                                                            <div className="relative h-6 rounded border border-slate-200 bg-white overflow-hidden">
+                                                                                            <div className="relative h-6 border border-slate-200 bg-white overflow-hidden">
                                                                                                 <div className="absolute inset-0 flex pointer-events-none">
                                                                                                     {Array.from({ length: 24 }).map((_, h) => (
                                                                                                         <div key={`anomaly-grid-status-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
@@ -10283,7 +10413,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                                     return (
                                                                                                         <div
                                                                                                             key={`anomaly-status-bar-${segIdx}`}
-                                                                                                            className="absolute top-1 bottom-1 rounded-sm"
+                                                                                                            className="absolute top-1 bottom-1"
                                                                                                             style={{
                                                                                                                 left: `${computeLeftPercent(seg.startMin)}%`,
                                                                                                                 width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
@@ -10333,10 +10463,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                 {timelineList.map((seg, segIdx) => (
                                                                                     (() => {
                                                                                         const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
-                                                                                        const rowClass = seg.isNoPhoneAnomaly
+                                                                                        const rowClass = seg.isNoPhoneAnomalyInShift
                                                                                             ? 'border-rose-200 bg-rose-50 text-rose-900'
                                                                                             : tone.row;
-                                                                                        const pillClass = seg.isNoPhoneAnomaly
+                                                                                        const pillClass = seg.isNoPhoneAnomalyInShift
                                                                                             ? 'border-rose-200 bg-white text-rose-700'
                                                                                             : tone.pill;
                                                                                         return (
@@ -10356,7 +10486,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                             </span>
                                                                                         )}
                                                                                         <span className="tabular-nums">Длит.: {plannerStatusFormatDuration(seg.durationSec)}</span>
-                                                                                        {seg.isNoPhoneAnomaly && (
+                                                                                        {seg.isNoPhoneAnomalyInShift && (
                                                                                             <span className="px-1.5 py-0.5 rounded border border-rose-300 bg-white text-rose-700 font-semibold">
                                                                                                 Аномалия
                                                                                             </span>
