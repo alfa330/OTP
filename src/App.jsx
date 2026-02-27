@@ -4675,6 +4675,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const workStatusTotalMin = plannerIntervalsTotalMinutes(workStatusIntervals);
             const workInsideShiftMin = plannerOverlapMinutesBetweenIntervalSets(workStatusIntervals, shiftIntervals);
             const workOutsideShiftMin = Math.max(0, workStatusTotalMin - workInsideShiftMin);
+            const workOutsideShiftIntervals = plannerSubtractIntervals(workStatusIntervals, shiftIntervals);
             const matchedTotalMin = matchedWorkMin + matchedBreakMin;
             const compliancePct = totalScheduledMin > 0 ? (matchedTotalMin / totalScheduledMin) * 100 : null;
 
@@ -4724,6 +4725,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 matchedWorkMin,
                 matchedBreakMin,
                 workOutsideShiftMin,
+                workOutsideShiftIntervals,
                 matchedTotalMin,
                 compliancePct,
                 lateTotalMin,
@@ -8772,12 +8774,18 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 defectNoPhoneSec > 60
                                             );
                                             const hasOvertimeMarker = (viewMode === 'day' || viewMode === 'week' || viewMode === 'month') && overtimeOutsideShiftMin > 10;
-                                            const defectMarkerTitle = [
+                                            const defectIssues = [
                                                 defectLateMin > 0 ? `Опоздание: ${Math.round(defectLateMin)} мин` : '',
                                                 defectEarlyLeaveMin > 0 ? `Ранний уход: ${Math.round(defectEarlyLeaveMin)} мин` : '',
                                                 defectNoPhoneSec > 60 ? `Без телефона в смене: ${Math.round(defectNoPhoneSec / 60)} мин` : ''
-                                            ].filter(Boolean).join(' • ') || 'Есть недочеты по смене';
-                                            const overtimeMarkerTitle = `Переработка вне смены: ${Math.round(overtimeOutsideShiftMin)} мин`;
+                                            ].filter(Boolean);
+                                            const overtimeIssues = hasOvertimeMarker
+                                                ? [`Вне смены: ${Math.round(overtimeOutsideShiftMin)} мин`]
+                                                : [];
+                                            const markerTooltipText = [
+                                                defectIssues.length > 0 ? `Проблемы: ${defectIssues.join(', ')}` : '',
+                                                overtimeIssues.length > 0 ? `Переработка: ${overtimeIssues.join(', ')}` : ''
+                                            ].filter(Boolean).join('\n');
                                             const specialStatusLateBars = (specialStatusMatchMetrics?.perShift || [])
                                                 .map(sh => {
                                                     const lateMin = Number(sh?.lateMin || 0);
@@ -8786,6 +8794,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     const end = Math.min(Number(sh?.end || 0), start + lateMin);
                                                     if (end <= start) return null;
                                                     return { start, end, lateMin };
+                                                })
+                                                .filter(Boolean);
+                                            const specialStatusOvertimeBars = (specialStatusMatchMetrics?.workOutsideShiftIntervals || [])
+                                                .map((interval, idx) => {
+                                                    const start = Math.max(0, Number(interval?.start || 0));
+                                                    const end = Math.min(1440, Number(interval?.end || 0));
+                                                    if (end <= start) return null;
+                                                    return { id: idx, start, end, min: end - start };
                                                 })
                                                 .filter(Boolean);
                                             const specialStatusTimelineTrackBaseWidth = 24 * 40;
@@ -8851,17 +8867,15 @@ const withAccessTokenHeader = (headers = {}) => {
                                             return (
                                             <div key={d} className={`${plannerStatusSpecialDayViewEnabled ? 'h-[100px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')} style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }} onClick={(e) => handleDayClick(e, op.id, d)}>
                                                 {(hasDefectMarker || hasOvertimeMarker) && (
-                                                    <span className="absolute top-1 right-1 z-50 flex items-center gap-1 pointer-events-none">
+                                                    <span className="absolute top-1 right-1 z-50 flex items-center gap-1" title={markerTooltipText || 'Есть недочеты/переработка'}>
                                                         {hasOvertimeMarker && (
                                                             <span
                                                                 className="w-2.5 h-2.5 rounded-full bg-emerald-600 border border-white shadow-sm"
-                                                                title={overtimeMarkerTitle}
                                                             />
                                                         )}
                                                         {hasDefectMarker && (
                                                             <span
                                                                 className="w-2.5 h-2.5 rounded-full bg-rose-600 border border-white shadow-sm"
-                                                                title={defectMarkerTitle}
                                                             />
                                                         )}
                                                     </span>
@@ -8949,6 +8963,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                 title={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
                                                                             />
                                                                         ))}
+                                                                        {specialStatusOvertimeBars.map((ot) => (
+                                                                            <div
+                                                                                key={`special-overtime-${ot.id}`}
+                                                                                className="absolute top-0 bottom-0 z-40 border-l border-emerald-700/80 bg-emerald-500/35"
+                                                                                style={{
+                                                                                    left: `${computeLeftPercent(ot.start)}%`,
+                                                                                    width: `${((ot.end - ot.start) / minutesInDay) * 100}%`
+                                                                                }}
+                                                                                title={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
+                                                                            />
+                                                                        ))}
                                                                         {parts.length === 0 && (
                                                                             <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет смены</div>
                                                                         )}
@@ -9004,6 +9029,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     </span>
                                                                     <span className={specialStatusMatchMetrics.earlyLeaveTotalMin > 0 ? 'text-rose-700 font-medium' : 'text-slate-500'}>
                                                                         {`Уход: ${Math.round(specialStatusMatchMetrics.earlyLeaveTotalMin)}м`}
+                                                                    </span>
+                                                                    <span className={specialStatusMatchMetrics.workOutsideShiftMin > 10 ? 'text-emerald-700 font-medium' : 'text-slate-500'}>
+                                                                        {`Перераб.: ${Math.round(specialStatusMatchMetrics.workOutsideShiftMin || 0)}м`}
                                                                     </span>
                                                                 </div>
                                                             )}
@@ -10333,6 +10361,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                 return { start, end, lateMin };
                                                                             })
                                                                             .filter(Boolean);
+                                                                        const shiftOvertimeBars = (shiftStatusMatchMetrics?.workOutsideShiftIntervals || [])
+                                                                            .map((interval, idx) => {
+                                                                                const start = Math.max(0, Number(interval?.start || 0));
+                                                                                const end = Math.min(1440, Number(interval?.end || 0));
+                                                                                if (end <= start) return null;
+                                                                                return { id: idx, start, end, min: end - start };
+                                                                            })
+                                                                            .filter(Boolean);
                                                                         const timelineTrackBaseWidth = 24 * 52;
                                                                         const timelineTrackWidthPx = Math.max(timelineTrackBaseWidth, Math.round(timelineTrackBaseWidth * (plannerStatusTimelineZoom || 1)));
                                                                         const timelineTrackStyle = { width: `${timelineTrackWidthPx}px`, minWidth: '100%' };
@@ -10380,6 +10416,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                     </span>
                                                                                     <span className={`px-2 py-1 rounded-md border text-xs ${shiftStatusMatchMetrics.earlyLeaveTotalMin > 0 ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
                                                                                         Ранний уход: <strong className="tabular-nums">{Math.round(shiftStatusMatchMetrics.earlyLeaveTotalMin)} мин</strong>
+                                                                                    </span>
+                                                                                    <span className={`px-2 py-1 rounded-md border text-xs ${shiftStatusMatchMetrics.workOutsideShiftMin > 10 ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+                                                                                        Переработка: <strong className="tabular-nums">{Math.round(shiftStatusMatchMetrics.workOutsideShiftMin || 0)} мин</strong>
                                                                                     </span>
                                                                                 </div>
                                                                             )}
@@ -10445,6 +10484,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                                             width: `${((late.end - late.start) / minutesInDay) * 100}%`
                                                                                                         }}
                                                                                                         title={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
+                                                                                                    />
+                                                                                                ))}
+                                                                                                {shiftOvertimeBars.map((ot) => (
+                                                                                                    <div
+                                                                                                        key={`anomaly-overtime-bar-${ot.id}`}
+                                                                                                        className="absolute top-0 bottom-0 z-40 border-l border-emerald-700/80 bg-emerald-500/35"
+                                                                                                        style={{
+                                                                                                            left: `${computeLeftPercent(ot.start)}%`,
+                                                                                                            width: `${((ot.end - ot.start) / minutesInDay) * 100}%`
+                                                                                                        }}
+                                                                                                        title={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
                                                                                                     />
                                                                                                 ))}
                                                                                             </div>
