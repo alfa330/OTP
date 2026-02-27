@@ -5881,7 +5881,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 const targetNode = editJournalStatusNodeMapRef.current.get(focusKey);
                 if (!scroller || !targetNode) return false;
                 const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-                const targetTop = Math.max(0, Math.min(maxTop, targetNode.offsetTop - 8));
+                const desiredTop = targetNode.offsetTop - Math.max(12, Math.round(scroller.clientHeight * 0.32));
+                const targetTop = Math.max(0, Math.min(maxTop, desiredTop));
                 scroller.scrollTo({ top: targetTop, behavior });
                 return true;
             };
@@ -9842,7 +9843,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     const journalRows = importedStatusTimelineByOperatorDateKey.get(`${journalOperatorNameKey}|${journalDate}`) || [];
                     return (
                         <div className={`fixed inset-0 z-[65] flex justify-end p-2 sm:p-3 pointer-events-none ${showEditTimelineModal ? 'items-start pt-2' : 'items-center'}`}>
-                            <div className={`w-[360px] max-w-[calc(100vw-1rem)] ${showEditTimelineModal ? 'max-h-[62vh]' : 'max-h-[calc(100vh-4rem)]'} bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden pointer-events-auto`}>
+                            <div className={`w-[360px] max-w-[calc(100vw-1rem)] ${showEditTimelineModal ? 'max-h-[68vh]' : 'max-h-[calc(100vh-4rem)]'} bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden pointer-events-auto`}>
                                 <div className="px-3 py-2.5 border-b border-slate-200 bg-slate-50 flex items-start justify-between gap-2">
                                     <div className="min-w-0">
                                         <div className="text-sm font-semibold text-slate-900">Журнал статусов</div>
@@ -9859,7 +9860,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <i className="fas fa-times text-xs"></i>
                                     </button>
                                 </div>
-                                <div ref={editJournalScrollRef} className={`${showEditTimelineModal ? 'max-h-[calc(62vh-3rem)]' : 'max-h-[calc(100vh-10rem)]'} overflow-auto p-2 space-y-1.5`}>
+                                <div ref={editJournalScrollRef} className={`${showEditTimelineModal ? 'max-h-[calc(68vh-3rem)]' : 'max-h-[calc(100vh-10rem)]'} overflow-auto p-2 space-y-1.5`}>
                                     {journalRows.length === 0 && (
                                         <div className="text-xs text-slate-500 border border-slate-200 rounded-lg p-2 bg-slate-50">
                                             Нет переключений статусов за этот день.
