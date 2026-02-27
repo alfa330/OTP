@@ -5336,6 +5336,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const dragState = useRef(null);
             const breakReminderNotifiedRef = useRef(new Map());
             const editTimelineScrollRef = useRef(null);
+            const editTimelineStatusNodeMapRef = useRef(new Map());
             const plannerUiStateLoadedRef = useRef(false);
             const plannerExcelImportInputRef = useRef(null);
             const plannerStatusAnomalyInputRef = useRef(null);
@@ -5861,23 +5862,38 @@ const withAccessTokenHeader = (headers = {}) => {
                 `${Number(seg?.startMin ?? seg?.start ?? 0)}:${Number(seg?.endMin ?? seg?.end ?? 0)}:${plannerStatusNormalizeKey(seg?.stateName || seg?.stateKey || '')}:${idx}`
             );
 
+            const scrollEditTimelineToFocusedStatus = (focusKey, behavior = 'smooth') => {
+                if (!focusKey) return false;
+                const scroller = editTimelineScrollRef.current;
+                const targetNode = editTimelineStatusNodeMapRef.current.get(focusKey);
+                if (!scroller || !targetNode) return false;
+                const maxLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+                const targetLeft = Math.max(0, Math.min(maxLeft, targetNode.offsetLeft - 8));
+                scroller.scrollTo({ left: targetLeft, behavior });
+                return true;
+            };
+
             const focusEditTimelineStatusSegment = (seg, idx = 0) => {
                 if (!seg) return;
                 const focusKey = buildEditTimelineStatusFocusKey(seg, idx);
                 setEditTimelineFocusedStatusKey(focusKey);
                 if (!showEditTimelineModal) setShowEditTimelineModal(true);
-
-                const startMinRaw = Number(seg?.startMin ?? seg?.start ?? 0);
-                const startMin = Number.isFinite(startMinRaw) ? Math.max(0, Math.min(1440, startMinRaw)) : 0;
-                setTimeout(() => {
-                    const scroller = editTimelineScrollRef.current;
-                    if (!scroller) return;
-                    const scrollable = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-                    const targetPx = (startMin / 1440) * scroller.scrollWidth;
-                    const targetLeft = Math.max(0, Math.min(scrollable, targetPx - (scroller.clientWidth * 0.35)));
-                    scroller.scrollTo({ left: targetLeft, behavior: 'smooth' });
-                }, 60);
+                const scrollAttempts = [0, 70, 140, 220];
+                scrollAttempts.forEach((delay, attemptIdx) => {
+                    setTimeout(() => {
+                        scrollEditTimelineToFocusedStatus(focusKey, attemptIdx === 0 ? 'auto' : 'smooth');
+                    }, delay);
+                });
             };
+
+            useEffect(() => {
+                if (!showEditTimelineModal || !editTimelineFocusedStatusKey) return;
+                const timers = [
+                    setTimeout(() => scrollEditTimelineToFocusedStatus(editTimelineFocusedStatusKey, 'auto'), 0),
+                    setTimeout(() => scrollEditTimelineToFocusedStatus(editTimelineFocusedStatusKey, 'smooth'), 80)
+                ];
+                return () => timers.forEach(t => clearTimeout(t));
+            }, [showEditTimelineModal, editTimelineFocusedStatusKey, modalState.open, modalState.opId, modalState.date]);
 
             useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
@@ -9791,7 +9807,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     const journalRows = importedStatusTimelineByOperatorDateKey.get(`${journalOperatorNameKey}|${journalDate}`) || [];
                     return (
                         <div className={`fixed inset-0 z-[65] flex justify-end p-2 sm:p-3 pointer-events-none ${showEditTimelineModal ? 'items-start pt-2' : 'items-center'}`}>
-                            <div className={`w-[360px] max-w-[calc(100vw-1rem)] ${showEditTimelineModal ? 'max-h-[38vh]' : 'max-h-[calc(100vh-4rem)]'} bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden pointer-events-auto`}>
+                            <div className={`w-[360px] max-w-[calc(100vw-1rem)] ${showEditTimelineModal ? 'max-h-[52vh]' : 'max-h-[calc(100vh-4rem)]'} bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden pointer-events-auto`}>
                                 <div className="px-3 py-2.5 border-b border-slate-200 bg-slate-50 flex items-start justify-between gap-2">
                                     <div className="min-w-0">
                                         <div className="text-sm font-semibold text-slate-900">Журнал статусов</div>
@@ -9808,7 +9824,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <i className="fas fa-times text-xs"></i>
                                     </button>
                                 </div>
-                                <div className={`${showEditTimelineModal ? 'max-h-[calc(38vh-3rem)]' : 'max-h-[calc(100vh-10rem)]'} overflow-auto p-2 space-y-1.5`}>
+                                <div className={`${showEditTimelineModal ? 'max-h-[calc(52vh-3rem)]' : 'max-h-[calc(100vh-10rem)]'} overflow-auto p-2 space-y-1.5`}>
                                     {journalRows.length === 0 && (
                                         <div className="text-xs text-slate-500 border border-slate-200 rounded-lg p-2 bg-slate-50">
                                             Нет переключений статусов за этот день.
@@ -10098,6 +10114,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         return (
                                                             <div
                                                                 key={`modal-sheet-status-bar-${segIdx}`}
+                                                                ref={(node) => {
+                                                                    if (node) editTimelineStatusNodeMapRef.current.set(segFocusKey, node);
+                                                                    else editTimelineStatusNodeMapRef.current.delete(segFocusKey);
+                                                                }}
                                                                 className={`absolute top-1 bottom-1 border ${isFocusedSeg ? 'z-50 border-sky-700' : 'border-transparent'}`}
                                                                 style={{
                                                                     left: `${computeLeftPercent(seg.startMin)}%`,
