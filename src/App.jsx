@@ -9813,12 +9813,10 @@ const withAccessTokenHeader = (headers = {}) => {
 
                     return (
                         <div
-                            className="fixed inset-0 z-[70] flex items-end justify-center p-2 sm:p-3 bg-black/40 backdrop-blur-[1px]"
-                            onClick={() => setShowEditTimelineModal(false)}
+                            className="fixed inset-0 z-[55] flex items-end justify-center p-2 sm:p-3 pointer-events-none"
                         >
                             <div
-                                className="w-full max-w-[1700px] rounded-t-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden"
-                                onClick={(e) => e.stopPropagation()}
+                                className="w-full max-w-[1700px] rounded-t-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden pointer-events-auto"
                             >
                                 <div className="flex items-start justify-between gap-3 p-4 border-b border-slate-200 bg-slate-50">
                                     <div>
