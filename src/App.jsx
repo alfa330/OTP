@@ -5296,6 +5296,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 statusDeleting: false
             });
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
+            const [showEditTimelineModal, setShowEditTimelineModal] = useState(false);
             const [showDayBreaksModal, setShowDayBreaksModal] = useState(false);
             const [isLoading, setIsLoading] = useState(false);
             const [bulkActionState, setBulkActionState] = useState({ loading: false, action: '' });
@@ -9132,7 +9133,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     </div>
                     </div>
                 </div>
-                <SimpleModal open={modalState.open} onClose={() => { setModalState((m) => ({ ...m, open: false })); clearSelectedDays(); }}>
+                <SimpleModal open={modalState.open} onClose={() => { setModalState((m) => ({ ...m, open: false })); setShowEditTimelineModal(false); clearSelectedDays(); }}>
                     {/* Шапка с информацией об операторе */}
                     <div className="mb-6 pb-4 border-b border-slate-200">
                         <div className="flex items-start justify-between mb-3">
@@ -9173,7 +9174,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 </div>
                             </div>
                             <button 
-                                onClick={() => { setModalState(m => ({ ...m, open: false })); clearSelectedDays(); }} 
+                                onClick={() => { setModalState(m => ({ ...m, open: false })); setShowEditTimelineModal(false); clearSelectedDays(); }} 
                                 className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
                             >
                                 <i className="fas fa-times text-lg"></i>
@@ -9189,6 +9190,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                     : modalState.date
                                 }
                             </span>
+                            {!isBulkSelectionModal && (
+                                <button
+                                    type="button"
+                                    onClick={() => setShowEditTimelineModal(true)}
+                                    className="ml-auto px-2.5 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 flex items-center gap-1.5"
+                                    title="Открыть таймлайн статусов отдельным окном"
+                                >
+                                    <i className="fas fa-chart-gantt text-[10px]"></i>
+                                    Таймлайн
+                                </button>
+                            )}
                             {isBulkSelectionModal && modalBulkSortedDates.length > 0 && (
                                 <span className="ml-auto text-xs text-slate-500">
                                     {modalBulkSortedDates[0]} — {modalBulkSortedDates[modalBulkSortedDates.length - 1]}
@@ -9651,160 +9663,6 @@ const withAccessTokenHeader = (headers = {}) => {
                     </>
                     )}
 
-                    {!isBulkSelectionModal && modalState.opId && modalState.date && (() => {
-                        const modalPreviewOp = operators.find(o => o.id === modalState.opId);
-                        const modalPreviewDate = String(modalState.date || '');
-                        if (!modalPreviewOp || !modalPreviewDate) return null;
-                        const previewParts = getShiftPartsForDate(modalPreviewOp, modalPreviewDate);
-                        const previewBreakParts = previewParts
-                            .flatMap(p => getBreakPartsForPart(modalPreviewOp, p, modalPreviewDate))
-                            .map(b => ({ start: Math.max(0, Math.min(1440, Number(b?.start || 0))), end: Math.max(0, Math.min(1440, Number(b?.end || 0))) }))
-                            .filter(b => b.end > b.start);
-                        const previewStatusBars = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(modalPreviewOp?.name)}|${modalPreviewDate}`) || [];
-                        const previewMetrics = (previewParts.length > 0 && previewStatusBars.length > 0)
-                            ? plannerComputeShiftStatusMatchMetrics({
-                                shiftParts: previewParts,
-                                breakParts: previewBreakParts,
-                                statusBars: previewStatusBars
-                            })
-                            : null;
-                        const previewLateBars = (previewMetrics?.perShift || [])
-                            .map(sh => {
-                                const lateMin = Number(sh?.lateMin || 0);
-                                if (lateMin <= 0) return null;
-                                const start = Number(sh?.start || 0);
-                                const end = Math.min(Number(sh?.end || 0), start + lateMin);
-                                if (end <= start) return null;
-                                return { start, end, lateMin };
-                            })
-                            .filter(Boolean);
-                        const previewOvertimeBars = (previewMetrics?.workOutsideShiftIntervals || [])
-                            .map((interval, idx) => {
-                                const start = Math.max(0, Number(interval?.start || 0));
-                                const end = Math.min(1440, Number(interval?.end || 0));
-                                if (end <= start) return null;
-                                return { id: idx, start, end, min: end - start };
-                            })
-                            .filter(Boolean);
-                        const timelineTrackBaseWidth = 24 * 52;
-                        const timelineTrackWidthPx = Math.max(timelineTrackBaseWidth, Math.round(timelineTrackBaseWidth * (plannerStatusTimelineZoom || 1)));
-                        const timelineTrackStyle = { width: `${timelineTrackWidthPx}px`, minWidth: '100%' };
-                        return (
-                            <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                <div className="text-sm font-semibold text-slate-800 mb-2">Таймлайн статусов за день</div>
-                                <div className="flex items-start gap-2">
-                                    <div className="w-14 shrink-0">
-                                        <div className="h-5 mb-1" />
-                                        <div className="h-6 mb-2 text-[10px] font-semibold uppercase tracking-wide text-slate-500 flex items-center justify-end">График</div>
-                                        <div className="h-6 text-[10px] font-semibold uppercase tracking-wide text-slate-500 flex items-center justify-end">Статусы</div>
-                                    </div>
-                                    <div className="flex-1 overflow-x-auto pb-1">
-                                        <div style={timelineTrackStyle} className="min-w-full">
-                                            <div className="relative h-5 mb-1">
-                                                <div className="absolute inset-0 flex items-end">
-                                                    {Array.from({ length: 24 }).map((_, h) => (
-                                                        <div key={`modal-preview-hour-${h}`} className="flex-1 text-center text-[10px] leading-none text-slate-500">
-                                                            {h}
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-
-                                            <div className="relative h-6 border border-slate-200 bg-white overflow-hidden mb-2">
-                                                <div className="absolute inset-0 flex pointer-events-none">
-                                                    {Array.from({ length: 24 }).map((_, h) => (
-                                                        <div key={`modal-preview-grid-shift-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
-                                                    ))}
-                                                </div>
-                                                {previewParts.map((p, pIdx) => {
-                                                    const srcSeg = modalPreviewOp?.shifts?.[p.sourceDate]?.[p.sourceIndex];
-                                                    const isNight = !!(srcSeg && timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
-                                                    return (
-                                                        <div
-                                                            key={`modal-preview-shift-bar-${pIdx}`}
-                                                            className="absolute top-1 bottom-1 border border-white/60"
-                                                            style={{
-                                                                left: `${computeLeftPercent(p.start)}%`,
-                                                                width: `${((p.end - p.start) / minutesInDay) * 100}%`,
-                                                                background: isNight ? 'linear-gradient(90deg,#fb923c,#ea580c)' : 'linear-gradient(90deg,#60a5fa,#2563eb)'
-                                                            }}
-                                                            title={`${isNight ? 'Ночная смена' : 'Смена'} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
-                                                        />
-                                                    );
-                                                })}
-                                                {previewBreakParts.map((b, bIdx) => (
-                                                    <div
-                                                        key={`modal-preview-break-bar-${bIdx}`}
-                                                        className="absolute top-[3px] bottom-[3px] border border-amber-200 bg-amber-300/90"
-                                                        style={{
-                                                            left: `${computeLeftPercent(b.start)}%`,
-                                                            width: `${((b.end - b.start) / minutesInDay) * 100}%`
-                                                        }}
-                                                        title={`Перерыв • ${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
-                                                    />
-                                                ))}
-                                                {previewLateBars.map((late, lateIdx) => (
-                                                    <div
-                                                        key={`modal-preview-late-bar-${lateIdx}`}
-                                                        className="absolute top-0 bottom-0 z-40 border-l border-rose-700/80 bg-rose-500/35"
-                                                        style={{
-                                                            left: `${computeLeftPercent(late.start)}%`,
-                                                            width: `${((late.end - late.start) / minutesInDay) * 100}%`
-                                                        }}
-                                                        title={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
-                                                    />
-                                                ))}
-                                                {previewOvertimeBars.map((ot) => (
-                                                    <div
-                                                        key={`modal-preview-overtime-bar-${ot.id}`}
-                                                        className="absolute top-0 bottom-0 z-40 border-l border-emerald-700/80 bg-emerald-500/35"
-                                                        style={{
-                                                            left: `${computeLeftPercent(ot.start)}%`,
-                                                            width: `${((ot.end - ot.start) / minutesInDay) * 100}%`
-                                                        }}
-                                                        title={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
-                                                    />
-                                                ))}
-                                                {previewParts.length === 0 && (
-                                                    <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет смены</div>
-                                                )}
-                                            </div>
-
-                                            <div className="relative h-6 border border-slate-200 bg-white overflow-hidden">
-                                                <div className="absolute inset-0 flex pointer-events-none">
-                                                    {Array.from({ length: 24 }).map((_, h) => (
-                                                        <div key={`modal-preview-grid-status-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
-                                                    ))}
-                                                </div>
-                                                {previewStatusBars.map((seg, segIdx) => {
-                                                    const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
-                                                    return (
-                                                        <div
-                                                            key={`modal-preview-status-bar-${segIdx}`}
-                                                            className="absolute top-1 bottom-1"
-                                                            style={{
-                                                                left: `${computeLeftPercent(seg.startMin)}%`,
-                                                                width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
-                                                                background: tone.bar
-                                                            }}
-                                                            title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
-                                                        />
-                                                    );
-                                                })}
-                                                {plannerStatusAnomalyAnalysis && previewStatusBars.length === 0 && (
-                                                    <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет статусов</div>
-                                                )}
-                                                {!plannerStatusAnomalyAnalysis && (
-                                                    <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Загрузите статусы</div>
-                                                )}
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        );
-                    })()}
-
                     {/* Нижняя панель с кнопками */}
                     <div className="mt-6 pt-4 border-t border-slate-200">
                         {!modalState.isDayOff && (modalState.multipleDates || modalState.multipleTargets || modalState.editIndex !== null || modalState.showAddPanel) && (
@@ -9823,7 +9681,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         <div className="flex gap-3 justify-end">
                             <button 
                                 className="px-5 py-3 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition-colors flex items-center gap-2"
-                                onClick={() => { if (bulkActionState.loading) return; setModalState((m) => ({ ...m, open: false })); clearSelectedDays(); }}
+                                onClick={() => { if (bulkActionState.loading) return; setModalState((m) => ({ ...m, open: false })); setShowEditTimelineModal(false); clearSelectedDays(); }}
                                 disabled={bulkActionState.loading}
                             >
                                 <i className="fas fa-times"></i>
@@ -9877,6 +9735,187 @@ const withAccessTokenHeader = (headers = {}) => {
                         </div>
                     </div>
                     </>
+                </SimpleModal>
+
+                <SimpleModal
+                    open={!!(showEditTimelineModal && modalState.open && !isBulkSelectionModal && modalState.opId && modalState.date)}
+                    onClose={() => setShowEditTimelineModal(false)}
+                    panelClassName="w-[calc(100vw-2rem)] max-w-[1600px]"
+                >
+                    {(() => {
+                        const modalPreviewOp = operators.find(o => o.id === modalState.opId);
+                        const modalPreviewDate = String(modalState.date || '');
+                        if (!modalPreviewOp || !modalPreviewDate) return null;
+                        const previewParts = getShiftPartsForDate(modalPreviewOp, modalPreviewDate);
+                        const previewBreakParts = previewParts
+                            .flatMap(p => getBreakPartsForPart(modalPreviewOp, p, modalPreviewDate))
+                            .map(b => ({ start: Math.max(0, Math.min(1440, Number(b?.start || 0))), end: Math.max(0, Math.min(1440, Number(b?.end || 0))) }))
+                            .filter(b => b.end > b.start);
+                        const previewStatusBars = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(modalPreviewOp?.name)}|${modalPreviewDate}`) || [];
+                        const previewMetrics = (previewParts.length > 0 && previewStatusBars.length > 0)
+                            ? plannerComputeShiftStatusMatchMetrics({
+                                shiftParts: previewParts,
+                                breakParts: previewBreakParts,
+                                statusBars: previewStatusBars
+                            })
+                            : null;
+                        const previewLateBars = (previewMetrics?.perShift || [])
+                            .map(sh => {
+                                const lateMin = Number(sh?.lateMin || 0);
+                                if (lateMin <= 0) return null;
+                                const start = Number(sh?.start || 0);
+                                const end = Math.min(Number(sh?.end || 0), start + lateMin);
+                                if (end <= start) return null;
+                                return { start, end, lateMin };
+                            })
+                            .filter(Boolean);
+                        const previewOvertimeBars = (previewMetrics?.workOutsideShiftIntervals || [])
+                            .map((interval, idx) => {
+                                const start = Math.max(0, Number(interval?.start || 0));
+                                const end = Math.min(1440, Number(interval?.end || 0));
+                                if (end <= start) return null;
+                                return { id: idx, start, end, min: end - start };
+                            })
+                            .filter(Boolean);
+                        const timelineTrackBaseWidth = 24 * 52;
+                        const timelineTrackWidthPx = Math.max(timelineTrackBaseWidth, Math.round(timelineTrackBaseWidth * (plannerStatusTimelineZoom || 1)));
+                        const timelineTrackStyle = { width: `${timelineTrackWidthPx}px`, minWidth: '100%' };
+                        return (
+                            <>
+                                <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-slate-200">
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                            <i className="fas fa-chart-gantt text-blue-600"></i>
+                                            Таймлайн статусов за день
+                                        </h3>
+                                        <div className="text-sm text-slate-600 mt-1">
+                                            <span className="font-medium text-slate-800">{modalPreviewOp?.name || `Оператор ${modalState.opId}`}</span>
+                                            <span className="mx-2">•</span>
+                                            <span>{modalPreviewDate}</span>
+                                        </div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowEditTimelineModal(false)}
+                                        className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
+                                    >
+                                        <i className="fas fa-times"></i>
+                                    </button>
+                                </div>
+                                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                                    <div className="flex items-start gap-3">
+                                        <div className="w-16 shrink-0">
+                                            <div className="h-6 mb-2" />
+                                            <div className="h-7 mb-3 text-[10px] font-semibold uppercase tracking-wide text-slate-500 flex items-center justify-end">График</div>
+                                            <div className="h-7 text-[10px] font-semibold uppercase tracking-wide text-slate-500 flex items-center justify-end">Статусы</div>
+                                        </div>
+                                        <div className="flex-1 overflow-x-auto pb-2">
+                                            <div style={timelineTrackStyle} className="min-w-full">
+                                                <div className="relative h-6 mb-2">
+                                                    <div className="absolute inset-0 flex items-end">
+                                                        {Array.from({ length: 24 }).map((_, h) => (
+                                                            <div key={`modal-preview-hour-${h}`} className="flex-1 text-center text-[10px] leading-none text-slate-500">
+                                                                {h}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+
+                                                <div className="relative h-7 border border-slate-200 bg-white overflow-hidden mb-3">
+                                                    <div className="absolute inset-0 flex pointer-events-none">
+                                                        {Array.from({ length: 24 }).map((_, h) => (
+                                                            <div key={`modal-preview-grid-shift-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
+                                                        ))}
+                                                    </div>
+                                                    {previewParts.map((p, pIdx) => {
+                                                        const srcSeg = modalPreviewOp?.shifts?.[p.sourceDate]?.[p.sourceIndex];
+                                                        const isNight = !!(srcSeg && timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start));
+                                                        return (
+                                                            <div
+                                                                key={`modal-preview-shift-bar-${pIdx}`}
+                                                                className="absolute top-1 bottom-1 border border-white/60"
+                                                                style={{
+                                                                    left: `${computeLeftPercent(p.start)}%`,
+                                                                    width: `${((p.end - p.start) / minutesInDay) * 100}%`,
+                                                                    background: isNight ? 'linear-gradient(90deg,#fb923c,#ea580c)' : 'linear-gradient(90deg,#60a5fa,#2563eb)'
+                                                                }}
+                                                                title={`${isNight ? 'Ночная смена' : 'Смена'} • ${minutesToTime(p.start)} — ${minutesToTime(p.end)}`}
+                                                            />
+                                                        );
+                                                    })}
+                                                    {previewBreakParts.map((b, bIdx) => (
+                                                        <div
+                                                            key={`modal-preview-break-bar-${bIdx}`}
+                                                            className="absolute top-[3px] bottom-[3px] border border-amber-200 bg-amber-300/90"
+                                                            style={{
+                                                                left: `${computeLeftPercent(b.start)}%`,
+                                                                width: `${((b.end - b.start) / minutesInDay) * 100}%`
+                                                            }}
+                                                            title={`Перерыв • ${minutesToTime(b.start)} — ${minutesToTime(b.end)}`}
+                                                        />
+                                                    ))}
+                                                    {previewLateBars.map((late, lateIdx) => (
+                                                        <div
+                                                            key={`modal-preview-late-bar-${lateIdx}`}
+                                                            className="absolute top-0 bottom-0 z-40 border-l border-rose-700/80 bg-rose-500/35"
+                                                            style={{
+                                                                left: `${computeLeftPercent(late.start)}%`,
+                                                                width: `${((late.end - late.start) / minutesInDay) * 100}%`
+                                                            }}
+                                                            title={`Опоздание • ${minutesToTime(late.start)} — ${minutesToTime(late.end)} • ${Math.round(late.lateMin)} мин`}
+                                                        />
+                                                    ))}
+                                                    {previewOvertimeBars.map((ot) => (
+                                                        <div
+                                                            key={`modal-preview-overtime-bar-${ot.id}`}
+                                                            className="absolute top-0 bottom-0 z-40 border-l border-emerald-700/80 bg-emerald-500/35"
+                                                            style={{
+                                                                left: `${computeLeftPercent(ot.start)}%`,
+                                                                width: `${((ot.end - ot.start) / minutesInDay) * 100}%`
+                                                            }}
+                                                            title={`Переработка • ${minutesToTime(ot.start)} — ${minutesToTime(ot.end)} • ${Math.round(ot.min)} мин`}
+                                                        />
+                                                    ))}
+                                                    {previewParts.length === 0 && (
+                                                        <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет смены</div>
+                                                    )}
+                                                </div>
+
+                                                <div className="relative h-7 border border-slate-200 bg-white overflow-hidden">
+                                                    <div className="absolute inset-0 flex pointer-events-none">
+                                                        {Array.from({ length: 24 }).map((_, h) => (
+                                                            <div key={`modal-preview-grid-status-${h}`} className="flex-1 border-r last:border-r-0 border-slate-100" />
+                                                        ))}
+                                                    </div>
+                                                    {previewStatusBars.map((seg, segIdx) => {
+                                                        const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
+                                                        return (
+                                                            <div
+                                                                key={`modal-preview-status-bar-${segIdx}`}
+                                                                className="absolute top-1 bottom-1"
+                                                                style={{
+                                                                    left: `${computeLeftPercent(seg.startMin)}%`,
+                                                                    width: `${((seg.endMin - seg.startMin) / minutesInDay) * 100}%`,
+                                                                    background: tone.bar
+                                                                }}
+                                                                title={`${seg.stateName} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`}
+                                                            />
+                                                        );
+                                                    })}
+                                                    {plannerStatusAnomalyAnalysis && previewStatusBars.length === 0 && (
+                                                        <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Нет статусов</div>
+                                                    )}
+                                                    {!plannerStatusAnomalyAnalysis && (
+                                                        <div className="absolute inset-0 flex items-center justify-center text-[11px] text-slate-400">Загрузите статусы</div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </>
+                        );
+                    })()}
                 </SimpleModal>
 
                 <SimpleModal open={!!excelImportReport && user?.role !== 'operator'} onClose={() => setExcelImportReport(null)}>
