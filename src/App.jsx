@@ -5196,7 +5196,7 @@ const withAccessTokenHeader = (headers = {}) => {
             );
             }
 
-            function SimpleModal({ open, onClose, children, panelClassName = '' }) {
+            function SimpleModal({ open, onClose, children, panelClassName = '', panelStyle = null }) {
             const [mounted, setMounted] = useState(open);
             const [show, setShow] = useState(false);
             useEffect(() => {
@@ -5221,6 +5221,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 />
                 <div
                     className={`bg-white rounded p-4 z-60 ${panelClassName || 'w-[720px] max-w-[calc(100vw-1rem)]'} max-h-[calc(100vh-2rem)] overflow-y-auto overflow-x-hidden shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`}
+                    style={panelStyle || undefined}
                     role="dialog"
                     aria-modal="true"
                 >
@@ -9137,7 +9138,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 <SimpleModal
                     open={modalState.open}
                     onClose={() => { setModalState((m) => ({ ...m, open: false })); setShowEditTimelineModal(false); setShowEditStatusJournal(false); clearSelectedDays(); }}
-                    panelClassName={`w-[720px] max-w-[calc(100vw-1rem)] ${(showEditTimelineModal && !isBulkSelectionModal) ? 'mb-[22vh] sm:mb-[26vh]' : ''} ${(showEditStatusJournal && !isBulkSelectionModal) ? 'lg:translate-x-[120px]' : ''}`}
+                    panelClassName={`w-[720px] max-w-[calc(100vw-1rem)] ${(showEditStatusJournal && !isBulkSelectionModal) ? 'lg:-translate-x-[120px]' : ''}`}
+                    panelStyle={(showEditTimelineModal && !isBulkSelectionModal) ? { maxHeight: '62vh' } : undefined}
                 >
                     {/* Шапка с информацией об операторе */}
                     <div className="mb-6 pb-4 border-b border-slate-200">
@@ -9762,8 +9764,8 @@ const withAccessTokenHeader = (headers = {}) => {
                     const journalOperatorNameKey = plannerStatusNormalizeOperatorName(journalOp?.name);
                     const journalRows = importedStatusTimelineByOperatorDateKey.get(`${journalOperatorNameKey}|${journalDate}`) || [];
                     return (
-                        <div className="fixed inset-0 z-[65] flex items-center justify-end p-2 sm:p-3 pointer-events-none">
-                            <div className="w-[380px] max-w-[calc(100vw-1rem)] max-h-[calc(100vh-2rem)] bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden pointer-events-auto">
+                        <div className={`fixed inset-0 z-[65] flex justify-end p-2 sm:p-3 pointer-events-none ${showEditTimelineModal ? 'items-start pt-3' : 'items-center'}`}>
+                            <div className={`w-[380px] max-w-[calc(100vw-1rem)] ${showEditTimelineModal ? 'max-h-[44vh]' : 'max-h-[calc(100vh-2rem)]'} bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden pointer-events-auto`}>
                                 <div className="px-3 py-2.5 border-b border-slate-200 bg-slate-50 flex items-start justify-between gap-2">
                                     <div className="min-w-0">
                                         <div className="text-sm font-semibold text-slate-900">Журнал статусов</div>
@@ -9780,7 +9782,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <i className="fas fa-times text-xs"></i>
                                     </button>
                                 </div>
-                                <div className="max-h-[calc(100vh-8rem)] overflow-auto p-2 space-y-1.5">
+                                <div className={`${showEditTimelineModal ? 'max-h-[calc(44vh-3rem)]' : 'max-h-[calc(100vh-8rem)]'} overflow-auto p-2 space-y-1.5`}>
                                     {journalRows.length === 0 && (
                                         <div className="text-xs text-slate-500 border border-slate-200 rounded-lg p-2 bg-slate-50">
                                             Нет переключений статусов за этот день.
