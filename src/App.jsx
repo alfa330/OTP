@@ -9133,7 +9133,11 @@ const withAccessTokenHeader = (headers = {}) => {
                     </div>
                     </div>
                 </div>
-                <SimpleModal open={modalState.open} onClose={() => { setModalState((m) => ({ ...m, open: false })); setShowEditTimelineModal(false); clearSelectedDays(); }}>
+                <SimpleModal
+                    open={modalState.open}
+                    onClose={() => { setModalState((m) => ({ ...m, open: false })); setShowEditTimelineModal(false); clearSelectedDays(); }}
+                    panelClassName={`w-[720px] max-w-[calc(100vw-1rem)] ${(showEditTimelineModal && !isBulkSelectionModal) ? 'mb-[34vh] sm:mb-[38vh]' : ''}`}
+                >
                     {/* Шапка с информацией об операторе */}
                     <div className="mb-6 pb-4 border-b border-slate-200">
                         <div className="flex items-start justify-between mb-3">
@@ -9813,7 +9817,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                     return (
                         <div
-                            className="fixed inset-0 z-[55] flex items-end justify-center p-2 sm:p-3 pointer-events-none"
+                            className="fixed inset-0 z-[45] flex items-end justify-center p-2 sm:p-3 pointer-events-none"
                         >
                             <div
                                 className="w-full max-w-[1700px] rounded-t-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden pointer-events-auto"
