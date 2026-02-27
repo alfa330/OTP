@@ -5274,7 +5274,12 @@ const withAccessTokenHeader = (headers = {}) => {
             const [plannerStatusSpecialViewEnabled, setPlannerStatusSpecialViewEnabled] = useState(false);
             const [plannerStatusModalFocus, setPlannerStatusModalFocus] = useState(null);
             const [showPlannerTopActionsMenu, setShowPlannerTopActionsMenu] = useState(false);
-            const [showSidebarFiltersMenu, setShowSidebarFiltersMenu] = useState(false);
+            const [sidebarFilterMenus, setSidebarFilterMenus] = useState({
+                supervisors: false,
+                statuses: false,
+                directions: false,
+                breakGroups: false
+            });
             const [myScheduleData, setMyScheduleData] = useState(null);
             const [myLiveScheduleData, setMyLiveScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
@@ -5293,7 +5298,6 @@ const withAccessTokenHeader = (headers = {}) => {
             const plannerExcelImportInputRef = useRef(null);
             const plannerStatusAnomalyInputRef = useRef(null);
             const plannerTopActionsMenuRef = useRef(null);
-            const sidebarFiltersMenuRef = useRef(null);
             const plannerUiStateStorageKey = useMemo(
                 () => `otp.work_schedules.ui_state.${user?.login || user?.name || user?.role || 'anonymous'}`,
                 [user?.login, user?.name, user?.role]
@@ -5677,6 +5681,18 @@ const withAccessTokenHeader = (headers = {}) => {
             };
             const removeBreakDirectionGroupAt = (groupIndex) => {
                 setBreakDirectionGroups(prev => sanitizeBreakDirectionGroups((prev || []).filter((_, idx) => idx !== groupIndex)));
+            };
+            const toggleSidebarFilterMenu = (sectionKey) => {
+                setSidebarFilterMenus(prev => {
+                    const nextValue = !prev?.[sectionKey];
+                    return {
+                        supervisors: false,
+                        statuses: false,
+                        directions: false,
+                        breakGroups: false,
+                        [sectionKey]: nextValue
+                    };
+                });
             };
 
             // Фильтруем операторов по выбранным супервайзерам, статусам и направлениям
@@ -6493,26 +6509,6 @@ const withAccessTokenHeader = (headers = {}) => {
                     window.removeEventListener('keydown', onKeyDown);
                 };
             }, [showPlannerTopActionsMenu]);
-
-            useEffect(() => {
-                if (!showSidebarFiltersMenu) return;
-                if (typeof window === 'undefined') return;
-                const onPointerDown = (event) => {
-                    const container = sidebarFiltersMenuRef.current;
-                    if (!container) return;
-                    if (container.contains(event.target)) return;
-                    setShowSidebarFiltersMenu(false);
-                };
-                const onKeyDown = (event) => {
-                    if (event.key === 'Escape') setShowSidebarFiltersMenu(false);
-                };
-                window.addEventListener('mousedown', onPointerDown);
-                window.addEventListener('keydown', onKeyDown);
-                return () => {
-                    window.removeEventListener('mousedown', onPointerDown);
-                    window.removeEventListener('keydown', onKeyDown);
-                };
-            }, [showSidebarFiltersMenu]);
 
             const togglePlannerStatusAnomalyDayExpanded = (dayKey) => {
                 if (!dayKey) return;
@@ -8103,42 +8099,25 @@ const withAccessTokenHeader = (headers = {}) => {
                 <div className="flex items-start gap-4 mb-0 h-[calc(100vh-1rem)]">
                     <div className="flex flex-col gap-3">
                     <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
-                        <div className="relative w-[260px] flex-shrink-0" ref={sidebarFiltersMenuRef}>
-                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-2">
-                                <div className="flex items-center justify-between gap-2">
-                                    <div className="min-w-0">
-                                        <div className="text-[11px] uppercase tracking-wide text-slate-500">Панель фильтров</div>
-                                        <div className="text-sm font-semibold text-slate-800">Супервайзер / Статус / Направление</div>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={() => setShowSidebarFiltersMenu(v => !v)}
-                                        className={`w-8 h-8 rounded-lg border transition-all flex items-center justify-center ${showSidebarFiltersMenu ? 'bg-slate-800 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'}`}
-                                        title="Открыть фильтры"
-                                        aria-haspopup="menu"
-                                        aria-expanded={showSidebarFiltersMenu ? 'true' : 'false'}
-                                    >
-                                        <i className="fas fa-ellipsis-v"></i>
-                                    </button>
-                                </div>
-                                <div className="mt-2 flex flex-wrap gap-1 text-[11px] text-slate-600">
-                                    <span className="px-1.5 py-0.5 rounded bg-slate-100">SV: {selectedSupervisors.length}</span>
-                                    <span className="px-1.5 py-0.5 rounded bg-slate-100">Статус: {selectedStatuses.length}</span>
-                                    <span className="px-1.5 py-0.5 rounded bg-slate-100">Напр.: {selectedDirections.length}</span>
-                                    <span className="px-1.5 py-0.5 rounded bg-slate-100">Группы: {breakDirectionGroups.length}</span>
-                                </div>
-                            </div>
-
-                            {showSidebarFiltersMenu && (
-                                <div className="absolute left-0 mt-2 w-[320px] max-h-[calc(100vh-7rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50 shadow-2xl z-[75]">
-                                    <div className="px-3 py-2.5 bg-gradient-to-r from-slate-50 to-slate-100 border-b border-slate-200">
-                                        <div className="text-[11px] uppercase tracking-wide text-slate-500">Настройки</div>
-                                        <div className="text-sm font-semibold text-slate-800">Фильтры планировщика</div>
-                                    </div>
-                                    <div className="p-3 space-y-3">
+                        <div className="w-[260px] flex-shrink-0 space-y-3">
                         <div className="bg-white rounded-xl border border-slate-200 p-3 w-full">
-                            <div className="text-sm font-medium mb-2">Фильтр по супервайзерам</div>
-                            <div className="max-h-64 overflow-y-auto border rounded p-2">
+                            <div className="flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                    <div className="text-sm font-medium">Фильтр по супервайзерам</div>
+                                    <div className="text-[11px] text-slate-500">Выбрано: {selectedSupervisors.length}</div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => toggleSidebarFilterMenu('supervisors')}
+                                    className={`w-8 h-8 rounded-lg border transition-all flex items-center justify-center ${sidebarFilterMenus.supervisors ? 'bg-slate-800 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'}`}
+                                    title="Показать выбор"
+                                    aria-expanded={sidebarFilterMenus.supervisors ? 'true' : 'false'}
+                                >
+                                    <i className="fas fa-ellipsis-v"></i>
+                                </button>
+                            </div>
+                            {sidebarFilterMenus.supervisors && (
+                            <div className="mt-2 max-h-64 overflow-y-auto border rounded p-2">
                                 {uniqueSupervisors.length === 0 ? (
                                     <div className="text-xs text-slate-400">Нет супервайзеров</div>
                                 ) : (
@@ -8161,7 +8140,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                     ))
                                 )}
                             </div>
-                            {selectedSupervisors.length > 0 && (
+                            )}
+                            {sidebarFilterMenus.supervisors && selectedSupervisors.length > 0 && (
                                 <button
                                     onClick={() => setSelectedSupervisors([])}
                                     className="mt-2 w-full px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
@@ -8171,8 +8151,23 @@ const withAccessTokenHeader = (headers = {}) => {
                             )}
                         </div>
                         <div className="bg-white rounded-xl border border-slate-200 p-3 w-full">
-                            <div className="text-sm font-medium mb-2">Фильтр по статусу</div>
-                            <div className="max-h-64 overflow-y-auto border rounded p-2">
+                            <div className="flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                    <div className="text-sm font-medium">Фильтр по статусу</div>
+                                    <div className="text-[11px] text-slate-500">Выбрано: {selectedStatuses.length}</div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => toggleSidebarFilterMenu('statuses')}
+                                    className={`w-8 h-8 rounded-lg border transition-all flex items-center justify-center ${sidebarFilterMenus.statuses ? 'bg-slate-800 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'}`}
+                                    title="Показать выбор"
+                                    aria-expanded={sidebarFilterMenus.statuses ? 'true' : 'false'}
+                                >
+                                    <i className="fas fa-ellipsis-v"></i>
+                                </button>
+                            </div>
+                            {sidebarFilterMenus.statuses && (
+                            <div className="mt-2 max-h-64 overflow-y-auto border rounded p-2">
                                 <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
                                     <input
                                         type="checkbox"
@@ -8249,7 +8244,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                     <span className="text-xs">Уволенные</span>
                                 </label>
                             </div>
-                            {selectedStatuses.length > 0 && (
+                            )}
+                            {sidebarFilterMenus.statuses && selectedStatuses.length > 0 && (
                                 <button
                                     onClick={() => setSelectedStatuses([])}
                                     className="mt-2 w-full px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
@@ -8259,8 +8255,23 @@ const withAccessTokenHeader = (headers = {}) => {
                             )}
                         </div>
                         <div className="bg-white rounded-xl border border-slate-200 p-3 w-full">
-                            <div className="text-sm font-medium mb-2">Фильтр по направлениям</div>
-                            <div className="max-h-64 overflow-y-auto border rounded p-2">
+                            <div className="flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                    <div className="text-sm font-medium">Фильтр по направлениям</div>
+                                    <div className="text-[11px] text-slate-500">Выбрано: {selectedDirections.length}</div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => toggleSidebarFilterMenu('directions')}
+                                    className={`w-8 h-8 rounded-lg border transition-all flex items-center justify-center ${sidebarFilterMenus.directions ? 'bg-slate-800 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'}`}
+                                    title="Показать выбор"
+                                    aria-expanded={sidebarFilterMenus.directions ? 'true' : 'false'}
+                                >
+                                    <i className="fas fa-ellipsis-v"></i>
+                                </button>
+                            </div>
+                            {sidebarFilterMenus.directions && (
+                            <div className="mt-2 max-h-64 overflow-y-auto border rounded p-2">
                                 {uniqueDirections.length === 0 ? (
                                     <div className="text-xs text-slate-400">Нет направлений</div>
                                 ) : (
@@ -8283,7 +8294,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                     ))
                                 )}
                             </div>
-                            {selectedDirections.length > 0 && (
+                            )}
+                            {sidebarFilterMenus.directions && selectedDirections.length > 0 && (
                                 <button
                                     onClick={() => setSelectedDirections([])}
                                     className="mt-2 w-full px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
@@ -8293,8 +8305,24 @@ const withAccessTokenHeader = (headers = {}) => {
                             )}
                         </div>
                         <div className="bg-white rounded-xl border border-slate-200 p-3 w-full">
-                            <div className="text-sm font-medium mb-1">Группы направлений для перерывов</div>
-                            <div className="text-[11px] text-slate-500 mb-2">
+                            <div className="flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                    <div className="text-sm font-medium">Группы направлений для перерывов</div>
+                                    <div className="text-[11px] text-slate-500">Групп: {breakDirectionGroups.length}</div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => toggleSidebarFilterMenu('breakGroups')}
+                                    className={`w-8 h-8 rounded-lg border transition-all flex items-center justify-center ${sidebarFilterMenus.breakGroups ? 'bg-slate-800 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'}`}
+                                    title="Показать выбор"
+                                    aria-expanded={sidebarFilterMenus.breakGroups ? 'true' : 'false'}
+                                >
+                                    <i className="fas fa-ellipsis-v"></i>
+                                </button>
+                            </div>
+                            {sidebarFilterMenus.breakGroups && (
+                            <>
+                            <div className="text-[11px] text-slate-500 mt-2 mb-2">
                                 Внутри одной группы перерывы не будут пересекаться между направлениями
                             </div>
 
@@ -8379,10 +8407,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                     Очистить все группы
                                 </button>
                             )}
-                        </div>
-                                    </div>
-                                </div>
+                            </>
                             )}
+                        </div>
                         </div>
                     </div>
                     <div className="flex-1 min-w-0 flex flex-col h-full">
