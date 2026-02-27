@@ -8905,9 +8905,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             className="h-full flex flex-col gap-1"
                                                             onDoubleClick={(e) => {
                                                                 e.stopPropagation();
-                                                                openPlannerStatusTransitionsModalForCell(op, d);
+                                                                openEditModal(op.id, d);
                                                             }}
-                                                            title="Двойной клик — открыть переключения статусов в модалке"
+                                                            title="Двойной клик — открыть редактор смены"
                                                         >
                                                             <div className="flex items-center gap-1 h-[34px]">
                                                                 <div className="w-6 shrink-0 text-[9px] uppercase text-slate-500 font-semibold text-right">гр</div>
@@ -9195,15 +9195,30 @@ const withAccessTokenHeader = (headers = {}) => {
                                 }
                             </span>
                             {!isBulkSelectionModal && (
-                                <button
-                                    type="button"
-                                    onClick={() => setShowEditTimelineModal(v => !v)}
-                                    className="ml-auto px-2.5 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 flex items-center gap-1.5"
-                                    title={showEditTimelineModal ? 'Скрыть таймлайн за день' : 'Показать таймлайн за день'}
-                                >
-                                    <i className="fas fa-chart-gantt text-[10px]"></i>
-                                    {showEditTimelineModal ? 'Скрыть таймлайн' : 'Таймлайн'}
-                                </button>
+                                <div className="ml-auto flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowEditTimelineModal(v => !v)}
+                                        className="px-2.5 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 flex items-center gap-1.5"
+                                        title={showEditTimelineModal ? 'Скрыть таймлайн за день' : 'Показать таймлайн за день'}
+                                    >
+                                        <i className="fas fa-chart-gantt text-[10px]"></i>
+                                        {showEditTimelineModal ? 'Скрыть таймлайн' : 'Таймлайн'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const opForJournal = operators.find(o => o.id === modalState.opId);
+                                            openPlannerStatusTransitionsModalForCell(opForJournal, modalState.date);
+                                        }}
+                                        disabled={!plannerStatusAnomalyAnalysis}
+                                        className="px-2.5 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        title={plannerStatusAnomalyAnalysis ? 'Открыть журнал переключений статусов за выбранный день' : 'Сначала загрузите статусы (CSV)'}
+                                    >
+                                        <i className="fas fa-list-ul text-[10px]"></i>
+                                        Журнал статусов
+                                    </button>
+                                </div>
                             )}
                             {isBulkSelectionModal && modalBulkSortedDates.length > 0 && (
                                 <span className="ml-auto text-xs text-slate-500">
