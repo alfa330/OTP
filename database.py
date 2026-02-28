@@ -6019,7 +6019,7 @@ class Database:
             elif action_norm == 'reopened':
                 if not is_reviewer:
                     raise PermissionError("ONLY_REVIEWER")
-                if current_status not in ('accepted', 'completed', 'returned'):
+                if current_status != 'accepted':
                     raise ValueError("INVALID_TRANSITION")
                 target_status = 'in_progress'
                 history_status = 'reopened'
