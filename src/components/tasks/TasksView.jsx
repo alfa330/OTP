@@ -380,9 +380,9 @@ const ChevronRight = () => (
   </svg>
 );
 const RefreshIcon = () => (
-  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-    <path d="M13.5 2.5v4h-4M2.5 13.5v-4h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-    <path d="M13.5 6.5A6 6 0 102.5 9.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+    <path d="M20 12a8 8 0 1 1-2.343-5.657" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    <polyline points="16 6 21.5 6 21.5 11.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
   </svg>
 );
 const PlusIcon = () => (
