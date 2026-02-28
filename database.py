@@ -624,9 +624,24 @@ class Database:
                     status VARCHAR(32) NOT NULL DEFAULT 'assigned' CHECK (status IN ('assigned', 'in_progress', 'completed', 'accepted', 'returned')),
                     assigned_to INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    completion_summary TEXT,
+                    completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    completed_at TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE tasks
+                ADD COLUMN IF NOT EXISTS completion_summary TEXT;
+            """)
+            cursor.execute("""
+                ALTER TABLE tasks
+                ADD COLUMN IF NOT EXISTS completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE tasks
+                ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP;
             """)
 
             # Tasks status history
@@ -653,6 +668,7 @@ class Database:
                     storage_type VARCHAR(16) NOT NULL DEFAULT 'db' CHECK (storage_type IN ('db', 'gcs')),
                     gcs_bucket VARCHAR(255),
                     gcs_blob_path TEXT,
+                    attachment_kind VARCHAR(16) NOT NULL DEFAULT 'initial' CHECK (attachment_kind IN ('initial', 'result')),
                     uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
@@ -671,12 +687,25 @@ class Database:
             """)
             cursor.execute("""
                 ALTER TABLE task_attachments
+                ADD COLUMN IF NOT EXISTS attachment_kind VARCHAR(16) NOT NULL DEFAULT 'initial';
+            """)
+            cursor.execute("""
+                ALTER TABLE task_attachments
                 DROP CONSTRAINT IF EXISTS task_attachments_storage_type_check;
             """)
             cursor.execute("""
                 ALTER TABLE task_attachments
                 ADD CONSTRAINT task_attachments_storage_type_check
                 CHECK (storage_type IN ('db', 'gcs'));
+            """)
+            cursor.execute("""
+                ALTER TABLE task_attachments
+                DROP CONSTRAINT IF EXISTS task_attachments_attachment_kind_check;
+            """)
+            cursor.execute("""
+                ALTER TABLE task_attachments
+                ADD CONSTRAINT task_attachments_attachment_kind_check
+                CHECK (attachment_kind IN ('initial', 'result'));
             """)
             cursor.execute("""
                 ALTER TABLE task_attachments
@@ -5765,9 +5794,9 @@ class Database:
                     cursor.execute("""
                         INSERT INTO task_attachments (
                             task_id, file_name, content_type, file_size, file_data,
-                            storage_type, gcs_bucket, gcs_blob_path, uploaded_by
+                            storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by
                         )
-                        VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, 'initial', %s)
                     """, (task_id, file_name, content_type, file_size, gcs_bucket, gcs_blob_path, created_by_id))
                 else:
                     file_data = attachment.get('file_data') or b''
@@ -5777,9 +5806,9 @@ class Database:
                     cursor.execute("""
                         INSERT INTO task_attachments (
                             task_id, file_name, content_type, file_size, file_data,
-                            storage_type, gcs_bucket, gcs_blob_path, uploaded_by
+                            storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by
                         )
-                        VALUES (%s, %s, %s, %s, %s, 'db', NULL, NULL, %s)
+                        VALUES (%s, %s, %s, %s, %s, 'db', NULL, NULL, 'initial', %s)
                     """, (task_id, file_name, content_type, file_size, psycopg2.Binary(bytes(file_data)), created_by_id))
 
         return {
@@ -5797,22 +5826,26 @@ class Database:
                 cursor.execute("""
                     SELECT
                         t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,
+                        t.completion_summary, t.completed_at, t.completed_by, completed_user.name,
                         assignee.id, assignee.name, assignee.role, assignee.supervisor_id,
                         creator.id, creator.name, creator.role
                     FROM tasks t
                     LEFT JOIN users assignee ON assignee.id = t.assigned_to
                     LEFT JOIN users creator ON creator.id = t.created_by
+                    LEFT JOIN users completed_user ON completed_user.id = t.completed_by
                     ORDER BY t.created_at DESC, t.id DESC
                 """)
             elif role == 'sv':
                 cursor.execute("""
                     SELECT
                         t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,
+                        t.completion_summary, t.completed_at, t.completed_by, completed_user.name,
                         assignee.id, assignee.name, assignee.role, assignee.supervisor_id,
                         creator.id, creator.name, creator.role
                     FROM tasks t
                     LEFT JOIN users assignee ON assignee.id = t.assigned_to
                     LEFT JOIN users creator ON creator.id = t.created_by
+                    LEFT JOIN users completed_user ON completed_user.id = t.completed_by
                     WHERE
                         t.created_by = %s
                         OR t.assigned_to = %s
@@ -5841,7 +5874,8 @@ class Database:
             cursor.execute("""
                 SELECT
                     a.id, a.task_id, a.file_name, a.content_type, a.file_size, a.created_at,
-                    COALESCE(a.storage_type, 'db'), a.gcs_bucket, a.gcs_blob_path
+                    COALESCE(a.storage_type, 'db'), a.gcs_bucket, a.gcs_blob_path,
+                    COALESCE(a.attachment_kind, 'initial')
                 FROM task_attachments a
                 WHERE a.task_id = ANY(%s)
                 ORDER BY a.id ASC
@@ -5869,12 +5903,16 @@ class Database:
                 "created_at": row[5].isoformat() if hasattr(row[5], 'isoformat') else row[5],
                 "storage_type": row[6],
                 "gcs_bucket": row[7],
-                "gcs_blob_path": row[8]
+                "gcs_blob_path": row[8],
+                "attachment_kind": row[9]
             })
 
         result = []
         for row in task_rows:
             task_id = row[0]
+            all_attachments = attachment_map.get(task_id, [])
+            initial_attachments = [a for a in all_attachments if a.get("attachment_kind") != "result"]
+            result_attachments = [a for a in all_attachments if a.get("attachment_kind") == "result"]
             result.append({
                 "id": task_id,
                 "subject": row[1],
@@ -5883,28 +5921,35 @@ class Database:
                 "status": row[4],
                 "created_at": row[5].isoformat() if hasattr(row[5], 'isoformat') else row[5],
                 "updated_at": row[6].isoformat() if hasattr(row[6], 'isoformat') else row[6],
+                "completion_summary": row[7],
+                "completed_at": row[8].isoformat() if hasattr(row[8], 'isoformat') else row[8],
+                "completed_by": row[9],
+                "completed_by_name": row[10],
                 "assignee": {
-                    "id": row[7],
-                    "name": row[8],
-                    "role": row[9],
-                    "supervisor_id": row[10]
-                } if row[7] else None,
-                "creator": {
                     "id": row[11],
                     "name": row[12],
-                    "role": row[13]
+                    "role": row[13],
+                    "supervisor_id": row[14]
                 } if row[11] else None,
+                "creator": {
+                    "id": row[15],
+                    "name": row[16],
+                    "role": row[17]
+                } if row[15] else None,
                 "history": history_map.get(task_id, []),
-                "attachments": attachment_map.get(task_id, [])
+                "attachments": initial_attachments,
+                "completion_attachments": result_attachments
             })
         return result
 
-    def update_task_status(self, task_id, requester_id, requester_role, action, comment=None):
+    def update_task_status(self, task_id, requester_id, requester_role, action, comment=None, completion_summary=None, completion_attachments=None):
         task_id = int(task_id)
         requester_id = int(requester_id)
         role = str(requester_role or '').lower()
         action_norm = str(action or '').strip().lower()
         comment_norm = (comment or '').strip() or None
+        completion_summary_norm = (completion_summary or '').strip() or None
+        completion_attachments = completion_attachments or []
 
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -5981,21 +6026,66 @@ class Database:
             else:
                 raise ValueError("INVALID_ACTION")
 
-            cursor.execute("""
-                UPDATE tasks
-                SET status = %s, updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-                WHERE id = %s
-                RETURNING updated_at
-            """, (target_status, task_id))
+            if action_norm == 'completed':
+                cursor.execute("""
+                    UPDATE tasks
+                    SET
+                        status = %s,
+                        completion_summary = %s,
+                        completed_by = %s,
+                        completed_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                        updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE id = %s
+                    RETURNING updated_at
+                """, (target_status, completion_summary_norm, requester_id, task_id))
+            else:
+                cursor.execute("""
+                    UPDATE tasks
+                    SET status = %s, updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                    WHERE id = %s
+                    RETURNING updated_at
+                """, (target_status, task_id))
             updated_at_row = cursor.fetchone()
             updated_at = updated_at_row[0] if updated_at_row else None
 
+            history_comment = completion_summary_norm if action_norm == 'completed' else comment_norm
             cursor.execute("""
                 INSERT INTO task_status_history (task_id, status_code, changed_by, comment)
                 VALUES (%s, %s, %s, %s)
                 RETURNING id, changed_at
-            """, (task_id, history_status, requester_id, comment_norm))
+            """, (task_id, history_status, requester_id, history_comment))
             history_row = cursor.fetchone()
+
+            if action_norm == 'completed':
+                for attachment in completion_attachments:
+                    file_name = (attachment.get('file_name') or 'attachment').strip() or 'attachment'
+                    content_type = (attachment.get('content_type') or '').strip() or None
+                    storage_type = (attachment.get('storage_type') or 'db').strip().lower() or 'db'
+                    if storage_type == 'gcs':
+                        gcs_bucket = (attachment.get('gcs_bucket') or '').strip() or None
+                        gcs_blob_path = (attachment.get('gcs_blob_path') or '').strip() or None
+                        file_size = int(attachment.get('file_size') or 0)
+                        if not gcs_bucket or not gcs_blob_path:
+                            continue
+                        cursor.execute("""
+                            INSERT INTO task_attachments (
+                                task_id, file_name, content_type, file_size, file_data,
+                                storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by
+                            )
+                            VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, 'result', %s)
+                        """, (task_id, file_name, content_type, file_size, gcs_bucket, gcs_blob_path, requester_id))
+                    else:
+                        file_data = attachment.get('file_data') or b''
+                        file_size = int(attachment.get('file_size') or len(file_data) or 0)
+                        if not isinstance(file_data, (bytes, bytearray, memoryview)):
+                            continue
+                        cursor.execute("""
+                            INSERT INTO task_attachments (
+                                task_id, file_name, content_type, file_size, file_data,
+                                storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by
+                            )
+                            VALUES (%s, %s, %s, %s, %s, 'db', NULL, NULL, 'result', %s)
+                        """, (task_id, file_name, content_type, file_size, psycopg2.Binary(bytes(file_data)), requester_id))
 
             return {
                 "task_id": task_id,

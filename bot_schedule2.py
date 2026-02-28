@@ -623,6 +623,64 @@ def _task_route_guard():
     return requester_id, requester, None, None
 
 
+def _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths):
+    if not gcs_bucket or not uploaded_blob_paths:
+        return
+    for uploaded_path in uploaded_blob_paths:
+        try:
+            gcs_bucket.blob(uploaded_path).delete()
+        except Exception:
+            pass
+
+
+def _upload_task_attachments_to_gcs(files, stage='initial'):
+    file_items = [item for item in (files or []) if item and item.filename]
+    if len(file_items) > TASK_MAX_FILES:
+        raise ValueError(f"Too many files. Max allowed: {TASK_MAX_FILES}")
+    if not file_items:
+        return [], [], None
+
+    bucket_name = (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+    if not bucket_name:
+        raise RuntimeError("GOOGLE_CLOUD_STORAGE_BUCKET_TASKS is not configured")
+
+    upload_folder = TASK_ATTACHMENTS_UPLOAD_FOLDER.strip('/')
+    upload_prefix = f"{upload_folder}/" if upload_folder else ""
+    gcs_client = get_gcs_client()
+    gcs_bucket = gcs_client.bucket(bucket_name)
+
+    attachments = []
+    uploaded_blob_paths = []
+
+    for idx, file_storage in enumerate(file_items):
+        file_data = file_storage.read() or b''
+        if len(file_data) > TASK_MAX_FILE_SIZE_BYTES:
+            raise ValueError(f"File '{file_storage.filename}' exceeds 10 MB limit")
+
+        safe_name = secure_filename(file_storage.filename) or f'attachment_{idx + 1}'
+        content_type = (file_storage.mimetype or '').strip() or 'application/octet-stream'
+        blob_path = (
+            f"{upload_prefix}tasks/{stage}/"
+            f"{datetime.utcnow().strftime('%Y/%m/%d')}/"
+            f"{uuid.uuid4().hex}_{safe_name}"
+        )
+
+        blob = gcs_bucket.blob(blob_path)
+        blob.upload_from_string(file_data, content_type=content_type)
+        uploaded_blob_paths.append(blob_path)
+
+        attachments.append({
+            "file_name": safe_name,
+            "content_type": content_type,
+            "file_size": len(file_data),
+            "storage_type": "gcs",
+            "gcs_bucket": bucket_name,
+            "gcs_blob_path": blob_path
+        })
+
+    return attachments, uploaded_blob_paths, gcs_bucket
+
+
 @app.before_request
 def hydrate_user_context_from_jwt():
     if not request.path.startswith('/api/'):
@@ -2944,59 +3002,15 @@ def handle_tasks():
             return jsonify({"error": "You cannot assign a task to this user"}), 403
 
         files = request.files.getlist('files')
-        if len(files) > TASK_MAX_FILES:
-            return jsonify({"error": f"Too many files. Max allowed: {TASK_MAX_FILES}"}), 400
-
-        attachments = []
-        uploaded_blob_paths = []
-        gcs_bucket = None
-        bucket_name = ''
-        if files:
-            bucket_name = (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
-            if not bucket_name:
-                return jsonify({"error": "GOOGLE_CLOUD_STORAGE_BUCKET_TASKS is not configured"}), 500
-            upload_folder = TASK_ATTACHMENTS_UPLOAD_FOLDER.strip('/')
-            upload_prefix = f"{upload_folder}/" if upload_folder else ""
-            gcs_client = get_gcs_client()
-            gcs_bucket = gcs_client.bucket(bucket_name)
-        else:
-            upload_prefix = ""
-        for idx, file_storage in enumerate(files):
-            if not file_storage or not file_storage.filename:
-                continue
-            file_data = file_storage.read() or b''
-            if len(file_data) > TASK_MAX_FILE_SIZE_BYTES:
-                return jsonify({"error": f"File '{file_storage.filename}' exceeds 10 MB limit"}), 400
-
-            safe_name = secure_filename(file_storage.filename) or f'attachment_{idx + 1}'
-            content_type = (file_storage.mimetype or '').strip() or 'application/octet-stream'
-            blob_path = (
-                f"{upload_prefix}tasks/"
-                f"{datetime.utcnow().strftime('%Y/%m/%d')}/"
-                f"{uuid.uuid4().hex}_{safe_name}"
-            )
-            try:
-                blob = gcs_bucket.blob(blob_path)
-                blob.upload_from_string(file_data, content_type=content_type)
-                uploaded_blob_paths.append(blob_path)
-            except Exception as upload_error:
-                # best-effort cleanup for already uploaded blobs in this request
-                for uploaded_path in uploaded_blob_paths:
-                    try:
-                        gcs_bucket.blob(uploaded_path).delete()
-                    except Exception:
-                        pass
-                logging.error(f"Task attachment upload failed: {upload_error}")
-                return jsonify({"error": f"Failed to upload attachment '{safe_name}'"}), 500
-
-            attachments.append({
-                "file_name": safe_name,
-                "content_type": content_type,
-                "file_size": len(file_data),
-                "storage_type": "gcs",
-                "gcs_bucket": bucket_name,
-                "gcs_blob_path": blob_path
-            })
+        try:
+            attachments, uploaded_blob_paths, gcs_bucket = _upload_task_attachments_to_gcs(files, stage='initial')
+        except ValueError as upload_error:
+            return jsonify({"error": str(upload_error)}), 400
+        except RuntimeError as upload_error:
+            return jsonify({"error": str(upload_error)}), 500
+        except Exception as upload_error:
+            logging.error(f"Task attachment upload failed: {upload_error}")
+            return jsonify({"error": "Failed to upload task attachments"}), 500
 
         try:
             created = db.create_task(
@@ -3009,11 +3023,7 @@ def handle_tasks():
             )
         except Exception:
             # DB write failed after upload -> cleanup uploaded blobs
-            for uploaded_path in uploaded_blob_paths:
-                try:
-                    gcs_bucket.blob(uploaded_path).delete()
-                except Exception:
-                    pass
+            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
             raise
 
         telegram_warning = None
@@ -3070,12 +3080,43 @@ def update_task_status(task_id):
         if guard_response is not None:
             return guard_response, guard_status
 
-        data = request.get_json() or {}
-        action = (data.get('action') or '').strip().lower()
-        comment = (data.get('comment') or '').strip()
+        content_type = (request.content_type or '').lower()
+        is_multipart = 'multipart/form-data' in content_type
+
+        if is_multipart:
+            action = (request.form.get('action') or '').strip().lower()
+            comment = (request.form.get('comment') or '').strip()
+            completion_summary = (request.form.get('completion_summary') or '').strip()
+            completion_files = request.files.getlist('files')
+        else:
+            data = request.get_json() or {}
+            action = (data.get('action') or '').strip().lower()
+            comment = (data.get('comment') or '').strip()
+            completion_summary = (data.get('completion_summary') or '').strip()
+            completion_files = []
 
         if action not in TASK_ALLOWED_ACTIONS:
             return jsonify({"error": "Invalid action"}), 400
+
+        completion_attachments = []
+        uploaded_blob_paths = []
+        gcs_bucket = None
+
+        if action == 'completed':
+            try:
+                completion_attachments, uploaded_blob_paths, gcs_bucket = _upload_task_attachments_to_gcs(
+                    completion_files,
+                    stage='result'
+                )
+            except ValueError as upload_error:
+                return jsonify({"error": str(upload_error)}), 400
+            except RuntimeError as upload_error:
+                return jsonify({"error": str(upload_error)}), 500
+            except Exception as upload_error:
+                logging.error(f"Task completion attachment upload failed: {upload_error}")
+                return jsonify({"error": "Failed to upload completion attachments"}), 500
+        elif completion_files:
+            return jsonify({"error": "Files can be attached only when completing a task"}), 400
 
         try:
             result = db.update_task_status(
@@ -3083,9 +3124,12 @@ def update_task_status(task_id):
                 requester_id=requester_id,
                 requester_role=requester[3],
                 action=action,
-                comment=comment
+                comment=comment,
+                completion_summary=completion_summary if action == 'completed' else None,
+                completion_attachments=completion_attachments
             )
         except ValueError as value_error:
+            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
             code = str(value_error)
             if code == 'TASK_NOT_FOUND':
                 return jsonify({"error": "Task not found"}), 404
@@ -3093,10 +3137,14 @@ def update_task_status(task_id):
                 return jsonify({"error": "Invalid task status transition"}), 400
             return jsonify({"error": code}), 400
         except PermissionError as permission_error:
+            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
             code = str(permission_error)
             if code in ('TASK_FORBIDDEN', 'ONLY_ASSIGNEE', 'ONLY_REVIEWER'):
                 return jsonify({"error": "You do not have permission for this action"}), 403
             return jsonify({"error": code}), 403
+        except Exception:
+            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
+            raise
 
         action_messages = {
             'in_progress': 'Task moved to in progress',
