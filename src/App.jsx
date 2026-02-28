@@ -7565,6 +7565,63 @@ const withAccessTokenHeader = (headers = {}) => {
                     durationMin: Math.max(0, endMin - startMin)
                 };
             }, [swapForm.swapDate, swapForm.startTime, swapForm.endTime, buildLocalSwapIntervalsForDate, timeStrToMinutesSafe]);
+            const swapDayTimeline = useMemo(() => {
+                const swapDate = swapForm.swapDate;
+                if (!swapDate) {
+                    return {
+                        date: '',
+                        hasShifts: false,
+                        segments: [],
+                        totalMinutes: 0,
+                        selectedInterval: null
+                    };
+                }
+
+                const src = myLiveScheduleData || myScheduleData;
+                const dayShifts = Array.isArray(src?.shifts?.[swapDate]) ? src.shifts[swapDate] : [];
+                const segments = [];
+                dayShifts.forEach((seg, idx) => {
+                    const startRaw = timeToMinutes(seg?.start);
+                    let endRaw = timeToMinutes(seg?.end);
+                    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return;
+                    if (endRaw <= startRaw) endRaw += 1440;
+                    const start = Math.max(0, Math.min(1440, startRaw));
+                    const end = Math.max(0, Math.min(1440, endRaw));
+                    if (end <= start) return;
+                    segments.push({
+                        id: `${swapDate}-${idx}-${seg?.start || ''}-${seg?.end || ''}`,
+                        start,
+                        end,
+                        label: `${minutesToTime(start)} — ${minutesToTime(end % 1440)}`,
+                        minutes: Math.max(0, end - start)
+                    });
+                });
+                segments.sort((a, b) => (a.start - b.start) || (a.end - b.end));
+
+                const selectedStart = timeStrToMinutesSafe(swapForm.startTime);
+                const selectedEnd = timeStrToMinutesSafe(swapForm.endTime);
+                const selectedInterval = (Number.isFinite(selectedStart) && Number.isFinite(selectedEnd) && selectedEnd > selectedStart)
+                    ? {
+                        start: Math.max(0, Math.min(1440, selectedStart)),
+                        end: Math.max(0, Math.min(1440, selectedEnd))
+                    }
+                    : null;
+
+                return {
+                    date: swapDate,
+                    hasShifts: segments.length > 0,
+                    segments,
+                    totalMinutes: segments.reduce((acc, item) => acc + (item.minutes || 0), 0),
+                    selectedInterval
+                };
+            }, [
+                swapForm.swapDate,
+                swapForm.startTime,
+                swapForm.endTime,
+                myLiveScheduleData,
+                myScheduleData,
+                timeStrToMinutesSafe
+            ]);
             const loadSwapRequests = useCallback(async ({ silent = false } = {}) => {
                 if (!isOperatorSelfSchedules || !user) return;
                 if (!silent) {
@@ -8799,6 +8856,75 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </select>
                                                     </label>
                                                 </div>
+                                                <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                                                        <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide">
+                                                            Смена на выбранную дату
+                                                        </div>
+                                                        <div className="text-xs text-slate-500">
+                                                            {swapDayTimeline.date
+                                                                ? `${formatDateRuShort(swapDayTimeline.date)} • ${formatMinutesOnly(swapDayTimeline.totalMinutes)}`
+                                                                : 'Выберите дату'}
+                                                        </div>
+                                                    </div>
+                                                    {swapDayTimeline.date && swapDayTimeline.hasShifts ? (
+                                                        <>
+                                                            <div className="relative h-10 rounded-lg border border-slate-300 bg-white overflow-hidden">
+                                                                {[0, 6, 12, 18, 24].map(hour => (
+                                                                    <div
+                                                                        key={`swap-timeline-mark-${hour}`}
+                                                                        className="absolute top-0 bottom-0 border-l border-slate-200"
+                                                                        style={{ left: `${(hour / 24) * 100}%` }}
+                                                                    ></div>
+                                                                ))}
+                                                                {swapDayTimeline.segments.map(seg => (
+                                                                    <div
+                                                                        key={`swap-timeline-seg-${seg.id}`}
+                                                                        className="absolute top-1 bottom-1 rounded bg-blue-500/80 border border-blue-600/80"
+                                                                        style={{
+                                                                            left: `${(seg.start / 1440) * 100}%`,
+                                                                            width: `${((seg.end - seg.start) / 1440) * 100}%`
+                                                                        }}
+                                                                        title={`${seg.label} (${formatMinutesOnly(seg.minutes)})`}
+                                                                    ></div>
+                                                                ))}
+                                                                {swapDayTimeline.selectedInterval && (
+                                                                    <div
+                                                                        className="absolute top-0 bottom-0 bg-emerald-400/25 border-x-2 border-emerald-500 pointer-events-none"
+                                                                        style={{
+                                                                            left: `${(swapDayTimeline.selectedInterval.start / 1440) * 100}%`,
+                                                                            width: `${((swapDayTimeline.selectedInterval.end - swapDayTimeline.selectedInterval.start) / 1440) * 100}%`
+                                                                        }}
+                                                                        title={`Выбранный интервал: ${swapForm.startTime} — ${swapForm.endTime}`}
+                                                                    ></div>
+                                                                )}
+                                                            </div>
+                                                            <div className="mt-1 flex justify-between text-[11px] text-slate-500 tabular-nums">
+                                                                <span>00:00</span>
+                                                                <span>06:00</span>
+                                                                <span>12:00</span>
+                                                                <span>18:00</span>
+                                                                <span>24:00</span>
+                                                            </div>
+                                                            <div className="mt-2 flex flex-wrap gap-1.5">
+                                                                {swapDayTimeline.segments.map(seg => (
+                                                                    <span
+                                                                        key={`swap-seg-chip-${seg.id}`}
+                                                                        className="px-2 py-0.5 rounded-md text-xs border border-blue-200 bg-blue-50 text-blue-700"
+                                                                    >
+                                                                        {seg.label} ({formatMinutesOnly(seg.minutes)})
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                        </>
+                                                    ) : (
+                                                        <div className="text-xs text-slate-500">
+                                                            {swapDayTimeline.date
+                                                                ? 'На выбранную дату у вас нет смен.'
+                                                                : 'Выберите дату, чтобы увидеть ваши смены таймлайном.'}
+                                                        </div>
+                                                    )}
+                                                </div>
                                                 <div className="mt-3 grid grid-cols-1 lg:grid-cols-4 gap-3 items-end">
                                                     <label className="lg:col-span-3 text-sm">
                                                         <div className="text-xs text-slate-600 mb-1">Комментарий (опционально)</div>
@@ -8835,6 +8961,102 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     )}
                                                     {swapCandidatesError && (
                                                         <div className="text-rose-600 mt-1">{swapCandidatesError}</div>
+                                                    )}
+                                                </div>
+                                                <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                                                        <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide">
+                                                            Кандидаты на замену
+                                                        </div>
+                                                        <div className="text-xs text-slate-500">
+                                                            По приоритету совпадения границ интервала
+                                                        </div>
+                                                    </div>
+                                                    {!swapTimeValidation.isValid ? (
+                                                        <div className="text-xs text-slate-500">
+                                                            Выберите корректный интервал, чтобы увидеть список кандидатов.
+                                                        </div>
+                                                    ) : swapCandidatesLoading ? (
+                                                        <div className="text-xs text-slate-500">
+                                                            <FaIcon className="fas fa-spinner fa-spin mr-1"></FaIcon>Подбираем кандидатов...
+                                                        </div>
+                                                    ) : swapCandidates.length === 0 ? (
+                                                        <div className="text-xs text-slate-500">
+                                                            На этот интервал нет доступных операторов.
+                                                        </div>
+                                                    ) : (
+                                                        <div className="space-y-2">
+                                                            {swapCandidates.map((item, idx) => {
+                                                                const isSelected = String(item?.id) === String(swapForm.targetOperatorId);
+                                                                const hasPriority = Number(item?.priorityScore || 0) > 0;
+                                                                const matchStart = !!item?.matchStartsAtRequestEnd;
+                                                                const matchEnd = !!item?.matchEndsAtRequestStart;
+                                                                const dayShifts = Array.isArray(item?.dayShifts) ? item.dayShifts : [];
+                                                                return (
+                                                                    <div
+                                                                        key={`swap-candidate-card-${item?.id}`}
+                                                                        className={`rounded-lg border p-2.5 ${
+                                                                            isSelected
+                                                                                ? 'border-blue-400 bg-blue-50'
+                                                                                : 'border-slate-200 bg-white'
+                                                                        }`}
+                                                                    >
+                                                                        <div className="flex flex-wrap items-start justify-between gap-2">
+                                                                            <div className="min-w-0">
+                                                                                <div className="text-sm font-medium text-slate-900">
+                                                                                    {idx + 1}. {item?.name || 'Оператор'}
+                                                                                </div>
+                                                                                <div className="text-xs text-slate-500">
+                                                                                    {item?.supervisorName ? `Супервайзер: ${item.supervisorName}` : 'Без супервайзера'}
+                                                                                </div>
+                                                                            </div>
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => setSwapForm(prev => ({ ...prev, targetOperatorId: String(item?.id || '') }))}
+                                                                                className={`px-2.5 py-1 rounded-md text-xs font-medium border ${
+                                                                                    isSelected
+                                                                                        ? 'bg-blue-600 text-white border-blue-600'
+                                                                                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                                                                                }`}
+                                                                            >
+                                                                                {isSelected ? 'Выбран' : 'Выбрать'}
+                                                                            </button>
+                                                                        </div>
+                                                                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                                                            {hasPriority ? (
+                                                                                <span className="px-2 py-0.5 rounded-md text-[11px] border border-emerald-200 bg-emerald-50 text-emerald-700">
+                                                                                    Приоритетный
+                                                                                </span>
+                                                                            ) : (
+                                                                                <span className="px-2 py-0.5 rounded-md text-[11px] border border-slate-200 bg-slate-100 text-slate-600">
+                                                                                    Обычный
+                                                                                </span>
+                                                                            )}
+                                                                            {matchStart && (
+                                                                                <span className="px-2 py-0.5 rounded-md text-[11px] border border-blue-200 bg-blue-50 text-blue-700">
+                                                                                    Конец интервала = старт смены
+                                                                                </span>
+                                                                            )}
+                                                                            {matchEnd && (
+                                                                                <span className="px-2 py-0.5 rounded-md text-[11px] border border-indigo-200 bg-indigo-50 text-indigo-700">
+                                                                                    Начало интервала = конец смены
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                        {dayShifts.length > 0 && (
+                                                                            <div className="mt-1.5 text-xs text-slate-600">
+                                                                                Смены на дату: {dayShifts.map(seg => {
+                                                                                    const s = String(seg?.start || '');
+                                                                                    const e = String(seg?.end || '');
+                                                                                    const crossing = timeToMinutes(e) <= timeToMinutes(s) && e !== '00:00';
+                                                                                    return `${s} — ${e}${crossing ? ' (+1)' : ''}`;
+                                                                                }).join(', ')}
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
                                                     )}
                                                 </div>
                                             </div>
