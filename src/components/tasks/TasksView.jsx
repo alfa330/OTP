@@ -51,7 +51,11 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const [selectedFiles, setSelectedFiles] = useState([]);
     const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
     const [expandedAllTaskId, setExpandedAllTaskId] = useState(null);
+    const [completeModalState, setCompleteModalState] = useState({ open: false, taskId: null, taskSubject: '' });
+    const [completionSummary, setCompletionSummary] = useState('');
+    const [completionFiles, setCompletionFiles] = useState([]);
     const fileInputRef = useRef(null);
+    const completionFileInputRef = useRef(null);
 
     const [form, setForm] = useState({
         subject: '',
@@ -190,6 +194,65 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         }
     };
 
+    const openCompleteModal = useCallback((task) => {
+        if (!task?.id) return;
+        setCompletionSummary(task?.completion_summary || '');
+        setCompletionFiles([]);
+        if (completionFileInputRef.current) {
+            completionFileInputRef.current.value = '';
+        }
+        setCompleteModalState({
+            open: true,
+            taskId: task.id,
+            taskSubject: task.subject || ''
+        });
+    }, []);
+
+    const closeCompleteModal = useCallback(() => {
+        setCompleteModalState({ open: false, taskId: null, taskSubject: '' });
+        setCompletionSummary('');
+        setCompletionFiles([]);
+        if (completionFileInputRef.current) {
+            completionFileInputRef.current.value = '';
+        }
+    }, []);
+
+    const submitCompletedWithResult = useCallback(async (event) => {
+        event.preventDefault();
+        if (!completeModalState.taskId) return;
+
+        const loadingKey = `${completeModalState.taskId}:completed`;
+        setActionLoadingKey(loadingKey);
+        try {
+            const body = new FormData();
+            body.append('action', 'completed');
+            body.append('completion_summary', completionSummary.trim());
+            completionFiles.forEach((file) => body.append('files', file));
+
+            const response = await axios.post(
+                `${apiBaseUrl}/api/tasks/${completeModalState.taskId}/status`,
+                body,
+                { headers: buildHeaders() }
+            );
+            notify(response?.data?.message || 'Статус обновлен', 'success');
+            closeCompleteModal();
+            await fetchTasks();
+        } catch (error) {
+            notify(error?.response?.data?.error || 'Не удалось завершить задачу', 'error');
+        } finally {
+            setActionLoadingKey('');
+        }
+    }, [
+        completeModalState.taskId,
+        completionSummary,
+        completionFiles,
+        apiBaseUrl,
+        buildHeaders,
+        notify,
+        closeCompleteModal,
+        fetchTasks
+    ]);
+
     const downloadAttachment = async (attachment) => {
         try {
             const response = await axios.get(
@@ -254,7 +317,13 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                         <button
                             key={key}
                             type="button"
-                            onClick={() => updateTaskStatus(task.id, button.action)}
+                            onClick={() => {
+                                if (button.action === 'completed') {
+                                    openCompleteModal(task);
+                                    return;
+                                }
+                                updateTaskStatus(task.id, button.action);
+                            }}
                             disabled={!!actionLoadingKey}
                             className={`px-3 py-1.5 text-sm rounded-lg transition ${button.className} ${actionLoadingKey ? 'opacity-70 cursor-not-allowed' : ''}`}
                         >
@@ -277,6 +346,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             className: 'bg-gray-100 text-gray-600 border border-gray-200'
         };
         const attachments = Array.isArray(task.attachments) ? task.attachments : [];
+        const completionAttachments = Array.isArray(task.completion_attachments) ? task.completion_attachments : [];
         const history = Array.isArray(task.history) ? task.history : [];
 
         return (
@@ -329,7 +399,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
                         {attachments.length > 0 && (
                             <div className="mt-3">
-                                <p className="text-sm font-medium text-gray-700 mb-2">Файлы:</p>
+                                <p className="text-sm font-medium text-gray-700 mb-2">Файлы задачи:</p>
                                 <div className="flex flex-wrap gap-2">
                                     {attachments.map((attachment) => (
                                         <button
@@ -343,6 +413,33 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                                         </button>
                                     ))}
                                 </div>
+                            </div>
+                        )}
+
+                        {(task.completion_summary || completionAttachments.length > 0) && (
+                            <div className="mt-4 bg-indigo-50 border border-indigo-100 rounded-lg p-3">
+                                <p className="text-sm font-semibold text-indigo-900 mb-2">Итоги выполнения</p>
+                                {task.completion_summary && (
+                                    <p className="text-sm text-indigo-900 whitespace-pre-wrap">{task.completion_summary}</p>
+                                )}
+                                {completionAttachments.length > 0 && (
+                                    <div className="mt-3">
+                                        <p className="text-sm font-medium text-indigo-900 mb-2">Итоговые файлы:</p>
+                                        <div className="flex flex-wrap gap-2">
+                                            {completionAttachments.map((attachment) => (
+                                                <button
+                                                    key={attachment.id}
+                                                    type="button"
+                                                    onClick={() => downloadAttachment(attachment)}
+                                                    className="px-3 py-1.5 rounded-lg bg-white hover:bg-indigo-100 border border-indigo-200 text-indigo-800 text-sm transition"
+                                                >
+                                                    <i className="fas fa-paperclip mr-1"></i>
+                                                    {attachment.file_name}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         )}
 
@@ -543,6 +640,85 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                                     className={`px-5 py-2.5 rounded-lg text-white font-medium transition ${isCreateLoading ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
                                 >
                                     {isCreateLoading ? 'Создаю...' : 'Поставить задачу'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {completeModalState.open && (
+                <div
+                    className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+                    onClick={closeCompleteModal}
+                >
+                    <div
+                        className="bg-white w-full max-w-2xl rounded-xl shadow-2xl border border-gray-200 p-6"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-center justify-between mb-4">
+                            <h3 className="text-xl font-semibold text-gray-800">Завершение задачи</h3>
+                            <button
+                                type="button"
+                                onClick={closeCompleteModal}
+                                className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-600"
+                                aria-label="Закрыть модалку"
+                            >
+                                <i className="fas fa-times"></i>
+                            </button>
+                        </div>
+
+                        {completeModalState.taskSubject && (
+                            <p className="text-sm text-gray-600 mb-4">
+                                <span className="font-medium text-gray-800">Задача:</span> {completeModalState.taskSubject}
+                            </p>
+                        )}
+
+                        <form onSubmit={submitCompletedWithResult} className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Итоги выполнения</label>
+                                <textarea
+                                    value={completionSummary}
+                                    onChange={(e) => setCompletionSummary(e.target.value)}
+                                    placeholder="Опишите, что сделано по задаче"
+                                    rows={5}
+                                    className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-y"
+                                    disabled={!!actionLoadingKey}
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Итоговые файлы</label>
+                                <input
+                                    ref={completionFileInputRef}
+                                    type="file"
+                                    multiple
+                                    onChange={(e) => setCompletionFiles(Array.from(e.target.files || []))}
+                                    className="w-full p-2.5 border border-gray-300 rounded-lg bg-white"
+                                    disabled={!!actionLoadingKey}
+                                />
+                                {completionFiles.length > 0 && (
+                                    <p className="mt-2 text-xs text-gray-500">
+                                        Прикреплено итоговых файлов: {completionFiles.length}
+                                    </p>
+                                )}
+                            </div>
+
+                            <div className="flex justify-end gap-2">
+                                <button
+                                    type="button"
+                                    onClick={closeCompleteModal}
+                                    disabled={!!actionLoadingKey}
+                                    className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition disabled:opacity-60"
+                                >
+                                    Отмена
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={!!actionLoadingKey}
+                                    className="px-5 py-2.5 rounded-lg text-white font-medium bg-indigo-600 hover:bg-indigo-700 transition disabled:opacity-60"
+                                >
+                                    {actionLoadingKey === `${completeModalState.taskId}:completed` ? 'Сохраняю...' : 'Отметить выполненной'}
                                 </button>
                             </div>
                         </form>
