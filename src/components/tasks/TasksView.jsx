@@ -59,11 +59,16 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         assignedTo: ''
     });
 
-    const notify = useCallback((message, type = 'success') => {
-        if (typeof showToast === 'function') {
-            showToast(message, type);
-        }
+    const showToastRef = useRef(showToast);
+    useEffect(() => {
+        showToastRef.current = showToast;
     }, [showToast]);
+
+    const notify = useCallback((message, type = 'success') => {
+        if (typeof showToastRef.current === 'function') {
+            showToastRef.current(message, type);
+        }
+    }, []);
 
     const buildHeaders = useCallback(() => {
         const headers = {};
@@ -467,4 +472,4 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     );
 };
 
-export default TasksView;
+export default React.memo(TasksView);
