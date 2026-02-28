@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 
 const TAG_OPTIONS = [
@@ -44,6 +44,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const [isCreateLoading, setIsCreateLoading] = useState(false);
     const [actionLoadingKey, setActionLoadingKey] = useState('');
     const [selectedFiles, setSelectedFiles] = useState([]);
+    const [isCreateFormOpen, setIsCreateFormOpen] = useState(false);
     const fileInputRef = useRef(null);
 
     const [form, setForm] = useState({
@@ -103,6 +104,12 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         fetchTasks();
     }, [user, fetchRecipients, fetchTasks]);
 
+    const currentUserId = Number(user?.id || 0);
+    const myTasks = useMemo(
+        () => tasks.filter((task) => Number(task?.assignee?.id || 0) === currentUserId),
+        [tasks, currentUserId]
+    );
+
     const handleCreateTask = async (event) => {
         event.preventDefault();
         if (!form.subject.trim()) {
@@ -130,6 +137,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             if (response?.data?.warning) {
                 notify(response.data.warning, 'error');
             }
+
             setForm({
                 subject: '',
                 description: '',
@@ -137,6 +145,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                 assignedTo: ''
             });
             setSelectedFiles([]);
+            setIsCreateFormOpen(false);
             if (fileInputRef.current) {
                 fileInputRef.current.value = '';
             }
@@ -198,7 +207,6 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     const renderTaskActions = (task) => {
         const assigneeId = Number(task?.assignee?.id || 0);
         const creatorId = Number(task?.creator?.id || 0);
-        const currentUserId = Number(user?.id || 0);
         const isAssignee = assigneeId === currentUserId;
         const canReview = !isAssignee && (user?.role === 'admin' || creatorId === currentUserId || user?.role === 'sv');
         const status = task?.status;
@@ -247,6 +255,84 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         );
     };
 
+    const renderTaskCard = (task) => {
+        const statusMeta = TASK_STATUS_META[task.status] || {
+            label: task.status || '—',
+            className: 'bg-gray-100 text-gray-600 border border-gray-200'
+        };
+        const attachments = Array.isArray(task.attachments) ? task.attachments : [];
+        const history = Array.isArray(task.history) ? task.history : [];
+
+        return (
+            <div key={task.id} className="border border-gray-200 rounded-xl p-4">
+                <div className="flex flex-wrap gap-2 items-center mb-2">
+                    <h4 className="text-lg font-semibold text-gray-900">{task.subject || 'Без темы'}</h4>
+                    <span className={`px-2 py-1 text-xs rounded-full ${statusMeta.className}`}>{statusMeta.label}</span>
+                    <span className="px-2 py-1 text-xs rounded-full bg-slate-100 text-slate-700 border border-slate-200">
+                        {TAG_LABELS[task.tag] || task.tag || '—'}
+                    </span>
+                </div>
+
+                <div className="text-sm text-gray-600 space-y-1">
+                    <p><strong>Кому:</strong> {task?.assignee?.name || '—'}</p>
+                    <p><strong>Поставил:</strong> {task?.creator?.name || '—'}</p>
+                    <p><strong>Создано:</strong> {formatDateTime(task.created_at)}</p>
+                </div>
+
+                {task.description && (
+                    <p className="mt-3 text-gray-700 whitespace-pre-wrap">{task.description}</p>
+                )}
+
+                {attachments.length > 0 && (
+                    <div className="mt-3">
+                        <p className="text-sm font-medium text-gray-700 mb-2">Файлы:</p>
+                        <div className="flex flex-wrap gap-2">
+                            {attachments.map((attachment) => (
+                                <button
+                                    key={attachment.id}
+                                    type="button"
+                                    onClick={() => downloadAttachment(attachment)}
+                                    className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm transition"
+                                >
+                                    <i className="fas fa-paperclip mr-1"></i>
+                                    {attachment.file_name}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {history.length > 0 && (
+                    <div className="mt-4 bg-gray-50 border border-gray-200 rounded-lg p-3">
+                        <p className="text-sm font-medium text-gray-700 mb-2">История выполнения</p>
+                        <div className="space-y-1.5">
+                            {history.map((item) => (
+                                <div key={item.id} className="text-sm text-gray-600">
+                                    <span className="font-medium text-gray-800">{HISTORY_STATUS_LABELS[item.status_code] || item.status_code}</span>
+                                    <span className="ml-2">{formatDateTime(item.changed_at)}</span>
+                                    {item.changed_by_name && <span className="ml-2 text-gray-500">({item.changed_by_name})</span>}
+                                    {item.comment && <span className="ml-2 text-rose-700">- {item.comment}</span>}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {renderTaskActions(task)}
+            </div>
+        );
+    };
+
+    const renderTaskList = (list, emptyText) => {
+        if (isTasksLoading) {
+            return <p className="text-gray-500">Загрузка задач...</p>;
+        }
+        if (!list.length) {
+            return <p className="text-gray-500">{emptyText}</p>;
+        }
+        return <div className="space-y-4">{list.map((task) => renderTaskCard(task))}</div>;
+    };
+
     if (!user || !['admin', 'sv'].includes(user.role)) {
         return null;
     }
@@ -254,96 +340,8 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     return (
         <div className="space-y-6">
             <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200">
-                <h2 className="text-2xl font-semibold text-gray-800 mb-4">Задачи</h2>
-                <form onSubmit={handleCreateTask} className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="md:col-span-2">
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Тема</label>
-                        <input
-                            type="text"
-                            value={form.subject}
-                            onChange={(e) => setForm((prev) => ({ ...prev, subject: e.target.value }))}
-                            placeholder="Введите тему задачи"
-                            className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            maxLength={255}
-                            disabled={isCreateLoading}
-                        />
-                    </div>
-
-                    <div className="md:col-span-2">
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Описание</label>
-                        <textarea
-                            value={form.description}
-                            onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
-                            placeholder="Опишите задачу"
-                            rows={4}
-                            className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
-                            disabled={isCreateLoading}
-                        />
-                    </div>
-
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Тег</label>
-                        <select
-                            value={form.tag}
-                            onChange={(e) => setForm((prev) => ({ ...prev, tag: e.target.value }))}
-                            className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            disabled={isCreateLoading}
-                        >
-                            {TAG_OPTIONS.map((tag) => (
-                                <option key={tag.value} value={tag.value}>{tag.label}</option>
-                            ))}
-                        </select>
-                    </div>
-
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Кому отправить</label>
-                        <select
-                            value={form.assignedTo}
-                            onChange={(e) => setForm((prev) => ({ ...prev, assignedTo: e.target.value }))}
-                            className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            disabled={isCreateLoading || isRecipientsLoading}
-                        >
-                            <option value="">Выберите сотрудника</option>
-                            {recipients.map((recipient) => (
-                                <option key={recipient.id} value={recipient.id}>
-                                    {recipient.name} ({recipient.role === 'sv' ? 'СВ' : 'Оператор'})
-                                </option>
-                            ))}
-                        </select>
-                    </div>
-
-                    <div className="md:col-span-2">
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Файлы</label>
-                        <input
-                            ref={fileInputRef}
-                            type="file"
-                            multiple
-                            onChange={(e) => setSelectedFiles(Array.from(e.target.files || []))}
-                            className="w-full p-2.5 border border-gray-300 rounded-lg bg-white"
-                            disabled={isCreateLoading}
-                        />
-                        {selectedFiles.length > 0 && (
-                            <p className="mt-2 text-xs text-gray-500">
-                                Прикреплено файлов: {selectedFiles.length}
-                            </p>
-                        )}
-                    </div>
-
-                    <div className="md:col-span-2 flex justify-end">
-                        <button
-                            type="submit"
-                            disabled={isCreateLoading || isRecipientsLoading}
-                            className={`px-5 py-2.5 rounded-lg text-white font-medium transition ${isCreateLoading ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
-                        >
-                            {isCreateLoading ? 'Создаю...' : 'Поставить задачу'}
-                        </button>
-                    </div>
-                </form>
-            </div>
-
-            <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200">
                 <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-xl font-semibold text-gray-800">Список задач</h3>
+                    <h2 className="text-2xl font-semibold text-gray-800">Мои задачи</h2>
                     <button
                         type="button"
                         onClick={fetchTasks}
@@ -353,78 +351,112 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                         {isTasksLoading ? 'Обновляю...' : 'Обновить'}
                     </button>
                 </div>
+                {renderTaskList(myTasks, 'У вас пока нет задач.')}
+            </div>
 
-                {isTasksLoading ? (
-                    <p className="text-gray-500">Загрузка задач...</p>
-                ) : tasks.length === 0 ? (
-                    <p className="text-gray-500">Пока задач нет.</p>
-                ) : (
-                    <div className="space-y-4">
-                        {tasks.map((task) => {
-                            const statusMeta = TASK_STATUS_META[task.status] || { label: task.status || '—', className: 'bg-gray-100 text-gray-600 border border-gray-200' };
-                            const attachments = Array.isArray(task.attachments) ? task.attachments : [];
-                            const history = Array.isArray(task.history) ? task.history : [];
-                            return (
-                                <div key={task.id} className="border border-gray-200 rounded-xl p-4">
-                                    <div className="flex flex-wrap gap-2 items-center mb-2">
-                                        <h4 className="text-lg font-semibold text-gray-900">{task.subject || 'Без темы'}</h4>
-                                        <span className={`px-2 py-1 text-xs rounded-full ${statusMeta.className}`}>{statusMeta.label}</span>
-                                        <span className="px-2 py-1 text-xs rounded-full bg-slate-100 text-slate-700 border border-slate-200">
-                                            {TAG_LABELS[task.tag] || task.tag || '—'}
-                                        </span>
-                                    </div>
+            <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200">
+                <div className="flex items-center justify-between">
+                    <h3 className="text-xl font-semibold text-gray-800">Добавление задачи</h3>
+                    <button
+                        type="button"
+                        onClick={() => setIsCreateFormOpen((prev) => !prev)}
+                        className={`px-4 py-2 rounded-lg text-sm font-medium transition ${isCreateFormOpen ? 'bg-gray-200 text-gray-700 hover:bg-gray-300' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+                    >
+                        {isCreateFormOpen ? 'Скрыть форму' : 'Добавить задачу'}
+                    </button>
+                </div>
 
-                                    <div className="text-sm text-gray-600 space-y-1">
-                                        <p><strong>Кому:</strong> {task?.assignee?.name || '—'}</p>
-                                        <p><strong>Поставил:</strong> {task?.creator?.name || '—'}</p>
-                                        <p><strong>Создано:</strong> {formatDateTime(task.created_at)}</p>
-                                    </div>
+                {isCreateFormOpen && (
+                    <form onSubmit={handleCreateTask} className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
+                        <div className="md:col-span-2">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Тема</label>
+                            <input
+                                type="text"
+                                value={form.subject}
+                                onChange={(e) => setForm((prev) => ({ ...prev, subject: e.target.value }))}
+                                placeholder="Введите тему задачи"
+                                className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                maxLength={255}
+                                disabled={isCreateLoading}
+                            />
+                        </div>
 
-                                    {task.description && (
-                                        <p className="mt-3 text-gray-700 whitespace-pre-wrap">{task.description}</p>
-                                    )}
+                        <div className="md:col-span-2">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Описание</label>
+                            <textarea
+                                value={form.description}
+                                onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
+                                placeholder="Опишите задачу"
+                                rows={4}
+                                className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+                                disabled={isCreateLoading}
+                            />
+                        </div>
 
-                                    {attachments.length > 0 && (
-                                        <div className="mt-3">
-                                            <p className="text-sm font-medium text-gray-700 mb-2">Файлы:</p>
-                                            <div className="flex flex-wrap gap-2">
-                                                {attachments.map((attachment) => (
-                                                    <button
-                                                        key={attachment.id}
-                                                        type="button"
-                                                        onClick={() => downloadAttachment(attachment)}
-                                                        className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm transition"
-                                                    >
-                                                        <i className="fas fa-paperclip mr-1"></i>
-                                                        {attachment.file_name}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    )}
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Тег</label>
+                            <select
+                                value={form.tag}
+                                onChange={(e) => setForm((prev) => ({ ...prev, tag: e.target.value }))}
+                                className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isCreateLoading}
+                            >
+                                {TAG_OPTIONS.map((tag) => (
+                                    <option key={tag.value} value={tag.value}>{tag.label}</option>
+                                ))}
+                            </select>
+                        </div>
 
-                                    {history.length > 0 && (
-                                        <div className="mt-4 bg-gray-50 border border-gray-200 rounded-lg p-3">
-                                            <p className="text-sm font-medium text-gray-700 mb-2">История выполнения</p>
-                                            <div className="space-y-1.5">
-                                                {history.map((item) => (
-                                                    <div key={item.id} className="text-sm text-gray-600">
-                                                        <span className="font-medium text-gray-800">{HISTORY_STATUS_LABELS[item.status_code] || item.status_code}</span>
-                                                        <span className="ml-2">{formatDateTime(item.changed_at)}</span>
-                                                        {item.changed_by_name && <span className="ml-2 text-gray-500">({item.changed_by_name})</span>}
-                                                        {item.comment && <span className="ml-2 text-rose-700">- {item.comment}</span>}
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    )}
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Кому отправить</label>
+                            <select
+                                value={form.assignedTo}
+                                onChange={(e) => setForm((prev) => ({ ...prev, assignedTo: e.target.value }))}
+                                className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                disabled={isCreateLoading || isRecipientsLoading}
+                            >
+                                <option value="">Выберите сотрудника</option>
+                                {recipients.map((recipient) => (
+                                    <option key={recipient.id} value={recipient.id}>
+                                        {recipient.name} ({recipient.role === 'sv' ? 'СВ' : 'Оператор'})
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
 
-                                    {renderTaskActions(task)}
-                                </div>
-                            );
-                        })}
-                    </div>
+                        <div className="md:col-span-2">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Файлы</label>
+                            <input
+                                ref={fileInputRef}
+                                type="file"
+                                multiple
+                                onChange={(e) => setSelectedFiles(Array.from(e.target.files || []))}
+                                className="w-full p-2.5 border border-gray-300 rounded-lg bg-white"
+                                disabled={isCreateLoading}
+                            />
+                            {selectedFiles.length > 0 && (
+                                <p className="mt-2 text-xs text-gray-500">
+                                    Прикреплено файлов: {selectedFiles.length}
+                                </p>
+                            )}
+                        </div>
+
+                        <div className="md:col-span-2 flex justify-end">
+                            <button
+                                type="submit"
+                                disabled={isCreateLoading || isRecipientsLoading}
+                                className={`px-5 py-2.5 rounded-lg text-white font-medium transition ${isCreateLoading ? 'bg-blue-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
+                            >
+                                {isCreateLoading ? 'Создаю...' : 'Поставить задачу'}
+                            </button>
+                        </div>
+                    </form>
                 )}
+            </div>
+
+            <div className="bg-white p-6 rounded-xl shadow-md border border-gray-200">
+                <h3 className="text-xl font-semibold text-gray-800 mb-4">Все задачи</h3>
+                {renderTaskList(tasks, 'Пока задач нет.')}
             </div>
         </div>
     );
