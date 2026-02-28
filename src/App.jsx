@@ -5,6 +5,7 @@ import Papa from 'papaparse';
 import jsQR from 'jsqr';
 import ToastContainer from './components/common/ToastContainer';
 import SalaryCalculationResult from './components/salary/SalaryCalculationResult';
+import TasksView from './components/tasks/TasksView';
 
 const MonitoringScaleModal = lazy(() => import('./components/modals/MonitoringScaleModal'));
 const DisputeModal = lazy(() => import('./components/modals/DisputeModal'));
@@ -18190,6 +18191,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 <i className="fas fa-book"></i> <span className="sidebar-text">Учет тренингов</span>
                                             </button>
                                         </li>
+                                        <li>
+                                            <button onClick={() => { setView('tasks'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-tasks"></i> <span className="sidebar-text">Задачи</span>
+                                            </button>
+                                        </li>
 
                                         <hr className="border-t border-white-700 my-2 opacity-40" />
 
@@ -18241,6 +18247,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <li>
                                             <button onClick={() => { setView('trainings'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
                                                 <i className="fas fa-book"></i> <span className="sidebar-text">Учет тренингов</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={() => { setView('tasks'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
+                                                <i className="fas fa-tasks"></i> <span className="sidebar-text">Задачи</span>
                                             </button>
                                         </li>
                                         <li>
@@ -19417,6 +19428,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 )}
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
+                                {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
@@ -20129,6 +20141,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 )} 
                                 {( view === "trainings" && (<TrainingsView user={user} operators={users} />))}
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
+                                {( view === "tasks" && (<TasksView user={user} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
