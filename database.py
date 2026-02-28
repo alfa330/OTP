@@ -6268,27 +6268,27 @@ class Database:
             for seg in requester_remaining:
                 seg_start_obj = self._normalize_schedule_time(seg.get('start'), 'start_time')
                 seg_end_obj = self._normalize_schedule_time(seg.get('end'), 'end_time')
-                seg_breaks = self._normalize_shift_breaks(seg.get('breaks') if isinstance(seg.get('breaks'), list) else [])
                 self._save_shift_tx(
                     cursor=cursor,
                     operator_id=requester_operator_id,
                     shift_date=swap_date_obj,
                     start_time=seg_start_obj,
                     end_time=seg_end_obj,
-                    breaks=seg_breaks
+                    # Перерывы пересчитываем по правилам после обмена, старые не переносим.
+                    breaks=None
                 )
 
             for seg in target_next:
                 seg_start_obj = self._normalize_schedule_time(seg.get('start'), 'start_time')
                 seg_end_obj = self._normalize_schedule_time(seg.get('end'), 'end_time')
-                seg_breaks = self._normalize_shift_breaks(seg.get('breaks') if isinstance(seg.get('breaks'), list) else [])
                 self._save_shift_tx(
                     cursor=cursor,
                     operator_id=target_operator_id,
                     shift_date=swap_date_obj,
                     start_time=seg_start_obj,
                     end_time=seg_end_obj,
-                    breaks=seg_breaks
+                    # Перерывы пересчитываем по правилам после обмена, старые не переносим.
+                    breaks=None
                 )
 
             cursor.execute(
