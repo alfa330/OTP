@@ -1,5 +1,6 @@
 ﻿import React, { useState } from 'react';
 import SalaryCalculationResult from './SalaryCalculationResult';
+import FaIcon from '../common/FaIcon';
 
 const SalaryCalculatorChat = () => {
   const [experience, setExperience] = useState('');
@@ -278,7 +279,7 @@ const SalaryCalculatorChat = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                 <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                        <i className="fas fa-user-clock text-blue-500"></i>
+                        <FaIcon className="fas fa-user-clock text-blue-500"></FaIcon>
                         Стаж работы (месяцев):
                     </label>
       <select
@@ -297,7 +298,7 @@ const SalaryCalculatorChat = () => {
     </div>
                 <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                        <i className="fas fa-star text-yellow-500"></i>
+                        <FaIcon className="fas fa-star text-yellow-500"></FaIcon>
                         Качество %):
                     </label>
       <input
@@ -312,7 +313,7 @@ const SalaryCalculatorChat = () => {
     </div>
                 <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                        <i className="fas fa-chart-line text-green-500"></i>
+                        <FaIcon className="fas fa-chart-line text-green-500"></FaIcon>
                         Средний балл по чатам:
                     </label>
       <input
@@ -327,7 +328,7 @@ const SalaryCalculatorChat = () => {
     </div>
                 <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                        <i className="fas fa-clock text-purple-500"></i>
+                        <FaIcon className="fas fa-clock text-purple-500"></FaIcon>
                         Среднее время ответа (минуты):
                     </label>
       <input
@@ -342,7 +343,7 @@ const SalaryCalculatorChat = () => {
     </div>
                 <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                        <i className="fas fa-comments text-blue-500"></i>
+                        <FaIcon className="fas fa-comments text-blue-500"></FaIcon>
                         Кол-во чатов в час:
                     </label>
       <input
@@ -357,7 +358,7 @@ const SalaryCalculatorChat = () => {
     </div>
                 <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                        <i className="fas fa-bullseye text-indigo-500"></i>
+                        <FaIcon className="fas fa-bullseye text-indigo-500"></FaIcon>
                         Норма часов:
                     </label>
       <input
@@ -372,7 +373,7 @@ const SalaryCalculatorChat = () => {
     </div>
                 <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                        <i className="fas fa-briefcase text-pink-500"></i>
+                        <FaIcon className="fas fa-briefcase text-pink-500"></FaIcon>
                         Отработанные часы:
                     </label>
       <input
@@ -387,7 +388,7 @@ const SalaryCalculatorChat = () => {
     </div>
                 <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                        <i className="fas fa-gift text-red-500"></i>
+                        <FaIcon className="fas fa-gift text-red-500"></FaIcon>
                         Бонусы:
                     </label>
                     <div className="space-y-4 mt-2">
@@ -451,7 +452,7 @@ const SalaryCalculatorChat = () => {
                     }`}
                     disabled={!validateForm()}
                 >
-                    <i className="fas fa-calculator mr-2"></i> Рассчетать
+                    <FaIcon className="fas fa-calculator mr-2"></FaIcon> Рассчетать
                 </button>
                 <button
                     onClick={togglePointsTable}
@@ -460,7 +461,7 @@ const SalaryCalculatorChat = () => {
                     }`}
                     disabled={!result}
                 >
-                    <i className="fas fa-table mr-2"></i> {showTable ? 'Скрыть таблицу' : 'Показать таблицу баллов'}
+                    <FaIcon className="fas fa-table mr-2"></FaIcon> {showTable ? 'Скрыть таблицу' : 'Показать таблицу баллов'}
                 </button>
                 <button
                     onClick={clearForm}
@@ -469,7 +470,7 @@ const SalaryCalculatorChat = () => {
                     }`}
                     disabled={!hasInput()}
                 >
-                    <i className="fas fa-eraser mr-2"></i> Очистить
+                    <FaIcon className="fas fa-eraser mr-2"></FaIcon> Очистить
                 </button>
             </div>
             <div className="mt-8">

@@ -1,4 +1,5 @@
 ﻿import React, { useState } from 'react';
+import FaIcon from '../common/FaIcon';
 
     const SalaryCalculationResult = ({ salaryResult }) => {
         const [copyMsg, setCopyMsg] = useState("");
@@ -84,7 +85,7 @@
                     className="inline-flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 transition text-sm"
                     title="Скопировать итоговую сумму"
                 >
-                    <i className="fas fa-copy" />
+                    <FaIcon className="fas fa-copy" />
                     Копировать итого
                 </button>
                 <div className="text-sm text-green-600 font-medium min-w-[90px] text-right">

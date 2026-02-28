@@ -1,4 +1,5 @@
 ﻿import React, { useEffect, useMemo, useState } from 'react';
+import FaIcon from '../common/FaIcon';
 
 const HistoryModal = ({ isOpen, onClose, history = [], subjectName = "" }) => {
 const [query, setQuery] = useState("");
@@ -81,7 +82,7 @@ return (
             {/* Header: иконка + заголовок и перенос строки с именем */}
             <div className="flex items-center justify-between gap-4">
             <div className="flex items-start gap-3">
-                <i className="fas fa-history text-xl text-blue-700 mt-1" aria-hidden="true" />
+                <FaIcon className="fas fa-history text-xl text-blue-700 mt-1" aria-hidden="true" />
                 <div className="flex flex-col">
                 <span id="history-modal-title" className="text-xl font-semibold text-blue-800 dark:text-blue-100">
                     История

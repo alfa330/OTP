@@ -1,4 +1,5 @@
 ﻿import React, { useEffect, useState } from 'react';
+import FaIcon from '../common/FaIcon';
 
 const PERIOD_STATUS_VALUES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
 const DISMISSAL_REASON_WITH_END_DATE = 'Б/С на летний период';
@@ -272,7 +273,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 <div className="flex items-start justify-between gap-4">
                 <div className="flex flex-col gap-0.5">
                     <h2 id="edit-user-title" className="text-2xl font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
-                    {isCreateMode ?  <i className="fas fa-user-edit text-blue-600"></i> : <i className="fas fa-pen text-blue-600"></i>}
+                    {isCreateMode ?  <FaIcon className="fas fa-user-edit text-blue-600"></FaIcon> : <FaIcon className="fas fa-pen text-blue-600"></FaIcon>}
                     {isCreateMode ? "Добавить сотрудника" : "Редактировать сотрудника"}
                     </h2>
                     {editedUser?.name && !isCreateMode && (
@@ -290,7 +291,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     aria-label="Закрыть"
                     className="rounded-md p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-800 transition"
                 >
-                    <i className="fas fa-times text-lg" />
+                    <FaIcon className="fas fa-times text-lg" />
                 </button>
                 </div>
 
@@ -931,7 +932,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     >
                         {isLoading ? (
                         <>
-                            <i className="fas fa-spinner fa-spin" /> Сохранение...
+                            <FaIcon className="fas fa-spinner fa-spin" /> Сохранение...
                         </>
                         ) : isCreateMode ? (
                         "Создать"
