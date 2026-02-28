@@ -2,6 +2,7 @@
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import './styles.css';
+import FaIcon from '../components/common/FaIcon';
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const EMBED_STATE_KEY = 'call_evaluation_embed_state';
@@ -106,10 +107,10 @@ const CriterionCard = ({ criterion, index, score, comment, commentVisible, onSco
                     {criterion.isCritical ? 'Критерий' : `${criterion.weight} pts`}
                 </span>
                 <button className={`crit-comment-toggle ${commentVisible ? 'active' : ''}`} onClick={onToggleComment} title="Комментарий">
-                    <i className="fa-regular fa-comment-dots" />
+                    <FaIcon className="fa-regular fa-comment-dots" />
                 </button>
                 <button className="crit-info-btn" onClick={onShowInfo} title="Описание критерия">
-                    <i className="fa-regular fa-circle-question" />
+                    <FaIcon className="fa-regular fa-circle-question" />
                 </button>
             </div>
             <div className="crit-card-body">
@@ -240,7 +241,7 @@ const SvRequestButton = ({ call, userId, userRole, fetchEvaluations, onReevaluat
                     <div className="modal request-modal" onClick={e => e.stopPropagation()}>
                         <div className="modal-header">
                             <div><h2>Запрос на переоценку</h2><div className="modal-header-sub">Call ID: {call.id}</div></div>
-                            <button className="close-btn" onClick={() => setShowModal(false)}><i className="fas fa-times"/></button>
+                            <button className="close-btn" onClick={() => setShowModal(false)}><FaIcon className="fas fa-times"/></button>
                         </div>
                         <div className="modal-body">
                             <div className="field">
@@ -261,7 +262,7 @@ const SvRequestButton = ({ call, userId, userRole, fetchEvaluations, onReevaluat
     if (call.sv_request && !call.sv_request_approved) return (
         <HoverTooltip text={[call.sv_request_comment && `Комментарий: ${call.sv_request_comment}`, call.sv_request_by_name && `От: ${call.sv_request_by_name}`].filter(Boolean).join('\n') || 'Запрос на рассмотрении'}>
             <span style={{fontSize:13, color:'var(--amber)', display:'flex', alignItems:'center', gap:4}}>
-                <i className="fas fa-clock" style={{fontSize:11}} /> Ожидает
+                <FaIcon className="fas fa-clock" style={{fontSize:11}} /> Ожидает
             </span>
         </HoverTooltip>
     );
@@ -269,7 +270,7 @@ const SvRequestButton = ({ call, userId, userRole, fetchEvaluations, onReevaluat
     if (call.sv_request_approved) return (
         <div style={{display:'flex', alignItems:'center', gap:6}}>
             <HoverTooltip text={[call.sv_request_comment && `Комм.: ${call.sv_request_comment}`, call.sv_request_by_name && `Запросил: ${call.sv_request_by_name}`, call.sv_request_approved_by_name && `Одобрил: ${call.sv_request_approved_by_name}`].filter(Boolean).join('\n') || 'Запрос одобрен'}>
-                <i className="fas fa-info-circle" style={{color:'var(--green)', cursor:'pointer'}} />
+                <FaIcon className="fas fa-info-circle" style={{color:'var(--green)', cursor:'pointer'}} />
             </HoverTooltip>
             <button className="btn btn-primary btn-sm" onClick={e => { e.stopPropagation(); onReevaluate(); }}>Переоценить</button>
         </div>
@@ -521,7 +522,7 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
                         <h2>{title}</h2>
                         <div className="modal-header-sub">Оператор: {operator?.name}</div>
                     </div>
-                    <button className="close-btn" onClick={onClose}><i className="fas fa-times" /></button>
+                    <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
                 </div>
                 <div className="modal-body">
                     {/* Direction selector */}
@@ -543,7 +544,7 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
                             {!existingEvaluation?.isReevaluation && (
                                 <div className="file-input-wrap" style={{marginBottom: 10}}>
                                     <label htmlFor="audioFile" className={`file-input-label ${callFile ? 'has-file' : ''}`}>
-                                        <i className={`fas ${callFile ? 'fa-check-circle' : 'fa-cloud-upload-alt'}`} />
+                                        <FaIcon className={`fas ${callFile ? 'fa-check-circle' : 'fa-cloud-upload-alt'}`} />
                                         {callFile ? callFile.name : 'Нажмите для загрузки аудиофайла'}
                                     </label>
                                     <input id="audioFile" type="file" accept="audio/*" onChange={handleFile} />
@@ -561,7 +562,7 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
                                     <span>Фактическая: <strong>{fmtSec(actualDuration) || '—'}</strong></span>
                                 </div>
                             )}
-                            {durationMismatch && <div className="duration-error"><i className="fas fa-exclamation-circle" />{audioError}</div>}
+                            {durationMismatch && <div className="duration-error"><FaIcon className="fas fa-exclamation-circle" />{audioError}</div>}
                             {audioError && !durationMismatch && <div className="error-text">{audioError}</div>}
                         </>
                     )}
@@ -630,12 +631,12 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
                 <div className="modal-footer">
                     {existingEvaluation?.isDraft && (
                         <button className="btn btn-danger" onClick={handleDeleteDraft} style={{marginRight:'auto'}}>
-                            <i className="fas fa-trash" /> Удалить черновик
+                            <FaIcon className="fas fa-trash" /> Удалить черновик
                         </button>
                     )}
                     <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
                     <button className="btn btn-primary" onClick={() => handleSubmit(false)} disabled={isSubmitDisabled || isSubmitting}>
-                        {isSubmitting ? <><span className="spinner" /> Отправка...</> : <><i className="fas fa-check" /> Отправить</>}
+                        {isSubmitting ? <><span className="spinner" /> Отправка...</> : <><FaIcon className="fas fa-check" /> Отправить</>}
                     </button>
                 </div>
             </div>
@@ -645,7 +646,7 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
                 <div className="info-panel" onClick={e => e.stopPropagation()}>
                     <div className="info-panel-header">
                         <span className="info-panel-title">{criteria[infoIndex].name}</span>
-                        <button className="close-btn" onClick={() => setInfoIndex(null)}><i className="fas fa-times" /></button>
+                        <button className="close-btn" onClick={() => setInfoIndex(null)}><FaIcon className="fas fa-times" /></button>
                     </div>
                     <div className="info-panel-body" dangerouslySetInnerHTML={{__html: parseToHtml(String(criteria[infoIndex].value || 'Описание отсутствует'))}} />
                 </div>
@@ -1011,14 +1012,14 @@ const App = ({ user, initialSelection }) => {
                 {selectedOperator && (
                     <div className="stats-bar">
                         <div className="stat-item">
-                            <div className="stat-icon blue"><i className="fas fa-headset" /></div>
+                            <div className="stat-icon blue"><FaIcon className="fas fa-headset" /></div>
                             <div>
                                 <div className="stat-value">{evalCount} <span style={{fontSize:12,color:'var(--text-2)',fontFamily:'var(--font)',fontWeight:400}}>/ {MAX_EVALS}</span></div>
                                 <div className="stat-label">Оценок в месяце</div>
                             </div>
                         </div>
                         <div className="stat-item">
-                            <div className="stat-icon green"><i className="fas fa-chart-line" /></div>
+                            <div className="stat-icon green"><FaIcon className="fas fa-chart-line" /></div>
                             <div>
                                 <div className="stat-value" style={{color: avgScore >= 80 ? 'var(--green)' : avgScore >= 60 ? 'var(--amber)' : avgScore > 0 ? 'var(--red)' : 'var(--text)'}}>
                                     {evalCount > 0 ? avgScore.toFixed(1) : '—'}
@@ -1055,7 +1056,7 @@ const App = ({ user, initialSelection }) => {
                         </table>
                     ) : displayedCalls.length === 0 ? (
                         <div className="empty-state">
-                            <div className="empty-state-icon"><i className="fas fa-inbox" /></div>
+                            <div className="empty-state-icon"><FaIcon className="fas fa-inbox" /></div>
                             <h3>Нет оценок</h3>
                             <p>Нет данных за {months.find(m=>m.value===selectedMonth)?.label || selectedMonth}{selectedOperator ? ` для ${selectedOperator.name}` : ''}. Добавьте первую оценку.</p>
                         </div>
@@ -1106,8 +1107,8 @@ const App = ({ user, initialSelection }) => {
                                                     <div style={{display:'flex',alignItems:'center',gap:6,flexShrink:0}} onClick={e=>e.stopPropagation()}>
                                                         {call.is_imported ? (
                                                             <>
-                                                                <button className="btn btn-green btn-sm" onClick={() => { setEditingEval(call); setShowEvalModal(true); }}><i className="fas fa-star" /> Оценить</button>
-                                                                {userRole==='admin' && <button className="btn btn-danger btn-sm" onClick={() => deleteImportedCall(call.id)}><i className="fas fa-trash" /></button>}
+                                                                <button className="btn btn-green btn-sm" onClick={() => { setEditingEval(call); setShowEvalModal(true); }}><FaIcon className="fas fa-star" /> Оценить</button>
+                                                                {userRole==='admin' && <button className="btn btn-danger btn-sm" onClick={() => deleteImportedCall(call.id)}><FaIcon className="fas fa-trash" /></button>}
                                                             </>
                                                         ) : (
                                                             <>
@@ -1115,7 +1116,7 @@ const App = ({ user, initialSelection }) => {
                                                                 {userRole==='admin' && !call.isDraft && (
                                                                     <>
                                                                         <button className="btn btn-secondary btn-sm" onClick={() => { setEditingEval({...call,isReevaluation:true}); setShowEvalModal(true); }}>
-                                                                            <i className="fas fa-redo" /> Переоценить
+                                                                            <FaIcon className="fas fa-redo" /> Переоценить
                                                                         </button>
                                                                         {call.isCorrection && (
                                                                             <button className="btn btn-secondary btn-sm" onClick={async () => {
@@ -1125,7 +1126,7 @@ const App = ({ user, initialSelection }) => {
                                                                                     if (d.status==='success') { setVersionHistory(d.versions); setShowVersionsModal(true); }
                                                                                 } catch(e) { console.error(e); }
                                                                             }}>
-                                                                                <i className="fas fa-history" />
+                                                                                <FaIcon className="fas fa-history" />
                                                                             </button>
                                                                         )}
                                                                     </>
@@ -1192,7 +1193,7 @@ const App = ({ user, initialSelection }) => {
                     <div style={{display:'flex',gap:8}}>
                         {userRole==='admin' && (viewMode==='extra'||hasExtra) && (
                             <button className="btn btn-secondary btn-sm" onClick={() => setViewMode(v=>v==='normal'?'extra':'normal')}>
-                                <i className={`fas fa-${viewMode==='normal'?'filter':'list'}`} /> {viewMode==='normal' ? 'Доп. оценки' : 'Основные'}
+                                <FaIcon className={`fas fa-${viewMode==='normal'?'filter':'list'}`} /> {viewMode==='normal' ? 'Доп. оценки' : 'Основные'}
                             </button>
                         )}
                         {viewMode === 'normal' && (
@@ -1202,7 +1203,7 @@ const App = ({ user, initialSelection }) => {
                                 onClick={() => { if (!selectedOperator||isMaxReached) return; setEditingEval(null); setShowEvalModal(true); }}
                                 disabled={!selectedOperator||isMaxReached}
                             >
-                                <i className="fas fa-plus" /> Добавить оценку
+                                <FaIcon className="fas fa-plus" /> Добавить оценку
                             </button>
                         )}
                     </div>
@@ -1228,7 +1229,7 @@ const App = ({ user, initialSelection }) => {
                     <div className="modal" style={{maxWidth:640}} onClick={e=>e.stopPropagation()}>
                         <div className="modal-header">
                             <div><h2>История версий</h2><div className="modal-header-sub">Все редакции данной оценки</div></div>
-                            <button className="close-btn" onClick={() => setShowVersionsModal(false)}><i className="fas fa-times" /></button>
+                            <button className="close-btn" onClick={() => setShowVersionsModal(false)}><FaIcon className="fas fa-times" /></button>
                         </div>
                         <div className="modal-body">
                             {versionHistory.map((v, i) => (

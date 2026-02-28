@@ -1,5 +1,6 @@
 ﻿import React, { useState } from 'react';
 import ToastContainer from '../common/ToastContainer';
+import FaIcon from '../common/FaIcon';
 
 const MonitoringScaleModal = ({ isOpen, onClose, onSave, initialDirections }) => {
     const [directions, setDirections] = useState(initialDirections || []);
@@ -583,7 +584,7 @@ const MonitoringScaleModal = ({ isOpen, onClose, onSave, initialDirections }) =>
                     >
                         {isLoading ? (
                             <>
-                                <i className="fas fa-spinner fa-spin"></i> Сохранение...
+                                <FaIcon className="fas fa-spinner fa-spin"></FaIcon> Сохранение...
                             </>
                         ) : (
                             'Сохранить'

@@ -1,4 +1,5 @@
 ﻿import React from 'react';
+import FaIcon from './FaIcon';
 
 const ToastContainer = ({ toasts, removeToast, setToasts }) => {
     const handleClose = (id) => {
@@ -19,13 +20,13 @@ const ToastContainer = ({ toasts, removeToast, setToasts }) => {
                         ${toast.type === 'success' ? 'bg-green-600 border-green-400' : 'bg-red-600 border-red-400'}
                         ${toast.closing ? 'animate-slide-out opacity-0' : 'animate-slide-in'}`}
                 >
-                    <i className={`fas ${toast.type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'} mr-3 text-lg`}></i>
+                    <FaIcon className={`fas ${toast.type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'} mr-3 text-lg`}></FaIcon>
                     <span className="flex-grow text-sm font-medium">{toast.message}</span>
                     <button 
                         onClick={() => handleClose(toast.id)} 
                         className="ml-4 text-white hover:text-gray-200 focus:outline-none"
                     >
-                        <i className="fas fa-times"></i>
+                        <FaIcon className="fas fa-times"></FaIcon>
                     </button>
                     {/* Progress bar */}
                     <div className="absolute bottom-0 left-0 h-1 bg-white bg-opacity-30 w-full">

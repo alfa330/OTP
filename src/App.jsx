@@ -6,6 +6,7 @@ import jsQR from 'jsqr';
 import ToastContainer from './components/common/ToastContainer';
 import SalaryCalculationResult from './components/salary/SalaryCalculationResult';
 import TasksView from './components/tasks/TasksView';
+import FaIcon from './components/common/FaIcon';
 
 const MonitoringScaleModal = lazy(() => import('./components/modals/MonitoringScaleModal'));
 const DisputeModal = lazy(() => import('./components/modals/DisputeModal'));
@@ -1183,7 +1184,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const fineIcons = (fines && fines.length > 0) ? (
             <div className="absolute top-[1.58rem] right-[-8px] flex gap-1 text-xs">
                 {Array.from(new Set(fines.map(f => String(f.reason || f.fine_reason || '').trim()))).slice(0,3).map((r, i) => (
-                r ? <i key={i} className={`${getFineIcon(r)} text-red-600`} title={r} style={{fontSize: '12px'}} /> : null
+                r ? <FaIcon key={i} className={`${getFineIcon(r)} text-red-600`} title={r} style={{fontSize: '12px'}} /> : null
                 ))}
             </div>
             ) : null;
@@ -1525,11 +1526,11 @@ const withAccessTokenHeader = (headers = {}) => {
                 >
                     {isDownloadingReport ? (
                     <>
-                        <i className="fas fa-spinner fa-spin mr-2" /> Формируется...
+                        <FaIcon className="fas fa-spinner fa-spin mr-2" /> Формируется...
                     </>
                     ) : (
                     <>
-                        <i className="fas fa-file-excel mr-2" /> Сформировать отчёт
+                        <FaIcon className="fas fa-file-excel mr-2" /> Сформировать отчёт
                     </>
                     )}
                 </button>
@@ -1932,7 +1933,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     <div className="flex items-start justify-between gap-4 p-6 border-b">
                     <div>
                         <h3 id="cell-modal-title" className="text-lg font-semibold text-gray-800 flex items-center gap-2">
-                        <i className="fas fa-info-circle text-sm text-gray-500" aria-hidden="true" />
+                        <FaIcon className="fas fa-info-circle text-sm text-gray-500" aria-hidden="true" />
                         Детали: <span className="ml-1 text-primary-700">{cellModel.name}</span>
                         <span className="ml-2 text-sm text-gray-500">— {cellModel.dateStr}</span>
                         </h3>
@@ -1945,7 +1946,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm text-gray-600 hover:bg-gray-50"
                         aria-label="Закрыть"
                         >
-                        <i className="fas fa-times" aria-hidden="true" /> Закрыть
+                        <FaIcon className="fas fa-times" aria-hidden="true" /> Закрыть
                         </button>
                     </div>
                     </div>
@@ -1956,7 +1957,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <label className="flex flex-col text-xs text-gray-700">
                         <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-clock" aria-hidden="true" /> Work time (ч)
+                            <FaIcon className="fas fa-clock" aria-hidden="true" /> Work time (ч)
                         </span>
                         <input
                             className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
@@ -1969,7 +1970,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                         <label className="flex flex-col text-xs text-gray-700">
                         <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-coffee" aria-hidden="true" /> Break time (ч)
+                            <FaIcon className="fas fa-coffee" aria-hidden="true" /> Break time (ч)
                         </span>
                         <input
                             className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
@@ -1982,7 +1983,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                         <label className="flex flex-col text-xs text-gray-700">
                         <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-comments" aria-hidden="true" /> Talk time (ч)
+                            <FaIcon className="fas fa-comments" aria-hidden="true" /> Talk time (ч)
                         </span>
                         <input
                             className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
@@ -1995,7 +1996,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                         <label className="flex flex-col text-xs text-gray-700">
                         <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-phone" aria-hidden="true" /> Calls
+                            <FaIcon className="fas fa-phone" aria-hidden="true" /> Calls
                         </span>
                         <input
                             className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
@@ -2007,7 +2008,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                         <label className="col-span-1 md:col-span-2 flex flex-col text-xs text-gray-700">
                         <span className="flex items-center gap-2 mb-1">
-                            <i className="fas fa-percent" aria-hidden="true" /> Efficiency (ч)
+                            <FaIcon className="fas fa-percent" aria-hidden="true" /> Efficiency (ч)
                         </span>
                         <input
                             className="w-full p-2 rounded-md border focus:ring-2 focus:ring-primary-200"
@@ -2023,12 +2024,12 @@ const withAccessTokenHeader = (headers = {}) => {
                         <div className="mt-6">
                         <div className="flex items-center justify-between mb-3">
                             <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-                            <i className="fas fa-chalkboard-teacher" aria-hidden="true" /> Тренинги
+                            <FaIcon className="fas fa-chalkboard-teacher" aria-hidden="true" /> Тренинги
                             </h4>
                             <div className="flex items-center gap-2">
                             {isTrainingActionLoading && (
                                 <span className="text-xs text-blue-600 inline-flex items-center gap-1">
-                                <i className="fas fa-spinner fa-spin" aria-hidden="true" /> Сохранение...
+                                <FaIcon className="fas fa-spinner fa-spin" aria-hidden="true" /> Сохранение...
                                 </span>
                             )}
                             <button
@@ -2038,7 +2039,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md border bg-white text-sm font-medium shadow-sm hover:shadow focus:outline-none focus:ring-2 focus:ring-offset-1"
                                 aria-label="Добавить тренинг"
                             >
-                                <i className="fas fa-plus" aria-hidden="true" /> Добавить
+                                <FaIcon className="fas fa-plus" aria-hidden="true" /> Добавить
                             </button>
                             </div>
                         </div>
@@ -2057,7 +2058,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     }`}>
                                     <div className="flex items-center justify-between gap-2">
                                     <div className="text-sm font-medium flex items-center gap-3">
-                                        <i className="fas fa-clock" aria-hidden="true" />
+                                        <FaIcon className="fas fa-clock" aria-hidden="true" />
                                         <span>{t.start_time || '—'} — {t.end_time || '—'}</span>
                                         <span className="text-xs text-gray-600">· {dur.toFixed(2)} ч</span>
                                     </div>
@@ -2070,7 +2071,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         className="px-2 py-1 text-xs rounded-md border bg-white hover:bg-gray-50"
                                         aria-label="Редактировать тренинг"
                                         >
-                                        <i className="fas fa-pen" aria-hidden="true" />
+                                        <FaIcon className="fas fa-pen" aria-hidden="true" />
                                         </button>
                                         <button
                                         type="button"
@@ -2079,7 +2080,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         className="px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 bg-white hover:bg-red-50"
                                         aria-label="Удалить тренинг"
                                         >
-                                        <i className="fas fa-trash" aria-hidden="true" />
+                                        <FaIcon className="fas fa-trash" aria-hidden="true" />
                                         </button>
                                     </div>
                                     </div>
@@ -2089,11 +2090,11 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                     <div className="flex items-center gap-2 text-xs">
                                     <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border">
-                                        <i className="fas fa-info-circle" /> {t.count_in_hours ? 'Засчитывается в часы' : 'Не засчитывается'}
+                                        <FaIcon className="fas fa-info-circle" /> {t.count_in_hours ? 'Засчитывается в часы' : 'Не засчитывается'}
                                     </span>
                                     {t.verified && (
                                         <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border">
-                                        <i className="fas fa-check" /> Проверено
+                                        <FaIcon className="fas fa-check" /> Проверено
                                         </span>
                                     )}
                                     </div>
@@ -2109,7 +2110,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     {/* Header */}
                     <div className="flex items-center justify-between mb-4">
                         <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-                            <i className="fas fa-exclamation-triangle" aria-hidden="true" /> Штрафы
+                            <FaIcon className="fas fa-exclamation-triangle" aria-hidden="true" /> Штрафы
                         </h4>
 
                         {/* Add button — компактно и заметно, справа */}
@@ -2280,11 +2281,11 @@ const withAccessTokenHeader = (headers = {}) => {
                     >
                         {isSavingCell ? (
                         <>
-                            <i className="fas fa-spinner fa-spin" aria-hidden="true" /> Сохранение...
+                            <FaIcon className="fas fa-spinner fa-spin" aria-hidden="true" /> Сохранение...
                         </>
                         ) : (
                         <>
-                            <i className="fas fa-save" aria-hidden="true" /> Сохранить
+                            <FaIcon className="fas fa-save" aria-hidden="true" /> Сохранить
                         </>
                         )}
                     </button>
@@ -3829,17 +3830,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                 >
                                 <div className="flex-1">
                                     <div className="font-semibold text-gray-800 flex items-center gap-2">
-                                    <i className="fa-solid fa-user text-blue-500 text-sm"></i>
+                                    <FaIcon className="fa-solid fa-user text-blue-500 text-sm"></FaIcon>
                                     {it.op ? (it.op.name || it.op.login || it.op.id) : it.csvName}
                                     </div>
 
                                     <div className="text-xs text-gray-500 flex items-center gap-1 mt-0.5">
-                                    <i className="fa-solid fa-diagram-project text-gray-400"></i>
+                                    <FaIcon className="fa-solid fa-diagram-project text-gray-400"></FaIcon>
                                     {it.op ? (it.op.direction_name || it.op.direction || '') : 'CSV-only'}
                                     </div>
 
                                     <div className="text-xs text-red-600 mt-1 flex items-center gap-1">
-                                    <i className="fa-solid fa-triangle-exclamation text-red-500"></i>
+                                    <FaIcon className="fa-solid fa-triangle-exclamation text-red-500"></FaIcon>
                                     НЕДОСТАТОЧНО ({it.csvCount} / {it.desired})
                                     </div>
                                 </div>
@@ -3847,13 +3848,13 @@ const withAccessTokenHeader = (headers = {}) => {
                                 <div className="flex items-center gap-2 text-xs">
                                     {it.op && (
                                     <div className="px-2 py-0.5 rounded-lg border border-blue-300 text-blue-600 font-medium flex items-center gap-1 bg-blue-50">
-                                        <i className="fa-solid fa-phone"></i>
+                                        <FaIcon className="fa-solid fa-phone"></FaIcon>
                                         Оценки: {it.op.call_count ?? 0}
                                     </div>
                                     )}
 
                                     <div className="px-2 py-0.5 rounded-lg border border-green-300 text-green-600 font-medium flex items-center gap-1 bg-green-50">
-                                    <i className="fa-solid fa-check"></i>
+                                    <FaIcon className="fa-solid fa-check"></FaIcon>
                                     Подходящие: {it.csvCount}
                                     </div>
 
@@ -3863,7 +3864,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     }
                                     className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm bg-gray-50 hover:bg-gray-100 transition-colors"
                                     >
-                                    <i className="fa-solid fa-gear text-gray-500"></i>
+                                    <FaIcon className="fa-solid fa-gear text-gray-500"></FaIcon>
                                     Настройки
                                     </button>
 
@@ -3874,7 +3875,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     }}
                                     className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm bg-gray-50 hover:bg-gray-100 transition-colors"
                                     >
-                                    <i className="fa-solid fa-eye text-gray-500"></i>
+                                    <FaIcon className="fa-solid fa-eye text-gray-500"></FaIcon>
                                     Просмотр
                                     </button>
                                 </div>
@@ -3921,12 +3922,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                         {/* Левая часть: имя, направление, статус и Custom */}
                                         <div className="flex-1 min-w-0">
                                             <div className="font-semibold text-gray-800 flex items-center gap-2 truncate">
-                                            <i className="fa-solid fa-user text-blue-500 text-sm"></i>
+                                            <FaIcon className="fa-solid fa-user text-blue-500 text-sm"></FaIcon>
                                             {displayName}
                                             </div>
 
                                             <div className="text-xs text-gray-500 flex items-center gap-1 mt-0.5 truncate">
-                                            <i className="fa-solid fa-diagram-project text-gray-400"></i>
+                                            <FaIcon className="fa-solid fa-diagram-project text-gray-400"></FaIcon>
                                             {op.direction_name || op.direction || ''}
                                             </div>
 
@@ -3934,13 +3935,13 @@ const withAccessTokenHeader = (headers = {}) => {
                                             <div className="flex items-center gap-2 mt-1 flex-wrap">
                                             {op.status && (
                                                 <div className="inline-flex items-center gap-1 text-xs text-gray-600 bg-gray-100 px-2 py-0.5 rounded-md">
-                                                <i className="fa-solid fa-circle-info text-gray-500"></i>
+                                                <FaIcon className="fa-solid fa-circle-info text-gray-500"></FaIcon>
                                                 {op.status}
                                                 </div>
                                             )}
                                             {info?.custom && (
                                                 <div className="inline-flex items-center gap-1 text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-md font-medium">
-                                                <i className="fa-solid fa-star text-yellow-600"></i>
+                                                <FaIcon className="fa-solid fa-star text-yellow-600"></FaIcon>
                                                 Custom
                                                 </div>
                                             )}
@@ -3948,7 +3949,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                             {anyCsvCount > 0 && csvCount === 0 && (
                                             <div className="text-xs text-yellow-700 mt-1 flex items-center gap-1">
-                                                <i className="fa-solid fa-triangle-exclamation text-yellow-600"></i>
+                                                <FaIcon className="fa-solid fa-triangle-exclamation text-yellow-600"></FaIcon>
                                                 Есть звонки в файле ({anyCsvCount}), но они не сопоставлены как «Подходящие»
                                             </div>
                                             )}
@@ -3960,12 +3961,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                         {/* Правая часть — счётчики и кнопки */}
                                         <div className="flex items-center gap-2 flex-wrap justify-end text-xs">
                                             <div className="px-2 py-0.5 rounded-lg border border-blue-300 text-blue-600 bg-blue-50 font-medium flex items-center gap-1">
-                                            <i className="fa-solid fa-phone"></i>
+                                            <FaIcon className="fa-solid fa-phone"></FaIcon>
                                             Оценки: {op.call_count ?? 0}
                                             </div>
 
                                             <div className="px-2 py-0.5 rounded-lg border border-green-300 text-green-600 bg-green-50 font-medium flex items-center gap-1">
-                                            <i className="fa-solid fa-check"></i>
+                                            <FaIcon className="fa-solid fa-check"></FaIcon>
                                             Подходящие: {csvCount}
                                             </div>
 
@@ -3974,7 +3975,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             title="Настройки"
                                             className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm bg-gray-50 hover:bg-gray-100 transition-colors"
                                             >
-                                            <i className="fa-solid fa-gear text-gray-500"></i>
+                                            <FaIcon className="fa-solid fa-gear text-gray-500"></FaIcon>
                                             Настройки
                                             </button>
 
@@ -3982,7 +3983,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             onClick={() => handleShowOperator(displayName)}
                                             className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm bg-gray-50 hover:bg-gray-100 transition-colors"
                                             >
-                                            <i className="fa-solid fa-eye text-gray-500"></i>
+                                            <FaIcon className="fa-solid fa-eye text-gray-500"></FaIcon>
                                             Просмотр
                                             </button>
                                         </div>
@@ -4109,11 +4110,11 @@ const withAccessTokenHeader = (headers = {}) => {
                             <button onClick={() => clearSelectedCallsForOperator(selectedOperator)} className="px-3 py-2 border rounded text-sm">Снять выбор</button>
 
                             <button title="Настройки оператора" onClick={handleOpenSettings} className="px-2 p-1 border rounded text-base bg-white hover:shadow" aria-label="Настройки">
-                                <i className="fa-solid fa-gear text-xl text-gray-700"></i>
+                                <FaIcon className="fa-solid fa-gear text-xl text-gray-700"></FaIcon>
                             </button>
 
                             <button title="Закрыть панель" onClick={handleClosePanel} className="px-3 p-1 border rounded text-base bg-white hover:shadow" aria-label="Закрыть">
-                                <i className="fa-solid fa-xmark text-xl text-gray-700"></i>
+                                <FaIcon className="fa-solid fa-xmark text-xl text-gray-700"></FaIcon>
                             </button>
                             </div>
                         </div>
@@ -5159,9 +5160,9 @@ const withAccessTokenHeader = (headers = {}) => {
             return (
                 <div className="bg-white rounded shadow-sm p-3 w-[260px] flex-shrink-0">
                 <div className="flex items-center justify-between mb-2">
-                    <button className="px-2 py-1 bg-slate-100 rounded" onClick={() => setCalendarMonth(m => new Date(m.getFullYear(), m.getMonth() - 1, 1))}><i className="fas fa-angle-left"></i></button>
+                    <button className="px-2 py-1 bg-slate-100 rounded" onClick={() => setCalendarMonth(m => new Date(m.getFullYear(), m.getMonth() - 1, 1))}><FaIcon className="fas fa-angle-left"></FaIcon></button>
                     <div className="text-sm font-medium">{calendarMonth.toLocaleString(undefined, { month: 'long', year: 'numeric' })}</div>
-                    <button className="px-2 py-1 bg-slate-100 rounded" onClick={() => setCalendarMonth(m => new Date(m.getFullYear(), m.getMonth() + 1, 1))}><i className="fas fa-angle-right"></i></button>
+                    <button className="px-2 py-1 bg-slate-100 rounded" onClick={() => setCalendarMonth(m => new Date(m.getFullYear(), m.getMonth() + 1, 1))}><FaIcon className="fas fa-angle-right"></FaIcon></button>
                 </div>
                 <div className="grid grid-cols-7 gap-1 text-[12px] text-center text-slate-600 mb-2">
                     {['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(d => <div key={d} className="text-xs">{d}</div>)}
@@ -7683,10 +7684,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                     className="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm"
                                 >
                                     <span className="flex items-center gap-2">
-                                        <i className="fas fa-calendar-alt text-blue-600"></i>
+                                        <FaIcon className="fas fa-calendar-alt text-blue-600"></FaIcon>
                                         Календарь
                                     </span>
-                                    <i className={`fas ${showOperatorMobileCalendar ? 'fa-chevron-up' : 'fa-chevron-down'} text-xs text-slate-500`}></i>
+                                    <FaIcon className={`fas ${showOperatorMobileCalendar ? 'fa-chevron-up' : 'fa-chevron-down'} text-xs text-slate-500`}></FaIcon>
                                 </button>
                                 {showOperatorMobileCalendar && (
                                     <div className="mt-2 flex justify-center">
@@ -7703,7 +7704,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
                                     <div className="flex flex-wrap gap-2 items-center">
                                         <h2 className="text-xl sm:text-2xl font-semibold flex items-center gap-2 mr-0 sm:mr-1">
-                                            <i className="fas fa-calendar-user text-blue-600"></i>
+                                            <FaIcon className="fas fa-calendar-user text-blue-600"></FaIcon>
                                             Мои смены
                                         </h2>
                                         <div className="flex items-center gap-1 sm:ml-3">
@@ -7719,12 +7720,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                         </button>
                                     </div>
                                     <div className="flex gap-2 items-center self-stretch sm:self-auto justify-between sm:justify-start">
-                                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-left"></i></button>
+                                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-left"></FaIcon></button>
                                         <div className="flex-1 sm:flex-none px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-center leading-tight">
                                             <div className="text-[11px] uppercase tracking-wide text-slate-500">{formatWeekdayRu(currentDate, 'short')}</div>
                                             <div className="text-sm font-semibold text-slate-900">{formatDateRuDayMonth(currentDate)}</div>
                                         </div>
-                                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-right"></i></button>
+                                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-right"></FaIcon></button>
                                     </div>
                                 </div>
 
@@ -7836,7 +7837,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 <div className="flex-1 min-h-0 overflow-visible lg:overflow-auto">
                                     {myScheduleLoading && (
                                         <div className="bg-white rounded-xl border border-slate-200 p-6 text-slate-600 text-sm">
-                                            <i className="fas fa-spinner fa-spin mr-2"></i>Загрузка смен...
+                                            <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>Загрузка смен...
                                         </div>
                                     )}
 
@@ -7853,7 +7854,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     <div className="xl:col-span-2 bg-white rounded-xl border border-slate-200 overflow-hidden">
                                                         <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
                                                             <div className="font-semibold text-slate-900 flex items-center gap-2">
-                                                                <i className="fas fa-chart-gantt text-blue-600"></i>
+                                                                <FaIcon className="fas fa-chart-gantt text-blue-600"></FaIcon>
                                                                 Таймлайн дня
                                                                 <span className="text-sm font-normal text-slate-500">{formatDateRuDayMonth(myCurrentDayCard.date)}</span>
                                                             </div>
@@ -7948,7 +7949,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     </div>
                                                     <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                                                         <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
-                                                            <div className="font-semibold text-slate-900 flex items-center gap-2"><i className="fas fa-mug-hot text-amber-600"></i>Перерывы дня</div>
+                                                            <div className="font-semibold text-slate-900 flex items-center gap-2"><FaIcon className="fas fa-mug-hot text-amber-600"></FaIcon>Перерывы дня</div>
                                                             <div className="text-xs text-slate-500">{myCurrentDayBreaksList.length}</div>
                                                         </div>
                                                         <div className="p-4 max-h-[330px] overflow-auto">
@@ -8052,7 +8053,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                         {!dayCard.isDayOff && dayCard.shifts.length > 0 && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{dayCard.shifts.length} смен</span>}
                                                                     </div>
                                                                     <div className="w-7 h-7 rounded-lg border border-slate-200 bg-white flex items-center justify-center text-slate-500">
-                                                                        <i className={`fas ${isExpanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-xs`}></i>
+                                                                        <FaIcon className={`fas ${isExpanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-xs`}></FaIcon>
                                                                     </div>
                                                                 </div>
                                                             </div>
@@ -8122,7 +8123,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                 {viewMode !== 'day' && (
                                                                                     <div className="px-3 py-2">
                                                                                         <div className="text-[11px] font-medium text-slate-600 mb-1.5 flex items-center gap-2 uppercase tracking-wide">
-                                                                                            <i className="fas fa-mug-hot text-amber-600"></i>
+                                                                                            <FaIcon className="fas fa-mug-hot text-amber-600"></FaIcon>
                                                                                             Перерывы
                                                                                         </div>
                                                                                         {segBreakCount === 0 ? (
@@ -8255,7 +8256,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     title="Показать выбор"
                                     aria-expanded={sidebarFilterMenus.supervisors ? 'true' : 'false'}
                                 >
-                                    <i className="fas fa-ellipsis-v"></i>
+                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
                                 </button>
                             </div>
                             {sidebarFilterMenus.supervisors && (
@@ -8305,7 +8306,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     title="Показать выбор"
                                     aria-expanded={sidebarFilterMenus.statuses ? 'true' : 'false'}
                                 >
-                                    <i className="fas fa-ellipsis-v"></i>
+                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
                                 </button>
                             </div>
                             {sidebarFilterMenus.statuses && (
@@ -8409,7 +8410,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     title="Показать выбор"
                                     aria-expanded={sidebarFilterMenus.directions ? 'true' : 'false'}
                                 >
-                                    <i className="fas fa-ellipsis-v"></i>
+                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
                                 </button>
                             </div>
                             {sidebarFilterMenus.directions && (
@@ -8459,7 +8460,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     title="Показать выбор"
                                     aria-expanded={sidebarFilterMenus.breakGroups ? 'true' : 'false'}
                                 >
-                                    <i className="fas fa-ellipsis-v"></i>
+                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
                                 </button>
                             </div>
                             {sidebarFilterMenus.breakGroups && (
@@ -8526,7 +8527,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     className="text-xs px-2 py-0.5 rounded bg-red-50 hover:bg-red-100 text-red-700"
                                                     title="Удалить группу"
                                                 >
-                                                    <i className="fas fa-trash-alt"></i>
+                                                    <FaIcon className="fas fa-trash-alt"></FaIcon>
                                                 </button>
                                             </div>
                                             <div className="flex flex-wrap gap-1">
@@ -8569,7 +8570,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 className="ml-3 px-3 py-1 rounded bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 text-sm font-medium flex items-center gap-2"
                                 title="Показать перерывы операторов за выбранный день"
                             >
-                                <i className="fas fa-mug-hot text-amber-600"></i>
+                                <FaIcon className="fas fa-mug-hot text-amber-600"></FaIcon>
                                 Перерывы
                                 {dayBreaksStats.breaksCount > 0 && (
                                     <span className="px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-900 text-[10px] leading-none">
@@ -8605,7 +8606,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     aria-haspopup="menu"
                                     aria-expanded={showPlannerTopActionsMenu ? 'true' : 'false'}
                                 >
-                                    <i className="fas fa-ellipsis-v"></i>
+                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
                                 </button>
 
                                 {showPlannerTopActionsMenu && (
@@ -8625,7 +8626,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 className="w-full px-3 py-2 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                                                 title="Экспортировать график (видимый диапазон дат) в Excel"
                                             >
-                                                <i className={`fas ${excelTransferState.exporting ? 'fa-spinner fa-spin' : 'fa-file-excel'}`}></i>
+                                                <FaIcon className={`fas ${excelTransferState.exporting ? 'fa-spinner fa-spin' : 'fa-file-excel'}`}></FaIcon>
                                                 {excelTransferState.exporting ? 'Экспорт...' : 'Экспорт Excel'}
                                             </button>
 
@@ -8638,7 +8639,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 className="w-full px-3 py-2 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                                                 title="Импортировать график из Excel (ФИО + даты)"
                                             >
-                                                <i className={`fas ${excelTransferState.importing ? 'fa-spinner fa-spin' : 'fa-file-import'}`}></i>
+                                                <FaIcon className={`fas ${excelTransferState.importing ? 'fa-spinner fa-spin' : 'fa-file-import'}`}></FaIcon>
                                                 {excelTransferState.importing ? 'Импорт...' : 'Импорт Excel'}
                                             </button>
 
@@ -8651,7 +8652,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 className="w-full px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                                                 title="Загрузить CSV переключений статусов операторов и построить таймлайн/аномалии"
                                             >
-                                                <i className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-upload'}`}></i>
+                                                <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-upload'}`}></FaIcon>
                                                 {plannerStatusAnomalyLoading ? 'Загрузка...' : 'Загрузить статусы'}
                                             </button>
 
@@ -8663,7 +8664,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     }}
                                                     className="w-full px-3 py-2 rounded-xl border border-violet-200 bg-violet-50 hover:bg-violet-100 text-violet-700 text-sm font-medium flex items-center gap-2"
                                                 >
-                                                    <i className="fas fa-chart-line"></i>
+                                                    <FaIcon className="fas fa-chart-line"></FaIcon>
                                                     Открыть отчет статусов
                                                 </button>
                                             )}
@@ -8678,7 +8679,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     className={`w-full px-3 py-2 rounded-xl border text-sm font-medium flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${plannerStatusSpecialViewEnabled ? 'border-rose-300 bg-rose-100 text-rose-800' : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'}`}
                                                     title={plannerStatusAnomalyAnalysis ? 'Включить/выключить спецрежим просмотра статусов' : 'Сначала загрузите CSV со статусами'}
                                                 >
-                                                    <i className={`fas ${plannerStatusSpecialViewEnabled ? 'fa-toggle-on' : 'fa-toggle-off'}`}></i>
+                                                    <FaIcon className={`fas ${plannerStatusSpecialViewEnabled ? 'fa-toggle-on' : 'fa-toggle-off'}`}></FaIcon>
                                                     Режим статусов
                                                 </button>
                                             )}
@@ -8692,7 +8693,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         className="w-7 h-7 rounded border border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
                                                         title="Уменьшить таймлайн"
                                                     >
-                                                        <i className="fas fa-minus text-[10px]"></i>
+                                                        <FaIcon className="fas fa-minus text-[10px]"></FaIcon>
                                                     </button>
                                                     <button
                                                         type="button"
@@ -8708,7 +8709,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         className="w-7 h-7 rounded border border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
                                                         title="Увеличить таймлайн"
                                                     >
-                                                        <i className="fas fa-plus text-[10px]"></i>
+                                                        <FaIcon className="fas fa-plus text-[10px]"></FaIcon>
                                                     </button>
                                                 </div>
                                             )}
@@ -8729,7 +8730,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium flex items-center gap-2"
                                                     title="Очистить загруженные статусы"
                                                 >
-                                                    <i className="fas fa-trash-alt"></i>
+                                                    <FaIcon className="fas fa-trash-alt"></FaIcon>
                                                     Очистить статусы
                                                 </button>
                                             </div>
@@ -8739,26 +8740,26 @@ const withAccessTokenHeader = (headers = {}) => {
                             </div>
                             </>
                         )}
-                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-left"></i></button>
+                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-left"></FaIcon></button>
                         <div className="text-sm">{currentDate.toLocaleDateString()}</div>
-                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><i className="fas fa-angle-right"></i></button>
+                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-right"></FaIcon></button>
                         </div>
                     </div>
 
                     <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-700">
-                        <i className="fas fa-info-circle mr-1"></i>
+                        <FaIcon className="fas fa-info-circle mr-1"></FaIcon>
                         <strong>Совет:</strong> Удерживайте Ctrl (или Cmd на Mac) и кликайте по дням для множественного выбора
                     </div>
                     {(plannerStatusAnomalyFileName || plannerStatusAnomalyError) && (
                         <div className={`mb-2 p-2 rounded text-xs border ${plannerStatusAnomalyError ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-rose-50 border-rose-200 text-rose-800'}`}>
                             {plannerStatusAnomalyError ? (
                                 <>
-                                    <i className="fas fa-triangle-exclamation mr-1"></i>
+                                    <FaIcon className="fas fa-triangle-exclamation mr-1"></FaIcon>
                                     Ошибка загрузки статусов: {plannerStatusAnomalyError}
                                 </>
                             ) : (
                                 <>
-                                    <i className="fas fa-file-csv mr-1"></i>
+                                    <FaIcon className="fas fa-file-csv mr-1"></FaIcon>
                                     Загружены статусы: <strong>{plannerStatusAnomalyFileName}</strong>
                                     {plannerStatusSpecialDayViewEnabled ? (
                                         <span className="ml-2 text-rose-700">• спецрежим включен</span>
@@ -9044,7 +9045,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                         className="text-[10px] px-1 py-0.5 mr-1 rounded bg-white/20 ml-auto"
                                                                                         title="Редактировать смену"
                                                                                     >
-                                                                                        <i className="fas fa-pen"></i>
+                                                                                        <FaIcon className="fas fa-pen"></FaIcon>
                                                                                     </button>
                                                                                 </div>
                                                                                 {getBreakPartsForPart(op, p, d).map((b, bi) => (
@@ -9173,7 +9174,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             onClick={(e) => { e.stopPropagation(); openEditModal(op.id, p.sourceDate, p.sourceIndex); }}
                                                             className="text-[10px] px-1 py-0.5 mr-1 rounded bg-white/20"
                                                             >
-                                                            <i className="fas fa-pen"></i>
+                                                            <FaIcon className="fas fa-pen"></FaIcon>
                                                             </button>
                                                             {getBreakPartsForPart(op, p, d).map((b, bi) => (
                                                             <div key={bi}
@@ -9284,13 +9285,13 @@ const withAccessTokenHeader = (headers = {}) => {
                                 onClick={() => { setModalState(m => ({ ...m, open: false })); setShowEditTimelineModal(false); setShowEditStatusJournal(false); setEditTimelineFocusedStatusKey(''); clearSelectedDays(); }} 
                                 className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
                             >
-                                <i className="fas fa-times text-lg"></i>
+                                <FaIcon className="fas fa-times text-lg"></FaIcon>
                             </button>
                         </div>
                         
                         {/* Информация о датах */}
                         <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-lg">
-                            <i className="fas fa-calendar-days text-slate-400"></i>
+                            <FaIcon className="fas fa-calendar-days text-slate-400"></FaIcon>
                             <span className="text-sm text-slate-600 font-medium">
                                 {isBulkSelectionModal
                                     ? `Выбрано: ${modalBulkCount}`
@@ -9309,7 +9310,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         className="px-2.5 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 flex items-center gap-1.5"
                                         title={showEditTimelineModal ? 'Скрыть таймлайн за день' : 'Показать таймлайн за день'}
                                     >
-                                        <i className="fas fa-chart-gantt text-[10px]"></i>
+                                        <FaIcon className="fas fa-chart-gantt text-[10px]"></FaIcon>
                                         {showEditTimelineModal ? 'Скрыть таймлайн' : 'Таймлайн'}
                                     </button>
                                     <button
@@ -9321,7 +9322,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         className="px-2.5 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                                         title={plannerStatusAnomalyAnalysis ? 'Открыть журнал переключений статусов за выбранный день' : 'Сначала загрузите статусы (CSV)'}
                                     >
-                                        <i className="fas fa-list-ul text-[10px]"></i>
+                                        <FaIcon className="fas fa-list-ul text-[10px]"></FaIcon>
                                         {showEditStatusJournal ? 'Скрыть журнал' : 'Журнал статусов'}
                                     </button>
                                 </div>
@@ -9337,7 +9338,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     {isBulkSelectionModal && (
                         <div className="mb-6 p-4 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-xl">
                             <div className="flex items-center gap-2 mb-2">
-                                <i className="fas fa-layer-group text-green-600"></i>
+                                <FaIcon className="fas fa-layer-group text-green-600"></FaIcon>
                                 <span className="text-sm font-semibold text-green-900">Массовое редактирование</span>
                             </div>
                             <div className="text-xs text-green-700">
@@ -9358,7 +9359,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             />
                             <div className="flex-1">
                                 <div className="flex items-center gap-2">
-                                    <i className="fas fa-calendar-times text-sky-600"></i>
+                                    <FaIcon className="fas fa-calendar-times text-sky-600"></FaIcon>
                                     <span className="text-sm font-semibold text-sky-900">Отметить как выходной</span>
                                 </div>
                                 {modalState.isDayOff && (
@@ -9375,7 +9376,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     <div className="mb-6 p-4 rounded-xl border border-slate-200 bg-slate-50/70">
                         <div className="flex items-center justify-between gap-3 mb-3">
                             <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
-                                <i className="fas fa-user-clock text-slate-500"></i>
+                                <FaIcon className="fas fa-user-clock text-slate-500"></FaIcon>
                                 Статус на период
                             </h4>
                             {(() => {
@@ -9541,7 +9542,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         className="px-4 py-2 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-slate-700 text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                                         title={(modalActiveScheduleStatus?.statusCode === 'dismissal' && modalActiveScheduleStatus?.isBlacklist) ? 'ЧС-увольнение нельзя удалить' : ''}
                                     >
-                                        <i className={`fas ${modalState.statusDeleting ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`}></i>
+                                        <FaIcon className={`fas ${modalState.statusDeleting ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`}></FaIcon>
                                         {modalState.statusDeleting ? 'Удаляем...' : 'Удалить статус'}
                                     </button>
                                 )}
@@ -9551,7 +9552,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     disabled={!!modalState.statusSaving || !!modalState.statusDeleting}
                                     className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                                 >
-                                    <i className={`fas ${modalState.statusSaving ? 'fa-spinner fa-spin' : 'fa-save'}`}></i>
+                                    <FaIcon className={`fas ${modalState.statusSaving ? 'fa-spinner fa-spin' : 'fa-save'}`}></FaIcon>
                                     {modalState.statusSaving ? 'Сохраняем...' : 'Сохранить статус'}
                                 </button>
                             </div>
@@ -9562,7 +9563,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     {isBulkSelectionModal && (
                     <div className="mb-6">
                         <h4 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                            <i className="fas fa-clock text-blue-500"></i>
+                            <FaIcon className="fas fa-clock text-blue-500"></FaIcon>
                             Настройка смены
                         </h4>
                         <div className="grid grid-cols-2 gap-4">
@@ -9600,7 +9601,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     <>
                     <div className="mb-6">
                         <h4 className="text-sm font-semibold text-slate-900 mb-3 flex items-center gap-2">
-                            <i className="fas fa-list text-slate-500"></i>
+                            <FaIcon className="fas fa-list text-slate-500"></FaIcon>
                             Существующие смены
                         </h4>
                         <div className="space-y-2">
@@ -9609,7 +9610,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             const arr = op?.shifts?.[modalState.date] ?? [];
                             if (arr.length === 0) return (
                                 <div className="text-center py-8 text-slate-400 bg-slate-50 rounded-lg border-2 border-dashed border-slate-200">
-                                    <i className="fas fa-calendar-xmark text-3xl mb-2"></i>
+                                    <FaIcon className="fas fa-calendar-xmark text-3xl mb-2"></FaIcon>
                                     <div className="text-sm">Нет запланированных смен</div>
                                 </div>
                             );
@@ -9626,7 +9627,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             {isEditing && <span className="px-2 py-0.5 bg-blue-500 text-white text-xs font-semibold rounded-full">Редактируется</span>}
                                         </div>
                                         <div className="text-sm text-slate-600 flex items-center gap-2">
-                                            <i className="fas fa-clock-rotate-left text-slate-400"></i>
+                                            <FaIcon className="fas fa-clock-rotate-left text-slate-400"></FaIcon>
                                             <span className="font-medium">{duration.toFixed(2)} часов</span>
                                         </div>
                                     </div>
@@ -9638,14 +9639,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 setModalState(m => ({ ...m, start: seg.start, end: seg.end, editIndex: idx, breaks: [], showAddPanel: true }));
                                             }}
                                         >
-                                            <i className="fas fa-pen text-xs"></i>
+                                            <FaIcon className="fas fa-pen text-xs"></FaIcon>
                                             Изменить
                                         </button>
                                         <button 
                                             className="px-3 py-2 text-sm font-medium bg-red-50 hover:bg-red-100 text-red-700 rounded-lg transition-colors"
                                             onClick={() => removeSegment({ opId: modalState.opId, date: modalState.date, index: idx })}
                                         >
-                                            <i className="fas fa-trash-alt"></i>
+                                            <FaIcon className="fas fa-trash-alt"></FaIcon>
                                         </button>
                                     </div>
                                 </div>
@@ -9658,7 +9659,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     <div className="mb-4">
                         <div className="flex items-center justify-between gap-3">
                             <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
-                                <i className="fas fa-clock text-blue-500"></i>
+                                <FaIcon className="fas fa-clock text-blue-500"></FaIcon>
                                 {modalState.editIndex !== null ? 'Редактирование смены' : 'Добавление смены'}
                             </h4>
                             {modalState.editIndex === null && (
@@ -9671,7 +9672,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         breaks: !m.showAddPanel ? (m.breaks ?? []) : []
                                     }))}
                                 >
-                                    <i className={`fas ${modalState.showAddPanel ? 'fa-chevron-up' : 'fa-plus'}`}></i>
+                                    <FaIcon className={`fas ${modalState.showAddPanel ? 'fa-chevron-up' : 'fa-plus'}`}></FaIcon>
                                     {modalState.showAddPanel ? 'Скрыть блок' : 'Добавить смену'}
                                 </button>
                             )}
@@ -9705,7 +9706,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                     <div className="mb-6">
                     <h4 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                        <i className="fas fa-mug-hot text-amber-600"></i>
+                        <FaIcon className="fas fa-mug-hot text-amber-600"></FaIcon>
                         Перерывы
                         <span className="text-xs text-slate-500 font-normal">(предпросмотр доступен до сохранения)</span>
                     </h4>
@@ -9795,7 +9796,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             <div className="mb-4 p-3 bg-blue-50 border border-blue-100 rounded-lg">
                                 <div className="flex items-center justify-between">
                                     <span className="text-sm text-blue-900 font-medium flex items-center gap-2">
-                                        <i className="fas fa-hourglass-half"></i>
+                                        <FaIcon className="fas fa-hourglass-half"></FaIcon>
                                         Длительность смены:
                                     </span>
                                     <span className="text-lg font-bold text-blue-600">
@@ -9810,7 +9811,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 onClick={() => { if (bulkActionState.loading) return; setModalState((m) => ({ ...m, open: false })); setShowEditTimelineModal(false); setShowEditStatusJournal(false); setEditTimelineFocusedStatusKey(''); clearSelectedDays(); }}
                                 disabled={bulkActionState.loading}
                             >
-                                <i className="fas fa-times"></i>
+                                <FaIcon className="fas fa-times"></FaIcon>
                                 Закрыть
                             </button>
                             {isBulkSelectionModal && (
@@ -9819,7 +9820,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     onClick={() => deleteShiftsForMultipleTargets(modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })))}
                                     disabled={bulkActionState.loading}
                                 >
-                                    <i className={`fas ${bulkActionState.loading && bulkActionState.action === 'delete_shifts' ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`}></i>
+                                    <FaIcon className={`fas ${bulkActionState.loading && bulkActionState.action === 'delete_shifts' ? 'fa-spinner fa-spin' : 'fa-trash-alt'}`}></FaIcon>
                                     {bulkActionState.loading && bulkActionState.action === 'delete_shifts'
                                         ? 'Очищаем...'
                                         : `Очистить (${modalBulkCount})`}
@@ -9831,7 +9832,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     onClick={() => setDayOffForMultipleTargets(modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })))}
                                     disabled={bulkActionState.loading}
                                 >
-                                    <i className={`fas ${bulkActionState.loading && bulkActionState.action === 'set_day_off' ? 'fa-spinner fa-spin' : 'fa-calendar-times'}`}></i>
+                                    <FaIcon className={`fas ${bulkActionState.loading && bulkActionState.action === 'set_day_off' ? 'fa-spinner fa-spin' : 'fa-calendar-times'}`}></FaIcon>
                                     {bulkActionState.loading && bulkActionState.action === 'set_day_off'
                                         ? 'Проставляем выходные...'
                                         : `Выходной всем (${modalBulkCount})`}
@@ -9843,7 +9844,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     onClick={() => saveSegmentToMultipleTargets({ targets: modalState.multipleTargets || (modalState.multipleDates || []).map(date => ({ opId: modalState.opId, date })), start: modalState.start, end: modalState.end, breaks: (modalState.breaks && modalState.breaks.length) ? modalState.breaks : null })}
                                     disabled={bulkActionState.loading}
                                 >
-                                    <i className={`fas ${bulkActionState.loading && bulkActionState.action === 'set_shift' ? 'fa-spinner fa-spin' : 'fa-check-double'}`}></i>
+                                    <FaIcon className={`fas ${bulkActionState.loading && bulkActionState.action === 'set_shift' ? 'fa-spinner fa-spin' : 'fa-check-double'}`}></FaIcon>
                                     {bulkActionState.loading && bulkActionState.action === 'set_shift'
                                         ? 'Применяем...'
                                         : `Применить ко всем (${modalBulkCount})`}
@@ -9854,7 +9855,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     className="px-5 py-3 rounded-lg bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white font-semibold shadow-lg hover:shadow-xl transition-all flex items-center gap-2"
                                     onClick={() => saveSegment({ opId: modalState.opId, date: modalState.date, start: modalState.start, end: modalState.end, editIndex: modalState.editIndex, breaks: modalState.breaks && modalState.breaks.length ? modalState.breaks : null })}
                                 >
-                                    <i className="fas fa-save"></i>
+                                    <FaIcon className="fas fa-save"></FaIcon>
                                     {modalState.editIndex !== null ? 'Обновить смену' : 'Сохранить смену'}
                                 </button>
                             )}
@@ -9884,7 +9885,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         className="w-7 h-7 rounded-md hover:bg-slate-200 text-slate-500 hover:text-slate-700 flex items-center justify-center"
                                         title="Закрыть журнал"
                                     >
-                                        <i className="fas fa-times text-xs"></i>
+                                        <FaIcon className="fas fa-times text-xs"></FaIcon>
                                     </button>
                                 </div>
                                 <div ref={editJournalScrollRef} className={`${showEditTimelineModal ? 'max-h-[calc(68vh-3rem)]' : 'max-h-[calc(100vh-10rem)]'} overflow-auto p-2 space-y-1.5`}>
@@ -10024,7 +10025,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         onClick={() => { setShowEditTimelineModal(false); setEditTimelineFocusedStatusKey(''); }}
                                         className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-200 text-slate-500 hover:text-slate-700 transition-colors"
                                     >
-                                        <i className="fas fa-times"></i>
+                                        <FaIcon className="fas fa-times"></FaIcon>
                                     </button>
                                 </div>
 
@@ -10292,7 +10293,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     <div className="flex items-start justify-between gap-3">
                                         <div className="flex items-start gap-3 min-w-0">
                                             <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${tone.iconWrap}`}>
-                                                <i className={`fas ${report.kind === 'error' ? 'fa-triangle-exclamation' : report.kind === 'warning' ? 'fa-circle-exclamation' : 'fa-circle-check'}`}></i>
+                                                <FaIcon className={`fas ${report.kind === 'error' ? 'fa-triangle-exclamation' : report.kind === 'warning' ? 'fa-circle-exclamation' : 'fa-circle-check'}`}></FaIcon>
                                             </div>
                                             <div className="min-w-0">
                                                 <div className={`text-lg font-semibold ${tone.title}`}>
@@ -10320,7 +10321,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             className="w-9 h-9 rounded-lg hover:bg-white/80 border border-black/10 text-slate-500 hover:text-slate-700 flex items-center justify-center flex-shrink-0"
                                             title="Закрыть"
                                         >
-                                            <i className="fas fa-times"></i>
+                                            <FaIcon className="fas fa-times"></FaIcon>
                                         </button>
                                     </div>
                                 </div>
@@ -10566,7 +10567,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-slate-200">
                                     <div>
                                         <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                                            <i className="fas fa-upload text-rose-600"></i>
+                                            <FaIcon className="fas fa-upload text-rose-600"></FaIcon>
                                             Загрузка статусов операторов
                                         </h3>
                                         <div className="text-sm text-slate-600 mt-1">
@@ -10586,7 +10587,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         onClick={() => setShowPlannerStatusAnomalyModal(false)}
                                         className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
                                     >
-                                        <i className="fas fa-times"></i>
+                                        <FaIcon className="fas fa-times"></FaIcon>
                                     </button>
                                 </div>
 
@@ -10597,7 +10598,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         disabled={plannerStatusAnomalyLoading}
                                         className="px-3 py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
                                     >
-                                        <i className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-file-csv'}`}></i>
+                                        <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-file-csv'}`}></FaIcon>
                                         {plannerStatusAnomalyLoading ? 'Анализируем...' : (hasAnalysis ? 'Загрузить другой CSV' : 'Загрузить CSV')}
                                     </button>
                                     {hasAnalysis && (
@@ -10609,7 +10610,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 className="w-8 h-8 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
                                                 title="Уменьшить таймлайн"
                                             >
-                                                <i className="fas fa-minus text-xs"></i>
+                                                <FaIcon className="fas fa-minus text-xs"></FaIcon>
                                             </button>
                                             <button
                                                 type="button"
@@ -10625,7 +10626,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 className="w-8 h-8 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
                                                 title="Увеличить таймлайн"
                                             >
-                                                <i className="fas fa-plus text-xs"></i>
+                                                <FaIcon className="fas fa-plus text-xs"></FaIcon>
                                             </button>
                                         </div>
                                     )}
@@ -10636,7 +10637,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             className={`px-3 py-2 rounded-lg border text-sm font-medium ${onlyAnomalies ? 'border-rose-300 bg-rose-100 text-rose-800' : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'}`}
                                             title="Фильтровать список операторов и дней только по аномалиям"
                                         >
-                                            <i className={`fas ${onlyAnomalies ? 'fa-filter-circle-xmark' : 'fa-filter'} mr-2`}></i>
+                                            <FaIcon className={`fas ${onlyAnomalies ? 'fa-filter-circle-xmark' : 'fa-filter'} mr-2`}></FaIcon>
                                             {onlyAnomalies ? 'Показать все' : 'Показать только аномалии'}
                                         </button>
                                     )}
@@ -10842,7 +10843,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                         <span>Всего: {plannerStatusFormatDuration(day.totalObservedSec || 0)}</span>
                                                                     </div>
                                                                 </div>
-                                                                <i className={`fas ${expanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-slate-400`}></i>
+                                                                <FaIcon className={`fas ${expanded ? 'fa-chevron-up' : 'fa-chevron-down'} text-slate-400`}></FaIcon>
                                                             </button>
 
                                                             {expanded && (
@@ -11142,7 +11143,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-200">
                         <div>
                             <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                                <i className="fas fa-mug-hot text-amber-600"></i>
+                                <FaIcon className="fas fa-mug-hot text-amber-600"></FaIcon>
                                 Перерывы за день
                             </h3>
                             <div className="text-sm text-slate-600 mt-1">
@@ -11153,7 +11154,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             onClick={() => setShowDayBreaksModal(false)}
                             className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
                         >
-                            <i className="fas fa-times"></i>
+                            <FaIcon className="fas fa-times"></FaIcon>
                         </button>
                     </div>
 
@@ -11218,7 +11219,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     >
                         <div className="flex items-center gap-3 flex-1">
                             <div className="bg-white/20 rounded-full p-2" style={{ animation: 'pulse 2s ease-in-out infinite' }}>
-                                <i className="fas fa-check-circle text-2xl"></i>
+                                <FaIcon className="fas fa-check-circle text-2xl"></FaIcon>
                             </div>
                             <div>
                                 <div className="text-lg font-bold">
@@ -11235,7 +11236,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 className="px-3 py-2 text-sm bg-white/20 hover:bg-white/30 rounded-lg transition-all hover:scale-105 whitespace-nowrap"
                                 title="Открыть массовое редактирование"
                             >
-                                <i className="fas fa-sliders-h mr-1"></i>
+                                <FaIcon className="fas fa-sliders-h mr-1"></FaIcon>
                                 Настроить
                             </button>
                         )}
@@ -11244,7 +11245,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             className="px-3 py-2 text-sm bg-white/20 hover:bg-white/30 rounded-lg transition-all hover:scale-105"
                             title="Очистить выбор"
                         >
-                            <i className="fas fa-times"></i>
+                            <FaIcon className="fas fa-times"></FaIcon>
                         </button>
                     </div>
                 )}
@@ -11431,7 +11432,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         className="text-gray-500 hover:text-gray-800 px-2 py-1 rounded-lg"
                         aria-label="Закрыть"
                     >
-                        <i className="fas fa-times"></i>
+                        <FaIcon className="fas fa-times"></FaIcon>
                     </button>
                     </div>
                 </div>
@@ -11725,14 +11726,14 @@ const withAccessTokenHeader = (headers = {}) => {
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-4">
                     <div className="w-14 h-14 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg">
-                        <i className="fa-solid fa-fan text-white text-2xl"></i>
+                        <FaIcon className="fa-solid fa-fan text-white text-2xl"></FaIcon>
                     </div>
                     <div>
                         <h1 className="text-3xl font-bold text-gray-900">
                         Dos AI
                         </h1>
                         <p className="text-sm text-gray-600 mt-1 flex items-center gap-2">
-                        <i className="fas fa-user text-blue-600"></i>
+                        <FaIcon className="fas fa-user text-blue-600"></FaIcon>
                         {user?.name || 'Оператор'}
                         </p>
                     </div>
@@ -11743,14 +11744,14 @@ const withAccessTokenHeader = (headers = {}) => {
                         onClick={copyJSON}
                         className="text-sm px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors flex items-center gap-2"
                         >
-                        <i className="fas fa-copy"></i>
+                        <FaIcon className="fas fa-copy"></FaIcon>
                         Копировать
                         </button>
                         <button
                         onClick={downloadJSON}
                         className="text-sm px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
                         >
-                        <i className="fas fa-download"></i>
+                        <FaIcon className="fas fa-download"></FaIcon>
                         Скачать
                         </button>
                     </div>
@@ -11765,7 +11766,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-6 mb-8">
                 <div className="flex items-center justify-between mb-6">
                     <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                    <i className="fas fa-calendar-days text-blue-600"></i>
+                    <FaIcon className="fas fa-calendar-days text-blue-600"></FaIcon>
                     Выберите месяц для просмотра
                     </h2>
                     {selectedMonth && (
@@ -11793,7 +11794,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         `}
                         >
                         <div className="flex flex-col items-center gap-1">
-                            <i className={`fas fa-calendar ${isSelected ? 'text-white' : 'text-gray-400'} text-lg`}></i>
+                            <FaIcon className={`fas fa-calendar ${isSelected ? 'text-white' : 'text-gray-400'} text-lg`}></FaIcon>
                             <span>{formatMonth(month)}</span>
                         </div>
                         </button>
@@ -11845,7 +11846,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 <div className="bg-red-50 border-2 border-red-200 rounded-2xl p-6 shadow-lg">
                     <div className="flex items-start gap-4">
                     <div className="w-12 h-12 bg-red-100 rounded-xl flex items-center justify-center flex-shrink-0">
-                        <i className="fas fa-exclamation-triangle text-red-600 text-xl"></i>
+                        <FaIcon className="fas fa-exclamation-triangle text-red-600 text-xl"></FaIcon>
                     </div>
                     <div className="flex-1">
                         <h3 className="text-lg font-semibold text-red-900 mb-2">
@@ -11868,7 +11869,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-6 hover:shadow-xl transition-shadow">
                         <div className="flex items-center gap-3 mb-4">
                         <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center">
-                            <i className="fas fa-calendar text-blue-600 text-xl"></i>
+                            <FaIcon className="fas fa-calendar text-blue-600 text-xl"></FaIcon>
                         </div>
                         <div>
                             <div className="text-xs text-gray-500 uppercase tracking-wide">
@@ -11920,7 +11921,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-6 hover:shadow-xl transition-shadow">
                         <div className="flex items-center gap-3 mb-4">
                         <div className="w-12 h-12 bg-orange-100 rounded-xl flex items-center justify-center">
-                            <i className="fas fa-star text-orange-600 text-xl"></i>
+                            <FaIcon className="fas fa-star text-orange-600 text-xl"></FaIcon>
                         </div>
                         <div className="text-sm font-semibold text-gray-900">
                             Ваши приоритеты
@@ -11949,7 +11950,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-6 hover:shadow-xl transition-shadow">
                         <div className="flex items-center gap-3 mb-4">
                         <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center">
-                            <i className="fas fa-graduation-cap text-green-600 text-xl"></i>
+                            <FaIcon className="fas fa-graduation-cap text-green-600 text-xl"></FaIcon>
                         </div>
                         <div className="text-sm font-semibold text-gray-900">
                             Рекомендации
@@ -11979,14 +11980,14 @@ const withAccessTokenHeader = (headers = {}) => {
                     {/* Per-Criterion Details */}
                     <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-6">
                     <h3 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-3">
-                        <i className="fas fa-list-check text-blue-600"></i>
+                        <FaIcon className="fas fa-list-check text-blue-600"></FaIcon>
                         Детализация по критериям
                     </h3>
                     <div className="space-y-4">
                         {perCriterion.length === 0 && (
                         <div className="text-center py-12">
                             <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                            <i className="fas fa-inbox text-gray-400 text-2xl"></i>
+                            <FaIcon className="fas fa-inbox text-gray-400 text-2xl"></FaIcon>
                             </div>
                             <p className="text-gray-600">Нет данных по критериям</p>
                         </div>
@@ -12018,7 +12019,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 )}
                             </div>
                             <div className="text-sm text-gray-600 flex items-center gap-2 bg-gray-100 px-3 py-1 rounded-lg">
-                                <i className="fas fa-info-circle"></i>
+                                <FaIcon className="fas fa-info-circle"></FaIcon>
                                 <span className="font-medium">{c.status ?? '—'}</span>
                             </div>
                             </div>
@@ -12027,7 +12028,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             {c.issues && (
                             <div className="mb-4">
                                 <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 flex items-center gap-2">
-                                <i className="fas fa-exclamation-circle text-red-600"></i>
+                                <FaIcon className="fas fa-exclamation-circle text-red-600"></FaIcon>
                                 Обнаруженные ошибки
                                 </div>
                                 <div className="bg-red-50 border border-red-100 rounded-xl p-4 max-h-40 overflow-auto">
@@ -12042,7 +12043,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <div>
                                 <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 flex items-center gap-2">
-                                <i className="fas fa-thumbs-up text-green-600"></i>
+                                <FaIcon className="fas fa-thumbs-up text-green-600"></FaIcon>
                                 Ваши сильные стороны
                                 </div>
                                 <p className="text-sm text-gray-700 bg-green-50 border border-green-100 rounded-lg p-3">
@@ -12051,7 +12052,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             </div>
                             <div>
                                 <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 flex items-center gap-2">
-                                <i className="fas fa-lightbulb text-yellow-600"></i>
+                                <FaIcon className="fas fa-lightbulb text-yellow-600"></FaIcon>
                                 Как улучшить
                                 </div>
                                 <p className="text-sm text-gray-700 bg-yellow-50 border border-yellow-100 rounded-lg p-3">
@@ -12061,7 +12062,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             <div>
                                 <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 flex items-center justify-between">
                                 <span className="flex items-center gap-2">
-                                    <i className="fas fa-tools text-blue-600"></i>
+                                    <FaIcon className="fas fa-tools text-blue-600"></FaIcon>
                                     Полезные техники
                                 </span>
                                 {Array.isArray(c.techniques) &&
@@ -12113,7 +12114,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-6">
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-                        <i className="fas fa-code text-gray-600"></i>
+                        <FaIcon className="fas fa-code text-gray-600"></FaIcon>
                         Исходные данные (JSON)
                         </h3>
                         <label className="flex items-center gap-3 cursor-pointer group">
@@ -12145,7 +12146,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-16">
                     <div className="text-center max-w-md mx-auto">
                     <div className="w-24 h-24 bg-gradient-to-br from-blue-100 to-purple-100 rounded-full flex items-center justify-center mx-auto mb-6 shadow-lg">
-                        <i className="fas fa-calendar-check text-blue-600 text-4xl"></i>
+                        <FaIcon className="fas fa-calendar-check text-blue-600 text-4xl"></FaIcon>
                     </div>
                     <h3 className="text-2xl font-bold text-gray-900 mb-3">
                         Выберите месяц для анализа
@@ -12757,7 +12758,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const Medal = ({ position }) => {
                 const medals = {1:{class:'medal-gold', icon:'fa-trophy'},2:{class:'medal-silver', icon:'fa-medal'},3:{class:'medal-bronze', icon:'fa-medal'}};
                 const medal = medals[position]; if(!medal) return React.createElement('span',{className:'text-gray-500 font-semibold'}, `#${position}`);
-                return React.createElement('div',{className:`${medal.class} w-10 h-10 rounded-full flex items-center justify-center text-white font-bold shadow-lg`}, React.createElement('i',{className:`fas ${medal.icon}`}));
+                return React.createElement('div',{className:`${medal.class} w-10 h-10 rounded-full flex items-center justify-center text-white font-bold shadow-lg`}, React.createElement(FaIcon,{className:`fas ${medal.icon}`}));
             };
 
             const ParticipantCard = ({ participant, position, scoreLabel = 'Оценки', showExtra = null }) => (
@@ -12786,7 +12787,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 return React.createElement('div', { className: `bg-gradient-to-br ${isFirst ? 'from-yellow-400 via-yellow-500 to-yellow-600' : 'from-blue-400 to-blue-600'} rounded-2xl p-6 shadow-2xl mb-6 text-white` },
                     isFirst && React.createElement('div', { className: 'flex items-center justify-center mb-4' },
                         React.createElement('div', { className: 'text-center' },
-                            React.createElement('i', { className: 'fas fa-crown text-5xl mb-2 animate-bounce' }),
+                            React.createElement(FaIcon, { className: 'fas fa-crown text-5xl mb-2 animate-bounce' }),
                             React.createElement('h3', { className: 'text-3xl font-bold' }, '🎉 ПОЗДРАВЛЯЕМ! 🎉'),
                             React.createElement('p', { className: 'text-xl mt-2 opacity-90' }, 
                                 stats.overallPosition === 1 ? 'Вы лидер общего рейтинга!' : 'Вы лидер в своей группе!'
@@ -12796,7 +12797,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     React.createElement('div', { className: 'grid grid-cols-1 md:grid-cols-3 gap-4' },
                         React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-xl p-4 backdrop-blur-sm' },
                             React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
-                                React.createElement('i', { className: 'fas fa-chart-line text-2xl' }),
+                                React.createElement(FaIcon, { className: 'fas fa-chart-line text-2xl' }),
                                 React.createElement('h4', { className: 'text-lg font-bold' }, 'Ваше место')
                             ),
                             React.createElement('p', { className: 'text-4xl font-bold' }, `#${stats.overallPosition}`),
@@ -12804,7 +12805,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         ),
                         React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-xl p-4 backdrop-blur-sm' },
                             React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
-                                React.createElement('i', { className: 'fas fa-users text-2xl' }),
+                                React.createElement(FaIcon, { className: 'fas fa-users text-2xl' }),
                                 React.createElement('h4', { className: 'text-lg font-bold' }, 'В группе ' + stats.entry.group)
                             ),
                             React.createElement('p', { className: 'text-4xl font-bold' }, `#${stats.groupPosition}`),
@@ -12812,7 +12813,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         ),
                         React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-xl p-4 backdrop-blur-sm' },
                             React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
-                                React.createElement('i', { className: 'fas fa-star text-2xl' }),
+                                React.createElement(FaIcon, { className: 'fas fa-star text-2xl' }),
                                 React.createElement('h4', { className: 'text-lg font-bold' }, 'Ваши оценки')
                             ),
                             React.createElement('p', { className: 'text-4xl font-bold' }, stats.entry.scores || 0),
@@ -12841,7 +12842,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 return React.createElement('div', { className: `bg-gradient-to-br ${isFirst ? 'from-yellow-400 via-yellow-500 to-yellow-600' : 'from-green-400 to-green-600'} rounded-2xl p-6 shadow-2xl mb-6 text-white` },
                     isFirst && React.createElement('div', { className: 'flex items-center justify-center mb-4' },
                         React.createElement('div', { className: 'text-center' },
-                            React.createElement('i', { className: 'fas fa-crown text-5xl mb-2 animate-bounce' }),
+                            React.createElement(FaIcon, { className: 'fas fa-crown text-5xl mb-2 animate-bounce' }),
                             React.createElement('h3', { className: 'text-3xl font-bold' }, '🎉 ПОЗДРАВЛЯЕМ! 🎉'),
                             React.createElement('p', { className: 'text-xl mt-2 opacity-90' }, 
                                 stats.overallPosition === 1 ? 'Вы лидер общего рейтинга!' : 'Вы лидер в своей группе!'
@@ -12851,7 +12852,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     React.createElement('div', { className: 'grid grid-cols-1 md:grid-cols-3 gap-4' },
                         React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-xl p-4 backdrop-blur-sm' },
                             React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
-                                React.createElement('i', { className: 'fas fa-chart-line text-2xl' }),
+                                React.createElement(FaIcon, { className: 'fas fa-chart-line text-2xl' }),
                                 React.createElement('h4', { className: 'text-lg font-bold' }, 'Ваше место')
                             ),
                             React.createElement('p', { className: 'text-4xl font-bold' }, `#${stats.overallPosition}`),
@@ -12859,7 +12860,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         ),
                         React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-xl p-4 backdrop-blur-sm' },
                             React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
-                                React.createElement('i', { className: 'fas fa-users text-2xl' }),
+                                React.createElement(FaIcon, { className: 'fas fa-users text-2xl' }),
                                 React.createElement('h4', { className: 'text-lg font-bold' }, stats.groupName)
                             ),
                             React.createElement('p', { className: 'text-4xl font-bold' }, `#${stats.groupPosition}`),
@@ -12867,7 +12868,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         ),
                         React.createElement('div', { className: 'bg-white bg-opacity-20 rounded-xl p-4 backdrop-blur-sm' },
                             React.createElement('div', { className: 'flex items-center gap-3 mb-2' },
-                                React.createElement('i', { className: 'fas fa-award text-2xl' }),
+                                React.createElement(FaIcon, { className: 'fas fa-award text-2xl' }),
                                 React.createElement('h4', { className: 'text-lg font-bold' }, 'Качество')
                             ),
                             React.createElement('p', { className: 'text-4xl font-bold' }, (stats.entry.score || 0).toFixed(2)),
@@ -12899,7 +12900,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 
                 return React.createElement('div', { className: 'bg-white rounded-2xl p-6 shadow-lg overflow-x-auto' },
                     React.createElement('h3', { className: 'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2' },
-                        React.createElement('i', { className: 'fas fa-star text-yellow-500' }),
+                        React.createElement(FaIcon, { className: 'fas fa-star text-yellow-500' }),
                         'Топ-10 общий рейтинг'
                     ),
                     React.createElement('table', { className: 'w-full min-w-max' },
@@ -12923,7 +12924,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         day.label,
                                         isAdmin && React.createElement('div', {
                                             className: 'absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 bg-blue-600 bg-opacity-90 text-white text-xs transition-opacity'
-                                        }, React.createElement('i', { className: 'fas fa-upload mr-1' }), 'Загрузить CSV')
+                                        }, React.createElement(FaIcon, { className: 'fas fa-upload mr-1' }), 'Загрузить CSV')
                                     )
                                 ),
                                 React.createElement('th', { className: 'px-4 py-3 text-center text-sm font-semibold text-gray-700 bg-yellow-50 border-2 border-yellow-400' }, 'Итого')
@@ -13015,7 +13016,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             ['0.5','0.75','1'].map(group=> 
                                 React.createElement('div',{key:group, className:'bg-white rounded-2xl p-6 shadow-lg'}, 
                                     React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, 
-                                        React.createElement('i',{className:'fas fa-users text-blue-600'}), 
+                                        React.createElement(FaIcon,{className:'fas fa-users text-blue-600'}), 
                                         `Группа ${group}`
                                     ), 
                                     React.createElement('div',{className:'space-y-3'}, 
@@ -13057,7 +13058,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             React.createElement('div',{className:'grid grid-cols-1 lg:grid-cols-2 gap-6'}, 
                                 React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, 
                                     React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, 
-                                        React.createElement('i',{className:'fas fa-seedling text-green-600'}), 
+                                        React.createElement(FaIcon,{className:'fas fa-seedling text-green-600'}), 
                                         'Новички (до 2 месяцев)'
                                     ), 
                                     React.createElement('div',{className:'space-y-3'}, 
@@ -13066,7 +13067,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 ), 
                                 React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, 
                                     React.createElement('h3',{className:'text-lg font-bold text-gray-800 mb-4 flex items-center gap-2'}, 
-                                        React.createElement('i',{className:'fas fa-user-graduate text-green-600'}), 
+                                        React.createElement(FaIcon,{className:'fas fa-user-graduate text-green-600'}), 
                                         'Опытные (от 2 месяцев)'
                                     ), 
                                     React.createElement('div',{className:'space-y-3'}, 
@@ -13081,14 +13082,14 @@ const withAccessTokenHeader = (headers = {}) => {
             const renderChat = () => (
                 React.createElement('div',{className:'space-y-6'},
                     React.createElement('div',{className:'bg-gradient-to-br from-purple-500 to-purple-700 rounded-2xl p-6 text-white'}, React.createElement('h3',{className:'text-2xl font-bold mb-2'}, 'Чат-менеджеры'), React.createElement('p',{className:'opacity-90'}, `Направление: Чат • Период: ${contestData.chat.period}`), contestData.chat.lastUpdate && React.createElement('p',{className:'text-sm opacity-75 mt-2'}, `Последнее обновление: ${contestData.chat.lastUpdate}`)),
-                    React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-heart text-purple-600'}), 'Рейтинг по благодарностям'), React.createElement('div',{className:'space-y-3'}, contestData.chat.results.length>0 ? contestData.chat.results.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Благодарности'})) : React.createElement('p',{className:'text-center text-gray-500 py-8'}, 'Нет данных')))
+                    React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement(FaIcon,{className:'fas fa-heart text-purple-600'}), 'Рейтинг по благодарностям'), React.createElement('div',{className:'space-y-3'}, contestData.chat.results.length>0 ? contestData.chat.results.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Благодарности'})) : React.createElement('p',{className:'text-center text-gray-500 py-8'}, 'Нет данных')))
                 )
             );
 
             const renderSmz = () => (
                 React.createElement('div',{className:'space-y-6'},
                     React.createElement('div',{className:'bg-gradient-to-br from-orange-500 to-orange-700 rounded-2xl p-6 text-white'}, React.createElement('h3',{className:'text-2xl font-bold mb-2'}, 'СМЗ'), React.createElement('p',{className:'opacity-90'}, `Направление: СМЗ • Период: ${contestData.smz.period}`), contestData.smz.lastUpdate && React.createElement('p',{className:'text-sm opacity-75 mt-2'}, `Последнее обновление: ${contestData.smz.lastUpdate}`)),
-                    React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement('i',{className:'fas fa-chart-line text-orange-600'}), 'Рейтинг по результатам'), React.createElement('div',{className:'space-y-3'}, contestData.smz.results.length>0 ? contestData.smz.results.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Всего', showExtra:(p)=> React.createElement(React.Fragment,null, React.createElement('span',{className:'text-xs text-gray-600'}, `Подписания: ${p.signatures}`), React.createElement('span',{className:'text-xs text-gray-600'}, `Обработки: ${p.calls}`)) })) : React.createElement('p',{className:'text-center text-gray-500 py-8'}, 'Нет данных')))
+                    React.createElement('div',{className:'bg-white rounded-2xl p-6 shadow-lg'}, React.createElement('h3',{className:'text-xl font-bold text-gray-800 mb-4 flex items-center gap-2'}, React.createElement(FaIcon,{className:'fas fa-chart-line text-orange-600'}), 'Рейтинг по результатам'), React.createElement('div',{className:'space-y-3'}, contestData.smz.results.length>0 ? contestData.smz.results.map((p,i)=> React.createElement(ParticipantCard,{key:i, participant:p, position:i+1, scoreLabel:'Всего', showExtra:(p)=> React.createElement(React.Fragment,null, React.createElement('span',{className:'text-xs text-gray-600'}, `Подписания: ${p.signatures}`), React.createElement('span',{className:'text-xs text-gray-600'}, `Обработки: ${p.calls}`)) })) : React.createElement('p',{className:'text-center text-gray-500 py-8'}, 'Нет данных')))
                 )
             );
 
@@ -13112,8 +13113,8 @@ const withAccessTokenHeader = (headers = {}) => {
             return (
                 React.createElement('div',{className:'min-h-screen p-4 md:p-8'},
                     React.createElement('div',{className:'max-w-7xl mx-auto'},
-                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-6 mb-6'}, React.createElement('div',{className:'flex flex-col md:flex-row justify-between items-start md:items-center gap-4'}, React.createElement('div',null, React.createElement('h1',{className:'text-3xl font-bold text-gray-800 mb-2'}, React.createElement('i',{className:'fas fa-trophy text-yellow-500 mr-3'}), 'Конкурсы'), React.createElement('p',{className:'text-gray-600'}, 'Отслеживайте результаты и лидеров')), isAdmin ? React.createElement('div',{className:'px-6 py-3 rounded-xl font-semibold bg-green-500 text-white flex items-center gap-2'}, React.createElement('i',{className:'fas fa-user-check mr-2'}), 'Админ-режим') : null)),
-                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-4 mb-6 overflow-x-auto scrollbar-hide'}, React.createElement('div',{className:'flex gap-2 min-w-max'}, availableTabs.map(tab=> React.createElement('button',{key:tab.id, onClick:()=>setActiveTab(tab.id), className:`px-6 py-3 rounded-xl font-semibold transition-all whitespace-nowrap ${activeTab===tab.id ? 'tab-active shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}, React.createElement('i',{className:`fas ${tab.icon} mr-2`}), tab.label)) )),
+                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-6 mb-6'}, React.createElement('div',{className:'flex flex-col md:flex-row justify-between items-start md:items-center gap-4'}, React.createElement('div',null, React.createElement('h1',{className:'text-3xl font-bold text-gray-800 mb-2'}, React.createElement(FaIcon,{className:'fas fa-trophy text-yellow-500 mr-3'}), 'Конкурсы'), React.createElement('p',{className:'text-gray-600'}, 'Отслеживайте результаты и лидеров')), isAdmin ? React.createElement('div',{className:'px-6 py-3 rounded-xl font-semibold bg-green-500 text-white flex items-center gap-2'}, React.createElement(FaIcon,{className:'fas fa-user-check mr-2'}), 'Админ-режим') : null)),
+                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-4 mb-6 overflow-x-auto scrollbar-hide'}, React.createElement('div',{className:'flex gap-2 min-w-max'}, availableTabs.map(tab=> React.createElement('button',{key:tab.id, onClick:()=>setActiveTab(tab.id), className:`px-6 py-3 rounded-xl font-semibold transition-all whitespace-nowrap ${activeTab===tab.id ? 'tab-active shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}, React.createElement(FaIcon,{className:`fas ${tab.icon} mr-2`}), tab.label)) )),
                         React.createElement('div',null, activeTab==='baiga' && renderBaiga(), activeTab==='quality' && renderQuality(), activeTab==='chat' && renderChat(), activeTab==='smz' && renderSmz())
                     ),
                     React.createElement(ToastContainer,{toasts:toasts, removeToast:removeToast})
@@ -14427,7 +14428,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 aria-label="Закрыть"
                                 className="rounded-md p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-800 transition"
                             >
-                                <i className="fas fa-times" />
+                                <FaIcon className="fas fa-times" />
                             </button>
                             </div>
 
@@ -14545,11 +14546,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                 >
                                 {isLoading ? (
                                     <>
-                                    <i className="fas fa-spinner fa-spin" /> Сохранение...
+                                    <FaIcon className="fas fa-spinner fa-spin" /> Сохранение...
                                     </>
                                 ) : (
                                     <>
-                                    <i className="fas fa-check" /> Сохранить
+                                    <FaIcon className="fas fa-check" /> Сохранить
                                     </>
                                 )}
                                 </button>
@@ -14894,7 +14895,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 style={{ width: 40, height: 40 }}
                                 aria-label="Удалить тренинг"
                             >
-                                <i className="fas fa-trash" />
+                                <FaIcon className="fas fa-trash" />
                             </button>
 
                             <h3 id="training-details-title" className="text-xl font-semibold mb-4 text-center">
@@ -14953,7 +14954,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 onClick={() => { setShowDetails(false); onEdit && onEdit(training); }}
                                 className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded flex items-center gap-2"
                                 >
-                                <i className="fas fa-pen"></i> Редактировать
+                                <FaIcon className="fas fa-pen"></FaIcon> Редактировать
                                 </button>
                                 <button
                                 onClick={() => setShowDetails(false)}
@@ -15139,11 +15140,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                             >
                                                 {isExpanded ? (
                                                 <>
-                                                    <i className="fas fa-chevron-up" aria-hidden="true" /> Свернуть
+                                                    <FaIcon className="fas fa-chevron-up" aria-hidden="true" /> Свернуть
                                                 </>
                                                 ) : (
                                                 <>
-                                                    <i className="fas fa-chevron-down" aria-hidden="true" /> Показать
+                                                    <FaIcon className="fas fa-chevron-down" aria-hidden="true" /> Показать
                                                 </>
                                                 )}
                                             </button>
@@ -15188,7 +15189,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setCalendarModal({ open: false, date: '', trainings: [] }); setSelectedCalendarTraining(null); }}>
                                 <div className="bg-white p-8 rounded-2xl shadow-2xl max-w-2xl w-full relative flex flex-col gap-4" style={{marginLeft: '0px'}} onClick={e => e.stopPropagation()}>
                                     <button onClick={() => { setCalendarModal({ open: false, date: '', trainings: [] }); setSelectedCalendarTraining(null); }} className="absolute top-4 right-4 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
-                                        <i className="fas fa-times fa-lg"></i>
+                                        <FaIcon className="fas fa-times fa-lg"></FaIcon>
                                     </button>
                                     <h3 className="text-2xl font-bold mb-2 text-center text-blue-800">Тренинги за {(() => { const [y,m,d]=calendarModal.date.split('-'); return `${d}.${m}.${y}`; })()}</h3>
                                     <div className="space-y-6 overflow-y-auto" style={{maxHeight: '60vh', paddingRight: '8px'}}>
@@ -15227,7 +15228,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 {selectedCalendarTraining && (
                                     <div className="bg-white p-6 rounded-lg shadow-lg max-w-md w-full relative ml-4" style={{marginRight: '40px'}} onClick={e => e.stopPropagation()}>
                                         <button onClick={() => setSelectedCalendarTraining(null)} className="absolute top-3 right-3 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
-                                            <i className="fas fa-times fa-lg"></i>
+                                            <FaIcon className="fas fa-times fa-lg"></FaIcon>
                                         </button>
                                         <h3 className="text-xl font-semibold mb-4 text-center">Детали тренинга</h3>
                                         <div className="space-y-4">
@@ -15716,7 +15717,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             <div className="flex-shrink-0 p-4 sm:p-6 pb-0 border-b border-gray-100">
                                 <div className="flex items-center justify-between">
                                     <h3 id="day-modal-title" className="text-lg sm:text-xl font-bold text-gray-800">
-                                        <i className="fas fa-calendar-day text-blue-500 mr-2"></i>
+                                        <FaIcon className="fas fa-calendar-day text-blue-500 mr-2"></FaIcon>
                                         {selectedDay.day} {monthLabel}
                                     </h3>
                                     <button
@@ -15724,7 +15725,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition"
                                         aria-label="Закрыть"
                                     >
-                                        <i className="fas fa-times text-lg"></i>
+                                        <FaIcon className="fas fa-times text-lg"></FaIcon>
                                     </button>
                                 </div>
                             </div>
@@ -15827,7 +15828,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     {metrics.map((m) => (
                                         <div key={m.key} className="flex items-center gap-3 p-2 bg-white border rounded-lg shadow-sm">
                                         <div className="flex-shrink-0 w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center text-blue-600">
-                                            <i className={`${m.icon} text-lg`} aria-hidden="true" />
+                                            <FaIcon className={`${m.icon} text-lg`} aria-hidden="true" />
                                         </div>
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center justify-between">
@@ -15986,7 +15987,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             {/* Поле запроса */}
                             <div className="mt-2">
                                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    <i className="fas fa-pen text-gray-400 mr-1"></i> Текст запроса
+                                    <FaIcon className="fas fa-pen text-gray-400 mr-1"></FaIcon> Текст запроса
                                 </label>
                                 <textarea
                                     value={requestMessage}
@@ -16018,9 +16019,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                         disabled={isSending}
                                     >
                                         {isSending ? (
-                                            <><i className="fas fa-spinner fa-spin"></i> Отправка...</>
+                                            <><FaIcon className="fas fa-spinner fa-spin"></FaIcon> Отправка...</>
                                         ) : (
-                                            <><i className="fas fa-paper-plane"></i> Отправить запрос</>
+                                            <><FaIcon className="fas fa-paper-plane"></FaIcon> Отправить запрос</>
                                         )}
                                     </button>
                                 </div>
@@ -17984,7 +17985,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     <div className="bg-white p-10 rounded-xl shadow-2xl w-full max-w-md transition-all duration-300 text-center">
                       <h1 className="text-4xl font-extrabold mb-6 text-indigo-700">OTP</h1>
                       <div className="flex items-center justify-center gap-3 text-gray-700">
-                        <i className="fas fa-spinner fa-spin text-blue-600"></i>
+                        <FaIcon className="fas fa-spinner fa-spin text-blue-600"></FaIcon>
                         <span>Проверка сессии...</span>
                       </div>
                     </div>
@@ -18120,7 +18121,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         className={`hamburger-btn ${mobileMenuOpen ? 'menu-open' : ''}`}
                         onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
                     >
-                        <i className={`fas ${mobileMenuOpen ? 'fa-times' : 'fa-bars'} text-xl`}></i>
+                        <FaIcon className={`fas ${mobileMenuOpen ? 'fa-times' : 'fa-bars'} text-xl`}></FaIcon>
                     </button>
                     
                     {/* Overlay для мобильного меню */}
@@ -18136,7 +18137,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 className="sidebar-collapse-btn absolute top-4 -right-4 w-8 h-8 rounded-full bg-blue-700 hover:bg-blue-600 flex items-center justify-center transition-all shadow-lg border-2 border-white"
                                 onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
                             >
-                                <i className={`fas fa-chevron-${sidebarCollapsed ? 'right' : 'left'} text-sm`}></i>
+                                <FaIcon className={`fas fa-chevron-${sidebarCollapsed ? 'right' : 'left'} text-sm`}></FaIcon>
                             </button>
                             
                             <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
@@ -18159,22 +18160,22 @@ const withAccessTokenHeader = (headers = {}) => {
                                     <>
                                         <li>
                                             <button onClick={() => { setView('sv_list'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_list' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-users"></i> <span className="sidebar-text">Супервайзеры</span>
+                                                <FaIcon className="fas fa-users"></FaIcon> <span className="sidebar-text">Супервайзеры</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('manage_users'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_users' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-user-cog"></i> <span className="sidebar-text">Сотрудники</span>
+                                                <FaIcon className="fas fa-user-cog"></FaIcon> <span className="sidebar-text">Сотрудники</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('admin_sessions'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'admin_sessions' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-laptop-house"></i> <span className="sidebar-text">Сессии</span>
+                                                <FaIcon className="fas fa-laptop-house"></FaIcon> <span className="sidebar-text">Сессии</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('qr_access'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-qrcode"></i> <span className="sidebar-text">QR доступ</span>
+                                                <FaIcon className="fas fa-qrcode"></FaIcon> <span className="sidebar-text">QR доступ</span>
                                             </button>
                                         </li>
 
@@ -18182,7 +18183,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                         <li>
                                             <button onClick={() => { setView('view_scores'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'view_scores' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-chart-bar"></i> <span className="sidebar-text">Оценки операторов</span>
+                                                <FaIcon className="fas fa-chart-bar"></FaIcon> <span className="sidebar-text">Оценки операторов</span>
                                             </button>
                                         </li>
                                         <li>
@@ -18193,7 +18194,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 })}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_evaluation' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-clipboard-check"></i> <span className="sidebar-text">Журнал оценок</span>
+                                                <FaIcon className="fas fa-clipboard-check"></FaIcon> <span className="sidebar-text">Журнал оценок</span>
                                             </button>
                                         </li>
                                         <li>
@@ -18201,7 +18202,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 onClick={() => { setView('sv_hours'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
+                                                <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
                                             </button>
                                         </li>
                                         <li>
@@ -18209,17 +18210,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 onClick={() => { setView('work_schedules'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
+                                                <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('trainings'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-book"></i> <span className="sidebar-text">Учет тренингов</span>
+                                                <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('tasks'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-tasks"></i> <span className="sidebar-text">Задачи</span>
+                                                <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
                                             </button>
                                         </li>
 
@@ -18230,17 +18231,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 onClick={() => { setView('call_division'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
+                                                <FaIcon className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => {fetchDirections(); setShowMonitoringScaleModal(true); setMobileMenuOpen(false);}} className="w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3">
-                                                <i className="fas fa-sliders-h"></i> <span className="sidebar-text">Мониторинговая шкала</span>
+                                                <FaIcon className="fas fa-sliders-h"></FaIcon> <span className="sidebar-text">Мониторинговая шкала</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('contests'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-award"></i> <span className="sidebar-text">Конкурсы</span>
+                                                <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                             </button>
                                         </li>
                                     </>
@@ -18249,7 +18250,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     <>
                                         <li>
                                             <button onClick={() => { setView('operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'operators' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-users-cog"></i> <span className="sidebar-text">Оценки операторов</span>
+                                                <FaIcon className="fas fa-users-cog"></FaIcon> <span className="sidebar-text">Оценки операторов</span>
                                             </button>
                                         </li>
                                         <li>
@@ -18257,27 +18258,27 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 onClick={() => openCallEvaluationSection({ month: selectedReportMonth || selectedMonth })}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_evaluation' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-clipboard-check"></i> <span className="sidebar-text">Журнал оценок</span>
+                                                <FaIcon className="fas fa-clipboard-check"></FaIcon> <span className="sidebar-text">Журнал оценок</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('qr_access'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-qrcode"></i> <span className="sidebar-text">QR доступ</span>
+                                                <FaIcon className="fas fa-qrcode"></FaIcon> <span className="sidebar-text">QR доступ</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('manage_operators'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-user-edit"></i> <span className="sidebar-text">Мои сотрудники</span>
+                                                <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Мои сотрудники</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('trainings'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-book"></i> <span className="sidebar-text">Учет тренингов</span>
+                                                <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('tasks'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tasks' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-tasks"></i> <span className="sidebar-text">Задачи</span>
+                                                <FaIcon className="fas fa-tasks"></FaIcon> <span className="sidebar-text">Задачи</span>
                                             </button>
                                         </li>
                                         <li>
@@ -18285,7 +18286,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 onClick={() => { setView('sv_hours'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
+                                                <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
                                             </button>
                                         </li>
                                         <li>
@@ -18293,7 +18294,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 onClick={() => { setView('work_schedules'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
+                                                <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
                                             </button>
                                         </li>
                                         <li>
@@ -18301,12 +18302,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 onClick={() => { setView('call_division'); setMobileMenuOpen(false); }}
                                                 className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
                                             >
-                                                <i className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
+                                                <FaIcon className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('contests'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-award"></i> <span className="sidebar-text">Конкурсы</span>
+                                                <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                             </button>
                                         </li>
                                     </>
@@ -18315,39 +18316,39 @@ const withAccessTokenHeader = (headers = {}) => {
                                     <>
                                         <li>
                                             <button onClick={() => { setView('profile'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'profile' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-user-circle"></i> <span className="sidebar-text">Профиль</span>
+                                                <FaIcon className="fas fa-user-circle"></FaIcon> <span className="sidebar-text">Профиль</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('hours'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'hours' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-clock"></i> <span className="sidebar-text">Мои часы</span>
+                                                <FaIcon className="fas fa-clock"></FaIcon> <span className="sidebar-text">Мои часы</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('work_schedules'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-calendar-alt"></i> <span className="sidebar-text">Мои смены</span>
+                                                <FaIcon className="fas fa-calendar-alt"></FaIcon> <span className="sidebar-text">Мои смены</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('evaluation'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'evaluation' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-chart-bar"></i> <span className="sidebar-text">Мои оценки</span>
+                                                <FaIcon className="fas fa-chart-bar"></FaIcon> <span className="sidebar-text">Мои оценки</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('ai_feedback'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_feedback' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fa-solid fa-fan"></i> <span className="sidebar-text">Dos AI</span>
+                                                <FaIcon className="fas fa-sparkles"></FaIcon> <span className="sidebar-text">Dos AI</span>
                                             </button>
                                         </li>
                                         <li>
                                             <button onClick={() => { setView('contests'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
-                                                <i className="fas fa-award"></i> <span className="sidebar-text">Конкурсы</span>
+                                                <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                             </button>
                                         </li>
                                     </>
                                 )}
                                 <li>
                                     <button onClick={() => { setView('salary'); setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
-                                        <i className="fas fa-calculator"></i> <span className="sidebar-text">Калькулятор зарплаты</span>
+                                        <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
                                     </button>
                                 </li>
 
@@ -18356,7 +18357,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 {/*
                                 <li>
                                         <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('Открываю галерею команды'); setShowDevLetterModal(true); try { startConfetti(); } catch(e){}; setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
-                                        <i className="fas fa-images"></i> <span className="sidebar-text">Галерея команды</span>
+                                        <FaIcon className="fas fa-images"></FaIcon> <span className="sidebar-text">Галерея команды</span>
                                     </button>
                                 </li>
                                 */}
@@ -18368,11 +18369,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                     aria-expanded={showSidebarAccountDropdown}
                                     aria-haspopup="menu"
                                 >
-                                    <i className="fas fa-cog"></i>
+                                    <FaIcon className="fas fa-cog"></FaIcon>
                                     <span className="sidebar-text ml-2">Аккаунт</span>
 
                                     {/* Стрелка появляется только при hover */}
-                                    <i className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></i>
+                                    <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
                                 </button>
  
                                 {(showSidebarAccountDropdown || isClosing) && (
@@ -18384,7 +18385,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         onClick={() => { setShowChangeLoginForm(true); handleToggleDropdown(true); }}
                                         className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
                                     >
-                                        <i className="fas fa-user-edit mr-2"></i> Смена логина
+                                        <FaIcon className="fas fa-user-edit mr-2"></FaIcon> Смена логина
                                     </button>
 
                                     <div className="border-t border-gray-200" />
@@ -18393,14 +18394,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                         onClick={() => { setShowChangePasswordForm(true); handleToggleDropdown(true); }}
                                         className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
                                     >
-                                        <i className="fas fa-lock mr-2"></i> Смена пароля
+                                        <FaIcon className="fas fa-lock mr-2"></FaIcon> Смена пароля
                                     </button>
                                     </div>
                                 )}
                                 </li>
                                 <li>
                                 <button onClick={handleLogout} className="w-full text-left py-3 px-4 rounded-lg hover:bg-red-700 bg-red-600 transition-all duration-200 flex items-center gap-3">
-                                    <i className="fas fa-sign-out-alt"></i> <span className="sidebar-text">Выход</span>
+                                    <FaIcon className="fas fa-sign-out-alt"></FaIcon> <span className="sidebar-text">Выход</span>
                                 </button>
                                 </li>
                             </ul>
@@ -18413,7 +18414,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         {user.role === 'operator' && (
                         <div className="bg-white p-4 rounded-xl shadow-sm mb-6 border border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                             <div className="flex items-center gap-3">
-                                <i className={`fas fa-shield-alt ${sensitiveAccess.granted ? 'text-green-600' : 'text-amber-600'}`}></i>
+                                <FaIcon className={`fas fa-shield-alt ${sensitiveAccess.granted ? 'text-green-600' : 'text-amber-600'}`}></FaIcon>
                                 <div className="text-sm">
                                     <div className="font-semibold text-gray-800">Доступ к моим данным оценок</div>
                                     <div className={`${sensitiveAccess.granted ? 'text-green-700' : 'text-amber-700'}`}>
@@ -18429,7 +18430,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     onClick={requestSensitiveQrAccess}
                                     className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium transition"
                                 >
-                                    <i className="fas fa-qrcode mr-2"></i>Сгенерировать QR
+                                    <FaIcon className="fas fa-qrcode mr-2"></FaIcon>Сгенерировать QR
                                 </button>
                                 )}
                                 {sensitiveAccess.granted && (
@@ -18462,7 +18463,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         {/* Header */}
                                         <div className="px-5 py-4 border-b border-gray-100 bg-gray-50">
                                             <h2 className="text-lg font-semibold text-gray-900">
-                                                <i className="fa-solid fa-qrcode mr-2 text-blue-600"></i>QR доступ
+                                                <FaIcon className="fa-solid fa-qrcode mr-2 text-blue-600"></FaIcon>QR доступ
                                             </h2>
                                             <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
                                                 Отсканируйте QR оператора или вставьте токен вручную. Подтверждение откроет полный номер и аудио только в текущей сессии.
@@ -18473,7 +18474,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             {/* Token input section */}
                                             <div className="space-y-3">
                                                 <label className="block text-sm font-medium text-gray-700">
-                                                    <i className="fa-solid fa-key mr-1.5 text-gray-400"></i>Токен / строка из QR
+                                                    <FaIcon className="fa-solid fa-key mr-1.5 text-gray-400"></FaIcon>Токен / строка из QR
                                                 </label>
                                                 <textarea
                                                     rows={3}
@@ -18493,7 +18494,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         }`}
                                                     >
                                                         <span className="flex items-center justify-center gap-2">
-                                                            <i className="fa-solid fa-unlock-keyhole"></i>
+                                                            <FaIcon className="fa-solid fa-unlock-keyhole"></FaIcon>
                                                             Подтвердить доступ
                                                         </span>
                                                     </button>
@@ -18501,7 +18502,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         onClick={() => { setQrApproveInput(''); setQrApproveResult(''); }}
                                                         className="px-4 py-2.5 rounded-xl text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 active:scale-95 transition"
                                                     >
-                                                        <i className="fa-solid fa-xmark"></i>
+                                                        <FaIcon className="fa-solid fa-xmark"></FaIcon>
                                                     </button>
                                                 </div>
 
@@ -18511,11 +18512,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             ? 'bg-green-50 text-green-700 border-green-200'
                                                             : 'bg-red-50 text-red-700 border-red-200'
                                                     }`}>
-                                                        <i className={`mt-0.5 shrink-0 fa-solid ${
+                                                        <FaIcon className={`mt-0.5 shrink-0 fa-solid ${
                                                             qrApproveResult.toLowerCase().includes('доступ открыт')
                                                                 ? 'fa-circle-check'
                                                                 : 'fa-circle-xmark'
-                                                        }`}></i>
+                                                        }`}></FaIcon>
                                                         {qrApproveResult}
                                                     </div>
                                                 )}
@@ -18531,7 +18532,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             {/* Scanner section */}
                                             <div className="space-y-3">
                                                 <label className="block text-sm font-medium text-gray-700">
-                                                    <i className="fa-solid fa-camera mr-1.5 text-gray-400"></i>Сканер QR
+                                                    <FaIcon className="fa-solid fa-camera mr-1.5 text-gray-400"></FaIcon>Сканер QR
                                                 </label>
 
                                                 <div className="relative rounded-xl overflow-hidden bg-gray-900 aspect-video">
@@ -18554,7 +18555,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     )}
                                                     {!qrScannerRunning && (
                                                         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/50 backdrop-blur-sm">
-                                                            <i className="fa-solid fa-video-slash text-2xl text-white/60"></i>
+                                                            <FaIcon className="fa-solid fa-video-slash text-2xl text-white/60"></FaIcon>
                                                             <span className="text-xs text-white/70">Камера выключена</span>
                                                         </div>
                                                     )}
@@ -18562,7 +18563,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                                 {qrScannerError && (
                                                     <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">
-                                                        <i className="fa-solid fa-triangle-exclamation mr-1.5"></i>
+                                                        <FaIcon className="fa-solid fa-triangle-exclamation mr-1.5"></FaIcon>
                                                         {qrScannerError}
                                                     </div>
                                                 )}
@@ -18577,11 +18578,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 >
                                                     {qrScannerRunning ? (
                                                         <span className="flex items-center justify-center gap-2">
-                                                            <i className="fa-solid fa-stop"></i> Остановить сканер
+                                                            <FaIcon className="fa-solid fa-stop"></FaIcon> Остановить сканер
                                                         </span>
                                                     ) : (
                                                         <span className="flex items-center justify-center gap-2">
-                                                            <i className="fa-solid fa-play"></i> Запустить сканер
+                                                            <FaIcon className="fa-solid fa-play"></FaIcon> Запустить сканер
                                                         </span>
                                                     )}
                                                 </button>
@@ -18601,7 +18602,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     <div className="flex items-center justify-between">
                                                         <div className="flex items-center gap-3">
                                                             <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
-                                                                <i className="fa-solid fa-unlock-keyhole text-blue-600"></i>
+                                                                <FaIcon className="fa-solid fa-unlock-keyhole text-blue-600"></FaIcon>
                                                             </div>
                                                             <div>
                                                                 <h3 className="text-base font-semibold text-gray-900">Подтвердить доступ</h3>
@@ -18612,7 +18613,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             onClick={() => setQrConfirmModalOpen(false)}
                                                             className="w-8 h-8 flex items-center justify-center rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition"
                                                         >
-                                                            <i className="fa-solid fa-xmark"></i>
+                                                            <FaIcon className="fa-solid fa-xmark"></FaIcon>
                                                         </button>
                                                     </div>
                                                 </div>
@@ -18629,7 +18630,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </p>
                                                     </div>
                                                     <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">
-                                                        <i className="fa-solid fa-circle-info mt-0.5 shrink-0"></i>
+                                                        <FaIcon className="fa-solid fa-circle-info mt-0.5 shrink-0"></FaIcon>
                                                         Доступ будет сброшен при закрытии или обновлении страницы.
                                                     </div>
                                                 </div>
@@ -18656,12 +18657,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     >
                                                         {qrApproveLoading ? (
                                                             <span className="flex items-center justify-center gap-2">
-                                                                <i className="fa-solid fa-circle-notch fa-spin"></i>
+                                                                <FaIcon className="fa-solid fa-circle-notch fa-spin"></FaIcon>
                                                                 Открываю...
                                                             </span>
                                                         ) : (
                                                             <span className="flex items-center justify-center gap-2">
-                                                                <i className="fa-solid fa-unlock-keyhole"></i>
+                                                                <FaIcon className="fa-solid fa-unlock-keyhole"></FaIcon>
                                                                 Открыть доступ
                                                             </span>
                                                         )}
@@ -18798,7 +18799,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 }
                                                 className="p-2 rounded-full hover:bg-gray-100"
                                                 >
-                                                <i className="fas fa-ellipsis-v"></i>
+                                                <FaIcon className="fas fa-ellipsis-v"></FaIcon>
                                                 </button>
 
                                                 {openMenuId === sv.id && (
@@ -18811,7 +18812,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     }}
                                                     className="block w-full text-left px-4 py-2 hover:bg-gray-100"
                                                     >
-                                                    <i className="fas fa-edit mr-2"></i>Править
+                                                    <FaIcon className="fas fa-edit mr-2"></FaIcon>Править
                                                     </button>
                                                     <button
                                                     onClick={() => {
@@ -18821,7 +18822,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     }}
                                                     className="block w-full text-left px-4 py-2 hover:bg-gray-100"
                                                     >
-                                                    <i className="fas fa-history mr-2"></i>История
+                                                    <FaIcon className="fas fa-history mr-2"></FaIcon>История
                                                     </button>
 
                                                     <div className="border-t border-gray-200" />
@@ -18830,7 +18831,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     onClick={() => removeSv(sv.id)}
                                                     className="block w-full text-left px-4 py-2 text-red-600 hover:bg-red-50"
                                                     >
-                                                    <i className="fas fa-trash mr-2"></i>Удалить
+                                                    <FaIcon className="fas fa-trash mr-2"></FaIcon>Удалить
                                                     </button>
                                                 </div>
                                                 )}
@@ -18888,7 +18889,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         onClick={() => setShowAddSvModal(false)}
                                         className="absolute top-4 right-4 text-gray-600 hover:text-gray-900"
                                     >
-                                        <i className="fas fa-times"></i>
+                                        <FaIcon className="fas fa-times"></FaIcon>
                                     </button>
                                     </div>
                                 </div>
@@ -18929,7 +18930,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isLoading ? 'bg-green-600 opacity-60 cursor-not-allowed text-white' : 'bg-green-600 text-white hover:bg-green-700'}`}
                                             title="Скачать отчет по прослушанным звонкам за выбранный месяц"
                                             >
-                                            <i className="fas fa-file-excel mr-2" />
+                                            <FaIcon className="fas fa-file-excel mr-2" />
                                             <span>{isLoading ? 'Загрузка...' : 'Скачать отчёт'}</span>
                                             </button>
 
@@ -18945,7 +18946,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             className={`inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition ${isAdminDataLoading || isLoading || !selectedSvId ? 'bg-blue-300 text-blue-600 opacity-60 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
                                             title="Обновить данные по оценкам для выбранного супервайзера"
                                             >
-                                            <i className="fas fa-sync-alt" />
+                                            <FaIcon className="fas fa-sync-alt" />
                                             <span>{isAdminDataLoading ? 'Обновление...' : 'Обновить'}</span>
                                             </button>
                                         </div>
@@ -19195,7 +19196,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         }}
                                         className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
                                         >
-                                        <i className="fas fa-user-plus"></i> Добавить сотрудника
+                                        <FaIcon className="fas fa-user-plus"></FaIcon> Добавить сотрудника
                                         </button>
 
                                         {/* Generate Report Button */}
@@ -19206,7 +19207,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         }`}
                                         disabled={isLoading}
                                         >
-                                        <i className="fas fa-file-excel mr-2"></i>
+                                        <FaIcon className="fas fa-file-excel mr-2"></FaIcon>
                                         {isLoading ? "Загрузка..." : "Сформировать отчет"}
                                         </button>
                                     </div>
@@ -19360,7 +19361,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 onClick={() => setOpenMenuId(openMenuId === u.id ? null : u.id)}
                                                                 className="p-2 rounded-full hover:bg-gray-100"
                                                             >
-                                                                <i className="fas fa-ellipsis-v"></i>
+                                                                <FaIcon className="fas fa-ellipsis-v"></FaIcon>
                                                             </button>
 
                                                             {openMenuId === u.id && (
@@ -19373,7 +19374,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     }}
                                                                     className="block w-full text-left px-4 py-2 hover:bg-gray-100"
                                                                 >
-                                                                    <i className="fas fa-edit mr-2"></i>Править
+                                                                    <FaIcon className="fas fa-edit mr-2"></FaIcon>Править
                                                                 </button>
                                                                 <button
                                                                     onClick={() => {
@@ -19386,12 +19387,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 >
                                                                     {loadingHistoryId === u.id ? (
                                                                     <>
-                                                                        <i className="fas fa-spinner fa-spin mr-2"></i>
+                                                                        <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
                                                                         Загрузка...
                                                                     </>
                                                                     ) : (
                                                                     <>
-                                                                        <i className="fas fa-history mr-2"></i>
+                                                                        <FaIcon className="fas fa-history mr-2"></FaIcon>
                                                                         История
                                                                     </>
                                                                     )}
@@ -19468,7 +19469,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         {/* Header */}
                                         <div className="px-5 py-4 border-b border-gray-100 bg-gray-50">
                                             <h2 className="text-lg font-semibold text-gray-900">
-                                                <i className="fa-solid fa-qrcode mr-2 text-blue-600"></i>QR доступ
+                                                <FaIcon className="fa-solid fa-qrcode mr-2 text-blue-600"></FaIcon>QR доступ
                                             </h2>
                                             <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
                                                 Отсканируйте QR оператора или вставьте токен вручную. Подтверждение откроет полный номер и аудио только в текущей сессии.
@@ -19479,7 +19480,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             {/* Token input section */}
                                             <div className="space-y-3">
                                                 <label className="block text-sm font-medium text-gray-700">
-                                                    <i className="fa-solid fa-key mr-1.5 text-gray-400"></i>Токен / строка из QR
+                                                    <FaIcon className="fa-solid fa-key mr-1.5 text-gray-400"></FaIcon>Токен / строка из QR
                                                 </label>
                                                 <textarea
                                                     rows={3}
@@ -19499,7 +19500,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         }`}
                                                     >
                                                         <span className="flex items-center justify-center gap-2">
-                                                            <i className="fa-solid fa-unlock-keyhole"></i>
+                                                            <FaIcon className="fa-solid fa-unlock-keyhole"></FaIcon>
                                                             Подтвердить доступ
                                                         </span>
                                                     </button>
@@ -19507,7 +19508,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         onClick={() => { setQrApproveInput(''); setQrApproveResult(''); }}
                                                         className="px-4 py-2.5 rounded-xl text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 active:scale-95 transition"
                                                     >
-                                                        <i className="fa-solid fa-xmark"></i>
+                                                        <FaIcon className="fa-solid fa-xmark"></FaIcon>
                                                     </button>
                                                 </div>
 
@@ -19517,11 +19518,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             ? 'bg-green-50 text-green-700 border-green-200'
                                                             : 'bg-red-50 text-red-700 border-red-200'
                                                     }`}>
-                                                        <i className={`mt-0.5 shrink-0 fa-solid ${
+                                                        <FaIcon className={`mt-0.5 shrink-0 fa-solid ${
                                                             qrApproveResult.toLowerCase().includes('доступ открыт')
                                                                 ? 'fa-circle-check'
                                                                 : 'fa-circle-xmark'
-                                                        }`}></i>
+                                                        }`}></FaIcon>
                                                         {qrApproveResult}
                                                     </div>
                                                 )}
@@ -19537,7 +19538,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             {/* Scanner section */}
                                             <div className="space-y-3">
                                                 <label className="block text-sm font-medium text-gray-700">
-                                                    <i className="fa-solid fa-camera mr-1.5 text-gray-400"></i>Сканер QR
+                                                    <FaIcon className="fa-solid fa-camera mr-1.5 text-gray-400"></FaIcon>Сканер QR
                                                 </label>
 
                                                 <div className="relative rounded-xl overflow-hidden bg-gray-900 aspect-video">
@@ -19560,7 +19561,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     )}
                                                     {!qrScannerRunning && (
                                                         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/50 backdrop-blur-sm">
-                                                            <i className="fa-solid fa-video-slash text-2xl text-white/60"></i>
+                                                            <FaIcon className="fa-solid fa-video-slash text-2xl text-white/60"></FaIcon>
                                                             <span className="text-xs text-white/70">Камера выключена</span>
                                                         </div>
                                                     )}
@@ -19568,7 +19569,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                                 {qrScannerError && (
                                                     <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">
-                                                        <i className="fa-solid fa-triangle-exclamation mr-1.5"></i>
+                                                        <FaIcon className="fa-solid fa-triangle-exclamation mr-1.5"></FaIcon>
                                                         {qrScannerError}
                                                     </div>
                                                 )}
@@ -19583,11 +19584,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 >
                                                     {qrScannerRunning ? (
                                                         <span className="flex items-center justify-center gap-2">
-                                                            <i className="fa-solid fa-stop"></i> Остановить сканер
+                                                            <FaIcon className="fa-solid fa-stop"></FaIcon> Остановить сканер
                                                         </span>
                                                     ) : (
                                                         <span className="flex items-center justify-center gap-2">
-                                                            <i className="fa-solid fa-play"></i> Запустить сканер
+                                                            <FaIcon className="fa-solid fa-play"></FaIcon> Запустить сканер
                                                         </span>
                                                     )}
                                                 </button>
@@ -19607,7 +19608,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     <div className="flex items-center justify-between">
                                                         <div className="flex items-center gap-3">
                                                             <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
-                                                                <i className="fa-solid fa-unlock-keyhole text-blue-600"></i>
+                                                                <FaIcon className="fa-solid fa-unlock-keyhole text-blue-600"></FaIcon>
                                                             </div>
                                                             <div>
                                                                 <h3 className="text-base font-semibold text-gray-900">Подтвердить доступ</h3>
@@ -19618,7 +19619,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             onClick={() => setQrConfirmModalOpen(false)}
                                                             className="w-8 h-8 flex items-center justify-center rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition"
                                                         >
-                                                            <i className="fa-solid fa-xmark"></i>
+                                                            <FaIcon className="fa-solid fa-xmark"></FaIcon>
                                                         </button>
                                                     </div>
                                                 </div>
@@ -19635,7 +19636,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </p>
                                                     </div>
                                                     <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">
-                                                        <i className="fa-solid fa-circle-info mt-0.5 shrink-0"></i>
+                                                        <FaIcon className="fa-solid fa-circle-info mt-0.5 shrink-0"></FaIcon>
                                                         Доступ будет сброшен при закрытии или обновлении страницы.
                                                     </div>
                                                 </div>
@@ -19662,12 +19663,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     >
                                                         {qrApproveLoading ? (
                                                             <span className="flex items-center justify-center gap-2">
-                                                                <i className="fa-solid fa-circle-notch fa-spin"></i>
+                                                                <FaIcon className="fa-solid fa-circle-notch fa-spin"></FaIcon>
                                                                 Открываю...
                                                             </span>
                                                         ) : (
                                                             <span className="flex items-center justify-center gap-2">
-                                                                <i className="fa-solid fa-unlock-keyhole"></i>
+                                                                <FaIcon className="fa-solid fa-unlock-keyhole"></FaIcon>
                                                                 Открыть доступ
                                                             </span>
                                                         )}
@@ -19698,7 +19699,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             }}
                                             className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-green-600 text-white hover:bg-green-700 transition"
                                         >
-                                            <i className="fas fa-user-plus"></i> Добавить оператора
+                                            <FaIcon className="fas fa-user-plus"></FaIcon> Добавить оператора
                                         </button>
                                         </div>
 
@@ -19876,7 +19877,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 }}
                                                                 className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
                                                                 >
-                                                                <i className="fas fa-edit"></i> Править
+                                                                <FaIcon className="fas fa-edit"></FaIcon> Править
                                                                 </button>
 
                                                                 <button
@@ -19891,11 +19892,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 >
                                                                 {loadingHistoryId === op.id ? (
                                                                     <>
-                                                                    <i className="fas fa-spinner fa-spin"></i> Загрузка...
+                                                                    <FaIcon className="fas fa-spinner fa-spin"></FaIcon> Загрузка...
                                                                     </>
                                                                 ) : (
                                                                     <>
-                                                                    <i className="fas fa-history"></i> История
+                                                                    <FaIcon className="fas fa-history"></FaIcon> История
                                                                     </>
                                                                 )}
                                                                 </button>
@@ -19971,7 +19972,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         aria-disabled={isLoading}
                                         title="Сгенерировать месячный отчет"
                                         >
-                                        <i className="fas fa-arrow-down" />
+                                        <FaIcon className="fas fa-arrow-down" />
                                         <span>{isLoading ? 'Скачивание...' : 'Сгенерировать отчет'}</span>
                                         </button>
 
@@ -19982,7 +19983,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         aria-disabled={isLoading || isAdminDataLoading}
                                         title="Обновить данные по оценкам за выбранный месяц"
                                         >
-                                        <i className="fas fa-sync-alt" />
+                                        <FaIcon className="fas fa-sync-alt" />
                                         <span>{isLoading ? 'Обновление...' : 'Обновить'}</span>
                                         </button>
                                     </div>
@@ -20127,7 +20128,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 className="inline-flex items-center gap-2 bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition"
                                                                 title={`Оценить оператора ${op.name}`}
                                                             >
-                                                                <i className="fas fa-play-circle" /> Оценить
+                                                                <FaIcon className="fas fa-play-circle" /> Оценить
                                                             </button>
                                                             </div>
                                                         </td>
@@ -20179,7 +20180,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 {view === 'profile' && ( 
                                   <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 lg:mb-8 text-gray-900 flex items-center gap-2">
-                                      <i className="fas fa-user-circle text-blue-600"></i>
+                                      <FaIcon className="fas fa-user-circle text-blue-600"></FaIcon>
                                       <span className="text-blue-600">
                                         Профиль
                                       </span>
@@ -20187,7 +20188,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             
                                     {isLoading ? (
                                       <p className="text-center text-gray-600 flex items-center justify-center">
-                                        <i className="fas fa-spinner fa-spin mr-2 text-gray-500"></i>
+                                        <FaIcon className="fas fa-spinner fa-spin mr-2 text-gray-500"></FaIcon>
                                         <span className="italic">Загрузка данных...</span>
                                       </p>
                                     ) : profileData ? (
@@ -20201,11 +20202,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                             <h3 className="text-xl sm:text-2xl font-bold text-gray-900">{profileData.name || '-'}</h3>
                                             <div className="flex flex-wrap justify-center sm:justify-start gap-2 mt-2">
                                               <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-                                                <i className="fas fa-user-tag"></i> {profileData.role || 'Оператор'}
+                                                <FaIcon className="fas fa-user-tag"></FaIcon> {profileData.role || 'Оператор'}
                                               </span>
                                               {profileData.direction && (
                                                 <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
-                                                  <i className="fas fa-compass"></i> {profileData.direction}
+                                                  <FaIcon className="fas fa-compass"></FaIcon> {profileData.direction}
                                                 </span>
                                               )}
                                             </div>
@@ -20255,7 +20256,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                           {/* Hire Date */}
                                           <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
                                             <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-green-100 flex items-center justify-center shrink-0">
-                                              <i className="fas fa-calendar-alt text-green-600 text-lg"></i>
+                                              <FaIcon className="fas fa-calendar-alt text-green-600 text-lg"></FaIcon>
                                             </div>
                                             <div className="min-w-0">
                                               <p className="text-xs uppercase tracking-wide text-gray-500">Дата найма</p>
@@ -20266,7 +20267,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                           {/* Supervisor */}
                                           <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
                                             <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
-                                              <i className="fas fa-user-tie text-indigo-600 text-lg"></i>
+                                              <FaIcon className="fas fa-user-tie text-indigo-600 text-lg"></FaIcon>
                                             </div>
                                             <div className="min-w-0">
                                               <p className="text-xs uppercase tracking-wide text-gray-500">Супервайзер</p>
@@ -20277,7 +20278,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                           {/* Experience */}
                                           <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
                                             <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-yellow-100 flex items-center justify-center shrink-0">
-                                              <i className="fas fa-award text-yellow-600 text-lg"></i>
+                                              <FaIcon className="fas fa-award text-yellow-600 text-lg"></FaIcon>
                                             </div>
                                             <div className="min-w-0">
                                               <p className="text-xs uppercase tracking-wide text-gray-500">Стаж работы <span className="text-gray-400 normal-case">(приблизительно)</span></p>
@@ -20306,14 +20307,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                               onClick={() => setView('hours')}
                                               className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg text-sm font-medium transition"
                                             >
-                                              <i className="fas fa-clock"></i>
+                                              <FaIcon className="fas fa-clock"></FaIcon>
                                               <span>Мои часы</span>
                                             </button>
                                             <button 
                                               onClick={() => setView('evaluation')}
                                               className="inline-flex items-center gap-2 px-4 py-2 bg-green-50 hover:bg-green-100 text-green-700 rounded-lg text-sm font-medium transition"
                                             >
-                                              <i className="fas fa-chart-bar"></i>
+                                              <FaIcon className="fas fa-chart-bar"></FaIcon>
                                               <span>Мои оценки</span>
                                             </button>
                                           </div>
@@ -20321,7 +20322,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                       </div>
                                     ) : (
                                       <p className="text-center text-gray-600 flex items-center justify-center">
-                                        <i className="fas fa-exclamation-circle mr-2 text-red-500"></i>
+                                        <FaIcon className="fas fa-exclamation-circle mr-2 text-red-500"></FaIcon>
                                         <span className="font-medium">Нету информации о профиле</span>
                                       </p>
                                     )}
@@ -20331,7 +20332,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 {(view === 'hours' || view === 'evaluation') && (
                                   <div className="mb-6">
                                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                                      <i className="fas fa-calendar-alt text-blue-600"></i>
+                                      <FaIcon className="fas fa-calendar-alt text-blue-600"></FaIcon>
                                       Выбор месяца:
                                     </label>
                                     <select
@@ -20352,13 +20353,13 @@ const withAccessTokenHeader = (headers = {}) => {
                                 {view === 'hours' && (
                                     <div className="workhours-section workhours-container bg-white p-4 sm:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-xl sm:text-3xl font-bold mb-4 sm:mb-8 text-gray-900 flex items-center gap-2">
-                                        <i className="fas fa-clock text-blue-600"></i>
+                                        <FaIcon className="fas fa-clock text-blue-600"></FaIcon>
                                         <span className="text-blue-600">Ваши рабочие часы</span>
                                         </h2>
 
                                         {isLoading ? (
                                         <p className="text-center text-gray-600 flex items-center justify-center">
-                                            <i className="fas fa-spinner fa-spin mr-2 text-gray-500"></i>
+                                            <FaIcon className="fas fa-spinner fa-spin mr-2 text-gray-500"></FaIcon>
                                             <span className="italic">Загрузка рабочих часов...</span>
                                         </p>
                                         ) : hoursData && Array.isArray(hoursData.operators) && hoursData.operators.length > 0 ? (
@@ -20445,7 +20446,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 {/* Отработанные часы (включая зачтённые часы тренинга) */}
                                                 <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <i className="fas fa-briefcase text-gray-400"></i> Отработанные часы
+                                                    <FaIcon className="fas fa-briefcase text-gray-400"></FaIcon> Отработанные часы
                                                     </p>
                                                     <p className={`text-xl font-bold ${getHoursPerformanceColor(regular, norm)}`}>
                                                     {safeNum(regular).toFixed(2)} <span className="text-sm font-medium text-gray-500">час</span>
@@ -20455,7 +20456,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 {/* Норма часов */}
                                                 <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <i className="fas fa-bullseye text-gray-400"></i> Норма часов
+                                                    <FaIcon className="fas fa-bullseye text-gray-400"></FaIcon> Норма часов
                                                     </p>
                                                     <p className="text-xl font-bold text-gray-900">
                                                     {safeNum(norm).toFixed(2)} <span className="text-sm font-medium text-gray-500">час</span>
@@ -20465,7 +20466,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 {/* Часы тренинга (только те, что count_in_hours === true) */}
                                                 <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <i className="fas fa-chalkboard-teacher text-gray-400"></i> Часы тренинга
+                                                    <FaIcon className="fas fa-chalkboard-teacher text-gray-400"></FaIcon> Часы тренинга
                                                     </p>
                                                     <p className="text-xl font-bold text-blue-700">
                                                     {safeNum(trainingHours).toFixed(2)} <span className="text-sm font-medium text-gray-500">час</span>
@@ -20475,7 +20476,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 {/* Штрафы */}
                                                 <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <i className="fas fa-exclamation-triangle text-gray-400"></i> Штрафы
+                                                    <FaIcon className="fas fa-exclamation-triangle text-gray-400"></FaIcon> Штрафы
                                                     </p>
                                                     <p className="text-xl font-bold text-red-600">
                                                     {safeNum(fines).toFixed(2)}
@@ -20485,7 +20486,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 {/* Звонки в час */}
                                                 <div className="p-5 workhours-card bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-1 flex items-center gap-1">
-                                                    <i className="fas fa-phone-alt text-gray-400"></i> Звонки в час
+                                                    <FaIcon className="fas fa-phone-alt text-gray-400"></FaIcon> Звонки в час
                                                     </p>
                                                     <p className={`text-xl font-bold ${getCallsPerHourColor(callsPerHour)}`}>
                                                     {safeNum(callsPerHour).toFixed(1)}
@@ -20517,7 +20518,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         })()
                                         ) : (
                                         <p className="text-center text-gray-600 flex items-center justify-center">
-                                            <i className="fas fa-times-circle mr-2 text-red-500"></i>
+                                            <FaIcon className="fas fa-times-circle mr-2 text-red-500"></FaIcon>
                                             Нет информации о часах.
                                         </p>
                                         )}
@@ -20526,7 +20527,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     {view === 'evaluation' && (
                                     <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold mb-4 sm:mb-6 lg:mb-8 text-gray-900 flex items-center gap-2">
-                                        <i className="fas fa-chart-bar text-blue-600"></i>
+                                        <FaIcon className="fas fa-chart-bar text-blue-600"></FaIcon>
                                         <span className="text-blue-600">Ваши оценки</span>
                                         </h2>
 
@@ -20547,7 +20548,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                         return isLoading ? (
                                             <p className="text-center text-gray-600 flex items-center justify-center">
-                                            <i className="fas fa-spinner fa-spin mr-2 text-gray-500"></i>
+                                            <FaIcon className="fas fa-spinner fa-spin mr-2 text-gray-500"></FaIcon>
                                             <span className="italic">Загрузка оценок...</span>
                                             </p>
                                         ) : allEvals.length > 0 ? (
@@ -20557,7 +20558,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 <div className="col-span-1 sm:col-span-2">
                                                 <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-2 flex items-center gap-1">
-                                                    <i className="fas fa-list-ol text-gray-400"></i> Количество оценок
+                                                    <FaIcon className="fas fa-list-ol text-gray-400"></FaIcon> Количество оценок
                                                     </p>
                                                     <p className="text-2xl sm:text-3xl lg:text-4xl font-bold text-gray-900">{evaluationCount}</p>
                                                     <p className={`mt-2 text-base sm:text-lg font-medium ${evaluationCount >= 20 ? 'text-green-600' : 'text-yellow-600'}`}>
@@ -20611,23 +20612,23 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 
                                                                 {/* Phone number */}
                                                                 <div className="flex items-center gap-2 mb-2">
-                                                                    <i className="fas fa-phone text-gray-400 text-xs"></i>
+                                                                    <FaIcon className="fas fa-phone text-gray-400 text-xs"></FaIcon>
                                                                     <span className="text-sm font-medium text-gray-800">{ev.phone_number || '-'}</span>
                                                                 </div>
                                                                 
                                                                 {/* Dates row */}
                                                                 <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 mb-2">
                                                                     <div className="flex items-center gap-1">
-                                                                        <i className="fas fa-calendar text-gray-400"></i>
+                                                                        <FaIcon className="fas fa-calendar text-gray-400"></FaIcon>
                                                                         <span>{formatDate(ev.appeal_date || ev.created_at)}</span>
                                                                     </div>
                                                                     <div className="flex items-center gap-1">
-                                                                        <i className="fas fa-clipboard-check text-gray-400"></i>
+                                                                        <FaIcon className="fas fa-clipboard-check text-gray-400"></FaIcon>
                                                                         <span>{formatDate(ev.evaluation_date)}</span>
                                                                     </div>
                                                                     {ev.month && (
                                                                         <div className="flex items-center gap-1">
-                                                                            <i className="fas fa-folder text-gray-400"></i>
+                                                                            <FaIcon className="fas fa-folder text-gray-400"></FaIcon>
                                                                             <span>{ev.month}</span>
                                                                         </div>
                                                                     )}
@@ -20659,13 +20660,13 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                             }}
                                                                             className="bg-yellow-500 text-white px-3 py-1.5 rounded-lg hover:bg-yellow-600 text-xs font-medium transition-all duration-200"
                                                                         >
-                                                                            <i className="fas fa-exclamation-circle mr-1"></i>
+                                                                            <FaIcon className="fas fa-exclamation-circle mr-1"></FaIcon>
                                                                             Оспорить
                                                                         </button>
                                                                     ) : <div></div>}
                                                                     <div className="flex items-center gap-1 text-xs text-blue-600">
                                                                         <span>{isExpanded ? 'Свернуть' : 'Подробнее'}</span>
-                                                                        <i className={`fas fa-chevron-${isExpanded ? 'up' : 'down'}`}></i>
+                                                                        <FaIcon className={`fas fa-chevron-${isExpanded ? 'up' : 'down'}`}></FaIcon>
                                                                     </div>
                                                                 </div>
                                                             </div>
@@ -20737,13 +20738,13 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                         <h4 className="font-semibold text-gray-900 mb-2 text-sm">Аудио</h4>
                                                                         {!canAccessSensitiveCallData ? (
                                                                             <div className="text-sm text-amber-600 flex items-center gap-2">
-                                                                                <i className="fas fa-shield-alt"></i> Аудио скрыто до QR-подтверждения
+                                                                                <FaIcon className="fas fa-shield-alt"></FaIcon> Аудио скрыто до QR-подтверждения
                                                                             </div>
                                                                         ) : audioUrl ? (
                                                                             <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} />
                                                                         ) : (
                                                                             <div className="text-sm text-red-500 flex items-center gap-2">
-                                                                                <i className="fas fa-times-circle"></i> Файлов не имеется
+                                                                                <FaIcon className="fas fa-times-circle"></FaIcon> Файлов не имеется
                                                                             </div>
                                                                         )}
                                                                     </div>
@@ -20830,7 +20831,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 }}
                                                                 className="bg-yellow-500 text-white px-3 py-1.5 rounded-lg hover:bg-yellow-600 text-xs font-medium transition-all duration-200"
                                                                 >
-                                                                <i className="fas fa-exclamation-circle mr-1"></i>
+                                                                <FaIcon className="fas fa-exclamation-circle mr-1"></FaIcon>
                                                                 Оспорить
                                                                 </button>
                                                             )}
@@ -20927,13 +20928,13 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     <h4 className="font-semibold text-gray-900 mb-2">Аудио</h4>
                                                                     {!canAccessSensitiveCallData ? (
                                                                     <div className="text-sm text-amber-600 flex items-center gap-2">
-                                                                        <i className="fas fa-shield-alt"></i> Аудио скрыто до QR-подтверждения
+                                                                        <FaIcon className="fas fa-shield-alt"></FaIcon> Аудио скрыто до QR-подтверждения
                                                                     </div>
                                                                     ) : audioUrl ? (
                                                                     <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} />
                                                                     ) : (
                                                                     <div className="text-sm text-red-500 flex items-center gap-2">
-                                                                        <i className="fas fa-times-circle"></i> Файлов не имеется
+                                                                        <FaIcon className="fas fa-times-circle"></FaIcon> Файлов не имеется
                                                                     </div>
                                                                     )}
                                                                 </div>
@@ -20970,7 +20971,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                             </div>
                                         ) : (
                                             <p className="text-center text-gray-600 flex items-center justify-center">
-                                            <i className="fas fa-times-circle mr-2 text-red-500"></i>
+                                            <FaIcon className="fas fa-times-circle mr-2 text-red-500"></FaIcon>
                                             Нет оценок за выбранный период.
                                             </p>
                                         );
@@ -20982,7 +20983,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         {view === 'salary' && (
                                             <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                                 <h2 className="text-3xl font-bold mb-8 text-gray-900 flex items-center gap-2">
-                                                    <i className="fas fa-calculator text-blue-600"></i>
+                                                    <FaIcon className="fas fa-calculator text-blue-600"></FaIcon>
                                                     <span className="text-blue-600">Калькулятор зарплаты</span>
                                                 </h2>
                                                 <div className="flex mb-4">
@@ -21010,7 +21011,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                                                             <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                                                                    <i className="fas fa-user-clock text-blue-500"></i>
+                                                                    <FaIcon className="fas fa-user-clock text-blue-500"></FaIcon>
                                                                     Стаж работы (месяцы):
                                                                 </label>
                                                                 <select
@@ -21028,7 +21029,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             </div>
                                                             <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                                                                    <i className="fas fa-star text-yellow-500"></i>
+                                                                    <FaIcon className="fas fa-star text-yellow-500"></FaIcon>
                                                                     Качество (%):
                                                                 </label>
                                                                 <input
@@ -21044,7 +21045,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             </div>
                                                             <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                                                                    <i className="fas fa-phone-alt text-green-500"></i>
+                                                                    <FaIcon className="fas fa-phone-alt text-green-500"></FaIcon>
                                                                     Кол-во звонков в час:
                                                                 </label>
                                                                 <input
@@ -21060,7 +21061,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             </div>
                                                             <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                                                                    <i className="fas fa-bullseye text-purple-500"></i>
+                                                                    <FaIcon className="fas fa-bullseye text-purple-500"></FaIcon>
                                                                     Норма часов:
                                                                 </label>
                                                                 <input
@@ -21076,7 +21077,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             </div>
                                                             <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                                                                    <i className="fas fa-briefcase text-indigo-500"></i>
+                                                                    <FaIcon className="fas fa-briefcase text-indigo-500"></FaIcon>
                                                                     Отработанные часы:
                                                                 </label>
                                                                 <input
@@ -21092,7 +21093,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             </div>
                                                             <div className="p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition mb-4">
                                                                 <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
-                                                                    <i className="fas fa-gift text-pink-500"></i>
+                                                                    <FaIcon className="fas fa-gift text-pink-500"></FaIcon>
                                                                     Бонусы:
                                                                 </label>
                                                                 <div className="space-y-4 mt-2">
@@ -21179,7 +21180,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     (salaryData.bonusFilming && !salaryData.bonusFilmingQuantity)
                                                                 }
                                                             >
-                                                                <i className="fas fa-calculator mr-2"></i> Рассчетать
+                                                                <FaIcon className="fas fa-calculator mr-2"></FaIcon> Рассчетать
                                                             </button>
                                                             <button
                                                                 onClick={() => setShowPointsTable(!showPointsTable)}
@@ -21188,7 +21189,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 }`}
                                                                 disabled={!salaryResult}
                                                             >
-                                                                <i className="fas fa-table mr-2"></i> {showPointsTable ? 'Скрыть таблицу баллов' : 'Показать таблицу баллов'}
+                                                                <FaIcon className="fas fa-table mr-2"></FaIcon> {showPointsTable ? 'Скрыть таблицу баллов' : 'Показать таблицу баллов'}
                                                             </button>
                                                             <button
                                                                 onClick={clearSalaryForm}
@@ -21215,7 +21216,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     !salaryData.bonusFilming
                                                                 }
                                                             >
-                                                                <i className="fas fa-eraser mr-2"></i> Очистить
+                                                                <FaIcon className="fas fa-eraser mr-2"></FaIcon> Очистить
                                                             </button>
                                                         </div>
 
@@ -21402,7 +21403,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         aria-label="Закрыть"
                                         className="rounded-md p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-800 transition"
                                     >
-                                        <i className="fas fa-times text-lg" />
+                                        <FaIcon className="fas fa-times text-lg" />
                                     </button>
                                     </div>
 
@@ -21436,7 +21437,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                     <div className="relative">
                                         <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
-                                        <i className="fas fa-user text-gray-400" />
+                                        <FaIcon className="fas fa-user text-gray-400" />
                                         </div>
                                         <input
                                         id="new-login"
@@ -21473,7 +21474,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                     <div className="relative">
                                         <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
-                                        <i className="fas fa-user-check text-gray-400" />
+                                        <FaIcon className="fas fa-user-check text-gray-400" />
                                         </div>
                                         <input
                                         id="confirm-login"
@@ -21507,7 +21508,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     ${isLoading ? "bg-blue-600" : "bg-blue-600 hover:bg-blue-700 active:scale-95"}`}
                                         disabled={isLoading}
                                     >
-                                        <i className={`fas fa-save ${isLoading ? "animate-pulse" : ""}`} />
+                                        <FaIcon className={`fas fa-save ${isLoading ? "animate-pulse" : ""}`} />
                                         {isLoading ? "Обновление..." : "Обновить"}
                                     </button>
                                     </div>
@@ -21540,7 +21541,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         aria-label="Закрыть"
                                         className="rounded-md p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-800 transition"
                                     >
-                                        <i className="fas fa-times text-lg" />
+                                        <FaIcon className="fas fa-times text-lg" />
                                     </button>
                                     </div>
 
@@ -21566,7 +21567,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         Новый пароль
                                         </label>
                                         <div className="absolute inset-y-0 left-0 flex items-center pl-3 mt-6 pointer-events-none">
-                                        <i className="fas fa-lock text-gray-400" />
+                                        <FaIcon className="fas fa-lock text-gray-400" />
                                         </div>
                                         <input
                                         id="new-password"
@@ -21586,7 +21587,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         Подтвердите пароль
                                         </label>
                                         <div className="absolute inset-y-0 left-0 flex items-center pl-3 mt-6 pointer-events-none">
-                                        <i className="fas fa-lock text-gray-400" />
+                                        <FaIcon className="fas fa-lock text-gray-400" />
                                         </div>
                                         <input
                                         id="confirm-password"
@@ -21613,7 +21614,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     ${isLoading ? "bg-blue-600" : "bg-blue-600 hover:bg-blue-700 active:scale-95"}`}
                                         disabled={isLoading}
                                     >
-                                        <i className={`fas fa-save ${isLoading ? "animate-pulse" : ""}`} />
+                                        <FaIcon className={`fas fa-save ${isLoading ? "animate-pulse" : ""}`} />
                                         {isLoading ? "Обновление..." : "Обновить"}
                                     </button>
                                     </div>
@@ -21640,7 +21641,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 <div className="flex items-center justify-between mb-3">
                                     <h3 className="text-lg font-semibold text-gray-900">QR-подтверждение доступа</h3>
                                     <button onClick={closeSensitiveQrModal} className="text-gray-500 hover:text-gray-700">
-                                        <i className="fas fa-times"></i>
+                                        <FaIcon className="fas fa-times"></FaIcon>
                                     </button>
                                 </div>
                                 <p className="text-sm text-gray-600 mb-4">
@@ -21708,7 +21709,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     onClick={() => setShowDevLetterModal(false)}
                                     className="absolute top-6 right-6 w-10 h-10 flex items-center justify-center rounded-full bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700 transition-all z-10"
                                 >
-                                    <i className="fas fa-times"></i>
+                                    <FaIcon className="fas fa-times"></FaIcon>
                                 </button>
 
                                 <div className="p-4 sm:p-6 md:p-10">
@@ -21745,14 +21746,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     className="absolute left-2 sm:left-4 top-1/2 -translate-y-1/2 bg-white/90 hover:bg-white p-2 sm:p-3 rounded-full shadow-md"
                                                     aria-label="Предыдущее фото"
                                                 >
-                                                    <i className="fas fa-chevron-left"></i>
+                                                    <FaIcon className="fas fa-chevron-left"></FaIcon>
                                                 </button>
                                                 <button
                                                     onClick={() => setDevLetterIndex((devLetterIndex + 1) % devLetterImages.length)}
                                                     className="absolute right-2 sm:right-4 top-1/2 -translate-y-1/2 bg-white/90 hover:bg-white p-2 sm:p-3 rounded-full shadow-md"
                                                     aria-label="Следующее фото"
                                                 >
-                                                    <i className="fas fa-chevron-right"></i>
+                                                    <FaIcon className="fas fa-chevron-right"></FaIcon>
                                                 </button>
                                             </div>
 
@@ -21793,7 +21794,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <p className="text-sm text-gray-600">
                                             Хотите добавить свой кадр? Пишите в Telegram:&nbsp;
                                             <a href="https://t.me/Alfa33O" target="_blank" rel="noopener noreferrer" className="text-blue-600 font-semibold hover:underline">
-                                                <i className="fab fa-telegram-plane"></i>&nbsp;@Alfa33O
+                                                <FaIcon className="fab fa-telegram-plane"></FaIcon>&nbsp;@Alfa33O
                                             </a>
                                         </p>
                                         <button
