@@ -131,6 +131,12 @@
     .sidebar.collapsed:hover .sidebar-logo-mini {
       display: none;
     }
+    .sidebar button > svg:not(.sidebar-text) {
+      flex: 0 0 18px;
+      width: 18px;
+      height: 18px;
+      min-width: 18px;
+    }
     .main-content {
       margin-left: 256px;
       transition: margin-left 0.3s ease;
