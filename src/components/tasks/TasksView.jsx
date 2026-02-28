@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import { RefreshCw } from 'lucide-react';
 
 /* ─── Google Fonts ─── */
 const fontLink = document.createElement('link');
@@ -451,12 +452,6 @@ const ChevronRight = () => (
     <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
   </svg>
 );
-const RefreshIcon = () => (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
-    <path d="M20 12a8 8 0 1 1-2.343-5.657" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-    <polyline points="16 6 21.5 6 21.5 11.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-  </svg>
-);
 const PlusIcon = () => (
   <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
     <path d="M8 2v12M2 8h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
@@ -900,7 +895,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         <div className="tv-section-header">
           <span className="tv-section-title heading">Мои задачи</span>
           <button className="tv-btn tv-btn-ghost" onClick={fetchTasks} disabled={isTasksLoading}>
-            <RefreshIcon />{isTasksLoading ? 'Обновляю...' : 'Обновить'}
+            <RefreshCw size={13} strokeWidth={2} />{isTasksLoading ? 'Обновляю...' : 'Обновить'}
           </button>
         </div>
         <div className="tv-my-tabs">
@@ -930,7 +925,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
           <span className="tv-section-title heading">Все задачи</span>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="tv-btn tv-btn-ghost" onClick={fetchTasks} disabled={isTasksLoading}>
-              <RefreshIcon />{isTasksLoading ? 'Обновляю...' : 'Обновить'}
+              <RefreshCw size={13} strokeWidth={2} />{isTasksLoading ? 'Обновляю...' : 'Обновить'}
             </button>
             <button className="tv-btn tv-btn-primary" onClick={() => setCreateOpen(true)}>
               <PlusIcon />Добавить задачу
