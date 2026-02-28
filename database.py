@@ -5907,15 +5907,53 @@ class Database:
             op_day_shifts = day_shift_map_by_operator.get(op_id, [])
             if self._day_shifts_overlap_interval(op_day_shifts, interval_start_min, interval_end_min):
                 continue
+            normalized_day_shifts = []
+            match_starts_at_request_end = False
+            match_ends_at_request_start = False
+            for seg in (op_day_shifts or []):
+                seg_start_val = seg.get('start')
+                seg_end_val = seg.get('end')
+                if not seg_start_val or not seg_end_val:
+                    continue
+                seg_start_min, seg_end_min = self._schedule_interval_minutes(seg_start_val, seg_end_val)
+                seg_start_min = max(0, min(1440, int(seg_start_min)))
+                seg_end_min = max(0, min(1440, int(seg_end_min)))
+                if seg_end_min <= seg_start_min:
+                    continue
+                if seg_start_min == interval_end_min:
+                    match_starts_at_request_end = True
+                if seg_end_min == interval_start_min:
+                    match_ends_at_request_start = True
+                normalized_day_shifts.append({
+                    'start': _minutes_to_time(seg_start_min),
+                    'end': _minutes_to_time(seg_end_min)
+                })
+
+            priority_score = 0
+            if match_starts_at_request_end:
+                priority_score += 1
+            if match_ends_at_request_start:
+                priority_score += 1
             result.append({
                 'id': op_id,
                 'name': row[1],
                 'direction': row[2],
                 'status': row[3],
                 'rate': float(row[4]) if row[4] is not None else None,
-                'supervisorName': row[5]
+                'supervisorName': row[5],
+                'dayShifts': normalized_day_shifts,
+                'matchStartsAtRequestEnd': bool(match_starts_at_request_end),
+                'matchEndsAtRequestStart': bool(match_ends_at_request_start),
+                'priorityScore': int(priority_score)
             })
 
+        result.sort(
+            key=lambda item: (
+                -int(item.get('priorityScore') or 0),
+                str(item.get('name') or '').lower(),
+                int(item.get('id') or 0)
+            )
+        )
         return result
 
     def create_shift_swap_request(
