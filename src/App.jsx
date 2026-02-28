@@ -16023,18 +16023,18 @@ const withAccessTokenHeader = (headers = {}) => {
                     return options;
                 };
 
-                function showToast(message, type = 'success') {
+                const removeToast = useCallback((id) => {
+                    setToasts(prev => prev.filter(toast => toast.id !== id));
+                }, []);
+
+                const showToast = useCallback((message, type = 'success') => {
                     const id = Date.now();
                     setToasts(prev => [...prev, { id, message, type, closing: false }]);
                     setTimeout(() => {
                         setToasts(prev => prev.map(t => t.id === id ? { ...t, closing: true } : t));
                         setTimeout(() => removeToast(id), 300);
                     }, 5000);
-                }
-                
-                function removeToast(id) {
-                    setToasts(prev => prev.filter(toast => toast.id !== id));
-                }
+                }, [removeToast]);
 
                 const fetchDirections = async () => {
                     const requestKey = `fetchDirections:${user?.id || 'anonymous'}`;
