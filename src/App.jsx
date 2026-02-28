@@ -7759,13 +7759,15 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <button
                                                             type="button"
                                                             onClick={handleToggleBreakReminder}
-                                                            className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors border ${
-                                                                breakReminderEnabled ? 'bg-blue-600 border-blue-600' : 'bg-white border-slate-300'
+                                                            className={`relative inline-flex h-7 w-12 items-center rounded-full border shadow-sm transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 ${
+                                                                breakReminderEnabled
+                                                                    ? 'bg-blue-600 border-blue-600 focus-visible:ring-blue-500'
+                                                                    : 'bg-slate-200 border-slate-400 ring-1 ring-slate-300 focus-visible:ring-slate-500'
                                                             }`}
                                                             aria-pressed={breakReminderEnabled}
                                                             aria-label={breakReminderEnabled ? 'Выключить напоминания о перерыве' : 'Включить напоминания о перерыве'}
                                                         >
-                                                            <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${breakReminderEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                                                            <span className={`inline-block h-5 w-5 rounded-full border border-slate-300 bg-white shadow-md transition-transform ${breakReminderEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
                                                         </button>
                                                     </div>
                                                     <div className="mt-2 text-[11px] text-slate-500">
@@ -21817,5 +21819,4 @@ const withAccessTokenHeader = (headers = {}) => {
 
 export { ErrorBoundary };
 export default App;
-
 
