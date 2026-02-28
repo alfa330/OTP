@@ -103,6 +103,93 @@ styleTag.textContent = `
   .tv-task-row-assignee { font-size: 12px; color: var(--ink-3); }
   .tv-task-row-date     { font-size: 12px; color: var(--ink-3); }
 
+  /* -- My tasks tabs/grouping -- */
+  .tv-my-tabs {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #f1f0ed;
+  }
+  .tv-tab-btn {
+    border: 0;
+    background: transparent;
+    color: var(--ink-2);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 7px 12px;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .tv-tab-btn:hover { color: var(--ink); }
+  .tv-tab-btn.is-active {
+    background: var(--surface);
+    color: var(--ink);
+    box-shadow: var(--shadow-sm);
+  }
+  .tv-person-list { display: flex; flex-direction: column; gap: 8px; }
+  .tv-person-row {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    padding: 12px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    cursor: pointer;
+    transition: all .15s ease;
+    text-align: left;
+  }
+  .tv-person-row:hover {
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-sm);
+    transform: translateY(-1px);
+  }
+  .tv-person-row.is-active {
+    border-color: #c7d2fe;
+    background: #eef2ff;
+  }
+  .tv-person-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .tv-person-stats {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 12px;
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+  .tv-alert-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #b45309;
+    font-weight: 600;
+  }
+  .tv-pulse-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #f59e0b;
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, .55);
+    animation: tvPulse 1.4s ease-out infinite;
+  }
+  @keyframes tvPulse {
+    0%   { box-shadow: 0 0 0 0 rgba(245, 158, 11, .55); }
+    70%  { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+  }
+  .tv-person-tasks { margin-top: 12px; }
+
   /* ── Badges ── */
   .tv-badge {
     display: inline-flex; align-items: center;
@@ -274,6 +361,8 @@ styleTag.textContent = `
     .tv-drawer { width: 100vw; }
     .tv-info-grid { grid-template-columns: 1fr; }
     .tv-task-row-assignee, .tv-task-row-date { display: none; }
+    .tv-person-row { align-items: flex-start; flex-direction: column; }
+    .tv-person-stats { white-space: normal; gap: 8px; }
   }
 `;
 document.head.appendChild(styleTag);
@@ -300,6 +389,10 @@ const STATUS_META = {
   returned:    { label: 'Возвращён', badge: 'tv-badge-rose',    dot: '#fda4af' },
 };
 
+const DONE_STATUSES = new Set(['completed', 'accepted']);
+const ACTIVE_STATUSES = new Set(['in_progress', 'returned']);
+const NOT_ACCEPTED_STATUSES = new Set(['assigned']);
+
 const HISTORY_LABELS = {
   assigned:    'Выставлен',
   in_progress: 'Принят в работу',
@@ -318,6 +411,30 @@ const fmt = (v) => {
 };
 
 /* ─── Icons ─── */
+const groupTasksByPerson = (list, getPerson) => {
+  const groups = new Map();
+  list.forEach((task) => {
+    const person = getPerson(task) || {};
+    const idNum = Number(person?.id || 0);
+    const name = (person?.name || '-').trim() || '-';
+    const key = idNum > 0 ? `id:${idNum}` : `name:${name}`;
+
+    if (!groups.has(key)) {
+      groups.set(key, { key, name, done: 0, active: 0, notAccepted: 0, tasks: [] });
+    }
+    const group = groups.get(key);
+    group.tasks.push(task);
+    if (DONE_STATUSES.has(task?.status)) group.done += 1;
+    else if (NOT_ACCEPTED_STATUSES.has(task?.status)) group.notAccepted += 1;
+    else if (ACTIVE_STATUSES.has(task?.status)) group.active += 1;
+    else group.active += 1;
+  });
+
+  return Array.from(groups.values()).sort((a, b) =>
+    a.name.localeCompare(b.name, 'ru-RU', { sensitivity: 'base' })
+  );
+};
+
 const CloseIcon = () => (
   <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
     <path d="M1 1l12 12M13 1L1 13" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
@@ -518,6 +635,9 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const [completeModal,     setCompleteModal]     = useState({ open: false, taskId: null, taskSubject: '' });
   const [completionSummary, setCompletionSummary] = useState('');
   const [completionFiles,   setCompletionFiles]   = useState([]);
+  const [myTasksTab,        setMyTasksTab]        = useState('incoming');
+  const [incomingPersonKey, setIncomingPersonKey] = useState(null);
+  const [outgoingPersonKey, setOutgoingPersonKey] = useState(null);
 
   const fileInputRef           = useRef(null);
   const completionFileInputRef = useRef(null);
@@ -567,10 +687,35 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   }, [user, fetchRecipients, fetchTasks]);
 
   const currentUserId = Number(user?.id || 0);
-  const myTasks = useMemo(
+  const incomingTasks = useMemo(
     () => tasks.filter(t => Number(t?.assignee?.id || 0) === currentUserId),
     [tasks, currentUserId]
   );
+  const outgoingTasks = useMemo(
+    () => tasks.filter(t => Number(t?.creator?.id || 0) === currentUserId),
+    [tasks, currentUserId]
+  );
+
+  const incomingGroups = useMemo(
+    () => groupTasksByPerson(incomingTasks, t => t?.creator),
+    [incomingTasks]
+  );
+  const outgoingGroups = useMemo(
+    () => groupTasksByPerson(outgoingTasks, t => t?.assignee),
+    [outgoingTasks]
+  );
+
+  useEffect(() => {
+    setIncomingPersonKey(prev =>
+      prev && incomingGroups.some(g => g.key === prev) ? prev : null
+    );
+  }, [incomingGroups]);
+
+  useEffect(() => {
+    setOutgoingPersonKey(prev =>
+      prev && outgoingGroups.some(g => g.key === prev) ? prev : null
+    );
+  }, [outgoingGroups]);
 
   /* ── Create ── */
   const handleCreate = async (e) => {
@@ -708,6 +853,44 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     );
   };
 
+  const renderGroupedTasks = (groups, selectedKey, onSelect, emptyText, showNotAccepted = false) => {
+    if (isTasksLoading) return <div className="tv-loading">Загрузка...</div>;
+    if (!groups.length) return <div className="tv-empty">{emptyText}</div>;
+    const selected = groups.find(g => g.key === selectedKey) || null;
+    return (
+      <>
+        <div className="tv-person-list">
+          {groups.map(group => (
+            <button
+              key={group.key}
+              type="button"
+              className={`tv-person-row ${selectedKey === group.key ? 'is-active' : ''}`}
+              onClick={() => onSelect(group.key)}
+            >
+              <span className="tv-person-name">{group.name}</span>
+              <span className="tv-person-stats">
+                <span>Выполнено: {group.done}</span>
+                <span>Выполняется: {group.active}</span>
+                {showNotAccepted && (
+                  <span className="tv-alert-stat">
+                    {group.notAccepted > 0 && <span className="tv-pulse-dot" />}
+                    <span>Не принято в работу: {group.notAccepted}</span>
+                  </span>
+                )}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <div className="tv-person-tasks">
+          {selected
+            ? renderList(selected.tasks, 'У выбранного сотрудника задач пока нет.')
+            : <div className="tv-empty">Нажмите на сотрудника, чтобы посмотреть его задачи.</div>}
+        </div>
+      </>
+    );
+  };
+
   if (!user || !['admin', 'sv'].includes(user.role)) return null;
 
   return (
@@ -720,7 +903,25 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             <RefreshIcon />{isTasksLoading ? 'Обновляю...' : 'Обновить'}
           </button>
         </div>
-        {renderList(myTasks, 'У вас пока нет задач.')}
+        <div className="tv-my-tabs">
+          <button
+            type="button"
+            className={`tv-tab-btn ${myTasksTab === 'incoming' ? 'is-active' : ''}`}
+            onClick={() => setMyTasksTab('incoming')}
+          >
+            Принятые
+          </button>
+          <button
+            type="button"
+            className={`tv-tab-btn ${myTasksTab === 'outgoing' ? 'is-active' : ''}`}
+            onClick={() => setMyTasksTab('outgoing')}
+          >
+            Исходящие
+          </button>
+        </div>
+        {myTasksTab === 'incoming'
+          ? renderGroupedTasks(incomingGroups, incomingPersonKey, setIncomingPersonKey, 'По принятым задачам пока нет данных.', true)
+          : renderGroupedTasks(outgoingGroups, outgoingPersonKey, setOutgoingPersonKey, 'По исходящим задачам пока нет данных.')}
       </div>
 
       {/* All tasks */}
