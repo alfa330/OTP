@@ -4845,6 +4845,25 @@ def _iter_schedule_excel_dates(start_date_obj, end_date_obj):
         cur = cur + timedelta(days=1)
 
 
+def _work_schedule_operator_requester():
+    requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+    if not requester_id:
+        return None, None, ("Unauthorized", 401)
+
+    try:
+        requester_id = int(requester_id)
+    except Exception:
+        return None, None, ("Invalid requester id", 400)
+
+    user_data = db.get_user(id=requester_id)
+    if not user_data:
+        return None, None, ("User not found", 404)
+    if user_data[3] != 'operator':
+        return None, None, ("Forbidden", 403)
+
+    return requester_id, user_data, None
+
+
 @app.route('/api/work_schedules/my', methods=['GET'])
 @require_api_key
 def get_my_work_schedules():
@@ -4877,6 +4896,147 @@ def get_my_work_schedules():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error getting my work schedules: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/work_schedules/shift_swap/candidates', methods=['GET'])
+@require_api_key
+def get_shift_swap_candidates():
+    """
+    Вернуть операторов-кандидатов для замены:
+    - в том же направлении, что и текущий оператор
+    - без смен в выбранном интервале времени на выбранную дату
+    Query params:
+      swap_date=YYYY-MM-DD
+      start_time=HH:MM
+      end_time=HH:MM
+    """
+    try:
+        requester_id, _user_data, err = _work_schedule_operator_requester()
+        if err:
+            return jsonify({"error": err[0]}), err[1]
+
+        swap_date = request.args.get('swap_date')
+        start_time = request.args.get('start_time')
+        end_time = request.args.get('end_time')
+        if not swap_date or not start_time or not end_time:
+            return jsonify({"error": "swap_date, start_time and end_time are required"}), 400
+
+        candidates = db.get_shift_swap_candidates(
+            requester_operator_id=requester_id,
+            swap_date=swap_date,
+            start_time=start_time,
+            end_time=end_time
+        )
+        return jsonify({
+            "candidates": candidates,
+            "swap_date": swap_date,
+            "start_time": start_time,
+            "end_time": end_time
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error getting shift swap candidates: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/work_schedules/shift_swap/requests', methods=['GET', 'POST'])
+@require_api_key
+def shift_swap_requests():
+    """
+    GET: входящие/исходящие запросы на замену для текущего оператора.
+    POST: создать запрос на замену.
+    """
+    try:
+        requester_id, _user_data, err = _work_schedule_operator_requester()
+        if err:
+            return jsonify({"error": err[0]}), err[1]
+
+        if request.method == 'GET':
+            raw_limit = request.args.get('limit')
+            try:
+                limit = int(raw_limit) if raw_limit is not None else 200
+            except Exception:
+                return jsonify({"error": "Invalid limit"}), 400
+
+            payload = db.get_shift_swap_requests_for_operator(
+                operator_id=requester_id,
+                limit=limit
+            )
+            return jsonify(payload), 200
+
+        data = request.get_json(silent=True) or {}
+        target_operator_id = data.get('target_operator_id')
+        swap_date = data.get('swap_date')
+        start_time = data.get('start_time')
+        end_time = data.get('end_time')
+        request_comment = data.get('comment')
+        if not target_operator_id or not swap_date or not start_time or not end_time:
+            return jsonify({"error": "target_operator_id, swap_date, start_time and end_time are required"}), 400
+
+        created_request = db.create_shift_swap_request(
+            requester_operator_id=requester_id,
+            target_operator_id=target_operator_id,
+            swap_date=swap_date,
+            start_time=start_time,
+            end_time=end_time,
+            request_comment=request_comment
+        )
+        return jsonify({
+            "message": "Swap request created",
+            "request": created_request
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in shift swap requests endpoint: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/work_schedules/shift_swap/respond', methods=['POST'])
+@require_api_key
+def respond_shift_swap_request():
+    """
+    Ответ на запрос замены (только получатель):
+    Body:
+      {
+        "request_id": int,
+        "action": "accept" | "reject",
+        "comment": "optional"
+      }
+    """
+    try:
+        requester_id, _user_data, err = _work_schedule_operator_requester()
+        if err:
+            return jsonify({"error": err[0]}), err[1]
+
+        data = request.get_json(silent=True) or {}
+        request_id = data.get('request_id')
+        action = data.get('action')
+        response_comment = data.get('comment')
+        if not request_id or not action:
+            return jsonify({"error": "request_id and action are required"}), 400
+
+        updated_request = db.respond_shift_swap_request(
+            request_id=request_id,
+            responder_operator_id=requester_id,
+            action=action,
+            response_comment=response_comment
+        )
+        action_norm = str(action).strip().lower()
+        message = "Swap request accepted" if action_norm == 'accept' else "Swap request rejected"
+        return jsonify({
+            "message": message,
+            "request": updated_request
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error responding shift swap request: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
