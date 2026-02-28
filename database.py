@@ -546,6 +546,61 @@ class Database:
                     UNIQUE(operator_id, day_off_date)
                 );
             """)
+            # Shift swap requests between operators (operator -> operator)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS work_shift_swap_requests (
+                    id SERIAL PRIMARY KEY,
+                    requester_operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    target_operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    direction_id INTEGER NULL REFERENCES directions(id) ON DELETE SET NULL,
+                    start_date DATE NOT NULL,
+                    end_date DATE NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    request_comment TEXT NULL,
+                    response_comment TEXT NULL,
+                    requested_shifts_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    responded_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    responded_at TIMESTAMP NULL,
+                    accepted_at TIMESTAMP NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT work_shift_swap_requests_status_check CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled')),
+                    CONSTRAINT work_shift_swap_requests_period_check CHECK (end_date >= start_date),
+                    CONSTRAINT work_shift_swap_requests_participants_check CHECK (requester_operator_id <> target_operator_id)
+                );
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shift_swap_requests
+                ADD COLUMN IF NOT EXISTS direction_id INTEGER NULL REFERENCES directions(id) ON DELETE SET NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shift_swap_requests
+                ADD COLUMN IF NOT EXISTS request_comment TEXT;
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shift_swap_requests
+                ADD COLUMN IF NOT EXISTS response_comment TEXT;
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shift_swap_requests
+                ADD COLUMN IF NOT EXISTS requested_shifts_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shift_swap_requests
+                ADD COLUMN IF NOT EXISTS responded_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL;
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shift_swap_requests
+                ADD COLUMN IF NOT EXISTS responded_at TIMESTAMP;
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shift_swap_requests
+                ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMP;
+            """)
+            cursor.execute("""
+                ALTER TABLE work_shift_swap_requests
+                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+            """)
             cursor.execute("""
                 ALTER TABLE users
                 DROP CONSTRAINT IF EXISTS users_status_check;
@@ -739,6 +794,12 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_shifts_operator_date ON work_shifts(operator_id, shift_date);
                 CREATE INDEX IF NOT EXISTS idx_work_shifts_date ON work_shifts(shift_date);
                 CREATE INDEX IF NOT EXISTS idx_days_off_operator_date ON days_off(operator_id, day_off_date);
+                CREATE INDEX IF NOT EXISTS idx_work_shift_swap_requests_target_status
+                ON work_shift_swap_requests(target_operator_id, status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_work_shift_swap_requests_requester_status
+                ON work_shift_swap_requests(requester_operator_id, status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_work_shift_swap_requests_period
+                ON work_shift_swap_requests(start_date, end_date);
                 CREATE INDEX IF NOT EXISTS idx_ai_feedback_cache_operator_month ON ai_feedback_cache(operator_id, month);
                 CREATE INDEX IF NOT EXISTS idx_tasks_assigned_to ON tasks(assigned_to);
                 CREATE INDEX IF NOT EXISTS idx_tasks_created_by ON tasks(created_by);
@@ -5280,6 +5341,971 @@ class Database:
             )
 
             return result
+
+    def _iter_schedule_dates_inclusive(self, start_date_obj, end_date_obj):
+        current = start_date_obj
+        while current <= end_date_obj:
+            yield current
+            current = current + timedelta(days=1)
+
+    def _load_operator_shift_map_for_period_tx(self, cursor, operator_id, start_date_obj, end_date_obj):
+        operator_id = int(operator_id)
+        start_date_obj = self._normalize_schedule_date(start_date_obj)
+        end_date_obj = self._normalize_schedule_date(end_date_obj)
+        if end_date_obj < start_date_obj:
+            raise ValueError("end_date must be >= start_date")
+
+        cursor.execute(
+            """
+            SELECT ws.id, ws.shift_date, ws.start_time, ws.end_time
+            FROM work_shifts ws
+            WHERE ws.operator_id = %s
+              AND ws.shift_date >= %s
+              AND ws.shift_date <= %s
+            ORDER BY ws.shift_date, ws.start_time
+            """,
+            (operator_id, start_date_obj, end_date_obj)
+        )
+        rows = cursor.fetchall() or []
+
+        shifts_by_date = {}
+        shift_ref = {}
+        shift_ids = []
+        for shift_id, shift_date, start_time_value, end_time_value in rows:
+            day_key = shift_date.strftime('%Y-%m-%d')
+            item = {
+                'start': start_time_value.strftime('%H:%M'),
+                'end': end_time_value.strftime('%H:%M'),
+                'breaks': []
+            }
+            shifts_by_date.setdefault(day_key, []).append(item)
+            shift_ref[int(shift_id)] = item
+            shift_ids.append(int(shift_id))
+
+        if shift_ids:
+            cursor.execute(
+                """
+                SELECT shift_id, start_minutes, end_minutes
+                FROM shift_breaks
+                WHERE shift_id = ANY(%s)
+                ORDER BY shift_id, start_minutes, end_minutes
+                """,
+                (shift_ids,)
+            )
+            for shift_id, br_start, br_end in cursor.fetchall() or []:
+                target = shift_ref.get(int(shift_id))
+                if target is None:
+                    continue
+                target['breaks'].append({
+                    'start': int(br_start),
+                    'end': int(br_end)
+                })
+
+        normalized = {}
+        for day_key, segs in shifts_by_date.items():
+            merged = _merge_shifts_for_date(segs or [])
+            if merged:
+                normalized[day_key] = merged
+        return dict(sorted(normalized.items(), key=lambda x: x[0]))
+
+    def _normalize_shift_snapshot_map(self, raw_snapshot):
+        if raw_snapshot is None:
+            return {}
+
+        source = raw_snapshot
+        if isinstance(source, str):
+            text = source.strip()
+            if not text:
+                return {}
+            try:
+                source = json.loads(text)
+            except Exception as exc:
+                raise ValueError("Invalid requested_shifts_json format") from exc
+
+        if not isinstance(source, dict):
+            raise ValueError("requested_shifts_json must be an object")
+
+        normalized = {}
+        for raw_day, raw_shifts in source.items():
+            try:
+                day_obj = self._normalize_schedule_date(raw_day)
+            except Exception as exc:
+                raise ValueError("Invalid date in requested_shifts_json") from exc
+            day_key = day_obj.strftime('%Y-%m-%d')
+
+            if not isinstance(raw_shifts, list):
+                continue
+
+            parsed_shifts = []
+            for seg in raw_shifts:
+                if not isinstance(seg, dict):
+                    continue
+                start_raw = seg.get('start') or seg.get('start_time')
+                end_raw = seg.get('end') or seg.get('end_time')
+                if not start_raw or not end_raw:
+                    continue
+                start_obj = self._normalize_schedule_time(start_raw, 'start_time')
+                end_obj = self._normalize_schedule_time(end_raw, 'end_time')
+                breaks_raw = seg.get('breaks') if isinstance(seg.get('breaks'), list) else []
+                breaks_norm = self._normalize_shift_breaks(breaks_raw)
+                parsed_shifts.append({
+                    'start': start_obj.strftime('%H:%M'),
+                    'end': end_obj.strftime('%H:%M'),
+                    'breaks': breaks_norm
+                })
+
+            merged = _merge_shifts_for_date(parsed_shifts)
+            if merged:
+                normalized[day_key] = merged
+
+        return dict(sorted(normalized.items(), key=lambda x: x[0]))
+
+    def _snapshot_shift_totals(self, snapshot):
+        days_count = 0
+        shifts_count = 0
+        total_minutes = 0
+        for day_key, shifts in (snapshot or {}).items():
+            if not isinstance(shifts, list) or not shifts:
+                continue
+            days_count += 1
+            for seg in shifts:
+                start_val = seg.get('start')
+                end_val = seg.get('end')
+                if not start_val or not end_val:
+                    continue
+                start_min, end_min = self._schedule_interval_minutes(start_val, end_val)
+                shifts_count += 1
+                total_minutes += max(0, int(end_min) - int(start_min))
+        return {
+            'daysCount': int(days_count),
+            'shiftsCount': int(shifts_count),
+            'totalMinutes': int(total_minutes)
+        }
+
+    def _normalize_swap_time_range(self, start_time, end_time):
+        start_obj = self._normalize_schedule_time(start_time, 'start_time')
+        end_obj = self._normalize_schedule_time(end_time, 'end_time')
+        start_str = start_obj.strftime('%H:%M')
+        end_str = end_obj.strftime('%H:%M')
+        start_min = _time_to_minutes(start_str)
+        end_min = _time_to_minutes(end_str)
+        if end_min <= start_min:
+            raise ValueError("end_time must be greater than start_time")
+        return {
+            'startTime': start_str,
+            'endTime': end_str,
+            'startMin': int(start_min),
+            'endMin': int(end_min)
+        }
+
+    def _normalize_swap_request_payload(self, raw_payload, fallback_date=None):
+        payload = raw_payload
+        if payload is None:
+            payload = {}
+        if isinstance(payload, str):
+            text = payload.strip()
+            if not text:
+                payload = {}
+            else:
+                try:
+                    payload = json.loads(text)
+                except Exception as exc:
+                    raise ValueError("Invalid swap payload format") from exc
+        if not isinstance(payload, dict):
+            payload = {}
+
+        swap_date = payload.get('swapDate') or payload.get('swap_date') or fallback_date
+        if swap_date:
+            try:
+                swap_date = self._normalize_schedule_date(swap_date).strftime('%Y-%m-%d')
+            except Exception:
+                swap_date = None
+
+        interval_raw = payload.get('interval') if isinstance(payload.get('interval'), dict) else {}
+        start_time = interval_raw.get('start') or interval_raw.get('start_time')
+        end_time = interval_raw.get('end') or interval_raw.get('end_time')
+        start_min = interval_raw.get('startMin')
+        end_min = interval_raw.get('endMin')
+
+        if start_time and end_time:
+            try:
+                normalized_interval = self._normalize_swap_time_range(start_time, end_time)
+                start_time = normalized_interval['startTime']
+                end_time = normalized_interval['endTime']
+                start_min = normalized_interval['startMin']
+                end_min = normalized_interval['endMin']
+            except Exception:
+                start_time = None
+                end_time = None
+                start_min = None
+                end_min = None
+
+        if start_min is not None and end_min is not None:
+            try:
+                start_min = int(start_min)
+                end_min = int(end_min)
+            except Exception:
+                start_min = None
+                end_min = None
+            if start_min is not None and end_min is not None and end_min <= start_min:
+                start_min = None
+                end_min = None
+
+        requested_segments_raw = payload.get('requestedSegments') if isinstance(payload.get('requestedSegments'), list) else []
+        requested_segments = []
+        for seg in requested_segments_raw:
+            if not isinstance(seg, dict):
+                continue
+            seg_start = seg.get('start') or seg.get('start_time')
+            seg_end = seg.get('end') or seg.get('end_time')
+            if not seg_start or not seg_end:
+                continue
+            try:
+                seg_start_obj = self._normalize_schedule_time(seg_start, 'segment_start')
+                seg_end_obj = self._normalize_schedule_time(seg_end, 'segment_end')
+            except Exception:
+                continue
+            seg_start_str = seg_start_obj.strftime('%H:%M')
+            seg_end_str = seg_end_obj.strftime('%H:%M')
+            seg_start_min, seg_end_min = self._schedule_interval_minutes(seg_start_str, seg_end_str)
+            seg_start_min = max(0, min(1440, int(seg_start_min)))
+            seg_end_min = max(0, min(1440, int(seg_end_min)))
+            if seg_end_min <= seg_start_min:
+                continue
+            breaks_norm = self._normalize_shift_breaks(seg.get('breaks') if isinstance(seg.get('breaks'), list) else [])
+            clipped_breaks = []
+            for b in breaks_norm:
+                b_start = max(seg_start_min, int(b.get('start', 0)))
+                b_end = min(seg_end_min, int(b.get('end', 0)))
+                if b_end > b_start:
+                    clipped_breaks.append({'start': b_start, 'end': b_end})
+            requested_segments.append({
+                'start': _minutes_to_time(seg_start_min),
+                'end': _minutes_to_time(seg_end_min),
+                'breaks': clipped_breaks
+            })
+
+        if requested_segments:
+            requested_segments = _merge_shifts_for_date(requested_segments)
+
+        return {
+            'swapDate': swap_date,
+            'startTime': start_time,
+            'endTime': end_time,
+            'startMin': start_min if start_min is not None else None,
+            'endMin': end_min if end_min is not None else None,
+            'requestedSegments': requested_segments
+        }
+
+    def _extract_day_interval_segments_from_shifts(self, day_shifts, interval_start_min, interval_end_min):
+        interval_start_min = int(interval_start_min)
+        interval_end_min = int(interval_end_min)
+        if interval_end_min <= interval_start_min:
+            return []
+
+        result = []
+        for seg in (day_shifts or []):
+            start_val = seg.get('start')
+            end_val = seg.get('end')
+            if not start_val or not end_val:
+                continue
+            seg_start, seg_end = self._schedule_interval_minutes(start_val, end_val)
+            seg_start = max(0, min(1440, int(seg_start)))
+            seg_end = max(0, min(1440, int(seg_end)))
+            if seg_end <= seg_start:
+                continue
+
+            overlap_start = max(seg_start, interval_start_min)
+            overlap_end = min(seg_end, interval_end_min)
+            if overlap_end <= overlap_start:
+                continue
+
+            raw_breaks = self._normalize_shift_breaks(seg.get('breaks') if isinstance(seg.get('breaks'), list) else [])
+            clipped_breaks = []
+            for b in raw_breaks:
+                b_start = max(overlap_start, int(b.get('start', 0)))
+                b_end = min(overlap_end, int(b.get('end', 0)))
+                if b_end > b_start:
+                    clipped_breaks.append({'start': b_start, 'end': b_end})
+
+            result.append({
+                'start': _minutes_to_time(overlap_start),
+                'end': _minutes_to_time(overlap_end),
+                'breaks': clipped_breaks
+            })
+
+        if not result:
+            return []
+        return _merge_shifts_for_date(result)
+
+    def _is_interval_fully_covered_by_day_shifts(self, day_shifts, interval_start_min, interval_end_min):
+        extracted = self._extract_day_interval_segments_from_shifts(day_shifts, interval_start_min, interval_end_min)
+        if not extracted:
+            return False
+        intervals = []
+        for seg in extracted:
+            s, e = self._schedule_interval_minutes(seg.get('start'), seg.get('end'))
+            s = max(0, min(1440, int(s)))
+            e = max(0, min(1440, int(e)))
+            if e > s:
+                intervals.append({'start': s, 'end': e})
+        merged = self._merge_break_intervals(intervals)
+        if len(merged) != 1:
+            return False
+        return int(merged[0]['start']) <= int(interval_start_min) and int(merged[0]['end']) >= int(interval_end_min)
+
+    def _day_shifts_overlap_interval(self, day_shifts, interval_start_min, interval_end_min):
+        interval_start_min = int(interval_start_min)
+        interval_end_min = int(interval_end_min)
+        if interval_end_min <= interval_start_min:
+            return False
+
+        for seg in (day_shifts or []):
+            start_val = seg.get('start')
+            end_val = seg.get('end')
+            if not start_val or not end_val:
+                continue
+            seg_start, seg_end = self._schedule_interval_minutes(start_val, end_val)
+            seg_start = max(0, min(1440, int(seg_start)))
+            seg_end = max(0, min(1440, int(seg_end)))
+            if seg_end <= seg_start:
+                continue
+            if seg_start < interval_end_min and interval_start_min < seg_end:
+                return True
+        return False
+
+    def _subtract_interval_from_day_shifts(self, day_shifts, interval_start_min, interval_end_min):
+        interval_start_min = int(interval_start_min)
+        interval_end_min = int(interval_end_min)
+        if interval_end_min <= interval_start_min:
+            return _merge_shifts_for_date(day_shifts or [])
+
+        result = []
+        for seg in (day_shifts or []):
+            start_val = seg.get('start')
+            end_val = seg.get('end')
+            if not start_val or not end_val:
+                continue
+            seg_start, seg_end = self._schedule_interval_minutes(start_val, end_val)
+            seg_start = int(seg_start)
+            seg_end = int(seg_end)
+            if seg_end <= seg_start:
+                continue
+
+            # Для overlap-проверки учитываем только часть, принадлежащую выбранной дате (00:00-24:00).
+            seg_day_start = max(0, min(1440, seg_start))
+            seg_day_end = max(0, min(1440, seg_end))
+
+            if seg_day_end <= interval_start_min or seg_day_start >= interval_end_min:
+                result.append({
+                    'start': _minutes_to_time(seg_start),
+                    'end': _minutes_to_time(seg_end),
+                    'breaks': self._normalize_shift_breaks(seg.get('breaks') if isinstance(seg.get('breaks'), list) else [])
+                })
+                continue
+
+            left_start = seg_start
+            left_end = min(seg_end, interval_start_min)
+            right_start = max(seg_start, interval_end_min)
+            right_end = seg_end
+
+            raw_breaks = self._normalize_shift_breaks(seg.get('breaks') if isinstance(seg.get('breaks'), list) else [])
+
+            def append_piece(piece_start, piece_end):
+                if piece_end <= piece_start:
+                    return
+                piece_breaks = []
+                for b in raw_breaks:
+                    b_start = max(piece_start, int(b.get('start', 0)))
+                    b_end = min(piece_end, int(b.get('end', 0)))
+                    if b_end > b_start:
+                        piece_breaks.append({'start': b_start, 'end': b_end})
+                result.append({
+                    'start': _minutes_to_time(piece_start),
+                    'end': _minutes_to_time(piece_end),
+                    'breaks': piece_breaks
+                })
+
+            append_piece(left_start, left_end)
+            append_piece(right_start, right_end)
+
+        if not result:
+            return []
+        return _merge_shifts_for_date(result)
+
+    def _serialize_shift_swap_request_row(self, row):
+        if not row:
+            return None
+        (
+            request_id,
+            requester_id,
+            requester_name,
+            target_id,
+            target_name,
+            direction_id,
+            direction_name,
+            start_date,
+            end_date,
+            status,
+            request_comment,
+            response_comment,
+            requested_shifts_json,
+            created_at,
+            updated_at,
+            responded_at,
+            accepted_at,
+            responded_by,
+            responded_by_name
+        ) = row
+
+        payload = self._normalize_swap_request_payload(
+            requested_shifts_json,
+            fallback_date=start_date.strftime('%Y-%m-%d') if isinstance(start_date, date) else None
+        )
+        requested_segments = payload.get('requestedSegments') or []
+        totals = self._snapshot_shift_totals({
+            payload.get('swapDate') or (start_date.strftime('%Y-%m-%d') if isinstance(start_date, date) else ''): requested_segments
+        })
+
+        def _fmt_dt(value):
+            if isinstance(value, datetime):
+                return value.isoformat()
+            return None
+
+        return {
+            'id': int(request_id),
+            'requester': {
+                'id': int(requester_id),
+                'name': requester_name
+            },
+            'target': {
+                'id': int(target_id),
+                'name': target_name
+            },
+            'direction': {
+                'id': int(direction_id) if direction_id is not None else None,
+                'name': direction_name
+            },
+            'swapDate': payload.get('swapDate') or (start_date.strftime('%Y-%m-%d') if isinstance(start_date, date) else None),
+            'startTime': payload.get('startTime'),
+            'endTime': payload.get('endTime'),
+            'startDate': start_date.strftime('%Y-%m-%d') if isinstance(start_date, date) else str(start_date),
+            'endDate': end_date.strftime('%Y-%m-%d') if isinstance(end_date, date) else str(end_date),
+            'status': str(status),
+            'requestComment': request_comment,
+            'responseComment': response_comment,
+            'requestedShifts': {
+                payload.get('swapDate') or (start_date.strftime('%Y-%m-%d') if isinstance(start_date, date) else ''): requested_segments
+            },
+            'requestedSegments': requested_segments,
+            'summary': totals,
+            'createdAt': _fmt_dt(created_at),
+            'updatedAt': _fmt_dt(updated_at),
+            'respondedAt': _fmt_dt(responded_at),
+            'acceptedAt': _fmt_dt(accepted_at),
+            'respondedBy': {
+                'id': int(responded_by) if responded_by is not None else None,
+                'name': responded_by_name
+            }
+        }
+
+    def _select_shift_swap_request_by_id_tx(self, cursor, request_id):
+        cursor.execute(
+            """
+            SELECT
+                r.id,
+                r.requester_operator_id, req.name,
+                r.target_operator_id, tgt.name,
+                r.direction_id, d.name,
+                r.start_date, r.end_date,
+                r.status,
+                r.request_comment,
+                r.response_comment,
+                r.requested_shifts_json,
+                r.created_at,
+                r.updated_at,
+                r.responded_at,
+                r.accepted_at,
+                r.responded_by,
+                resp.name
+            FROM work_shift_swap_requests r
+            JOIN users req ON req.id = r.requester_operator_id
+            JOIN users tgt ON tgt.id = r.target_operator_id
+            LEFT JOIN directions d ON d.id = r.direction_id
+            LEFT JOIN users resp ON resp.id = r.responded_by
+            WHERE r.id = %s
+            LIMIT 1
+            """,
+            (int(request_id),)
+        )
+        return cursor.fetchone()
+
+    def get_shift_swap_candidates(self, requester_operator_id, swap_date, start_time, end_time):
+        requester_operator_id = int(requester_operator_id)
+        swap_date_obj = self._normalize_schedule_date(swap_date)
+        interval = self._normalize_swap_time_range(start_time, end_time)
+        interval_start_min = interval['startMin']
+        interval_end_min = interval['endMin']
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, role, direction_id
+                FROM users
+                WHERE id = %s
+                LIMIT 1
+                """,
+                (requester_operator_id,)
+            )
+            requester_row = cursor.fetchone()
+            if not requester_row:
+                raise ValueError("Requester not found")
+            if str(requester_row[1]) != 'operator':
+                raise ValueError("Only operators can request swap candidates")
+            requester_direction_id = requester_row[2]
+            if requester_direction_id is None:
+                raise ValueError("У вашего профиля не задано направление")
+
+            cursor.execute(
+                """
+                SELECT
+                    u.id,
+                    u.name,
+                    COALESCE(d.name, ''),
+                    COALESCE(u.status, 'working'),
+                    u.rate,
+                    s.name
+                FROM users u
+                LEFT JOIN directions d ON d.id = u.direction_id
+                LEFT JOIN users s ON s.id = u.supervisor_id
+                WHERE u.role = 'operator'
+                  AND u.id <> %s
+                  AND u.direction_id = %s
+                  AND COALESCE(u.status, 'working') <> 'fired'
+                ORDER BY LOWER(u.name), u.id
+                """,
+                (requester_operator_id, requester_direction_id)
+            )
+            candidate_rows = cursor.fetchall() or []
+            if not candidate_rows:
+                return []
+
+            candidate_ids = [int(row[0]) for row in candidate_rows]
+            day_shift_map_by_operator = {}
+            for op_id in candidate_ids:
+                shift_map = self._load_operator_shift_map_for_period_tx(
+                    cursor=cursor,
+                    operator_id=op_id,
+                    start_date_obj=swap_date_obj,
+                    end_date_obj=swap_date_obj
+                )
+                day_shift_map_by_operator[int(op_id)] = shift_map.get(swap_date_obj.strftime('%Y-%m-%d'), [])
+
+        result = []
+        for row in candidate_rows:
+            op_id = int(row[0])
+            op_day_shifts = day_shift_map_by_operator.get(op_id, [])
+            if self._day_shifts_overlap_interval(op_day_shifts, interval_start_min, interval_end_min):
+                continue
+            result.append({
+                'id': op_id,
+                'name': row[1],
+                'direction': row[2],
+                'status': row[3],
+                'rate': float(row[4]) if row[4] is not None else None,
+                'supervisorName': row[5]
+            })
+
+        return result
+
+    def create_shift_swap_request(
+        self,
+        requester_operator_id,
+        target_operator_id,
+        swap_date,
+        start_time,
+        end_time,
+        request_comment=None
+    ):
+        requester_operator_id = int(requester_operator_id)
+        target_operator_id = int(target_operator_id)
+        if requester_operator_id == target_operator_id:
+            raise ValueError("Нельзя отправить запрос самому себе")
+
+        swap_date_obj = self._normalize_schedule_date(swap_date)
+        swap_date_str = swap_date_obj.strftime('%Y-%m-%d')
+        interval = self._normalize_swap_time_range(start_time, end_time)
+        interval_start_min = interval['startMin']
+        interval_end_min = interval['endMin']
+
+        request_comment_norm = None
+        if request_comment is not None:
+            text = str(request_comment).strip()
+            request_comment_norm = text or None
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, role, direction_id, name, COALESCE(status, 'working')
+                FROM users
+                WHERE id = ANY(%s)
+                """,
+                ([requester_operator_id, target_operator_id],)
+            )
+            users_rows = cursor.fetchall() or []
+            users_map = {int(row[0]): row for row in users_rows}
+            requester = users_map.get(requester_operator_id)
+            target = users_map.get(target_operator_id)
+            if not requester:
+                raise ValueError("Requester not found")
+            if not target:
+                raise ValueError("Target operator not found")
+            if str(requester[1]) != 'operator' or str(target[1]) != 'operator':
+                raise ValueError("Swap is available only between operators")
+            if str(target[4]) == 'fired':
+                raise ValueError("Выбранный оператор уволен")
+
+            requester_direction_id = requester[2]
+            target_direction_id = target[2]
+            if requester_direction_id is None or target_direction_id is None:
+                raise ValueError("У операторов должно быть указано направление")
+            if int(requester_direction_id) != int(target_direction_id):
+                raise ValueError("Оператор для замены должен быть в том же направлении")
+
+            cursor.execute(
+                """
+                SELECT requested_shifts_json
+                FROM work_shift_swap_requests
+                WHERE status = 'pending'
+                  AND requester_operator_id = %s
+                  AND target_operator_id = %s
+                  AND start_date = %s
+                  AND end_date = %s
+                """,
+                (requester_operator_id, target_operator_id, swap_date_obj, swap_date_obj)
+            )
+            existing_pending_payloads = cursor.fetchall() or []
+            for (existing_raw_payload,) in existing_pending_payloads:
+                existing_payload = self._normalize_swap_request_payload(existing_raw_payload, fallback_date=swap_date_str)
+                ex_start = existing_payload.get('startMin')
+                ex_end = existing_payload.get('endMin')
+                if ex_start is None or ex_end is None:
+                    continue
+                if int(ex_start) < interval_end_min and interval_start_min < int(ex_end):
+                    raise ValueError("Уже есть активный запрос на пересекающийся интервал для этого оператора")
+
+            requester_day_map = self._load_operator_shift_map_for_period_tx(
+                cursor=cursor,
+                operator_id=requester_operator_id,
+                start_date_obj=swap_date_obj,
+                end_date_obj=swap_date_obj
+            )
+            target_day_map = self._load_operator_shift_map_for_period_tx(
+                cursor=cursor,
+                operator_id=target_operator_id,
+                start_date_obj=swap_date_obj,
+                end_date_obj=swap_date_obj
+            )
+
+            requester_day_shifts = requester_day_map.get(swap_date_str, [])
+            target_day_shifts = target_day_map.get(swap_date_str, [])
+            if not self._is_interval_fully_covered_by_day_shifts(requester_day_shifts, interval_start_min, interval_end_min):
+                raise ValueError("Выбранный интервал должен полностью находиться внутри ваших смен")
+            if self._day_shifts_overlap_interval(target_day_shifts, interval_start_min, interval_end_min):
+                raise ValueError("У выбранного оператора уже есть смена в этом интервале")
+
+            requested_segments = self._extract_day_interval_segments_from_shifts(
+                requester_day_shifts,
+                interval_start_min,
+                interval_end_min
+            )
+            if not requested_segments:
+                raise ValueError("Не удалось сформировать сегменты смен для замены")
+
+            payload = {
+                'mode': 'time_range_v1',
+                'swapDate': swap_date_str,
+                'interval': {
+                    'start': interval['startTime'],
+                    'end': interval['endTime'],
+                    'startMin': interval_start_min,
+                    'endMin': interval_end_min
+                },
+                'requestedSegments': requested_segments
+            }
+
+            cursor.execute(
+                """
+                INSERT INTO work_shift_swap_requests (
+                    requester_operator_id,
+                    target_operator_id,
+                    direction_id,
+                    start_date,
+                    end_date,
+                    status,
+                    request_comment,
+                    requested_shifts_json,
+                    created_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                RETURNING id
+                """,
+                (
+                    requester_operator_id,
+                    target_operator_id,
+                    int(requester_direction_id),
+                    swap_date_obj,
+                    swap_date_obj,
+                    request_comment_norm,
+                    json.dumps(payload, ensure_ascii=False)
+                )
+            )
+            request_id = int(cursor.fetchone()[0])
+            row = self._select_shift_swap_request_by_id_tx(cursor, request_id)
+            return self._serialize_shift_swap_request_row(row)
+
+    def get_shift_swap_requests_for_operator(self, operator_id, limit=200):
+        operator_id = int(operator_id)
+        limit = max(1, min(int(limit), 500))
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    r.id,
+                    r.requester_operator_id, req.name,
+                    r.target_operator_id, tgt.name,
+                    r.direction_id, d.name,
+                    r.start_date, r.end_date,
+                    r.status,
+                    r.request_comment,
+                    r.response_comment,
+                    r.requested_shifts_json,
+                    r.created_at,
+                    r.updated_at,
+                    r.responded_at,
+                    r.accepted_at,
+                    r.responded_by,
+                    resp.name
+                FROM work_shift_swap_requests r
+                JOIN users req ON req.id = r.requester_operator_id
+                JOIN users tgt ON tgt.id = r.target_operator_id
+                LEFT JOIN directions d ON d.id = r.direction_id
+                LEFT JOIN users resp ON resp.id = r.responded_by
+                WHERE r.requester_operator_id = %s
+                   OR r.target_operator_id = %s
+                ORDER BY
+                    CASE WHEN r.status = 'pending' THEN 0 ELSE 1 END,
+                    r.created_at DESC,
+                    r.id DESC
+                LIMIT %s
+                """,
+                (operator_id, operator_id, limit)
+            )
+            rows = cursor.fetchall() or []
+
+        serialized = [self._serialize_shift_swap_request_row(row) for row in rows]
+        incoming = [item for item in serialized if int(item['target']['id']) == operator_id]
+        outgoing = [item for item in serialized if int(item['requester']['id']) == operator_id]
+        return {
+            'incoming': incoming,
+            'outgoing': outgoing
+        }
+
+    def respond_shift_swap_request(self, request_id, responder_operator_id, action, response_comment=None):
+        request_id = int(request_id)
+        responder_operator_id = int(responder_operator_id)
+        action_norm = str(action or '').strip().lower()
+        if action_norm not in ('accept', 'reject'):
+            raise ValueError("action must be 'accept' or 'reject'")
+
+        response_comment_norm = None
+        if response_comment is not None:
+            text = str(response_comment).strip()
+            response_comment_norm = text or None
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, role
+                FROM users
+                WHERE id = %s
+                LIMIT 1
+                """,
+                (responder_operator_id,)
+            )
+            responder_row = cursor.fetchone()
+            if not responder_row:
+                raise ValueError("Responder not found")
+            if str(responder_row[1]) != 'operator':
+                raise ValueError("Only operators can respond to swap requests")
+
+            cursor.execute(
+                """
+                SELECT
+                    id,
+                    requester_operator_id,
+                    target_operator_id,
+                    start_date,
+                    end_date,
+                    status,
+                    requested_shifts_json
+                FROM work_shift_swap_requests
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (request_id,)
+            )
+            locked_row = cursor.fetchone()
+            if not locked_row:
+                raise ValueError("Swap request not found")
+
+            (
+                _locked_id,
+                requester_operator_id,
+                target_operator_id,
+                start_date_obj,
+                end_date_obj,
+                current_status,
+                requested_shifts_raw
+            ) = locked_row
+
+            requester_operator_id = int(requester_operator_id)
+            target_operator_id = int(target_operator_id)
+            if responder_operator_id != target_operator_id:
+                raise ValueError("Только получатель запроса может принять или отклонить замену")
+            if str(current_status) != 'pending':
+                raise ValueError(f"Запрос уже обработан (статус: {current_status})")
+
+            if action_norm == 'reject':
+                cursor.execute(
+                    """
+                    UPDATE work_shift_swap_requests
+                    SET status = 'rejected',
+                        response_comment = %s,
+                        responded_by = %s,
+                        responded_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (response_comment_norm, responder_operator_id, request_id)
+                )
+                row = self._select_shift_swap_request_by_id_tx(cursor, request_id)
+                return self._serialize_shift_swap_request_row(row)
+
+            fallback_date = start_date_obj.strftime('%Y-%m-%d') if isinstance(start_date_obj, date) else None
+            payload = self._normalize_swap_request_payload(requested_shifts_raw, fallback_date=fallback_date)
+            swap_date_str = payload.get('swapDate') or fallback_date
+            if not swap_date_str:
+                raise ValueError("Запрос не содержит дату замены")
+            swap_date_obj = self._normalize_schedule_date(swap_date_str)
+            interval_start_min = payload.get('startMin')
+            interval_end_min = payload.get('endMin')
+            if interval_start_min is None or interval_end_min is None:
+                raise ValueError("Запрос не содержит корректный интервал времени")
+            interval_start_min = int(interval_start_min)
+            interval_end_min = int(interval_end_min)
+            if interval_end_min <= interval_start_min:
+                raise ValueError("Некорректный интервал времени в запросе")
+
+            requested_segments = payload.get('requestedSegments') or []
+            if not requested_segments:
+                raise ValueError("Запрос не содержит сегменты смен для переноса")
+
+            requester_day_map = self._load_operator_shift_map_for_period_tx(
+                cursor=cursor,
+                operator_id=requester_operator_id,
+                start_date_obj=swap_date_obj,
+                end_date_obj=swap_date_obj
+            )
+            target_day_map = self._load_operator_shift_map_for_period_tx(
+                cursor=cursor,
+                operator_id=target_operator_id,
+                start_date_obj=swap_date_obj,
+                end_date_obj=swap_date_obj
+            )
+            requester_day_shifts = requester_day_map.get(swap_date_str, [])
+            target_day_shifts = target_day_map.get(swap_date_str, [])
+            if self._day_shifts_overlap_interval(target_day_shifts, interval_start_min, interval_end_min):
+                raise ValueError("Нельзя принять запрос: у вас уже есть смена в этом интервале")
+
+            current_requested_segments = self._extract_day_interval_segments_from_shifts(
+                requester_day_shifts,
+                interval_start_min,
+                interval_end_min
+            )
+            if not current_requested_segments:
+                raise ValueError("Нельзя принять запрос: у инициатора больше нет смен в этом интервале")
+
+            requested_sign = sorted(
+                f"{seg.get('start')}|{seg.get('end')}"
+                for seg in (requested_segments or [])
+                if seg.get('start') and seg.get('end')
+            )
+            current_sign = sorted(
+                f"{seg.get('start')}|{seg.get('end')}"
+                for seg in (current_requested_segments or [])
+                if seg.get('start') and seg.get('end')
+            )
+            if requested_sign and requested_sign != current_sign:
+                raise ValueError("Нельзя принять запрос: интервалы инициатора изменились")
+
+            requester_remaining = self._subtract_interval_from_day_shifts(
+                requester_day_shifts,
+                interval_start_min,
+                interval_end_min
+            )
+            target_next = _merge_shifts_for_date([
+                *(target_day_shifts or []),
+                *(current_requested_segments or [])
+            ])
+
+            # Полностью пересобираем день у обоих операторов для атомарного переноса интервала.
+            self._clear_day_schedule_tx(cursor, requester_operator_id, swap_date_obj)
+            self._clear_day_schedule_tx(cursor, target_operator_id, swap_date_obj)
+
+            for seg in requester_remaining:
+                seg_start_obj = self._normalize_schedule_time(seg.get('start'), 'start_time')
+                seg_end_obj = self._normalize_schedule_time(seg.get('end'), 'end_time')
+                seg_breaks = self._normalize_shift_breaks(seg.get('breaks') if isinstance(seg.get('breaks'), list) else [])
+                self._save_shift_tx(
+                    cursor=cursor,
+                    operator_id=requester_operator_id,
+                    shift_date=swap_date_obj,
+                    start_time=seg_start_obj,
+                    end_time=seg_end_obj,
+                    breaks=seg_breaks
+                )
+
+            for seg in target_next:
+                seg_start_obj = self._normalize_schedule_time(seg.get('start'), 'start_time')
+                seg_end_obj = self._normalize_schedule_time(seg.get('end'), 'end_time')
+                seg_breaks = self._normalize_shift_breaks(seg.get('breaks') if isinstance(seg.get('breaks'), list) else [])
+                self._save_shift_tx(
+                    cursor=cursor,
+                    operator_id=target_operator_id,
+                    shift_date=swap_date_obj,
+                    start_time=seg_start_obj,
+                    end_time=seg_end_obj,
+                    breaks=seg_breaks
+                )
+
+            cursor.execute(
+                """
+                UPDATE work_shift_swap_requests
+                SET status = 'accepted',
+                    response_comment = %s,
+                    responded_by = %s,
+                    responded_at = CURRENT_TIMESTAMP,
+                    accepted_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (response_comment_norm, responder_operator_id, request_id)
+            )
+            row = self._select_shift_swap_request_by_id_tx(cursor, request_id)
+            return self._serialize_shift_swap_request_row(row)
 
     def save_shift(
         self,

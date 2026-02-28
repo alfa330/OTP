@@ -5360,9 +5360,27 @@ const withAccessTokenHeader = (headers = {}) => {
             const [myLiveScheduleData, setMyLiveScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
             const [myScheduleError, setMyScheduleError] = useState('');
+            const [myScheduleReloadNonce, setMyScheduleReloadNonce] = useState(0);
+            const [operatorSelfTab, setOperatorSelfTab] = useState('schedule');
             const [expandedMyDayCards, setExpandedMyDayCards] = useState({});
             const [showOperatorMobileCalendar, setShowOperatorMobileCalendar] = useState(false);
             const [breakReminderEnabled, setBreakReminderEnabled] = useState(false);
+            const [swapRequestsLoading, setSwapRequestsLoading] = useState(false);
+            const [swapRequestsError, setSwapRequestsError] = useState('');
+            const [swapIncomingRequests, setSwapIncomingRequests] = useState([]);
+            const [swapOutgoingRequests, setSwapOutgoingRequests] = useState([]);
+            const [swapCandidatesLoading, setSwapCandidatesLoading] = useState(false);
+            const [swapCandidatesError, setSwapCandidatesError] = useState('');
+            const [swapCandidates, setSwapCandidates] = useState([]);
+            const [swapSubmitting, setSwapSubmitting] = useState(false);
+            const [swapRespondingId, setSwapRespondingId] = useState(null);
+            const [swapForm, setSwapForm] = useState({
+                swapDate: '',
+                startTime: '',
+                endTime: '',
+                targetOperatorId: '',
+                comment: ''
+            });
             const [breakReminderPermissionState, setBreakReminderPermissionState] = useState(() => {
                 if (typeof window === 'undefined') return 'unsupported';
                 return ('Notification' in window) ? window.Notification.permission : 'unsupported';
@@ -6002,7 +6020,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                 loadMySchedules();
                 return () => { cancelled = true; };
-            }, [isOperatorSelfSchedules, user, visibleRange]);
+            }, [isOperatorSelfSchedules, user, visibleRange, myScheduleReloadNonce]);
 
             useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
@@ -6031,7 +6049,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                 loadMyLiveSchedules();
                 return () => { cancelled = true; };
-            }, [isOperatorSelfSchedules, user, operatorTodayKey]);
+            }, [isOperatorSelfSchedules, user, operatorTodayKey, myScheduleReloadNonce]);
 
             const buildModalStatusDraftForDate = (opId, date) => {
                 const fallbackDate = typeof date === 'string' && date ? date : '';
@@ -7364,6 +7382,403 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '';
                 return d.toLocaleDateString('ru-RU', { weekday: style });
             };
+            const notifySwapMessage = (message, type = 'info') => {
+                try {
+                    if (typeof window !== 'undefined' && typeof window.showToast === 'function') {
+                        window.showToast(message, type);
+                        return;
+                    }
+                } catch (e) {
+                    console.warn('Failed to show swap toast:', e);
+                }
+                if (typeof window !== 'undefined') {
+                    window.alert(message);
+                }
+            };
+            const timeStrToMinutesSafe = useCallback((value) => {
+                if (typeof value !== 'string' || !/^\d{2}:\d{2}$/.test(value)) return NaN;
+                const [hh, mm] = value.split(':');
+                const h = Number(hh);
+                const m = Number(mm);
+                if (!Number.isFinite(h) || !Number.isFinite(m)) return NaN;
+                if (h < 0 || h > 23 || m < 0 || m > 59) return NaN;
+                return h * 60 + m;
+            }, []);
+            const mySwapSourceShiftDays = useMemo(() => {
+                const src = myLiveScheduleData || myScheduleData;
+                const shiftsByDate = src?.shifts;
+                if (!shiftsByDate || typeof shiftsByDate !== 'object') return [];
+                return Object.keys(shiftsByDate)
+                    .filter(dayKey => Array.isArray(shiftsByDate[dayKey]) && shiftsByDate[dayKey].length > 0)
+                    .sort();
+            }, [myLiveScheduleData, myScheduleData]);
+            const buildLocalSwapIntervalsForDate = useCallback((dayKey) => {
+                if (!dayKey) return [];
+                const src = myLiveScheduleData || myScheduleData;
+                const dayShifts = Array.isArray(src?.shifts?.[dayKey]) ? src.shifts[dayKey] : [];
+                const rawIntervals = [];
+                dayShifts.forEach(seg => {
+                    const s = timeToMinutes(seg?.start);
+                    let e = timeToMinutes(seg?.end);
+                    if (!Number.isFinite(s) || !Number.isFinite(e)) return;
+                    if (e <= s) e += 1440;
+                    const start = Math.max(0, Math.min(1440, s));
+                    const end = Math.max(0, Math.min(1440, e));
+                    if (end > start) rawIntervals.push({ start, end });
+                });
+                rawIntervals.sort((a, b) => (a.start - b.start) || (a.end - b.end));
+                const merged = [];
+                rawIntervals.forEach(interval => {
+                    const last = merged[merged.length - 1];
+                    if (!last) {
+                        merged.push({ ...interval });
+                        return;
+                    }
+                    if (interval.start <= last.end) {
+                        last.end = Math.max(last.end, interval.end);
+                    } else {
+                        merged.push({ ...interval });
+                    }
+                });
+                return merged;
+            }, [myLiveScheduleData, myScheduleData]);
+            useEffect(() => {
+                if (!isOperatorSelfSchedules) return;
+                setSwapForm(prev => {
+                    if (!Array.isArray(mySwapSourceShiftDays) || mySwapSourceShiftDays.length === 0) {
+                        if (!prev.swapDate && !prev.startTime && !prev.endTime) return prev;
+                        return {
+                            ...prev,
+                            swapDate: '',
+                            startTime: '',
+                            endTime: '',
+                            targetOperatorId: ''
+                        };
+                    }
+                    const firstDate = mySwapSourceShiftDays[0];
+                    let swapDate = prev.swapDate;
+                    if (!swapDate || !mySwapSourceShiftDays.includes(swapDate)) swapDate = firstDate;
+                    const intervals = buildLocalSwapIntervalsForDate(swapDate);
+                    let startTime = prev.startTime;
+                    let endTime = prev.endTime;
+                    const startMin = timeStrToMinutesSafe(startTime);
+                    const endMin = timeStrToMinutesSafe(endTime);
+                    if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) {
+                        if (intervals.length > 0) {
+                            const firstInterval = intervals[0];
+                            startTime = minutesToTime(firstInterval.start);
+                            const defaultEnd = Math.min(firstInterval.end, firstInterval.start + 60);
+                            endTime = minutesToTime(defaultEnd);
+                        } else {
+                            startTime = '';
+                            endTime = '';
+                        }
+                    }
+                    if (
+                        swapDate === prev.swapDate &&
+                        startTime === prev.startTime &&
+                        endTime === prev.endTime
+                    ) {
+                        return prev;
+                    }
+                    return {
+                        ...prev,
+                        swapDate,
+                        startTime,
+                        endTime
+                    };
+                });
+            }, [isOperatorSelfSchedules, mySwapSourceShiftDays, buildLocalSwapIntervalsForDate, timeStrToMinutesSafe]);
+            const swapTimeValidation = useMemo(() => {
+                const swapDate = swapForm.swapDate;
+                const startTime = swapForm.startTime;
+                const endTime = swapForm.endTime;
+                if (!swapDate) {
+                    return {
+                        isValid: false,
+                        message: 'Выберите дату для запроса',
+                        startMin: NaN,
+                        endMin: NaN,
+                        durationMin: 0
+                    };
+                }
+                if (!startTime || !endTime) {
+                    return {
+                        isValid: false,
+                        message: 'Выберите время начала и окончания',
+                        startMin: NaN,
+                        endMin: NaN,
+                        durationMin: 0
+                    };
+                }
+                const startMin = timeStrToMinutesSafe(startTime);
+                const endMin = timeStrToMinutesSafe(endTime);
+                if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) {
+                    return {
+                        isValid: false,
+                        message: 'Некорректный формат времени',
+                        startMin,
+                        endMin,
+                        durationMin: 0
+                    };
+                }
+                if (endMin <= startMin) {
+                    return {
+                        isValid: false,
+                        message: 'Время окончания должно быть позже времени начала',
+                        startMin,
+                        endMin,
+                        durationMin: 0
+                    };
+                }
+                const intervals = buildLocalSwapIntervalsForDate(swapDate);
+                if (intervals.length === 0) {
+                    return {
+                        isValid: false,
+                        message: 'На выбранную дату у вас нет смен',
+                        startMin,
+                        endMin,
+                        durationMin: 0
+                    };
+                }
+                let coveredUntil = startMin;
+                for (const interval of intervals) {
+                    if (interval.end <= coveredUntil) continue;
+                    if (interval.start > coveredUntil) break;
+                    coveredUntil = Math.max(coveredUntil, interval.end);
+                    if (coveredUntil >= endMin) break;
+                }
+                if (coveredUntil < endMin) {
+                    return {
+                        isValid: false,
+                        message: 'Выбранный интервал должен полностью находиться внутри ваших смен',
+                        startMin,
+                        endMin,
+                        durationMin: Math.max(0, endMin - startMin)
+                    };
+                }
+                return {
+                    isValid: true,
+                    message: '',
+                    startMin,
+                    endMin,
+                    durationMin: Math.max(0, endMin - startMin)
+                };
+            }, [swapForm.swapDate, swapForm.startTime, swapForm.endTime, buildLocalSwapIntervalsForDate, timeStrToMinutesSafe]);
+            const loadSwapRequests = useCallback(async ({ silent = false } = {}) => {
+                if (!isOperatorSelfSchedules || !user) return;
+                if (!silent) {
+                    setSwapRequestsLoading(true);
+                }
+                try {
+                    if (!silent) setSwapRequestsError('');
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_swap/requests?limit=250`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader()
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    setSwapIncomingRequests(Array.isArray(payload?.incoming) ? payload.incoming : []);
+                    setSwapOutgoingRequests(Array.isArray(payload?.outgoing) ? payload.outgoing : []);
+                    if (!silent) setSwapRequestsError('');
+                } catch (error) {
+                    if (!silent) {
+                        setSwapRequestsError(error?.message || 'Не удалось загрузить запросы на замену');
+                    }
+                    console.warn('Error loading swap requests:', error);
+                } finally {
+                    if (!silent) {
+                        setSwapRequestsLoading(false);
+                    }
+                }
+            }, [isOperatorSelfSchedules, user]);
+            useEffect(() => {
+                if (!isOperatorSelfSchedules || !user) return;
+                let cancelled = false;
+                const run = async () => {
+                    if (cancelled) return;
+                    await loadSwapRequests({ silent: false });
+                };
+                run();
+                const timer = setInterval(() => {
+                    loadSwapRequests({ silent: true });
+                }, 45000);
+                return () => {
+                    cancelled = true;
+                    clearInterval(timer);
+                };
+            }, [isOperatorSelfSchedules, user, loadSwapRequests]);
+            useEffect(() => {
+                if (!isOperatorSelfSchedules || !user) return;
+                if (!swapTimeValidation.isValid) {
+                    setSwapCandidates([]);
+                    setSwapCandidatesError('');
+                    setSwapCandidatesLoading(false);
+                    return;
+                }
+
+                let cancelled = false;
+                const loadCandidates = async () => {
+                    try {
+                        setSwapCandidatesLoading(true);
+                        setSwapCandidatesError('');
+                        const query = new URLSearchParams({
+                            swap_date: swapForm.swapDate,
+                            start_time: swapForm.startTime,
+                            end_time: swapForm.endTime
+                        }).toString();
+                        const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_swap/candidates?${query}`, {
+                            credentials: 'include',
+                            headers: withAccessTokenHeader()
+                        });
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok) {
+                            throw new Error(payload?.error || `HTTP ${response.status}`);
+                        }
+                        if (cancelled) return;
+                        const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+                        setSwapCandidates(candidates);
+                        setSwapForm(prev => {
+                            const keepSelected = candidates.some(item => String(item.id) === String(prev.targetOperatorId));
+                            if (keepSelected) return prev;
+                            return { ...prev, targetOperatorId: '' };
+                        });
+                    } catch (error) {
+                        if (cancelled) return;
+                        setSwapCandidates([]);
+                        setSwapCandidatesError(error?.message || 'Не удалось загрузить кандидатов');
+                    } finally {
+                        if (!cancelled) setSwapCandidatesLoading(false);
+                    }
+                };
+
+                loadCandidates();
+                return () => { cancelled = true; };
+            }, [
+                isOperatorSelfSchedules,
+                user,
+                swapTimeValidation.isValid,
+                swapForm.swapDate,
+                swapForm.startTime,
+                swapForm.endTime
+            ]);
+            const handleCreateSwapRequest = async () => {
+                if (swapSubmitting) return;
+                if (!swapTimeValidation.isValid) {
+                    notifySwapMessage(swapTimeValidation.message || 'Выберите корректный интервал', 'warning');
+                    return;
+                }
+                const targetOperatorId = Number(swapForm.targetOperatorId);
+                if (!Number.isFinite(targetOperatorId) || targetOperatorId <= 0) {
+                    notifySwapMessage('Выберите оператора для замены', 'warning');
+                    return;
+                }
+
+                try {
+                    setSwapSubmitting(true);
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_swap/requests`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({
+                            target_operator_id: targetOperatorId,
+                            swap_date: swapForm.swapDate,
+                            start_time: swapForm.startTime,
+                            end_time: swapForm.endTime,
+                            comment: (swapForm.comment || '').trim() || null
+                        })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    notifySwapMessage('Запрос на замену отправлен', 'success');
+                    setSwapForm(prev => ({
+                        ...prev,
+                        targetOperatorId: '',
+                        comment: ''
+                    }));
+                    await loadSwapRequests({ silent: true });
+                } catch (error) {
+                    notifySwapMessage(error?.message || 'Не удалось отправить запрос на замену', 'error');
+                } finally {
+                    setSwapSubmitting(false);
+                }
+            };
+            const handleRespondSwapRequest = async (requestId, action) => {
+                const actionNorm = String(action || '').toLowerCase();
+                if (!requestId || !['accept', 'reject'].includes(actionNorm)) return;
+                if (swapRespondingId) return;
+                if (actionNorm === 'reject') {
+                    const ok = typeof window === 'undefined' ? true : window.confirm('Отклонить запрос на замену?');
+                    if (!ok) return;
+                }
+                try {
+                    setSwapRespondingId(Number(requestId));
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_swap/respond`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({
+                            request_id: Number(requestId),
+                            action: actionNorm
+                        })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    if (actionNorm === 'accept') {
+                        notifySwapMessage('Запрос принят, смены перенесены', 'success');
+                        setMyScheduleReloadNonce(v => v + 1);
+                    } else {
+                        notifySwapMessage('Запрос отклонен', 'success');
+                    }
+                    await loadSwapRequests({ silent: true });
+                } catch (error) {
+                    notifySwapMessage(error?.message || 'Не удалось обработать запрос', 'error');
+                } finally {
+                    setSwapRespondingId(null);
+                }
+            };
+            const swapPendingIncomingCount = useMemo(
+                () => (swapIncomingRequests || []).filter(item => item?.status === 'pending').length,
+                [swapIncomingRequests]
+            );
+            const getSwapStatusMeta = (status) => {
+                switch (String(status || '').toLowerCase()) {
+                    case 'pending':
+                        return { label: 'Ожидает', className: 'bg-amber-100 text-amber-800 border-amber-200' };
+                    case 'accepted':
+                        return { label: 'Принят', className: 'bg-emerald-100 text-emerald-800 border-emerald-200' };
+                    case 'rejected':
+                        return { label: 'Отклонен', className: 'bg-rose-100 text-rose-800 border-rose-200' };
+                    case 'cancelled':
+                        return { label: 'Отменен', className: 'bg-slate-100 text-slate-700 border-slate-200' };
+                    default:
+                        return { label: status || '—', className: 'bg-slate-100 text-slate-700 border-slate-200' };
+                }
+            };
+            const formatSwapIntervalLabel = (req) => {
+                const dateStr = req?.swapDate || req?.startDate || '';
+                const startTime = req?.startTime || '';
+                const endTime = req?.endTime || '';
+                if (dateStr && startTime && endTime) {
+                    return `${formatDateRuShort(dateStr)} ${startTime} — ${endTime}`;
+                }
+                if (req?.startDate && req?.endDate) {
+                    return req.startDate === req.endDate
+                        ? formatDateRuShort(req.startDate)
+                        : `${formatDateRuShort(req.startDate)} — ${formatDateRuShort(req.endDate)}`;
+                }
+                return '—';
+            };
             const myUpcomingShiftItems = useMemo(() => {
                 const now = new Date();
                 const nowTs = now.getTime();
@@ -7741,25 +8156,60 @@ const withAccessTokenHeader = (headers = {}) => {
                                             Мои смены
                                         </h2>
                                         <div className="flex items-center gap-1 sm:ml-3">
-                                            <button onClick={() => setViewMode('day')} className={`px-2.5 sm:px-3 py-1 rounded text-sm ${viewMode === 'day' ? 'bg-slate-800 text-white' : 'bg-white'}`}>День</button>
-                                            <button onClick={() => setViewMode('week')} className={`px-2.5 sm:px-3 py-1 rounded text-sm ${viewMode === 'week' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Неделя</button>
-                                            <button onClick={() => setViewMode('month')} className={`px-2.5 sm:px-3 py-1 rounded text-sm ${viewMode === 'month' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Месяц</button>
+                                            <button
+                                                onClick={() => setOperatorSelfTab('schedule')}
+                                                className={`px-2.5 sm:px-3 py-1 rounded text-sm ${operatorSelfTab === 'schedule' ? 'bg-slate-800 text-white' : 'bg-white'}`}
+                                            >
+                                                Смены
+                                            </button>
+                                            <button
+                                                onClick={() => setOperatorSelfTab('swaps')}
+                                                className={`px-2.5 sm:px-3 py-1 rounded text-sm inline-flex items-center gap-1 ${operatorSelfTab === 'swaps' ? 'bg-slate-800 text-white' : 'bg-white'}`}
+                                            >
+                                                Замены
+                                                {swapPendingIncomingCount > 0 && (
+                                                    <span className={`px-1.5 py-0.5 rounded-full text-[11px] font-semibold ${operatorSelfTab === 'swaps' ? 'bg-white/20 text-white' : 'bg-amber-100 text-amber-800'}`}>
+                                                        {swapPendingIncomingCount}
+                                                    </span>
+                                                )}
+                                            </button>
                                         </div>
-                                        <button
-                                            onClick={() => setCurrentDate(new Date())}
-                                            className="sm:ml-2 px-3 py-1 rounded bg-white border border-slate-200 hover:bg-slate-50 text-sm"
-                                        >
-                                            Сегодня
-                                        </button>
+                                        {operatorSelfTab === 'schedule' && (
+                                            <>
+                                                <div className="flex items-center gap-1">
+                                                    <button onClick={() => setViewMode('day')} className={`px-2.5 sm:px-3 py-1 rounded text-sm ${viewMode === 'day' ? 'bg-slate-800 text-white' : 'bg-white'}`}>День</button>
+                                                    <button onClick={() => setViewMode('week')} className={`px-2.5 sm:px-3 py-1 rounded text-sm ${viewMode === 'week' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Неделя</button>
+                                                    <button onClick={() => setViewMode('month')} className={`px-2.5 sm:px-3 py-1 rounded text-sm ${viewMode === 'month' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Месяц</button>
+                                                </div>
+                                                <button
+                                                    onClick={() => setCurrentDate(new Date())}
+                                                    className="sm:ml-2 px-3 py-1 rounded bg-white border border-slate-200 hover:bg-slate-50 text-sm"
+                                                >
+                                                    Сегодня
+                                                </button>
+                                            </>
+                                        )}
+                                        {operatorSelfTab === 'swaps' && (
+                                            <button
+                                                onClick={() => loadSwapRequests({ silent: false })}
+                                                className="sm:ml-2 px-3 py-1 rounded bg-white border border-slate-200 hover:bg-slate-50 text-sm inline-flex items-center gap-1"
+                                                disabled={swapRequestsLoading}
+                                            >
+                                                {swapRequestsLoading ? <FaIcon className="fas fa-spinner fa-spin"></FaIcon> : <FaIcon className="fas fa-rotate"></FaIcon>}
+                                                Обновить
+                                            </button>
+                                        )}
                                     </div>
-                                    <div className="flex gap-2 items-center self-stretch sm:self-auto justify-between sm:justify-start">
-                                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-left"></FaIcon></button>
-                                        <div className="flex-1 sm:flex-none px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-center leading-tight">
-                                            <div className="text-[11px] uppercase tracking-wide text-slate-500">{formatWeekdayRu(currentDate, 'short')}</div>
-                                            <div className="text-sm font-semibold text-slate-900">{formatDateRuDayMonth(currentDate)}</div>
+                                    {operatorSelfTab === 'schedule' && (
+                                        <div className="flex gap-2 items-center self-stretch sm:self-auto justify-between sm:justify-start">
+                                            <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-left"></FaIcon></button>
+                                            <div className="flex-1 sm:flex-none px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-center leading-tight">
+                                                <div className="text-[11px] uppercase tracking-wide text-slate-500">{formatWeekdayRu(currentDate, 'short')}</div>
+                                                <div className="text-sm font-semibold text-slate-900">{formatDateRuDayMonth(currentDate)}</div>
+                                            </div>
+                                            <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-right"></FaIcon></button>
                                         </div>
-                                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-right"></FaIcon></button>
-                                    </div>
+                                    )}
                                 </div>
 
                                 <div className="grid grid-cols-1 gap-3 mb-3">
@@ -7870,6 +8320,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                 </div>
 
                                 <div className="flex-1 min-h-0 overflow-visible lg:overflow-auto">
+                                    {operatorSelfTab === 'schedule' && (
+                                        <>
                                     {myScheduleLoading && (
                                         <div className="bg-white rounded-xl border border-slate-200 p-6 text-slate-600 text-sm">
                                             <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>Загрузка смен...
@@ -8261,6 +8713,264 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <div className="text-[11px] uppercase tracking-wide text-amber-700">Перерывы</div>
                                                         <div className="text-lg font-bold text-amber-900 tabular-nums">{formatMinutesOnly(myScheduleSummary.totalBreakMin)}</div>
                                                     </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                        </>
+                                    )}
+                                    {operatorSelfTab === 'swaps' && (
+                                        <div className="space-y-3 pb-2">
+                                            <div className="bg-white rounded-xl border border-slate-200 p-4">
+                                                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                                                    <div>
+                                                        <div className="text-base font-semibold text-slate-900">Новый запрос на замену</div>
+                                                        <div className="text-xs text-slate-500">Выберите дату, время и оператора того же направления, у которого нет смен в этот интервал</div>
+                                                    </div>
+                                                    <div className="text-xs text-slate-500">
+                                                        Доступных дат со сменами: <span className="font-semibold tabular-nums">{mySwapSourceShiftDays.length}</span>
+                                                    </div>
+                                                </div>
+                                                <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
+                                                    <label className="text-sm">
+                                                        <div className="text-xs text-slate-600 mb-1">Дата</div>
+                                                        <select
+                                                            value={swapForm.swapDate}
+                                                            onChange={(e) => {
+                                                                const nextDate = e.target.value;
+                                                                setSwapForm(prev => ({
+                                                                    ...prev,
+                                                                    swapDate: nextDate,
+                                                                    targetOperatorId: ''
+                                                                }));
+                                                            }}
+                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+                                                        >
+                                                            <option value="">Выберите дату смены</option>
+                                                            {mySwapSourceShiftDays.map(dayKey => (
+                                                                <option key={`swap-date-${dayKey}`} value={dayKey}>
+                                                                    {formatDateRuShort(dayKey)} ({formatWeekdayRu(dayKey, 'short')})
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                    </label>
+                                                    <label className="text-sm">
+                                                        <div className="text-xs text-slate-600 mb-1">С</div>
+                                                        <input
+                                                            type="time"
+                                                            value={swapForm.startTime}
+                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, startTime: e.target.value, targetOperatorId: '' }))}
+                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+                                                            step={300}
+                                                        />
+                                                    </label>
+                                                    <label className="text-sm">
+                                                        <div className="text-xs text-slate-600 mb-1">По</div>
+                                                        <input
+                                                            type="time"
+                                                            value={swapForm.endTime}
+                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, endTime: e.target.value, targetOperatorId: '' }))}
+                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+                                                            step={300}
+                                                        />
+                                                    </label>
+                                                    <label className="text-sm">
+                                                        <div className="text-xs text-slate-600 mb-1">Оператор для замены</div>
+                                                        <select
+                                                            value={swapForm.targetOperatorId}
+                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, targetOperatorId: e.target.value }))}
+                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+                                                            disabled={!swapTimeValidation.isValid || swapCandidatesLoading}
+                                                        >
+                                                            <option value="">
+                                                                {!swapTimeValidation.isValid
+                                                                    ? 'Сначала выберите корректный интервал'
+                                                                    : swapCandidatesLoading
+                                                                        ? 'Загрузка кандидатов...'
+                                                                        : swapCandidates.length === 0
+                                                                            ? 'Нет доступных операторов'
+                                                                            : 'Выберите оператора'}
+                                                            </option>
+                                                            {swapCandidates.map(item => (
+                                                                <option key={`swap-candidate-${item.id}`} value={String(item.id)}>
+                                                                    {item.name}{item.supervisorName ? ` • ${item.supervisorName}` : ''}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                    </label>
+                                                </div>
+                                                <div className="mt-3 grid grid-cols-1 lg:grid-cols-4 gap-3 items-end">
+                                                    <label className="lg:col-span-3 text-sm">
+                                                        <div className="text-xs text-slate-600 mb-1">Комментарий (опционально)</div>
+                                                        <input
+                                                            type="text"
+                                                            value={swapForm.comment}
+                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, comment: e.target.value }))}
+                                                            placeholder="Например: Прошу подменить на время учебы"
+                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+                                                            maxLength={400}
+                                                        />
+                                                    </label>
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleCreateSwapRequest}
+                                                        disabled={swapSubmitting || !swapTimeValidation.isValid || !swapForm.targetOperatorId}
+                                                        className={`px-3 py-2 rounded-lg text-sm font-medium transition ${
+                                                            swapSubmitting || !swapTimeValidation.isValid || !swapForm.targetOperatorId
+                                                                ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                                                                : 'bg-blue-600 text-white hover:bg-blue-700'
+                                                        }`}
+                                                    >
+                                                        {swapSubmitting ? 'Отправка...' : 'Отправить запрос'}
+                                                    </button>
+                                                </div>
+                                                <div className="mt-2 text-xs">
+                                                    {!swapTimeValidation.isValid && (
+                                                        <div className="text-rose-600">{swapTimeValidation.message}</div>
+                                                    )}
+                                                    {swapTimeValidation.isValid && (
+                                                        <div className="text-slate-500">
+                                                            Интервал: {formatDateRuShort(swapForm.swapDate)} {swapForm.startTime} — {swapForm.endTime} ({formatMinutesOnly(swapTimeValidation.durationMin)})
+                                                        </div>
+                                                    )}
+                                                    {swapCandidatesError && (
+                                                        <div className="text-rose-600 mt-1">{swapCandidatesError}</div>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            {swapRequestsError && (
+                                                <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm">
+                                                    {swapRequestsError}
+                                                </div>
+                                            )}
+
+                                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                                                <div className="bg-white rounded-xl border border-slate-200 p-4">
+                                                    <div className="flex items-center justify-between gap-2 mb-3">
+                                                        <div className="text-sm font-semibold text-slate-900">Входящие</div>
+                                                        <div className="text-xs text-slate-500">
+                                                            Всего: <span className="font-semibold tabular-nums">{swapIncomingRequests.length}</span>
+                                                        </div>
+                                                    </div>
+                                                    {swapRequestsLoading ? (
+                                                        <div className="text-sm text-slate-500">
+                                                            <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>Загрузка...
+                                                        </div>
+                                                    ) : swapIncomingRequests.length === 0 ? (
+                                                        <div className="text-sm text-slate-400">Нет входящих запросов</div>
+                                                    ) : (
+                                                        <div className="space-y-2">
+                                                            {swapIncomingRequests.map(req => {
+                                                                const statusMeta = getSwapStatusMeta(req?.status);
+                                                                const periodLabel = formatSwapIntervalLabel(req);
+                                                                const isRespondingThis = Number(swapRespondingId) === Number(req?.id);
+                                                                return (
+                                                                    <div key={`swap-in-${req?.id}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                                                        <div className="flex flex-wrap items-start justify-between gap-2">
+                                                                            <div>
+                                                                                <div className="text-sm font-medium text-slate-900">{req?.requester?.name || 'Оператор'}</div>
+                                                                                <div className="text-xs text-slate-500">{periodLabel}</div>
+                                                                                <div className="text-xs text-slate-500 mt-0.5">
+                                                                                    Длительность: <span className="font-semibold tabular-nums">{formatMinutesOnly(req?.summary?.totalMinutes ?? 0)}</span>
+                                                                                </div>
+                                                                            </div>
+                                                                            <span className={`px-2 py-0.5 rounded-md border text-xs font-semibold ${statusMeta.className}`}>
+                                                                                {statusMeta.label}
+                                                                            </span>
+                                                                        </div>
+                                                                        {req?.requestComment && (
+                                                                            <div className="mt-2 text-xs text-slate-700">
+                                                                                Комментарий: {req.requestComment}
+                                                                            </div>
+                                                                        )}
+                                                                        {req?.responseComment && req?.status !== 'pending' && (
+                                                                            <div className="mt-2 text-xs text-slate-600">
+                                                                                Ответ: {req.responseComment}
+                                                                            </div>
+                                                                        )}
+                                                                        {req?.status === 'pending' && (
+                                                                            <div className="mt-3 flex items-center gap-2">
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => handleRespondSwapRequest(req?.id, 'accept')}
+                                                                                    disabled={!!swapRespondingId}
+                                                                                    className={`px-3 py-1.5 rounded-md text-xs font-medium ${
+                                                                                        isRespondingThis
+                                                                                            ? 'bg-slate-200 text-slate-500'
+                                                                                            : 'bg-emerald-600 text-white hover:bg-emerald-700'
+                                                                                    }`}
+                                                                                >
+                                                                                    {isRespondingThis ? 'Обработка...' : 'Принять'}
+                                                                                </button>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => handleRespondSwapRequest(req?.id, 'reject')}
+                                                                                    disabled={!!swapRespondingId}
+                                                                                    className={`px-3 py-1.5 rounded-md text-xs font-medium ${
+                                                                                        isRespondingThis
+                                                                                            ? 'bg-slate-200 text-slate-500'
+                                                                                            : 'bg-rose-600 text-white hover:bg-rose-700'
+                                                                                    }`}
+                                                                                >
+                                                                                    Отказать
+                                                                                </button>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                <div className="bg-white rounded-xl border border-slate-200 p-4">
+                                                    <div className="flex items-center justify-between gap-2 mb-3">
+                                                        <div className="text-sm font-semibold text-slate-900">Исходящие</div>
+                                                        <div className="text-xs text-slate-500">
+                                                            Всего: <span className="font-semibold tabular-nums">{swapOutgoingRequests.length}</span>
+                                                        </div>
+                                                    </div>
+                                                    {swapRequestsLoading ? (
+                                                        <div className="text-sm text-slate-500">
+                                                            <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>Загрузка...
+                                                        </div>
+                                                    ) : swapOutgoingRequests.length === 0 ? (
+                                                        <div className="text-sm text-slate-400">Нет исходящих запросов</div>
+                                                    ) : (
+                                                        <div className="space-y-2">
+                                                            {swapOutgoingRequests.map(req => {
+                                                                const statusMeta = getSwapStatusMeta(req?.status);
+                                                                const periodLabel = formatSwapIntervalLabel(req);
+                                                                return (
+                                                                    <div key={`swap-out-${req?.id}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                                                        <div className="flex flex-wrap items-start justify-between gap-2">
+                                                                            <div>
+                                                                                <div className="text-sm font-medium text-slate-900">{req?.target?.name || 'Оператор'}</div>
+                                                                                <div className="text-xs text-slate-500">{periodLabel}</div>
+                                                                                <div className="text-xs text-slate-500 mt-0.5">
+                                                                                    Длительность: <span className="font-semibold tabular-nums">{formatMinutesOnly(req?.summary?.totalMinutes ?? 0)}</span>
+                                                                                </div>
+                                                                            </div>
+                                                                            <span className={`px-2 py-0.5 rounded-md border text-xs font-semibold ${statusMeta.className}`}>
+                                                                                {statusMeta.label}
+                                                                            </span>
+                                                                        </div>
+                                                                        {req?.requestComment && (
+                                                                            <div className="mt-2 text-xs text-slate-700">
+                                                                                Комментарий: {req.requestComment}
+                                                                            </div>
+                                                                        )}
+                                                                        {req?.responseComment && req?.status !== 'pending' && (
+                                                                            <div className="mt-2 text-xs text-slate-600">
+                                                                                Ответ: {req.responseComment}
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
                                         </div>
