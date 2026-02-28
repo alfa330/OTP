@@ -300,7 +300,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
             buttons.push({ action: 'returned', label: 'Вернуть', className: 'bg-rose-600 hover:bg-rose-700 text-white' });
         }
 
-        if (canReview && ['accepted', 'completed', 'returned'].includes(status)) {
+        if (canReview && status === 'accepted') {
             buttons.push({ action: 'reopened', label: 'Возобновить', className: 'bg-slate-700 hover:bg-slate-800 text-white' });
         }
 
