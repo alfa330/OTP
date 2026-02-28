@@ -614,6 +614,75 @@ class Database:
                 );
             """)
 
+            # Tasks table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id SERIAL PRIMARY KEY,
+                    subject VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    tag VARCHAR(32) NOT NULL DEFAULT 'task' CHECK (tag IN ('task', 'problem', 'suggestion')),
+                    status VARCHAR(32) NOT NULL DEFAULT 'assigned' CHECK (status IN ('assigned', 'in_progress', 'completed', 'accepted', 'returned')),
+                    assigned_to INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+
+            # Tasks status history
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_status_history (
+                    id SERIAL PRIMARY KEY,
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    status_code VARCHAR(32) NOT NULL CHECK (status_code IN ('assigned', 'in_progress', 'completed', 'accepted', 'returned', 'reopened')),
+                    changed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    comment TEXT,
+                    changed_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+
+            # Tasks attachments (GCS primary, DB fallback)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_attachments (
+                    id SERIAL PRIMARY KEY,
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    file_name TEXT NOT NULL,
+                    content_type VARCHAR(255),
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    file_data BYTEA,
+                    storage_type VARCHAR(16) NOT NULL DEFAULT 'db' CHECK (storage_type IN ('db', 'gcs')),
+                    gcs_bucket VARCHAR(255),
+                    gcs_blob_path TEXT,
+                    uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            cursor.execute("""
+                ALTER TABLE task_attachments
+                ADD COLUMN IF NOT EXISTS storage_type VARCHAR(16) NOT NULL DEFAULT 'db';
+            """)
+            cursor.execute("""
+                ALTER TABLE task_attachments
+                ADD COLUMN IF NOT EXISTS gcs_bucket VARCHAR(255);
+            """)
+            cursor.execute("""
+                ALTER TABLE task_attachments
+                ADD COLUMN IF NOT EXISTS gcs_blob_path TEXT;
+            """)
+            cursor.execute("""
+                ALTER TABLE task_attachments
+                DROP CONSTRAINT IF EXISTS task_attachments_storage_type_check;
+            """)
+            cursor.execute("""
+                ALTER TABLE task_attachments
+                ADD CONSTRAINT task_attachments_storage_type_check
+                CHECK (storage_type IN ('db', 'gcs'));
+            """)
+            cursor.execute("""
+                ALTER TABLE task_attachments
+                ALTER COLUMN file_data DROP NOT NULL;
+            """)
+
             # Optimized Indexes (added more based on query patterns)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_calls_month ON calls(month);
@@ -642,6 +711,11 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_shifts_date ON work_shifts(shift_date);
                 CREATE INDEX IF NOT EXISTS idx_days_off_operator_date ON days_off(operator_id, day_off_date);
                 CREATE INDEX IF NOT EXISTS idx_ai_feedback_cache_operator_month ON ai_feedback_cache(operator_id, month);
+                CREATE INDEX IF NOT EXISTS idx_tasks_assigned_to ON tasks(assigned_to);
+                CREATE INDEX IF NOT EXISTS idx_tasks_created_by ON tasks(created_by);
+                CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+                CREATE INDEX IF NOT EXISTS idx_task_status_history_task_id ON task_status_history(task_id);
+                CREATE INDEX IF NOT EXISTS idx_task_attachments_task_id ON task_attachments(task_id);
                 
                     -- Table for Baiga daily scores (points per operator per day)
                     CREATE TABLE IF NOT EXISTS baiga_daily_scores (
@@ -5610,6 +5684,388 @@ class Database:
             entry = { 'operator_id': op_id, 'points': int(pts or 0), 'name': name }
             result.setdefault(day_str, []).append(entry)
         return result
+
+    def _task_visible_for_requester(self, requester_role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+        role = str(requester_role or '').lower()
+        requester_id = int(requester_id)
+        if role == 'admin':
+            return True
+        if created_by is not None and int(created_by) == requester_id:
+            return True
+        if assigned_to is not None and int(assigned_to) == requester_id:
+            return True
+        if role == 'sv' and assignee_role == 'operator' and assignee_supervisor_id is not None and int(assignee_supervisor_id) == requester_id:
+            return True
+        return False
+
+    def get_task_recipients(self, requester_id, requester_role):
+        requester_id = int(requester_id)
+        role = str(requester_role or '').lower()
+        with self._get_cursor() as cursor:
+            if role == 'admin':
+                cursor.execute("""
+                    SELECT u.id, u.name, u.role, u.supervisor_id, COALESCE(u.status, 'working')
+                    FROM users u
+                    WHERE u.role IN ('sv', 'operator')
+                      AND COALESCE(u.status, 'working') <> 'fired'
+                    ORDER BY CASE WHEN u.role = 'sv' THEN 0 ELSE 1 END, u.name
+                """)
+            elif role == 'sv':
+                cursor.execute("""
+                    SELECT u.id, u.name, u.role, u.supervisor_id, COALESCE(u.status, 'working')
+                    FROM users u
+                    WHERE u.role = 'operator'
+                      AND u.supervisor_id = %s
+                      AND COALESCE(u.status, 'working') <> 'fired'
+                    ORDER BY u.name
+                """, (requester_id,))
+            else:
+                return []
+
+            rows = cursor.fetchall()
+
+        return [
+            {
+                "id": row[0],
+                "name": row[1],
+                "role": row[2],
+                "supervisor_id": row[3],
+                "status": row[4]
+            }
+            for row in rows
+        ]
+
+    def create_task(self, subject, description, tag, assigned_to, created_by, attachments=None):
+        subject_norm = (subject or '').strip()
+        description_norm = (description or '').strip() or None
+        tag_norm = (tag or 'task').strip().lower() or 'task'
+        assigned_to_id = int(assigned_to)
+        created_by_id = int(created_by) if created_by is not None else None
+        attachments = attachments or []
+
+        if not subject_norm:
+            raise ValueError("SUBJECT_REQUIRED")
+        if tag_norm not in ('task', 'problem', 'suggestion'):
+            raise ValueError("INVALID_TAG")
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO tasks (subject, description, tag, status, assigned_to, created_by, created_at, updated_at)
+                VALUES (%s, %s, %s, 'assigned', %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'), (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                RETURNING id, created_at, updated_at
+            """, (subject_norm, description_norm, tag_norm, assigned_to_id, created_by_id))
+            task_id, created_at, updated_at = cursor.fetchone()
+
+            cursor.execute("""
+                INSERT INTO task_status_history (task_id, status_code, changed_by)
+                VALUES (%s, 'assigned', %s)
+            """, (task_id, created_by_id))
+
+            for attachment in attachments:
+                file_name = (attachment.get('file_name') or 'attachment').strip() or 'attachment'
+                content_type = (attachment.get('content_type') or '').strip() or None
+                storage_type = (attachment.get('storage_type') or 'db').strip().lower() or 'db'
+                if storage_type == 'gcs':
+                    gcs_bucket = (attachment.get('gcs_bucket') or '').strip() or None
+                    gcs_blob_path = (attachment.get('gcs_blob_path') or '').strip() or None
+                    file_size = int(attachment.get('file_size') or 0)
+                    if not gcs_bucket or not gcs_blob_path:
+                        continue
+                    cursor.execute("""
+                        INSERT INTO task_attachments (
+                            task_id, file_name, content_type, file_size, file_data,
+                            storage_type, gcs_bucket, gcs_blob_path, uploaded_by
+                        )
+                        VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, %s)
+                    """, (task_id, file_name, content_type, file_size, gcs_bucket, gcs_blob_path, created_by_id))
+                else:
+                    file_data = attachment.get('file_data') or b''
+                    file_size = int(attachment.get('file_size') or len(file_data) or 0)
+                    if not isinstance(file_data, (bytes, bytearray, memoryview)):
+                        continue
+                    cursor.execute("""
+                        INSERT INTO task_attachments (
+                            task_id, file_name, content_type, file_size, file_data,
+                            storage_type, gcs_bucket, gcs_blob_path, uploaded_by
+                        )
+                        VALUES (%s, %s, %s, %s, %s, 'db', NULL, NULL, %s)
+                    """, (task_id, file_name, content_type, file_size, psycopg2.Binary(bytes(file_data)), created_by_id))
+
+        return {
+            "id": task_id,
+            "created_at": created_at.isoformat() if hasattr(created_at, 'isoformat') else created_at,
+            "updated_at": updated_at.isoformat() if hasattr(updated_at, 'isoformat') else updated_at
+        }
+
+    def get_tasks_for_requester(self, requester_id, requester_role):
+        requester_id = int(requester_id)
+        role = str(requester_role or '').lower()
+
+        with self._get_cursor() as cursor:
+            if role == 'admin':
+                cursor.execute("""
+                    SELECT
+                        t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,
+                        assignee.id, assignee.name, assignee.role, assignee.supervisor_id,
+                        creator.id, creator.name, creator.role
+                    FROM tasks t
+                    LEFT JOIN users assignee ON assignee.id = t.assigned_to
+                    LEFT JOIN users creator ON creator.id = t.created_by
+                    ORDER BY t.created_at DESC, t.id DESC
+                """)
+            elif role == 'sv':
+                cursor.execute("""
+                    SELECT
+                        t.id, t.subject, t.description, t.tag, t.status, t.created_at, t.updated_at,
+                        assignee.id, assignee.name, assignee.role, assignee.supervisor_id,
+                        creator.id, creator.name, creator.role
+                    FROM tasks t
+                    LEFT JOIN users assignee ON assignee.id = t.assigned_to
+                    LEFT JOIN users creator ON creator.id = t.created_by
+                    WHERE
+                        t.created_by = %s
+                        OR t.assigned_to = %s
+                        OR (assignee.role = 'operator' AND assignee.supervisor_id = %s)
+                    ORDER BY t.created_at DESC, t.id DESC
+                """, (requester_id, requester_id, requester_id))
+            else:
+                return []
+
+            task_rows = cursor.fetchall()
+            if not task_rows:
+                return []
+
+            task_ids = [row[0] for row in task_rows]
+
+            cursor.execute("""
+                SELECT
+                    h.id, h.task_id, h.status_code, h.comment, h.changed_at,
+                    h.changed_by, u.name
+                FROM task_status_history h
+                LEFT JOIN users u ON u.id = h.changed_by
+                WHERE h.task_id = ANY(%s)
+                ORDER BY h.changed_at ASC, h.id ASC
+            """, (task_ids,))
+            history_rows = cursor.fetchall()
+
+            cursor.execute("""
+                SELECT
+                    a.id, a.task_id, a.file_name, a.content_type, a.file_size, a.created_at,
+                    COALESCE(a.storage_type, 'db'), a.gcs_bucket, a.gcs_blob_path
+                FROM task_attachments a
+                WHERE a.task_id = ANY(%s)
+                ORDER BY a.id ASC
+            """, (task_ids,))
+            attachment_rows = cursor.fetchall()
+
+        history_map = defaultdict(list)
+        for row in history_rows:
+            history_map[row[1]].append({
+                "id": row[0],
+                "status_code": row[2],
+                "comment": row[3],
+                "changed_at": row[4].isoformat() if hasattr(row[4], 'isoformat') else row[4],
+                "changed_by": row[5],
+                "changed_by_name": row[6]
+            })
+
+        attachment_map = defaultdict(list)
+        for row in attachment_rows:
+            attachment_map[row[1]].append({
+                "id": row[0],
+                "file_name": row[2],
+                "content_type": row[3],
+                "file_size": row[4],
+                "created_at": row[5].isoformat() if hasattr(row[5], 'isoformat') else row[5],
+                "storage_type": row[6],
+                "gcs_bucket": row[7],
+                "gcs_blob_path": row[8]
+            })
+
+        result = []
+        for row in task_rows:
+            task_id = row[0]
+            result.append({
+                "id": task_id,
+                "subject": row[1],
+                "description": row[2],
+                "tag": row[3],
+                "status": row[4],
+                "created_at": row[5].isoformat() if hasattr(row[5], 'isoformat') else row[5],
+                "updated_at": row[6].isoformat() if hasattr(row[6], 'isoformat') else row[6],
+                "assignee": {
+                    "id": row[7],
+                    "name": row[8],
+                    "role": row[9],
+                    "supervisor_id": row[10]
+                } if row[7] else None,
+                "creator": {
+                    "id": row[11],
+                    "name": row[12],
+                    "role": row[13]
+                } if row[11] else None,
+                "history": history_map.get(task_id, []),
+                "attachments": attachment_map.get(task_id, [])
+            })
+        return result
+
+    def update_task_status(self, task_id, requester_id, requester_role, action, comment=None):
+        task_id = int(task_id)
+        requester_id = int(requester_id)
+        role = str(requester_role or '').lower()
+        action_norm = str(action or '').strip().lower()
+        comment_norm = (comment or '').strip() or None
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    t.id, t.created_by, t.assigned_to, t.status,
+                    assignee.role, assignee.supervisor_id
+                FROM tasks t
+                LEFT JOIN users assignee ON assignee.id = t.assigned_to
+                WHERE t.id = %s
+            """, (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("TASK_NOT_FOUND")
+
+            created_by = row[1]
+            assigned_to = row[2]
+            current_status = row[3]
+            assignee_role = row[4]
+            assignee_supervisor_id = row[5]
+
+            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+                raise PermissionError("TASK_FORBIDDEN")
+
+            is_assignee = assigned_to is not None and int(assigned_to) == requester_id
+            is_reviewer = (
+                role == 'admin'
+                or (created_by is not None and int(created_by) == requester_id)
+                or (role == 'sv' and not is_assignee)
+            )
+
+            target_status = None
+            history_status = None
+
+            if action_norm == 'in_progress':
+                if not is_assignee:
+                    raise PermissionError("ONLY_ASSIGNEE")
+                if current_status not in ('assigned', 'returned', 'in_progress'):
+                    raise ValueError("INVALID_TRANSITION")
+                if current_status == 'in_progress':
+                    return {
+                        "task_id": task_id,
+                        "status": current_status
+                    }
+                target_status = 'in_progress'
+                history_status = 'in_progress'
+            elif action_norm == 'completed':
+                if not is_assignee:
+                    raise PermissionError("ONLY_ASSIGNEE")
+                if current_status not in ('in_progress', 'returned'):
+                    raise ValueError("INVALID_TRANSITION")
+                target_status = 'completed'
+                history_status = 'completed'
+            elif action_norm == 'accepted':
+                if not is_reviewer:
+                    raise PermissionError("ONLY_REVIEWER")
+                if current_status != 'completed':
+                    raise ValueError("INVALID_TRANSITION")
+                target_status = 'accepted'
+                history_status = 'accepted'
+            elif action_norm == 'returned':
+                if not is_reviewer:
+                    raise PermissionError("ONLY_REVIEWER")
+                if current_status not in ('completed', 'accepted'):
+                    raise ValueError("INVALID_TRANSITION")
+                target_status = 'returned'
+                history_status = 'returned'
+            elif action_norm == 'reopened':
+                if not is_reviewer:
+                    raise PermissionError("ONLY_REVIEWER")
+                if current_status not in ('accepted', 'completed', 'returned'):
+                    raise ValueError("INVALID_TRANSITION")
+                target_status = 'in_progress'
+                history_status = 'reopened'
+            else:
+                raise ValueError("INVALID_ACTION")
+
+            cursor.execute("""
+                UPDATE tasks
+                SET status = %s, updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                WHERE id = %s
+                RETURNING updated_at
+            """, (target_status, task_id))
+            updated_at_row = cursor.fetchone()
+            updated_at = updated_at_row[0] if updated_at_row else None
+
+            cursor.execute("""
+                INSERT INTO task_status_history (task_id, status_code, changed_by, comment)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id, changed_at
+            """, (task_id, history_status, requester_id, comment_norm))
+            history_row = cursor.fetchone()
+
+            return {
+                "task_id": task_id,
+                "status": target_status,
+                "updated_at": updated_at.isoformat() if hasattr(updated_at, 'isoformat') else updated_at,
+                "history_id": history_row[0] if history_row else None,
+                "history_changed_at": (history_row[1].isoformat() if history_row and hasattr(history_row[1], 'isoformat') else (history_row[1] if history_row else None))
+            }
+
+    def get_task_attachment_for_requester(self, attachment_id, requester_id, requester_role):
+        attachment_id = int(attachment_id)
+        requester_id = int(requester_id)
+        role = str(requester_role or '').lower()
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    a.id, a.file_name, a.content_type, a.file_size, a.file_data, a.created_at,
+                    COALESCE(a.storage_type, 'db'), a.gcs_bucket, a.gcs_blob_path,
+                    t.id, t.created_by, t.assigned_to,
+                    assignee.role, assignee.supervisor_id
+                FROM task_attachments a
+                JOIN tasks t ON t.id = a.task_id
+                LEFT JOIN users assignee ON assignee.id = t.assigned_to
+                WHERE a.id = %s
+            """, (attachment_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            created_by = row[10]
+            assigned_to = row[11]
+            assignee_role = row[12]
+            assignee_supervisor_id = row[13]
+
+            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+                raise PermissionError("TASK_FORBIDDEN")
+
+            storage_type = row[6] or 'db'
+            file_data = row[4]
+            if storage_type != 'gcs':
+                if isinstance(file_data, memoryview):
+                    file_data = file_data.tobytes()
+                elif isinstance(file_data, bytearray):
+                    file_data = bytes(file_data)
+                elif file_data is None:
+                    file_data = b''
+
+            return {
+                "id": row[0],
+                "file_name": row[1],
+                "content_type": row[2] or 'application/octet-stream',
+                "file_size": int(row[3] or 0),
+                "file_data": file_data,
+                "created_at": row[5].isoformat() if hasattr(row[5], 'isoformat') else row[5],
+                "storage_type": storage_type,
+                "gcs_bucket": row[7],
+                "gcs_blob_path": row[8],
+                "task_id": row[9]
+            }
 
     def save_ai_feedback_cache(self, operator_id: int, month: str, feedback_data: dict):
         """Сохранить или обновить AI фидбэк в кэше"""

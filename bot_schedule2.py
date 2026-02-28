@@ -23,6 +23,7 @@ from openpyxl import load_workbook, Workbook
 import re
 import xlsxwriter
 import json
+import html
 from concurrent.futures import ThreadPoolExecutor
 from database import db
 import uuid
@@ -583,6 +584,43 @@ def _ensure_call_access_for_requester(call_operator_id, requester, requester_id)
         operator = db.get_user(id=call_operator_id)
         return bool(operator and operator[3] == 'operator' and operator[6] == requester_id)
     return False
+
+
+TASK_ALLOWED_TAGS = {'task', 'problem', 'suggestion'}
+TASK_ALLOWED_ACTIONS = {'in_progress', 'completed', 'accepted', 'returned', 'reopened'}
+TASK_MAX_FILES = 10
+TASK_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
+TASK_ATTACHMENTS_UPLOAD_FOLDER = (os.getenv('TASK_ATTACHMENTS_UPLOAD_FOLDER') or 'TaskAttachments/').strip()
+TASK_TAG_LABELS = {
+    'task': 'Задача',
+    'problem': 'Проблема',
+    'suggestion': 'Предложение'
+}
+
+
+def _resolve_requester():
+    requester_id_raw = request.headers.get('X-User-Id') or getattr(g, 'user_id', None)
+    if not requester_id_raw:
+        return None, None, ("X-User-Id header required", 400)
+    try:
+        requester_id = int(requester_id_raw)
+    except Exception:
+        return None, None, ("Invalid X-User-Id", 400)
+
+    requester = db.get_user(id=requester_id)
+    if not requester:
+        return None, None, ("Requester not found", 404)
+    return requester_id, requester, None
+
+
+def _task_route_guard():
+    requester_id, requester, error = _resolve_requester()
+    if error:
+        message, status_code = error
+        return None, None, jsonify({"error": message}), status_code
+    if requester[3] not in ('admin', 'sv'):
+        return None, None, jsonify({"error": "Only admin and sv can access tasks"}), 403
+    return requester_id, requester, None, None
 
 
 @app.before_request
@@ -2846,6 +2884,289 @@ def notify_supervisor():
         return jsonify({"status": "success", "message": f"Notification sent to {user[2]}"}), 200
     except Exception as e:
         logging.error(f"Error in notify_supervisor: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/tasks/recipients', methods=['GET', 'OPTIONS'])
+@require_api_key
+def get_task_recipients():
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        recipients = db.get_task_recipients(requester_id, requester[3])
+        return jsonify({
+            "status": "success",
+            "recipients": recipients
+        }), 200
+    except Exception as e:
+        logging.error(f"Error in get_task_recipients: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/tasks', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def handle_tasks():
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        requester_role = requester[3]
+
+        if request.method == 'GET':
+            tasks = db.get_tasks_for_requester(requester_id, requester_role)
+            return jsonify({
+                "status": "success",
+                "tasks": tasks
+            }), 200
+
+        subject = (request.form.get('subject') or '').strip()
+        description = (request.form.get('description') or '').strip()
+        tag = (request.form.get('tag') or 'task').strip().lower() or 'task'
+        assigned_to_raw = request.form.get('assigned_to')
+
+        if not subject:
+            return jsonify({"error": "subject is required"}), 400
+        if tag not in TASK_ALLOWED_TAGS:
+            return jsonify({"error": "Invalid tag"}), 400
+        if not assigned_to_raw:
+            return jsonify({"error": "assigned_to is required"}), 400
+
+        try:
+            assigned_to = int(assigned_to_raw)
+        except Exception:
+            return jsonify({"error": "assigned_to must be an integer"}), 400
+
+        allowed_recipients = db.get_task_recipients(requester_id, requester_role)
+        allowed_ids = {int(item['id']) for item in allowed_recipients if item.get('id') is not None}
+        if assigned_to not in allowed_ids:
+            return jsonify({"error": "You cannot assign a task to this user"}), 403
+
+        files = request.files.getlist('files')
+        if len(files) > TASK_MAX_FILES:
+            return jsonify({"error": f"Too many files. Max allowed: {TASK_MAX_FILES}"}), 400
+
+        attachments = []
+        uploaded_blob_paths = []
+        gcs_bucket = None
+        bucket_name = ''
+        if files:
+            bucket_name = (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+            if not bucket_name:
+                return jsonify({"error": "GOOGLE_CLOUD_STORAGE_BUCKET_TASKS is not configured"}), 500
+            upload_folder = TASK_ATTACHMENTS_UPLOAD_FOLDER.strip('/')
+            upload_prefix = f"{upload_folder}/" if upload_folder else ""
+            gcs_client = get_gcs_client()
+            gcs_bucket = gcs_client.bucket(bucket_name)
+        else:
+            upload_prefix = ""
+        for idx, file_storage in enumerate(files):
+            if not file_storage or not file_storage.filename:
+                continue
+            file_data = file_storage.read() or b''
+            if len(file_data) > TASK_MAX_FILE_SIZE_BYTES:
+                return jsonify({"error": f"File '{file_storage.filename}' exceeds 10 MB limit"}), 400
+
+            safe_name = secure_filename(file_storage.filename) or f'attachment_{idx + 1}'
+            content_type = (file_storage.mimetype or '').strip() or 'application/octet-stream'
+            blob_path = (
+                f"{upload_prefix}tasks/"
+                f"{datetime.utcnow().strftime('%Y/%m/%d')}/"
+                f"{uuid.uuid4().hex}_{safe_name}"
+            )
+            try:
+                blob = gcs_bucket.blob(blob_path)
+                blob.upload_from_string(file_data, content_type=content_type)
+                uploaded_blob_paths.append(blob_path)
+            except Exception as upload_error:
+                # best-effort cleanup for already uploaded blobs in this request
+                for uploaded_path in uploaded_blob_paths:
+                    try:
+                        gcs_bucket.blob(uploaded_path).delete()
+                    except Exception:
+                        pass
+                logging.error(f"Task attachment upload failed: {upload_error}")
+                return jsonify({"error": f"Failed to upload attachment '{safe_name}'"}), 500
+
+            attachments.append({
+                "file_name": safe_name,
+                "content_type": content_type,
+                "file_size": len(file_data),
+                "storage_type": "gcs",
+                "gcs_bucket": bucket_name,
+                "gcs_blob_path": blob_path
+            })
+
+        try:
+            created = db.create_task(
+                subject=subject,
+                description=description,
+                tag=tag,
+                assigned_to=assigned_to,
+                created_by=requester_id,
+                attachments=attachments
+            )
+        except Exception:
+            # DB write failed after upload -> cleanup uploaded blobs
+            for uploaded_path in uploaded_blob_paths:
+                try:
+                    gcs_bucket.blob(uploaded_path).delete()
+                except Exception:
+                    pass
+            raise
+
+        telegram_warning = None
+        try:
+            assignee = db.get_user(id=assigned_to)
+            assignee_chat_id = assignee[1] if assignee else None
+            if assignee_chat_id:
+                tag_label = TASK_TAG_LABELS.get(tag, 'Задача')
+                requester_name = requester[2] if requester else 'Система'
+                message = (
+                    f"📌 <b>Новая задача</b>\n\n"
+                    f"Тема: <b>{html.escape(subject)}</b>\n"
+                    f"Тег: <b>{html.escape(tag_label)}</b>\n"
+                    f"Поставил(а): <b>{html.escape(str(requester_name))}</b>"
+                )
+                telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+                tg_response = requests.post(
+                    telegram_url,
+                    json={
+                        "chat_id": assignee_chat_id,
+                        "text": message,
+                        "parse_mode": "HTML"
+                    },
+                    timeout=10
+                )
+                if tg_response.status_code != 200:
+                    error_detail = tg_response.json().get('description', 'Unknown error')
+                    telegram_warning = f"Task created, but Telegram notification failed: {error_detail}"
+                    logging.error(f"Task Telegram API error: {error_detail}")
+        except Exception as notify_error:
+            telegram_warning = f"Task created, but Telegram notification failed: {str(notify_error)}"
+            logging.error(f"Task Telegram notification error: {notify_error}")
+
+        response_payload = {
+            "status": "success",
+            "message": "Task created successfully",
+            "task_id": created.get("id")
+        }
+        if telegram_warning:
+            response_payload["warning"] = telegram_warning
+
+        return jsonify(response_payload), 201
+
+    except Exception as e:
+        logging.error(f"Error in handle_tasks: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/tasks/<int:task_id>/status', methods=['POST', 'OPTIONS'])
+@require_api_key
+def update_task_status(task_id):
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        data = request.get_json() or {}
+        action = (data.get('action') or '').strip().lower()
+        comment = (data.get('comment') or '').strip()
+
+        if action not in TASK_ALLOWED_ACTIONS:
+            return jsonify({"error": "Invalid action"}), 400
+
+        try:
+            result = db.update_task_status(
+                task_id=task_id,
+                requester_id=requester_id,
+                requester_role=requester[3],
+                action=action,
+                comment=comment
+            )
+        except ValueError as value_error:
+            code = str(value_error)
+            if code == 'TASK_NOT_FOUND':
+                return jsonify({"error": "Task not found"}), 404
+            if code in ('INVALID_ACTION', 'INVALID_TRANSITION'):
+                return jsonify({"error": "Invalid task status transition"}), 400
+            return jsonify({"error": code}), 400
+        except PermissionError as permission_error:
+            code = str(permission_error)
+            if code in ('TASK_FORBIDDEN', 'ONLY_ASSIGNEE', 'ONLY_REVIEWER'):
+                return jsonify({"error": "You do not have permission for this action"}), 403
+            return jsonify({"error": code}), 403
+
+        action_messages = {
+            'in_progress': 'Task moved to in progress',
+            'completed': 'Task marked as completed',
+            'accepted': 'Task accepted',
+            'returned': 'Task returned for rework',
+            'reopened': 'Task reopened'
+        }
+        return jsonify({
+            "status": "success",
+            "message": action_messages.get(action, 'Task status updated'),
+            "task": result
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Error in update_task_status: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/tasks/attachments/<int:attachment_id>/download', methods=['GET', 'OPTIONS'])
+@require_api_key
+def download_task_attachment(attachment_id):
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        try:
+            attachment = db.get_task_attachment_for_requester(
+                attachment_id=attachment_id,
+                requester_id=requester_id,
+                requester_role=requester[3]
+            )
+        except PermissionError:
+            return jsonify({"error": "You do not have access to this attachment"}), 403
+
+        if not attachment:
+            return jsonify({"error": "Attachment not found"}), 404
+
+        if attachment.get('storage_type') == 'gcs':
+            bucket_name = (attachment.get('gcs_bucket') or '').strip()
+            blob_path = (attachment.get('gcs_blob_path') or '').strip()
+            if not bucket_name or not blob_path:
+                return jsonify({"error": "Attachment storage metadata is invalid"}), 500
+            try:
+                gcs_client = get_gcs_client()
+                bucket = gcs_client.bucket(bucket_name)
+                blob = bucket.blob(blob_path)
+                if not blob.exists():
+                    return jsonify({"error": "Attachment object not found in storage"}), 404
+                file_bytes = blob.download_as_bytes()
+            except Exception as storage_error:
+                logging.error(f"Error downloading GCS task attachment: {storage_error}")
+                return jsonify({"error": "Failed to download attachment from storage"}), 500
+
+            return send_file(
+                BytesIO(file_bytes),
+                as_attachment=True,
+                download_name=attachment['file_name'],
+                mimetype=attachment.get('content_type') or 'application/octet-stream'
+            )
+
+        return send_file(
+            BytesIO(attachment['file_data']),
+            as_attachment=True,
+            download_name=attachment['file_name'],
+            mimetype=attachment.get('content_type') or 'application/octet-stream'
+        )
+    except Exception as e:
+        logging.error(f"Error in download_task_attachment: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/api/admin/monthly_report', methods=['GET'])
