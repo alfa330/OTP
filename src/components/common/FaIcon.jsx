@@ -112,8 +112,7 @@ import {
     Workflow,
     Wrench,
     X,
-    XCircle,
-    Sparkles
+    XCircle
 } from 'lucide-react';
 
 const TOKEN_TO_ICON = {
@@ -256,8 +255,7 @@ const TOKEN_TO_ICON = {
     'fa-users': 'Users',
     'fa-users-cog': 'Users',
     'fa-video-slash': 'VideoOff',
-    'fa-xmark': 'X',
-    'fa-sparkles': 'Sparkles'
+    'fa-xmark': 'X'
 };
 
 const ICON_COMPONENTS = {
@@ -373,8 +371,7 @@ const ICON_COMPONENTS = {
     Workflow,
     Wrench,
     X,
-    XCircle,
-    Sparkles
+    XCircle
 };
 
 const FA_META_TOKENS = new Set([
