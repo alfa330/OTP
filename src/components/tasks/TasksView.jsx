@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { RefreshCw } from 'lucide-react';
 
 /* ─── Google Fonts ─── */
 const fontLink = document.createElement('link');
@@ -24,13 +23,11 @@ styleTag.textContent = `
     --ink-3: #9e9a93;
     --accent: #1a1916;
     --accent-fg: #ffffff;
-    --blue: #2563eb;
     --amber: #d97706;
     --indigo: #4338ca;
     --emerald: #059669;
     --rose: #e11d48;
     --shadow-sm: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
-    --shadow-md: 0 4px 16px rgba(0,0,0,.08), 0 2px 6px rgba(0,0,0,.05);
     --shadow-lg: 0 20px 60px rgba(0,0,0,.14), 0 8px 24px rgba(0,0,0,.08);
     --radius: 12px;
     --radius-sm: 8px;
@@ -59,14 +56,7 @@ styleTag.textContent = `
     font-size: 13px; font-weight: 500;
     border: 1px solid transparent;
     cursor: pointer; transition: all .15s ease;
-    white-space: nowrap;
-  }
-  .tv-spin {
-    animation: tvSpin .8s linear infinite;
-  }
-  @keyframes tvSpin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+    white-space: nowrap; background: none;
   }
   .tv-btn:disabled { opacity: .5; cursor: not-allowed; }
   .tv-btn-ghost {
@@ -75,85 +65,72 @@ styleTag.textContent = `
     color: var(--ink-2);
   }
   .tv-btn-ghost:hover:not(:disabled) {
-    background: var(--surface);
-    color: var(--ink);
-    border-color: var(--ink-3);
+    background: var(--surface); color: var(--ink); border-color: var(--ink-3);
   }
-  .tv-btn-primary {
-    background: var(--accent); color: var(--accent-fg);
-    border-color: var(--accent);
-  }
+  .tv-btn-primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
   .tv-btn-primary:hover:not(:disabled) { background: #333; }
-  .tv-btn-blue   { background: var(--blue); color: #fff; }
-  .tv-btn-blue:hover:not(:disabled) { background: #1d4ed8; }
-  .tv-btn-amber  { background: #fef3c7; color: var(--amber); border-color: #fde68a; }
-  .tv-btn-amber:hover:not(:disabled) { background: #fde68a; }
-  .tv-btn-indigo { background: #eef2ff; color: var(--indigo); border-color: #c7d2fe; }
-  .tv-btn-indigo:hover:not(:disabled) { background: #e0e7ff; }
-  .tv-btn-emerald{ background: #d1fae5; color: var(--emerald); border-color: #a7f3d0; }
-  .tv-btn-emerald:hover:not(:disabled){ background: #a7f3d0; }
-  .tv-btn-rose   { background: #ffe4e6; color: var(--rose); border-color: #fecdd3; }
-  .tv-btn-rose:hover:not(:disabled){ background: #fecdd3; }
+  .tv-btn-amber   { background: #fef3c7; color: var(--amber); border-color: #fde68a; }
+  .tv-btn-amber:hover:not(:disabled)   { background: #fde68a; }
+  .tv-btn-indigo  { background: #eef2ff; color: var(--indigo); border-color: #c7d2fe; }
+  .tv-btn-indigo:hover:not(:disabled)  { background: #e0e7ff; }
+  .tv-btn-emerald { background: #d1fae5; color: var(--emerald); border-color: #a7f3d0; }
+  .tv-btn-emerald:hover:not(:disabled) { background: #a7f3d0; }
+  .tv-btn-rose    { background: #ffe4e6; color: var(--rose); border-color: #fecdd3; }
+  .tv-btn-rose:hover:not(:disabled)    { background: #fecdd3; }
 
   /* ── Task Row ── */
   .tv-task-list { display: flex; flex-direction: column; gap: 2px; }
   .tv-task-row {
     display: flex; align-items: center; gap: 12px;
-    padding: 13px 16px;
+    padding: 12px 16px;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     cursor: pointer;
     transition: all .15s ease;
-    position: relative;
   }
   .tv-task-row:hover {
     border-color: var(--border-strong);
     box-shadow: var(--shadow-sm);
     transform: translateY(-1px);
   }
-  .tv-task-row-dot {
-    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
-  }
+  .tv-task-row-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
   .tv-task-row-subject {
     flex: 1; font-size: 14px; font-weight: 500; color: var(--ink);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
   }
-  .tv-task-row-meta {
-    font-size: 12px; color: var(--ink-3); flex-shrink: 0;
-    display: flex; align-items: center; gap: 10px;
-  }
+  .tv-task-row-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .tv-task-row-assignee { font-size: 12px; color: var(--ink-3); }
+  .tv-task-row-date     { font-size: 12px; color: var(--ink-3); }
+
+  /* ── Badges ── */
   .tv-badge {
     display: inline-flex; align-items: center;
     padding: 2px 9px; border-radius: 99px;
     font-size: 11px; font-weight: 500;
     border: 1px solid transparent;
-    white-space: nowrap;
+    white-space: nowrap; line-height: 1.6;
   }
-  .tv-badge-gray  { background: #f1f0ed; color: var(--ink-2); border-color: var(--border); }
-  .tv-badge-blue  { background: #dbeafe; color: #1e40af; border-color: #bfdbfe; }
-  .tv-badge-amber { background: #fef3c7; color: #92400e; border-color: #fde68a; }
-  .tv-badge-indigo{ background: #eef2ff; color: #3730a3; border-color: #c7d2fe; }
-  .tv-badge-emerald{background: #d1fae5; color: #065f46; border-color: #a7f3d0; }
-  .tv-badge-rose  { background: #ffe4e6; color: #9f1239; border-color: #fecdd3; }
+  .tv-badge-gray    { background: #f1f0ed; color: var(--ink-2);  border-color: var(--border); }
+  .tv-badge-blue    { background: #dbeafe; color: #1e40af;       border-color: #bfdbfe; }
+  .tv-badge-amber   { background: #fef3c7; color: #92400e;       border-color: #fde68a; }
+  .tv-badge-indigo  { background: #eef2ff; color: #3730a3;       border-color: #c7d2fe; }
+  .tv-badge-emerald { background: #d1fae5; color: #065f46;       border-color: #a7f3d0; }
+  .tv-badge-rose    { background: #ffe4e6; color: #9f1239;       border-color: #fecdd3; }
+  .tv-badge-teal    { background: #ccfbf1; color: #0f766e;       border-color: #99f6e4; }
+  .tv-badge-violet  { background: #ede9fe; color: #5b21b6;       border-color: #ddd6fe; }
 
   /* ── Empty / Loading ── */
   .tv-empty {
-    padding: 32px; text-align: center;
-    color: var(--ink-3); font-size: 13px;
-    background: var(--surface); border: 1px dashed var(--border);
-    border-radius: var(--radius);
+    padding: 32px; text-align: center; color: var(--ink-3); font-size: 13px;
+    background: var(--surface); border: 1px dashed var(--border); border-radius: var(--radius);
   }
-  .tv-loading {
-    padding: 24px; text-align: center;
-    color: var(--ink-3); font-size: 13px;
-  }
+  .tv-loading { padding: 24px; text-align: center; color: var(--ink-3); font-size: 13px; }
 
-  /* ── Drawer overlay ── */
+  /* ── Drawer ── */
   .tv-overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,.3);
-    backdrop-filter: blur(2px);
-    z-index: 40;
+    backdrop-filter: blur(2px); z-index: 40;
     animation: tvFadeIn .2s ease;
   }
   @keyframes tvFadeIn { from { opacity: 0 } to { opacity: 1 } }
@@ -161,75 +138,60 @@ styleTag.textContent = `
   .tv-drawer {
     position: fixed; top: 0; right: 0; bottom: 0;
     width: min(560px, 100vw);
-    background: var(--surface);
-    z-index: 50;
+    background: var(--surface); z-index: 50;
     display: flex; flex-direction: column;
     box-shadow: var(--shadow-lg);
     animation: tvSlideIn .22s cubic-bezier(.22,1,.36,1);
     overflow: hidden;
   }
-  @keyframes tvSlideIn {
-    from { transform: translateX(100%) }
-    to   { transform: translateX(0) }
-  }
+  @keyframes tvSlideIn { from { transform: translateX(100%) } to { transform: translateX(0) } }
+
   .tv-drawer-header {
-    padding: 24px 24px 20px;
-    border-bottom: 1px solid var(--border);
-    display: flex; align-items: flex-start; gap: 12px;
-    flex-shrink: 0;
+    padding: 24px 24px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: flex-start; gap: 12px; flex-shrink: 0;
   }
   .tv-drawer-header-text { flex: 1; min-width: 0; }
   .tv-drawer-title {
     font-family: 'Syne', sans-serif;
     font-size: 17px; font-weight: 600; color: var(--ink);
-    margin: 0 0 6px;
-    word-break: break-word;
+    margin: 0 0 8px; word-break: break-word;
   }
   .tv-drawer-badges { display: flex; flex-wrap: wrap; gap: 5px; }
-  .tv-drawer-close {
+
+  .tv-close-btn {
     width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
     background: #f1f0ed; border: none; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
-    color: var(--ink-2); transition: all .15s;
-    font-size: 14px; margin-top: 2px;
+    color: var(--ink-2); transition: all .15s; margin-top: 2px;
   }
-  .tv-drawer-close:hover { background: var(--border-strong); color: var(--ink); }
+  .tv-close-btn:hover { background: var(--border-strong); color: var(--ink); }
 
   .tv-drawer-body {
     flex: 1; overflow-y: auto; padding: 24px;
     display: flex; flex-direction: column; gap: 20px;
   }
   .tv-drawer-footer {
-    padding: 16px 24px;
-    border-top: 1px solid var(--border);
+    padding: 16px 24px; border-top: 1px solid var(--border);
     display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end;
-    flex-shrink: 0;
-    background: var(--bg);
+    flex-shrink: 0; background: var(--bg);
   }
 
   /* ── Detail blocks ── */
-  .tv-info-grid {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
-  }
+  .tv-info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   .tv-info-item label {
     display: block; font-size: 11px; font-weight: 600;
     letter-spacing: .06em; text-transform: uppercase;
     color: var(--ink-3); margin-bottom: 3px;
   }
-  .tv-info-item span {
-    font-size: 13px; color: var(--ink); font-weight: 400;
-  }
-  .tv-divider {
-    height: 1px; background: var(--border); margin: 0;
-  }
+  .tv-info-item span { font-size: 13px; color: var(--ink); }
+  .tv-divider { height: 1px; background: var(--border); margin: 0; }
   .tv-description {
     font-size: 14px; color: var(--ink-2); line-height: 1.65;
     white-space: pre-wrap; word-break: break-word;
   }
   .tv-block-label {
-    font-size: 11px; font-weight: 600;
-    letter-spacing: .06em; text-transform: uppercase;
-    color: var(--ink-3); margin-bottom: 8px;
+    font-size: 11px; font-weight: 600; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--ink-3); margin-bottom: 8px;
   }
   .tv-file-list { display: flex; flex-wrap: wrap; gap: 6px; }
   .tv-file-btn {
@@ -247,109 +209,95 @@ styleTag.textContent = `
   }
   .tv-completion-block .tv-block-label { color: var(--indigo); }
 
-  .tv-history-list { display: flex; flex-direction: column; gap: 0; }
+  .tv-history-list { display: flex; flex-direction: column; }
   .tv-history-item {
     display: flex; align-items: baseline; gap: 10px;
-    padding: 8px 0;
-    border-bottom: 1px solid var(--border);
-    font-size: 12px;
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+    font-size: 12px; flex-wrap: wrap;
   }
   .tv-history-item:last-child { border-bottom: none; }
   .tv-history-status { font-weight: 500; color: var(--ink); }
-  .tv-history-time { color: var(--ink-3); }
-  .tv-history-who { color: var(--ink-2); font-style: italic; }
-  .tv-history-comment { color: var(--ink-2); }
+  .tv-history-time   { color: var(--ink-3); }
+  .tv-history-who    { color: var(--ink-2); font-style: italic; }
+  .tv-history-comment{ color: var(--ink-2); }
 
-  /* ── Modal (create / complete) ── */
+  /* ── Modal ── */
   .tv-modal-overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,.35);
-    backdrop-filter: blur(3px);
-    z-index: 60; display: flex; align-items: center; justify-content: center;
-    padding: 16px;
-    animation: tvFadeIn .18s ease;
+    backdrop-filter: blur(3px); z-index: 60;
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px; animation: tvFadeIn .18s ease;
   }
   .tv-modal {
-    background: var(--surface);
-    width: 100%; max-width: 580px;
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-lg);
-    overflow: hidden;
-    animation: tvScaleIn .2s cubic-bezier(.22,1,.36,1);
-    max-height: 90vh;
-    display: flex; flex-direction: column;
+    background: var(--surface); width: 100%; max-width: 580px;
+    border-radius: var(--radius); box-shadow: var(--shadow-lg);
+    overflow: hidden; animation: tvScaleIn .2s cubic-bezier(.22,1,.36,1);
+    max-height: 90vh; display: flex; flex-direction: column;
   }
-  @keyframes tvScaleIn {
-    from { transform: scale(.95); opacity: 0 }
-    to   { transform: scale(1); opacity: 1 }
-  }
+  @keyframes tvScaleIn { from { transform: scale(.95); opacity: 0 } to { transform: scale(1); opacity: 1 } }
   .tv-modal-header {
-    padding: 20px 24px 18px;
-    border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; justify-content: space-between;
-    flex-shrink: 0;
+    padding: 20px 24px 18px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
   }
   .tv-modal-title {
     font-family: 'Syne', sans-serif;
     font-size: 16px; font-weight: 600; color: var(--ink); margin: 0;
   }
-  .tv-modal-body {
-    padding: 20px 24px; overflow-y: auto;
-    flex: 1;
-  }
+  .tv-modal-body { padding: 20px 24px; overflow-y: auto; flex: 1; }
   .tv-modal-footer {
-    padding: 14px 24px;
-    border-top: 1px solid var(--border);
+    padding: 14px 24px; border-top: 1px solid var(--border);
     display: flex; justify-content: flex-end; gap: 8px;
     background: var(--bg); flex-shrink: 0;
   }
 
   /* ── Form ── */
   .tv-form-grid { display: flex; flex-direction: column; gap: 16px; }
-  .tv-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   .tv-form-field label {
     display: block; font-size: 12px; font-weight: 500;
     color: var(--ink-2); margin-bottom: 5px;
   }
   .tv-input, .tv-textarea, .tv-select {
     width: 100%; padding: 9px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    font-size: 13px; color: var(--ink);
-    background: var(--bg);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    font-size: 13px; color: var(--ink); background: var(--bg);
     outline: none; transition: border .15s, box-shadow .15s;
     font-family: 'DM Sans', sans-serif;
   }
   .tv-input:focus, .tv-textarea:focus, .tv-select:focus {
-    border-color: var(--ink-3);
-    box-shadow: 0 0 0 3px rgba(26,25,22,.06);
+    border-color: var(--ink-3); box-shadow: 0 0 0 3px rgba(26,25,22,.06);
   }
-  .tv-input:disabled, .tv-textarea:disabled, .tv-select:disabled {
-    opacity: .55; cursor: not-allowed;
-  }
+  .tv-input:disabled, .tv-textarea:disabled, .tv-select:disabled { opacity: .55; cursor: not-allowed; }
   .tv-textarea { resize: vertical; min-height: 90px; line-height: 1.5; }
 
   @media (max-width: 600px) {
     .tv-root { padding: 16px 12px; }
     .tv-drawer { width: 100vw; }
-    .tv-info-grid, .tv-form-row { grid-template-columns: 1fr; }
-    .tv-task-row-meta { display: none; }
+    .tv-info-grid { grid-template-columns: 1fr; }
+    .tv-task-row-assignee, .tv-task-row-date { display: none; }
   }
 `;
 document.head.appendChild(styleTag);
 
 /* ─── Constants ─── */
 const TAG_OPTIONS = [
-  { value: 'task', label: 'Задача' },
-  { value: 'problem', label: 'Проблема' },
+  { value: 'task',       label: 'Задача' },
+  { value: 'problem',    label: 'Проблема' },
   { value: 'suggestion', label: 'Предложение' },
 ];
 
+// Distinct color per tag
+const TAG_META = {
+  task:       { label: 'Задача',      badge: 'tv-badge-blue' },
+  problem:    { label: 'Проблема',    badge: 'tv-badge-rose' },
+  suggestion: { label: 'Предложение', badge: 'tv-badge-teal' },
+};
+
 const STATUS_META = {
-  assigned:    { label: 'Выставлен',        badge: 'tv-badge-blue',    dot: '#93c5fd' },
-  in_progress: { label: 'В работе',          badge: 'tv-badge-amber',   dot: '#fcd34d' },
-  completed:   { label: 'Выполнен',          badge: 'tv-badge-indigo',  dot: '#a5b4fc' },
-  accepted:    { label: 'Принят',            badge: 'tv-badge-emerald', dot: '#6ee7b7' },
-  returned:    { label: 'Возвращён',         badge: 'tv-badge-rose',    dot: '#fda4af' },
+  assigned:    { label: 'Выставлен', badge: 'tv-badge-indigo',  dot: '#a5b4fc' },
+  in_progress: { label: 'В работе',  badge: 'tv-badge-amber',   dot: '#fcd34d' },
+  completed:   { label: 'Выполнен',  badge: 'tv-badge-violet',  dot: '#c4b5fd' },
+  accepted:    { label: 'Принят',    badge: 'tv-badge-emerald', dot: '#6ee7b7' },
+  returned:    { label: 'Возвращён', badge: 'tv-badge-rose',    dot: '#fda4af' },
 };
 
 const HISTORY_LABELS = {
@@ -361,7 +309,6 @@ const HISTORY_LABELS = {
   reopened:    'Возобновлён',
 };
 
-const TAG_LABELS = Object.fromEntries(TAG_OPTIONS.map((t) => [t.value, t.label]));
 const ROLE_LABELS = { admin: 'Админ', sv: 'СВ' };
 
 const fmt = (v) => {
@@ -370,7 +317,7 @@ const fmt = (v) => {
   return isNaN(d) ? String(v) : d.toLocaleString('ru-RU');
 };
 
-/* ─── Small helpers ─── */
+/* ─── Icons ─── */
 const CloseIcon = () => (
   <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
     <path d="M1 1l12 12M13 1L1 13" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
@@ -387,32 +334,193 @@ const ChevronRight = () => (
     <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
   </svg>
 );
+const RefreshIcon = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+    <path d="M20 12a8 8 0 1 1-2.343-5.657" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    <polyline points="16 6 21.5 6 21.5 11.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+  </svg>
+);
 const PlusIcon = () => (
   <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
     <path d="M8 2v12M2 8h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
   </svg>
 );
 
+/* ─────────────────────────────────────────────────────────────────────────
+   Sub-components are defined OUTSIDE TasksView.
+   This is critical: if defined inside, React creates a new component type
+   on every render → unmount+remount → drawer slides in again after each action.
+   ───────────────────────────────────────────────────────────────────────── */
+
+const TaskRow = React.memo(({ task, onClick }) => {
+  const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray', dot: '#ccc' };
+  const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
+  return (
+    <div className="tv-task-row" onClick={() => onClick(task)}>
+      <span className="tv-task-row-dot" style={{ background: sm.dot }} />
+      <span className="tv-task-row-subject">{task.subject || 'Без темы'}</span>
+      <span className="tv-task-row-meta">
+        <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
+        <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
+        <span className="tv-task-row-assignee">{task?.assignee?.name || '—'}</span>
+        <span className="tv-task-row-date">{fmt(task.created_at)}</span>
+        <ChevronRight />
+      </span>
+    </div>
+  );
+});
+
+const TaskDrawer = React.memo(({
+  task, onClose, actionLoadingKey,
+  getActionButtons, openCompleteModal, updateStatus, downloadAttachment,
+}) => {
+  const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
+  const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
+  const attachments     = Array.isArray(task.attachments)            ? task.attachments            : [];
+  const compAttachments = Array.isArray(task.completion_attachments) ? task.completion_attachments : [];
+  const history         = Array.isArray(task.history)                ? task.history                : [];
+  const btns            = getActionButtons(task);
+
+  return (
+    <>
+      <div className="tv-overlay" onClick={onClose} />
+      <div className="tv-drawer">
+        <div className="tv-drawer-header">
+          <div className="tv-drawer-header-text">
+            <h2 className="tv-drawer-title">{task.subject || 'Без темы'}</h2>
+            <div className="tv-drawer-badges">
+              <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
+              <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
+            </div>
+          </div>
+          <button className="tv-close-btn" onClick={onClose} aria-label="Закрыть">
+            <CloseIcon />
+          </button>
+        </div>
+
+        <div className="tv-drawer-body">
+          <div className="tv-info-grid">
+            <div className="tv-info-item"><label>Исполнитель</label><span>{task?.assignee?.name || '—'}</span></div>
+            <div className="tv-info-item"><label>Постановщик</label><span>{task?.creator?.name || '—'}</span></div>
+            <div className="tv-info-item"><label>Создано</label><span>{fmt(task.created_at)}</span></div>
+            <div className="tv-info-item"><label>Статус</label><span>{sm.label}</span></div>
+          </div>
+
+          {task.description && (
+            <>
+              <hr className="tv-divider" />
+              <div>
+                <p className="tv-block-label">Описание</p>
+                <p className="tv-description">{task.description}</p>
+              </div>
+            </>
+          )}
+
+          {attachments.length > 0 && (
+            <>
+              <hr className="tv-divider" />
+              <div>
+                <p className="tv-block-label">Файлы задачи</p>
+                <div className="tv-file-list">
+                  {attachments.map(att => (
+                    <button key={att.id} className="tv-file-btn" onClick={() => downloadAttachment(att)}>
+                      <FileIcon />{att.file_name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+
+          {(task.completion_summary || compAttachments.length > 0) && (
+            <>
+              <hr className="tv-divider" />
+              <div className="tv-completion-block">
+                <p className="tv-block-label">Итоги выполнения</p>
+                {task.completion_summary && (
+                  <p className="tv-description" style={{ marginBottom: compAttachments.length ? 10 : 0 }}>
+                    {task.completion_summary}
+                  </p>
+                )}
+                {compAttachments.length > 0 && (
+                  <div className="tv-file-list">
+                    {compAttachments.map(att => (
+                      <button key={att.id} className="tv-file-btn"
+                        style={{ background: '#e0e7ff', borderColor: '#c7d2fe', color: '#3730a3' }}
+                        onClick={() => downloadAttachment(att)}>
+                        <FileIcon />{att.file_name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {history.length > 0 && (
+            <>
+              <hr className="tv-divider" />
+              <div>
+                <p className="tv-block-label">История</p>
+                <div className="tv-history-list">
+                  {history.map((item, i) => (
+                    <div key={i} className="tv-history-item">
+                      <span className="tv-history-status">{HISTORY_LABELS[item.status_code] || item.status_code}</span>
+                      <span className="tv-history-time">{fmt(item.changed_at)}</span>
+                      {item.changed_by_name && <span className="tv-history-who">{item.changed_by_name}</span>}
+                      {item.comment && <span className="tv-history-comment">— {item.comment}</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        {btns.length > 0 && (
+          <div className="tv-drawer-footer">
+            {btns.map(btn => {
+              const key     = `${task.id}:${btn.action}`;
+              const loading = actionLoadingKey === key;
+              return (
+                <button
+                  key={btn.action}
+                  className={`tv-btn ${btn.cls}`}
+                  disabled={!!actionLoadingKey}
+                  onClick={() => {
+                    if (btn.action === 'completed') { openCompleteModal(task); return; }
+                    updateStatus(task.id, btn.action);
+                  }}
+                >
+                  {loading ? 'Сохраняю...' : btn.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </>
+  );
+});
+
 /* ─────────────────────────────────── Main Component ─── */
 const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
-  const [tasks, setTasks] = useState([]);
-  const [recipients, setRecipients] = useState([]);
-  const [isTasksLoading, setIsTasksLoading] = useState(false);
+  const [tasks,               setTasks]               = useState([]);
+  const [recipients,          setRecipients]          = useState([]);
+  const [isTasksLoading,      setIsTasksLoading]      = useState(false);
   const [isRecipientsLoading, setIsRecipientsLoading] = useState(false);
-  const [isCreateLoading, setIsCreateLoading] = useState(false);
-  const [actionLoadingKey, setActionLoadingKey] = useState('');
-  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [isCreateLoading,     setIsCreateLoading]     = useState(false);
+  const [actionLoadingKey,    setActionLoadingKey]    = useState('');
+  const [selectedFiles,       setSelectedFiles]       = useState([]);
 
-  // Modals
-  const [createOpen, setCreateOpen] = useState(false);
-  const [drawerTask, setDrawerTask] = useState(null);
-  const [completeModal, setCompleteModal] = useState({ open: false, taskId: null, taskSubject: '' });
+  const [createOpen,        setCreateOpen]        = useState(false);
+  const [drawerTask,        setDrawerTask]        = useState(null);
+  const [completeModal,     setCompleteModal]     = useState({ open: false, taskId: null, taskSubject: '' });
   const [completionSummary, setCompletionSummary] = useState('');
-  const [completionFiles, setCompletionFiles] = useState([]);
+  const [completionFiles,   setCompletionFiles]   = useState([]);
 
-  const fileInputRef = useRef(null);
+  const fileInputRef           = useRef(null);
   const completionFileInputRef = useRef(null);
-
   const [form, setForm] = useState({ subject: '', description: '', tag: 'task', assignedTo: '' });
 
   const showToastRef = useRef(showToast);
@@ -424,7 +532,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
   const buildHeaders = useCallback(() => {
     const h = {};
-    if (user?.id) h['X-User-Id'] = String(user.id);
+    if (user?.id)     h['X-User-Id'] = String(user.id);
     if (user?.apiKey) h['X-API-Key'] = user.apiKey;
     return typeof withAccessTokenHeader === 'function' ? withAccessTokenHeader(h) : h;
   }, [user?.id, user?.apiKey, withAccessTokenHeader]);
@@ -442,11 +550,11 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   const fetchTasks = useCallback(async () => {
     setIsTasksLoading(true);
     try {
-      const res = await axios.get(`${apiBaseUrl}/api/tasks`, { headers: buildHeaders() });
+      const res  = await axios.get(`${apiBaseUrl}/api/tasks`, { headers: buildHeaders() });
       const list = Array.isArray(res?.data?.tasks) ? res.data.tasks : [];
       setTasks(list);
-      // Sync drawer task if open
-      setDrawerTask(prev => prev ? (list.find(t => t.id === prev.id) || prev) : null);
+      // Update drawer content in-place without closing it
+      setDrawerTask(prev => prev ? (list.find(t => t.id === prev.id) ?? prev) : null);
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось загрузить задачи', 'error');
     } finally { setIsTasksLoading(false); }
@@ -464,16 +572,16 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     [tasks, currentUserId]
   );
 
-  /* ── Create task ── */
+  /* ── Create ── */
   const handleCreate = async (e) => {
     e.preventDefault();
     if (!form.subject.trim()) { notify('Укажите тему задачи', 'error'); return; }
-    if (!form.assignedTo) { notify('Выберите сотрудника', 'error'); return; }
+    if (!form.assignedTo)     { notify('Выберите сотрудника', 'error'); return; }
 
     const body = new FormData();
-    body.append('subject', form.subject.trim());
+    body.append('subject',     form.subject.trim());
     body.append('description', form.description.trim());
-    body.append('tag', form.tag);
+    body.append('tag',         form.tag);
     body.append('assigned_to', String(form.assignedTo));
     selectedFiles.forEach(f => body.append('files', f));
 
@@ -493,7 +601,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   };
 
   /* ── Update status ── */
-  const updateStatus = async (taskId, action) => {
+  const updateStatus = useCallback(async (taskId, action) => {
     const comment = action === 'returned'
       ? (window.prompt('Комментарий по доработке (необязательно):', '') || '').trim()
       : '';
@@ -510,7 +618,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось обновить статус', 'error');
     } finally { setActionLoadingKey(''); }
-  };
+  }, [apiBaseUrl, buildHeaders, notify, fetchTasks]);
 
   /* ── Complete modal ── */
   const openCompleteModal = useCallback((task) => {
@@ -552,27 +660,27 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
   }, [completeModal, completionSummary, completionFiles, apiBaseUrl, buildHeaders, notify, closeCompleteModal, fetchTasks]);
 
   /* ── Download ── */
-  const downloadAttachment = async (att) => {
+  const downloadAttachment = useCallback(async (att) => {
     try {
       const res = await axios.get(
         `${apiBaseUrl}/api/tasks/attachments/${att.id}/download`,
         { headers: buildHeaders(), responseType: 'blob' }
       );
       const blob = new Blob([res.data], { type: att.content_type || 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
       a.href = url; a.download = att.file_name || `attachment-${att.id}`;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось скачать файл', 'error');
     }
-  };
+  }, [apiBaseUrl, buildHeaders, notify]);
 
-  /* ── Action buttons for a task ── */
-  const getActionButtons = (task) => {
+  /* ── Action buttons ── */
+  const getActionButtons = useCallback((task) => {
     const assigneeId = Number(task?.assignee?.id || 0);
-    const creatorId  = Number(task?.creator?.id || 0);
+    const creatorId  = Number(task?.creator?.id  || 0);
     const isAssignee = assigneeId === currentUserId;
     const canReview  = !isAssignee && (user?.role === 'admin' || creatorId === currentUserId || user?.role === 'sv');
     const s = task?.status;
@@ -582,183 +690,20 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
     if (isAssignee && (s === 'in_progress' || s === 'returned'))
       btns.push({ action: 'completed', label: 'Выполнить', cls: 'tv-btn-indigo' });
     if (canReview && s === 'completed') {
-      btns.push({ action: 'accepted', label: 'Принять', cls: 'tv-btn-emerald' });
-      btns.push({ action: 'returned', label: 'Вернуть', cls: 'tv-btn-rose' });
+      btns.push({ action: 'accepted', label: 'Принять',  cls: 'tv-btn-emerald' });
+      btns.push({ action: 'returned', label: 'Вернуть',  cls: 'tv-btn-rose' });
     }
     if (canReview && s === 'accepted')
       btns.push({ action: 'reopened', label: 'Возобновить', cls: 'tv-btn-ghost' });
     return btns;
-  };
+  }, [currentUserId, user?.role]);
 
-  /* ── Task Row ── */
-  const TaskRow = ({ task }) => {
-    const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray', dot: '#ccc' };
-    return (
-      <div className="tv-task-row" onClick={() => setDrawerTask(task)}>
-        <span className="tv-task-row-dot" style={{ background: sm.dot }} />
-        <span className="tv-task-row-subject">{task.subject || 'Без темы'}</span>
-        <span className="tv-task-row-meta">
-          <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
-          <span style={{ color: 'var(--ink-3)', fontSize: 12 }}>{task?.assignee?.name || '—'}</span>
-          <span style={{ color: 'var(--ink-3)', fontSize: 12 }}>{fmt(task.created_at)}</span>
-          <ChevronRight />
-        </span>
-      </div>
-    );
-  };
-
-  /* ── Task Drawer ── */
-  const TaskDrawer = ({ task }) => {
-    if (!task) return null;
-    const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray', dot: '#ccc' };
-    const attachments = Array.isArray(task.attachments) ? task.attachments : [];
-    const compAttachments = Array.isArray(task.completion_attachments) ? task.completion_attachments : [];
-    const history = Array.isArray(task.history) ? task.history : [];
-    const btns = getActionButtons(task);
-
-    return (
-      <>
-        <div className="tv-overlay" onClick={() => setDrawerTask(null)} />
-        <div className="tv-drawer">
-          <div className="tv-drawer-header">
-            <div className="tv-drawer-header-text">
-              <h2 className="tv-drawer-title">{task.subject || 'Без темы'}</h2>
-              <div className="tv-drawer-badges">
-                <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
-                <span className="tv-badge tv-badge-gray">{TAG_LABELS[task.tag] || task.tag || '—'}</span>
-              </div>
-            </div>
-            <button className="tv-drawer-close" onClick={() => setDrawerTask(null)} aria-label="Закрыть">
-              <CloseIcon />
-            </button>
-          </div>
-
-          <div className="tv-drawer-body">
-            {/* Meta grid */}
-            <div className="tv-info-grid">
-              <div className="tv-info-item">
-                <label>Исполнитель</label>
-                <span>{task?.assignee?.name || '—'}</span>
-              </div>
-              <div className="tv-info-item">
-                <label>Постановщик</label>
-                <span>{task?.creator?.name || '—'}</span>
-              </div>
-              <div className="tv-info-item">
-                <label>Создано</label>
-                <span>{fmt(task.created_at)}</span>
-              </div>
-              <div className="tv-info-item">
-                <label>Статус</label>
-                <span>{sm.label}</span>
-              </div>
-            </div>
-
-            {task.description && (
-              <>
-                <hr className="tv-divider" />
-                <div>
-                  <p className="tv-block-label">Описание</p>
-                  <p className="tv-description">{task.description}</p>
-                </div>
-              </>
-            )}
-
-            {attachments.length > 0 && (
-              <>
-                <hr className="tv-divider" />
-                <div>
-                  <p className="tv-block-label">Файлы задачи</p>
-                  <div className="tv-file-list">
-                    {attachments.map(att => (
-                      <button key={att.id} className="tv-file-btn" onClick={() => downloadAttachment(att)}>
-                        <FileIcon />{att.file_name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
-
-            {(task.completion_summary || compAttachments.length > 0) && (
-              <>
-                <hr className="tv-divider" />
-                <div className="tv-completion-block">
-                  <p className="tv-block-label">Итоги выполнения</p>
-                  {task.completion_summary && (
-                    <p className="tv-description" style={{ marginBottom: compAttachments.length ? 10 : 0 }}>
-                      {task.completion_summary}
-                    </p>
-                  )}
-                  {compAttachments.length > 0 && (
-                    <div className="tv-file-list">
-                      {compAttachments.map(att => (
-                        <button key={att.id} className="tv-file-btn" onClick={() => downloadAttachment(att)}
-                          style={{ background: '#e0e7ff', borderColor: '#c7d2fe', color: '#3730a3' }}>
-                          <FileIcon />{att.file_name}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-
-            {history.length > 0 && (
-              <>
-                <hr className="tv-divider" />
-                <div>
-                  <p className="tv-block-label">История</p>
-                  <div className="tv-history-list">
-                    {history.map((item, i) => (
-                      <div key={i} className="tv-history-item">
-                        <span className="tv-history-status">
-                          {HISTORY_LABELS[item.status_code] || item.status_code}
-                        </span>
-                        <span className="tv-history-time">{fmt(item.changed_at)}</span>
-                        {item.changed_by_name && <span className="tv-history-who">{item.changed_by_name}</span>}
-                        {item.comment && <span className="tv-history-comment">— {item.comment}</span>}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-
-          {btns.length > 0 && (
-            <div className="tv-drawer-footer">
-              {btns.map(btn => {
-                const key = `${task.id}:${btn.action}`;
-                const loading = actionLoadingKey === key;
-                return (
-                  <button
-                    key={btn.action}
-                    className={`tv-btn ${btn.cls}`}
-                    disabled={!!actionLoadingKey}
-                    onClick={() => {
-                      if (btn.action === 'completed') { openCompleteModal(task); return; }
-                      updateStatus(task.id, btn.action);
-                    }}
-                  >
-                    {loading ? 'Сохраняю...' : btn.label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </>
-    );
-  };
-
-  /* ── Task list render ── */
   const renderList = (list, emptyText) => {
     if (isTasksLoading) return <div className="tv-loading">Загрузка...</div>;
-    if (!list.length) return <div className="tv-empty">{emptyText}</div>;
+    if (!list.length)   return <div className="tv-empty">{emptyText}</div>;
     return (
       <div className="tv-task-list">
-        {list.map(t => <TaskRow key={t.id} task={t} />)}
+        {list.map(t => <TaskRow key={t.id} task={t} onClick={setDrawerTask} />)}
       </div>
     );
   };
@@ -772,8 +717,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         <div className="tv-section-header">
           <span className="tv-section-title heading">Мои задачи</span>
           <button className="tv-btn tv-btn-ghost" onClick={fetchTasks} disabled={isTasksLoading}>
-            <RefreshCw size={13} strokeWidth={2} className={isTasksLoading ? 'tv-spin' : ''} />
-            {isTasksLoading ? 'Обновляю...' : 'Обновить'}
+            <RefreshIcon />{isTasksLoading ? 'Обновляю...' : 'Обновить'}
           </button>
         </div>
         {renderList(myTasks, 'У вас пока нет задач.')}
@@ -785,8 +729,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
           <span className="tv-section-title heading">Все задачи</span>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="tv-btn tv-btn-ghost" onClick={fetchTasks} disabled={isTasksLoading}>
-              <RefreshCw size={13} strokeWidth={2} className={isTasksLoading ? 'tv-spin' : ''} />
-              {isTasksLoading ? 'Обновляю...' : 'Обновить'}
+              <RefreshIcon />{isTasksLoading ? 'Обновляю...' : 'Обновить'}
             </button>
             <button className="tv-btn tv-btn-primary" onClick={() => setCreateOpen(true)}>
               <PlusIcon />Добавить задачу
@@ -796,8 +739,18 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
         {renderList(tasks, 'Пока задач нет.')}
       </div>
 
-      {/* Task Drawer */}
-      {drawerTask && <TaskDrawer task={drawerTask} />}
+      {/* Drawer — TaskDrawer is defined outside, so it won't remount on parent re-render */}
+      {drawerTask && (
+        <TaskDrawer
+          task={drawerTask}
+          onClose={() => setDrawerTask(null)}
+          actionLoadingKey={actionLoadingKey}
+          getActionButtons={getActionButtons}
+          openCompleteModal={openCompleteModal}
+          updateStatus={updateStatus}
+          downloadAttachment={downloadAttachment}
+        />
+      )}
 
       {/* Create Modal */}
       {createOpen && (
@@ -805,51 +758,51 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
           <div className="tv-modal" onClick={e => e.stopPropagation()}>
             <div className="tv-modal-header">
               <h3 className="tv-modal-title">Новая задача</h3>
-              <button className="tv-drawer-close" onClick={() => setCreateOpen(false)}><CloseIcon /></button>
+              <button className="tv-close-btn" onClick={() => setCreateOpen(false)}><CloseIcon /></button>
             </div>
             <form onSubmit={handleCreate}>
               <div className="tv-modal-body">
                 <div className="tv-form-grid">
-                  <div className="tv-form-field" style={{ gridColumn: '1 / -1' }}>
+                  <div className="tv-form-field">
                     <label>Тема</label>
                     <input className="tv-input" value={form.subject} maxLength={255} disabled={isCreateLoading}
                       placeholder="Введите тему задачи"
                       onChange={e => setForm(p => ({ ...p, subject: e.target.value }))} />
                   </div>
-                  <div className="tv-form-field" style={{ gridColumn: '1 / -1' }}>
+                  <div className="tv-form-field">
                     <label>Описание</label>
                     <textarea className="tv-textarea" value={form.description} disabled={isCreateLoading}
                       placeholder="Опишите задачу (необязательно)"
                       onChange={e => setForm(p => ({ ...p, description: e.target.value }))} />
                   </div>
-                  <div className="tv-form-field">
-                    <label>Тег</label>
-                    <select className="tv-select" value={form.tag} disabled={isCreateLoading}
-                      onChange={e => setForm(p => ({ ...p, tag: e.target.value }))}>
-                      {TAG_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                    </select>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+                    <div className="tv-form-field">
+                      <label>Тег</label>
+                      <select className="tv-select" value={form.tag} disabled={isCreateLoading}
+                        onChange={e => setForm(p => ({ ...p, tag: e.target.value }))}>
+                        {TAG_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                      </select>
+                    </div>
+                    <div className="tv-form-field">
+                      <label>Исполнитель</label>
+                      <select className="tv-select" value={form.assignedTo}
+                        disabled={isCreateLoading || isRecipientsLoading}
+                        onChange={e => setForm(p => ({ ...p, assignedTo: e.target.value }))}>
+                        <option value="">Выберите сотрудника</option>
+                        {recipients.map(r => (
+                          <option key={r.id} value={r.id}>
+                            {r.name} ({ROLE_LABELS[r.role] || r.role})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
                   <div className="tv-form-field">
-                    <label>Исполнитель</label>
-                    <select className="tv-select" value={form.assignedTo}
-                      disabled={isCreateLoading || isRecipientsLoading}
-                      onChange={e => setForm(p => ({ ...p, assignedTo: e.target.value }))}>
-                      <option value="">Выберите сотрудника</option>
-                      {recipients.map(r => (
-                        <option key={r.id} value={r.id}>
-                          {r.name} ({ROLE_LABELS[r.role] || r.role})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="tv-form-field" style={{ gridColumn: '1 / -1' }}>
                     <label>Файлы</label>
                     <input ref={fileInputRef} type="file" multiple className="tv-input" disabled={isCreateLoading}
                       onChange={e => setSelectedFiles(Array.from(e.target.files || []))} />
                     {selectedFiles.length > 0 && (
-                      <p style={{ fontSize: 11, color: 'var(--ink-3)', marginTop: 4 }}>
-                        Прикреплено: {selectedFiles.length}
-                      </p>
+                      <p style={{ fontSize: 11, color: 'var(--ink-3)', marginTop: 4 }}>Прикреплено: {selectedFiles.length}</p>
                     )}
                   </div>
                 </div>
@@ -873,7 +826,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
           <div className="tv-modal" onClick={e => e.stopPropagation()}>
             <div className="tv-modal-header">
               <h3 className="tv-modal-title">Завершение задачи</h3>
-              <button className="tv-drawer-close" onClick={closeCompleteModal}><CloseIcon /></button>
+              <button className="tv-close-btn" onClick={closeCompleteModal}><CloseIcon /></button>
             </div>
             <form onSubmit={submitComplete}>
               <div className="tv-modal-body">
@@ -897,9 +850,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                       disabled={!!actionLoadingKey}
                       onChange={e => setCompletionFiles(Array.from(e.target.files || []))} />
                     {completionFiles.length > 0 && (
-                      <p style={{ fontSize: 11, color: 'var(--ink-3)', marginTop: 4 }}>
-                        Прикреплено: {completionFiles.length}
-                      </p>
+                      <p style={{ fontSize: 11, color: 'var(--ink-3)', marginTop: 4 }}>Прикреплено: {completionFiles.length}</p>
                     )}
                   </div>
                 </div>
@@ -908,8 +859,7 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                 <button type="button" className="tv-btn tv-btn-ghost" disabled={!!actionLoadingKey}
                   onClick={closeCompleteModal}>Отмена</button>
                 <button type="submit" className="tv-btn tv-btn-indigo" disabled={!!actionLoadingKey}>
-                  {actionLoadingKey === `${completeModal.taskId}:completed`
-                    ? 'Сохраняю...' : 'Отметить выполненной'}
+                  {actionLoadingKey === `${completeModal.taskId}:completed` ? 'Сохраняю...' : 'Отметить выполненной'}
                 </button>
               </div>
             </form>
