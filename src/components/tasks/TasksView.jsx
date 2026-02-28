@@ -29,6 +29,11 @@ const TAG_LABELS = TAG_OPTIONS.reduce((acc, item) => {
     return acc;
 }, {});
 
+const ROLE_LABELS = {
+    admin: 'Админ',
+    sv: 'СВ'
+};
+
 const formatDateTime = (value) => {
     if (!value) return '—';
     const date = new Date(value);
@@ -417,11 +422,11 @@ const TasksView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
                             >
                                 <option value="">Выберите сотрудника</option>
                                 {recipients.map((recipient) => (
-                                    <option key={recipient.id} value={recipient.id}>
-                                        {recipient.name} ({recipient.role === 'sv' ? 'СВ' : 'Оператор'})
-                                    </option>
-                                ))}
-                            </select>
+                                <option key={recipient.id} value={recipient.id}>
+                                        {recipient.name} ({ROLE_LABELS[recipient.role] || recipient.role})
+                                </option>
+                            ))}
+                        </select>
                         </div>
 
                         <div className="md:col-span-2">

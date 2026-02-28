@@ -5702,23 +5702,14 @@ class Database:
         requester_id = int(requester_id)
         role = str(requester_role or '').lower()
         with self._get_cursor() as cursor:
-            if role == 'admin':
+            if role in ('admin', 'sv'):
                 cursor.execute("""
                     SELECT u.id, u.name, u.role, u.supervisor_id, COALESCE(u.status, 'working')
                     FROM users u
-                    WHERE u.role IN ('sv', 'operator')
+                    WHERE u.role IN ('admin', 'sv')
                       AND COALESCE(u.status, 'working') <> 'fired'
-                    ORDER BY CASE WHEN u.role = 'sv' THEN 0 ELSE 1 END, u.name
+                    ORDER BY CASE WHEN u.role = 'admin' THEN 0 ELSE 1 END, u.name
                 """)
-            elif role == 'sv':
-                cursor.execute("""
-                    SELECT u.id, u.name, u.role, u.supervisor_id, COALESCE(u.status, 'working')
-                    FROM users u
-                    WHERE u.role = 'operator'
-                      AND u.supervisor_id = %s
-                      AND COALESCE(u.status, 'working') <> 'fired'
-                    ORDER BY u.name
-                """, (requester_id,))
             else:
                 return []
 
@@ -5825,9 +5816,8 @@ class Database:
                     WHERE
                         t.created_by = %s
                         OR t.assigned_to = %s
-                        OR (assignee.role = 'operator' AND assignee.supervisor_id = %s)
                     ORDER BY t.created_at DESC, t.id DESC
-                """, (requester_id, requester_id, requester_id))
+                """, (requester_id, requester_id))
             else:
                 return []
 
