@@ -4490,6 +4490,221 @@ class Database:
                 [(shift_id, b['start'], b['end']) for b in breaks]
             )
 
+    def _load_shift_breaks_tx(self, cursor, shift_id):
+        cursor.execute(
+            """
+            SELECT start_minutes, end_minutes
+            FROM shift_breaks
+            WHERE shift_id = %s
+            ORDER BY start_minutes, end_minutes
+            """,
+            (int(shift_id),)
+        )
+        result = []
+        for start_minutes, end_minutes in cursor.fetchall() or []:
+            result.append({
+                'start': int(start_minutes),
+                'end': int(end_minutes)
+            })
+        return result
+
+    def _break_intervals_overlap(self, a, b):
+        return int(a['start']) < int(b['end']) and int(b['start']) < int(a['end'])
+
+    def _merge_break_intervals(self, items):
+        if not items:
+            return []
+        normalized = sorted(
+            [
+                {'start': int(x.get('start', 0)), 'end': int(x.get('end', 0))}
+                for x in items
+                if int(x.get('end', 0)) > int(x.get('start', 0))
+            ],
+            key=lambda x: (x['start'], x['end'])
+        )
+        if not normalized:
+            return []
+        result = [dict(normalized[0])]
+        for cur in normalized[1:]:
+            last = result[-1]
+            if cur['start'] <= last['end']:
+                last['end'] = max(last['end'], cur['end'])
+            else:
+                result.append(dict(cur))
+        return result
+
+    def _find_non_overlapping_break_start(self, desired_start, length, seg_start, seg_end, occupied_intervals):
+        step = 5
+
+        def snap(v):
+            return int(round(float(v) / step) * step)
+
+        desired_start = snap(desired_start)
+        candidates = [0]
+        max_shift = max(int(seg_end) - int(seg_start), 60)
+        for delta in range(step, max_shift + step, step):
+            candidates.append(delta)
+            candidates.append(-delta)
+
+        for delta in candidates:
+            s = desired_start + delta
+            start = max(int(seg_start), min(int(seg_end) - int(length), s))
+            end = start + int(length)
+            if start < int(seg_start) or end > int(seg_end):
+                continue
+            interval = {'start': start, 'end': end}
+            if any(self._break_intervals_overlap(interval, occ) for occ in (occupied_intervals or [])):
+                continue
+            return start
+        return None
+
+    def _load_occupied_break_intervals_for_operator_date_tx(self, cursor, operator_id, shift_date):
+        """
+        Возвращает занятые интервалы перерывов других операторов того же направления
+        для shift_date с учетом переходов через полночь (пред/след день со сдвигом).
+        """
+        operator_id = int(operator_id)
+        date_obj = self._normalize_schedule_date(shift_date)
+
+        cursor.execute(
+            """
+            SELECT direction_id
+            FROM users
+            WHERE id = %s
+            LIMIT 1
+            """,
+            (operator_id,)
+        )
+        row = cursor.fetchone()
+        direction_id = row[0] if row else None
+        if direction_id is None:
+            return []
+
+        prev_date = date_obj - timedelta(days=1)
+        next_date = date_obj + timedelta(days=1)
+        occupied = []
+
+        cursor.execute(
+            """
+            SELECT ws.shift_date, sb.start_minutes, sb.end_minutes
+            FROM work_shifts ws
+            JOIN users u ON u.id = ws.operator_id
+            JOIN shift_breaks sb ON sb.shift_id = ws.id
+            WHERE ws.operator_id <> %s
+              AND u.role = 'operator'
+              AND u.direction_id = %s
+              AND ws.shift_date IN (%s, %s, %s)
+            """,
+            (operator_id, direction_id, prev_date, date_obj, next_date)
+        )
+
+        for break_date, start_minutes, end_minutes in cursor.fetchall() or []:
+            try:
+                s = int(start_minutes)
+                e = int(end_minutes)
+            except Exception:
+                continue
+            if e <= s:
+                continue
+
+            if break_date == prev_date:
+                s -= 1440
+                e -= 1440
+            elif break_date == next_date:
+                s += 1440
+                e += 1440
+
+            ns = max(0, min(2880, int(s)))
+            ne = max(0, min(2880, int(e)))
+            if ne > ns:
+                occupied.append({'start': ns, 'end': ne})
+
+        return self._merge_break_intervals(occupied)
+
+    def _adjust_shift_breaks_against_occupied_tx(self, cursor, operator_id, shift_date, start_time, end_time, breaks):
+        if not isinstance(breaks, list) or not breaks:
+            return []
+
+        seg_start, seg_end = self._schedule_interval_minutes(start_time, end_time)
+        seg_start = max(0, seg_start)
+        seg_end = max(seg_start, min(2880, seg_end))
+        if seg_end <= seg_start:
+            return []
+
+        occupied = self._load_occupied_break_intervals_for_operator_date_tx(cursor, operator_id, shift_date)
+        new_breaks = []
+        for b in breaks:
+            b_start = int(b.get('start', 0))
+            b_end = int(b.get('end', 0))
+            length = b_end - b_start
+            if length <= 0 or (seg_end - seg_start) <= 0:
+                continue
+
+            desired_start = max(seg_start, min(seg_end - length, b_start))
+            found = self._find_non_overlapping_break_start(
+                desired_start=desired_start,
+                length=length,
+                seg_start=seg_start,
+                seg_end=seg_end,
+                occupied_intervals=occupied
+            )
+            if found is not None:
+                nb = {'start': int(found), 'end': int(found) + int(length)}
+            else:
+                clamped_start = max(seg_start, min(seg_end - length, b_start))
+                clamped_end = max(seg_start, min(seg_end, b_end))
+                if clamped_end <= clamped_start:
+                    continue
+                nb = {'start': int(clamped_start), 'end': int(clamped_end)}
+
+            new_breaks.append(nb)
+            occupied.append(nb)
+            occupied = self._merge_break_intervals(occupied)
+
+        return new_breaks
+
+    def _resolve_breaks_for_day_replacement_tx(self, cursor, operator_id, shift_date, start_time, end_time, breaks):
+        """
+        Для replace-сценариев (bulk set_shift): если клиент прислал старые автоперерывы
+        и смена стала короче, переводим на серверную автогенерацию (возвращаем None).
+        """
+        if breaks is None:
+            return None
+
+        incoming_breaks_norm = self._normalize_shift_breaks(breaks)
+        cursor.execute(
+            """
+            SELECT id, start_time, end_time
+            FROM work_shifts
+            WHERE operator_id = %s AND shift_date = %s
+            ORDER BY start_time
+            """,
+            (int(operator_id), self._normalize_schedule_date(shift_date))
+        )
+        existing_rows = cursor.fetchall() or []
+        if len(existing_rows) != 1:
+            return incoming_breaks_norm
+
+        shift_id, existing_start_value, existing_end_value = existing_rows[0]
+        existing_breaks = self._load_shift_breaks_tx(cursor, shift_id)
+        if not existing_breaks:
+            return incoming_breaks_norm
+        if incoming_breaks_norm != existing_breaks:
+            return incoming_breaks_norm
+
+        existing_start_min, existing_end_min = self._schedule_interval_minutes(existing_start_value, existing_end_value)
+        existing_duration = max(0, existing_end_min - existing_start_min)
+        existing_auto_breaks = self._compute_auto_shift_breaks_minutes(existing_start_min, existing_end_min)
+        if existing_breaks != existing_auto_breaks:
+            return incoming_breaks_norm
+
+        new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
+        new_duration = max(0, new_end_min - new_start_min)
+        if new_duration < existing_duration:
+            return None
+
+        return incoming_breaks_norm
+
     def _save_shift_tx(
         self,
         cursor,
@@ -4502,14 +4717,67 @@ class Database:
         previous_end_time=None
     ):
         new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
-        breaks_input = self._compute_auto_shift_breaks_minutes(new_start_min, new_end_min) if breaks is None else breaks
-        breaks_norm = self._normalize_shift_breaks(breaks_input)
+        new_duration_min = max(0, new_end_min - new_start_min)
 
         prev_start_obj = None
         prev_end_obj = None
         if previous_start_time is not None and previous_end_time is not None:
             prev_start_obj = self._normalize_schedule_time(previous_start_time, 'previous_start_time')
             prev_end_obj = self._normalize_schedule_time(previous_end_time, 'previous_end_time')
+
+        comparison_start_obj = prev_start_obj if prev_start_obj is not None else start_time
+        comparison_end_obj = prev_end_obj if prev_end_obj is not None else end_time
+        cursor.execute(
+            """
+            SELECT id, start_time, end_time
+            FROM work_shifts
+            WHERE operator_id = %s AND shift_date = %s
+              AND start_time = %s AND end_time = %s
+            LIMIT 1
+            """,
+            (operator_id, shift_date, comparison_start_obj, comparison_end_obj)
+        )
+        previous_shift_row = cursor.fetchone()
+        previous_shift_breaks = []
+        previous_shift_breaks_were_auto = False
+        previous_duration_min = 0
+        if previous_shift_row:
+            previous_shift_id, previous_start_value, previous_end_value = previous_shift_row
+            previous_start_min, previous_end_min = self._schedule_interval_minutes(previous_start_value, previous_end_value)
+            previous_duration_min = max(0, previous_end_min - previous_start_min)
+            previous_shift_breaks = self._load_shift_breaks_tx(cursor, previous_shift_id)
+            previous_auto_breaks = self._compute_auto_shift_breaks_minutes(previous_start_min, previous_end_min)
+            previous_shift_breaks_were_auto = (previous_shift_breaks == previous_auto_breaks)
+
+        if breaks is None:
+            breaks_norm = self._compute_auto_shift_breaks_minutes(new_start_min, new_end_min)
+        else:
+            incoming_breaks_norm = self._normalize_shift_breaks(breaks)
+            should_regenerate_auto_breaks = (
+                previous_shift_row is not None
+                and previous_shift_breaks_were_auto
+                and incoming_breaks_norm == previous_shift_breaks
+                and new_duration_min < previous_duration_min
+            )
+            breaks_norm = (
+                self._compute_auto_shift_breaks_minutes(new_start_min, new_end_min)
+                if should_regenerate_auto_breaks
+                else incoming_breaks_norm
+            )
+
+        # Приводим перерывы к правилам анти-пересечения между операторами одного направления.
+        breaks_norm = self._adjust_shift_breaks_against_occupied_tx(
+            cursor=cursor,
+            operator_id=operator_id,
+            shift_date=shift_date,
+            start_time=start_time,
+            end_time=end_time,
+            breaks=breaks_norm
+        )
+
+        # Если редактировали существующую смену по previous_* и время изменилось,
+        # удаляем старую запись, чтобы не оставлять дубль.
+        if prev_start_obj is not None and prev_end_obj is not None:
             if (
                 prev_start_obj != start_time or prev_end_obj != end_time
             ):
@@ -5203,6 +5471,14 @@ class Database:
                 if action_type == 'set_shift':
                     start_time_obj = self._normalize_schedule_time(item.get('start') or item.get('start_time'), 'start')
                     end_time_obj = self._normalize_schedule_time(item.get('end') or item.get('end_time'), 'end')
+                    resolved_breaks = self._resolve_breaks_for_day_replacement_tx(
+                        cursor=cursor,
+                        operator_id=operator_id,
+                        shift_date=date_obj,
+                        start_time=start_time_obj,
+                        end_time=end_time_obj,
+                        breaks=item.get('breaks')
+                    )
                     deleted_count = self._delete_all_shifts_for_day_tx(cursor, operator_id, date_obj)
                     shift_id = self._save_shift_tx(
                         cursor=cursor,
@@ -5210,7 +5486,7 @@ class Database:
                         shift_date=date_obj,
                         start_time=start_time_obj,
                         end_time=end_time_obj,
-                        breaks=item.get('breaks')
+                        breaks=resolved_breaks
                     )
                     summary['set_shift'] += 1
                     summary['deleted_shift_rows'] += deleted_count

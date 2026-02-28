@@ -6241,8 +6241,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 const isDayOff = op?.daysOff?.includes(date) ?? false;
                 if (editIndex !== null && arr[editIndex]) {
                 const seg = arr[editIndex];
-                const breaks = (seg.breaks ?? []).map(b => ({ start: b.start, end: b.end }));
-                setModalState({ open: true, opId, date, start: seg.start, end: seg.end, editIndex, breaks, isDayOff, multipleDates: null, multipleTargets: null, showAddPanel: true, ...buildModalStatusDraftForDate(opId, date) });
+                // Держим breaks пустым, чтобы автоперегенерация могла сработать при изменении длительности.
+                setModalState({ open: true, opId, date, start: seg.start, end: seg.end, editIndex, breaks: [], isDayOff, multipleDates: null, multipleTargets: null, showAddPanel: true, ...buildModalStatusDraftForDate(opId, date) });
                 } else {
                 setModalState({ open: true, opId, date, start: '09:00', end: '17:00', editIndex: null, breaks: [], isDayOff, multipleDates: null, multipleTargets: null, showAddPanel: false, ...buildModalStatusDraftForDate(opId, date) });
                 }
@@ -6396,6 +6396,25 @@ const withAccessTokenHeader = (headers = {}) => {
                   ...s,
                   breaks: Array.isArray(s.breaks) ? s.breaks.map(b => ({ start: b.start, end: b.end })) : []
                 }));
+                const prevSegBeforeEdit = (editIndex !== null && existing[editIndex]) ? existing[editIndex] : null;
+                const normalizedDuration = (segStart, segEnd) => {
+                  const s = Number(segStart);
+                  let e = Number(segEnd);
+                  if (!Number.isFinite(s) || !Number.isFinite(e)) return 0;
+                  if (e <= s) e += 1440;
+                  return Math.max(0, e - s);
+                };
+                const inputStartMinRaw = timeToMinutes(start);
+                const inputEndMinRaw = timeToMinutes(end);
+                const newInputDurationMin = normalizedDuration(inputStartMinRaw, inputEndMinRaw);
+                const prevStartMin = prevSegBeforeEdit
+                  ? (prevSegBeforeEdit.__startMin ?? timeToMinutes(prevSegBeforeEdit.start))
+                  : null;
+                const prevEndMin = prevSegBeforeEdit
+                  ? (prevSegBeforeEdit.__endMin ?? timeToMinutes(prevSegBeforeEdit.end))
+                  : null;
+                const prevDurationMin = prevSegBeforeEdit ? normalizedDuration(prevStartMin, prevEndMin) : 0;
+                const shouldRegenerateBreaksByShortening = !hasExplicitBreaks && editIndex !== null && prevSegBeforeEdit && newInputDurationMin < prevDurationMin;
 
                 if (editIndex === null) {
                   existing.push({ start, end });
@@ -6422,6 +6441,12 @@ const withAccessTokenHeader = (headers = {}) => {
                 let seedBreaks = hasExplicitBreaks
                   ? breaks.map(b => ({ start: b.start, end: b.end }))
                   : (Array.isArray(targetSeg.breaks) ? targetSeg.breaks.map(b => ({ start: b.start, end: b.end })) : []);
+
+                if (shouldRegenerateBreaksByShortening && !hasExplicitBreaks) {
+                  const sMin = targetSeg.__startMin ?? timeToMinutes(targetSeg.start);
+                  const eMin = targetSeg.__endMin ?? (timeToMinutes(targetSeg.end) + (timeToMinutes(targetSeg.end) <= timeToMinutes(targetSeg.start) ? 1440 : 0));
+                  seedBreaks = computeBreaksForShiftMinutes(sMin, eMin);
+                }
 
                 if ((!seedBreaks || seedBreaks.length === 0) && !hasExplicitBreaks) {
                   const sMin = targetSeg.__startMin ?? timeToMinutes(targetSeg.start);
@@ -9609,7 +9634,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <button 
                                             className="px-3 py-2 text-sm font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors flex items-center gap-1"
                                             onClick={() => {
-                                                setModalState(m => ({ ...m, start: seg.start, end: seg.end, editIndex: idx, breaks: (seg.breaks ?? []).map(b => ({ start: b.start, end: b.end })), showAddPanel: true }));
+                                                // Держим breaks пустым, чтобы при сокращении смены перерывы считались заново автоматически.
+                                                setModalState(m => ({ ...m, start: seg.start, end: seg.end, editIndex: idx, breaks: [], showAddPanel: true }));
                                             }}
                                         >
                                             <i className="fas fa-pen text-xs"></i>
