@@ -56,6 +56,7 @@ if (typeof window !== 'undefined') {
 const APP_BASE_URL = import.meta.env.BASE_URL || '/';
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
+const CALL_EVALUATION_EMBED_STATE_KEY = 'call_evaluation_embed_state';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
 
@@ -17893,15 +17894,41 @@ const withAccessTokenHeader = (headers = {}) => {
                 }
             };
 
-            const openCallEvaluationSection = ({ operatorId = null, operatorName = '', supervisorId = null, month = (selectedReportMonth || selectedMonth) } = {}) => {
-                const isAlreadyOpen = view === 'call_evaluation';
-
-                setCallEvaluationContext({
+            const openCallEvaluationSection = ({
+                operatorId = null,
+                operatorName = '',
+                supervisorId = null,
+                month = (selectedReportMonth || selectedMonth),
+                openInNewTab = false
+            } = {}) => {
+                const nextSelection = {
                     operatorId,
                     operatorName,
                     supervisorId,
                     month
-                });
+                };
+
+                if (openInNewTab) {
+                    try {
+                        const nextState = {
+                            user: user ? {
+                                id: user.id,
+                                role: user.role,
+                                name: user.name
+                            } : null,
+                            initialSelection: nextSelection
+                        };
+                        window.sessionStorage.setItem(CALL_EVALUATION_EMBED_STATE_KEY, JSON.stringify(nextState));
+                    } catch (error) {
+                        console.warn('Failed to store call evaluation context for new tab', error);
+                    }
+                    window.open(`${APP_BASE_URL}call_evaluation.html`, '_blank');
+                    return;
+                }
+
+                const isAlreadyOpen = view === 'call_evaluation';
+
+                setCallEvaluationContext(nextSelection);
                 if (!isAlreadyOpen) {
                     setCallEvaluationFrameReady(false);
                 }
@@ -21123,10 +21150,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                             <div className="flex items-center gap-2">
                                                             <button
-                                                                onClick={() => openCallEvaluationSection({
+                                                                onClick={(e) => openCallEvaluationSection({
                                                                     operatorId: op.id,
                                                                     operatorName: op.name,
-                                                                    month: selectedReportMonth || selectedMonth
+                                                                    month: selectedReportMonth || selectedMonth,
+                                                                    openInNewTab: Boolean(e?.ctrlKey || e?.metaKey)
                                                                 })}
                                                                 className="inline-flex items-center gap-2 bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition"
                                                                 title={`Оценить оператора ${op.name}`}
