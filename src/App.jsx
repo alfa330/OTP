@@ -4501,8 +4501,13 @@ const withAccessTokenHeader = (headers = {}) => {
             const parseDateStr = (s) => { const [y, m, day] = String(s).split('-').map(Number); return new Date(y, m - 1, day); };
             const addDays = (d, n) => { const r = new Date(d); r.setDate(r.getDate() + n); return r; };
             const isSameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+            const plannerNormalizeDirectionKey = (v) => String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+            const isChatManagerDirection = (directionValue) => {
+            const key = plannerNormalizeDirectionKey(directionValue);
+            return key === 'чат менеджер' || key === 'chat manager';
+            };
 
-            function computeBreaksForShiftMinutes(startMin, endMin) {
+            function computeBreaksForShiftMinutes(startMin, endMin, directionValue = null) {
             const dur = endMin - startMin;
             const breaks = [];
             const snap5 = (x) => Math.round(x / 5) * 5;
@@ -4511,19 +4516,32 @@ const withAccessTokenHeader = (headers = {}) => {
                 const s = snap5(center - size / 2);
                 breaks.push({ start: s, end: s + size });
             };
-            if (dur >= 5 * 60 && dur < 6 * 60) {
+            let useDefaultProfile = true;
+            if (isChatManagerDirection(directionValue)) {
+                if (dur >= 6 * 60 && dur < 9 * 60) {
+                pushCentered(startMin + dur * 0.5, 30);
+                useDefaultProfile = false;
+                } else if (dur >= 9 * 60 && dur <= 12 * 60) {
+                const centers = [startMin + dur / 3, startMin + 2 * dur / 3];
+                centers.forEach(c => pushCentered(c, 30));
+                useDefaultProfile = false;
+                }
+            }
+            if (useDefaultProfile) {
+                if (dur >= 5 * 60 && dur < 6 * 60) {
                 pushCentered(startMin + dur * 0.5, 15);
-            } else if (dur >= 6 * 60 && dur < 8 * 60) {
+                } else if (dur >= 6 * 60 && dur < 8 * 60) {
                 const centers = [startMin + dur / 3, startMin + 2 * dur / 3];
                 centers.forEach(c => pushCentered(c, 15));
-            } else if (dur >= 8 * 60 && dur < 11 * 60) {
+                } else if (dur >= 8 * 60 && dur < 11 * 60) {
                 const centers = [startMin + dur * 0.25, startMin + dur * 0.5, startMin + dur * 0.75];
                 const sizes = [15, 30, 15];
                 centers.forEach((c, i) => pushCentered(c, sizes[i]));
-            } else if (dur >= 11 * 60) {
+                } else if (dur >= 11 * 60) {
                 const centers = [startMin + dur * 0.2, startMin + dur * 0.45, startMin + dur * 0.7, startMin + dur * 0.87];
                 const sizes = [15, 30, 15, 15];
                 centers.forEach((c, i) => pushCentered(c, sizes[i]));
+                }
             }
             return breaks
                 .map(b => ({ start: Math.max(startMin, Math.min(endMin, snap5(b.start))), end: Math.max(startMin, Math.min(endMin, snap5(b.end))) }))
@@ -5109,7 +5127,7 @@ const withAccessTokenHeader = (headers = {}) => {
             for (const seg of segs) {
                 const rawSegStart = seg.__startMin ?? timeToMinutes(seg.start);
                 const rawSegEnd = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
-                seg.breaks = seg.breaks ?? computeBreaksForShiftMinutes(rawSegStart, rawSegEnd);
+                seg.breaks = seg.breaks ?? computeBreaksForShiftMinutes(rawSegStart, rawSegEnd, op?.direction);
                 const segStart = Math.max(0, rawSegStart);
                 const segEnd = Math.max(segStart, Math.min(2880, rawSegEnd));
                 const newBreaks = [];
@@ -5133,7 +5151,7 @@ const withAccessTokenHeader = (headers = {}) => {
             }
             }
 
-            function mergeSegments(segments) {
+            function mergeSegments(segments, directionValue = null) {
             if (!Array.isArray(segments) || segments.length === 0) return [];
             const intervals = segments.map(s => {
                 const start = timeToMinutes(s.start);
@@ -5158,7 +5176,7 @@ const withAccessTokenHeader = (headers = {}) => {
             return merged.map(m => {
                 const startStr = minutesToTime(m.start);
                 const endStr = minutesToTime(m.end % 1440);
-                const breaks = computeBreaksForShiftMinutes(m.start, m.end);
+                const breaks = computeBreaksForShiftMinutes(m.start, m.end, directionValue);
                 return { start: startStr, end: endStr, __startMin: m.start, __endMin: m.end, breaks };
             });
             }
@@ -6487,7 +6505,7 @@ const withAccessTokenHeader = (headers = {}) => {
                   existing[editIndex] = { start, end };
                 }
 
-                const merged = mergeSegments(existing);
+                const merged = mergeSegments(existing, simOp?.direction);
                 const inputStartMin = timeToMinutes(start);
                 const inputEndMin = timeToMinutes(end);
                 const inputEndNorm = (inputEndMin <= inputStartMin) ? (inputEndMin + 1440) : inputEndMin;
@@ -6508,13 +6526,13 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (shouldRegenerateBreaksByShortening && !hasExplicitBreaks) {
                   const sMin = targetSeg.__startMin ?? timeToMinutes(targetSeg.start);
                   const eMin = targetSeg.__endMin ?? (timeToMinutes(targetSeg.end) + (timeToMinutes(targetSeg.end) <= timeToMinutes(targetSeg.start) ? 1440 : 0));
-                  seedBreaks = computeBreaksForShiftMinutes(sMin, eMin);
+                  seedBreaks = computeBreaksForShiftMinutes(sMin, eMin, simOp?.direction);
                 }
 
                 if ((!seedBreaks || seedBreaks.length === 0) && !hasExplicitBreaks) {
                   const sMin = targetSeg.__startMin ?? timeToMinutes(targetSeg.start);
                   const eMin = targetSeg.__endMin ?? (timeToMinutes(targetSeg.end) + (timeToMinutes(targetSeg.end) <= timeToMinutes(targetSeg.start) ? 1440 : 0));
-                  seedBreaks = computeBreaksForShiftMinutes(sMin, eMin);
+                  seedBreaks = computeBreaksForShiftMinutes(sMin, eMin, simOp?.direction);
                 }
 
                 targetSeg.breaks = seedBreaks.map(b => ({ start: b.start, end: b.end }));
@@ -7050,7 +7068,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     } else {
                       arr[editIndex] = { start, end };
                     }
-                    const merged = mergeSegments(arr);
+                    const merged = mergeSegments(arr, op?.direction);
                     // подставим перерывы, если они были
                     if (breaksToSend && editIndex !== null) {
                       const seg = merged.find(s => s.start === effectiveStart && s.end === effectiveEnd);
@@ -7101,7 +7119,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     if (!op) return prev;
                     const arr = (op.shifts[date] ?? []).slice();
                     arr.splice(index, 1);
-                    if (arr.length === 0) delete op.shifts[date]; else op.shifts[date] = mergeSegments(arr);
+                    if (arr.length === 0) delete op.shifts[date]; else op.shifts[date] = mergeSegments(arr, op?.direction);
                     return copy;
                     });
                 } catch (error) {
@@ -7157,7 +7175,11 @@ const withAccessTokenHeader = (headers = {}) => {
             const getBreakPartsForPart = (op, p, dateStr) => {
                 const srcSeg = op.shifts?.[p.sourceDate]?.[p.sourceIndex];
                 if (!srcSeg) return [];
-                const brs = srcSeg.breaks ?? computeBreaksForShiftMinutes(srcSeg.__startMin ?? timeToMinutes(srcSeg.start), srcSeg.__endMin ?? (timeToMinutes(srcSeg.end) + (timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start) ? 1440 : 0)));
+                const brs = srcSeg.breaks ?? computeBreaksForShiftMinutes(
+                    srcSeg.__startMin ?? timeToMinutes(srcSeg.start),
+                    srcSeg.__endMin ?? (timeToMinutes(srcSeg.end) + (timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start) ? 1440 : 0)),
+                    op?.direction
+                );
                 const res = [];
                 brs.forEach(b => {
                 let bStartInDay = b.start;
@@ -7186,8 +7208,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (segDur <= 0) return null;
 
                 const generatedBreaks = seg
-                    ? (seg.breaks ?? computeBreaksForShiftMinutes(segStartMin, segEndMin))
-                    : computeBreaksForShiftMinutes(segStartMin, segEndMin);
+                    ? (seg.breaks ?? computeBreaksForShiftMinutes(segStartMin, segEndMin, op?.direction))
+                    : computeBreaksForShiftMinutes(segStartMin, segEndMin, op?.direction);
                 const breaksLocal = (modalState.breaks && modalState.breaks.length ? modalState.breaks : generatedBreaks)
                     .map(b => ({ start: b.start, end: b.end }));
 
@@ -7920,6 +7942,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 const nowTs = now.getTime();
                 const items = [];
                 const src = myLiveScheduleData || myScheduleData;
+                const myDirection = src?.direction;
                 const shiftsByDate = src?.shifts;
                 if (!shiftsByDate || typeof shiftsByDate !== 'object') return items;
 
@@ -7945,7 +7968,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                         const breaksSource = Array.isArray(seg?.breaks)
                             ? seg.breaks
-                            : computeBreaksForShiftMinutes(sMin, eMin);
+                            : computeBreaksForShiftMinutes(sMin, eMin, myDirection);
                         const breaks = (Array.isArray(breaksSource) ? breaksSource : [])
                             .map(b => {
                                 const start = Number(b?.start);
@@ -8099,6 +8122,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const breakReminderCandidates = useMemo(() => {
                 const result = [];
                 const reminderSource = myLiveScheduleData || myScheduleData;
+                const reminderDirection = reminderSource?.direction;
                 const shiftsByDate = reminderSource?.shifts;
                 if (!shiftsByDate || typeof shiftsByDate !== 'object') return result;
 
@@ -8119,7 +8143,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                         const breaks = Array.isArray(seg?.breaks)
                             ? seg.breaks
-                            : computeBreaksForShiftMinutes(startBase, endBase);
+                            : computeBreaksForShiftMinutes(startBase, endBase, reminderDirection);
                         const isCrossing = timeToMinutes(seg?.end) <= timeToMinutes(seg?.start) && seg?.end !== '00:00';
                         const shiftLabel = `${seg?.start || '—'} — ${seg?.end || '—'}${isCrossing ? ' (+1)' : ''}`;
 
