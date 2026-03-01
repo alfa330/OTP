@@ -4588,7 +4588,16 @@ def _ws_minutes_to_time(minutes):
     return f"{hh:02d}:{mm:02d}"
 
 
-def _ws_compute_breaks_for_shift_minutes(start_min, end_min):
+def _ws_normalize_direction_key(value):
+    return ' '.join(str(value or '').strip().lower().split())
+
+
+def _ws_is_chat_manager_direction(direction_value):
+    key = _ws_normalize_direction_key(direction_value)
+    return key in ('чат менеджер', 'chat manager')
+
+
+def _ws_compute_breaks_for_shift_minutes(start_min, end_min, direction_value=None):
     dur = int(end_min) - int(start_min)
     if dur <= 0:
         return []
@@ -4606,21 +4615,32 @@ def _ws_compute_breaks_for_shift_minutes(start_min, end_min):
         if e > s:
             breaks.append({'start': s, 'end': e})
 
-    if dur >= 5 * 60 and dur < 6 * 60:
-        push_centered(start_min + dur * 0.5, 15)
-    elif dur >= 6 * 60 and dur < 8 * 60:
-        push_centered(start_min + dur / 3, 15)
-        push_centered(start_min + 2 * dur / 3, 15)
-    elif dur >= 8 * 60 and dur < 11 * 60:
-        centers = [start_min + dur * 0.25, start_min + dur * 0.5, start_min + dur * 0.75]
-        sizes = [15, 30, 15]
-        for c, sz in zip(centers, sizes):
-            push_centered(c, sz)
-    elif dur >= 11 * 60:
-        centers = [start_min + dur * 0.2, start_min + dur * 0.45, start_min + dur * 0.7, start_min + dur * 0.87]
-        sizes = [15, 30, 15, 15]
-        for c, sz in zip(centers, sizes):
-            push_centered(c, sz)
+    use_default_profile = True
+    if _ws_is_chat_manager_direction(direction_value):
+        if dur >= 6 * 60 and dur < 9 * 60:
+            push_centered(start_min + dur * 0.5, 30)
+            use_default_profile = False
+        elif dur >= 9 * 60 and dur <= 12 * 60:
+            push_centered(start_min + dur / 3, 30)
+            push_centered(start_min + 2 * dur / 3, 30)
+            use_default_profile = False
+
+    if use_default_profile:
+        if dur >= 5 * 60 and dur < 6 * 60:
+            push_centered(start_min + dur * 0.5, 15)
+        elif dur >= 6 * 60 and dur < 8 * 60:
+            push_centered(start_min + dur / 3, 15)
+            push_centered(start_min + 2 * dur / 3, 15)
+        elif dur >= 8 * 60 and dur < 11 * 60:
+            centers = [start_min + dur * 0.25, start_min + dur * 0.5, start_min + dur * 0.75]
+            sizes = [15, 30, 15]
+            for c, sz in zip(centers, sizes):
+                push_centered(c, sz)
+        elif dur >= 11 * 60:
+            centers = [start_min + dur * 0.2, start_min + dur * 0.45, start_min + dur * 0.7, start_min + dur * 0.87]
+            sizes = [15, 30, 15, 15]
+            for c, sz in zip(centers, sizes):
+                push_centered(c, sz)
 
     normalized = []
     seen = set()
@@ -4831,7 +4851,7 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
         if not isinstance(seg.get('breaks'), list):
             seg['breaks'] = []
         if len(seg['breaks']) == 0:
-            seg['breaks'] = _ws_compute_breaks_for_shift_minutes(raw_seg_start, raw_seg_end)
+            seg['breaks'] = _ws_compute_breaks_for_shift_minutes(raw_seg_start, raw_seg_end, op.get('direction'))
 
         seg_start = max(0, raw_seg_start)
         seg_end = max(seg_start, min(2880, raw_seg_end))
@@ -5852,7 +5872,7 @@ def import_work_schedules_excel():
                     'end': _ws_minutes_to_time(emin),
                     '__startMin': smin,
                     '__endMin': emin,
-                    'breaks': _ws_compute_breaks_for_shift_minutes(smin, emin)
+                    'breaks': _ws_compute_breaks_for_shift_minutes(smin, emin, sim_op.get('direction'))
                 })
 
             sim_op['shifts'][date_str] = prepared_shifts

@@ -4489,7 +4489,28 @@ class Database:
             end_min += 24 * 60
         return start_min, end_min
 
-    def _compute_auto_shift_breaks_minutes(self, start_min, end_min):
+    def _normalize_direction_key(self, direction_name):
+        return ' '.join(str(direction_name or '').strip().lower().split())
+
+    def _is_chat_manager_direction(self, direction_name):
+        key = self._normalize_direction_key(direction_name)
+        return key in ('чат менеджер', 'chat manager')
+
+    def _get_operator_direction_name_tx(self, cursor, operator_id):
+        cursor.execute(
+            """
+            SELECT d.name
+            FROM users u
+            LEFT JOIN directions d ON d.id = u.direction_id
+            WHERE u.id = %s
+            LIMIT 1
+            """,
+            (int(operator_id),)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def _compute_auto_shift_breaks_minutes(self, start_min, end_min, direction_name=None):
         """
         Серверная автогенерация перерывов (зеркалит фронтенд-базовую логику по длительности смены).
         Возвращает список интервалов в минутах от начала дня; для ночных смен end_min может быть > 1440.
@@ -4514,21 +4535,32 @@ class Database:
             if e > s:
                 breaks.append({'start': s, 'end': e})
 
-        if dur >= 5 * 60 and dur < 6 * 60:
-            push_centered(start_min + dur * 0.5, 15)
-        elif dur >= 6 * 60 and dur < 8 * 60:
-            push_centered(start_min + dur / 3, 15)
-            push_centered(start_min + 2 * dur / 3, 15)
-        elif dur >= 8 * 60 and dur < 11 * 60:
-            centers = [start_min + dur * 0.25, start_min + dur * 0.5, start_min + dur * 0.75]
-            sizes = [15, 30, 15]
-            for c, sz in zip(centers, sizes):
-                push_centered(c, sz)
-        elif dur >= 11 * 60:
-            centers = [start_min + dur * 0.2, start_min + dur * 0.45, start_min + dur * 0.7, start_min + dur * 0.87]
-            sizes = [15, 30, 15, 15]
-            for c, sz in zip(centers, sizes):
-                push_centered(c, sz)
+        use_default_profile = True
+        if self._is_chat_manager_direction(direction_name):
+            if dur >= 6 * 60 and dur < 9 * 60:
+                push_centered(start_min + dur * 0.5, 30)
+                use_default_profile = False
+            elif dur >= 9 * 60 and dur <= 12 * 60:
+                push_centered(start_min + dur / 3, 30)
+                push_centered(start_min + 2 * dur / 3, 30)
+                use_default_profile = False
+
+        if use_default_profile:
+            if dur >= 5 * 60 and dur < 6 * 60:
+                push_centered(start_min + dur * 0.5, 15)
+            elif dur >= 6 * 60 and dur < 8 * 60:
+                push_centered(start_min + dur / 3, 15)
+                push_centered(start_min + 2 * dur / 3, 15)
+            elif dur >= 8 * 60 and dur < 11 * 60:
+                centers = [start_min + dur * 0.25, start_min + dur * 0.5, start_min + dur * 0.75]
+                sizes = [15, 30, 15]
+                for c, sz in zip(centers, sizes):
+                    push_centered(c, sz)
+            elif dur >= 11 * 60:
+                centers = [start_min + dur * 0.2, start_min + dur * 0.45, start_min + dur * 0.7, start_min + dur * 0.87]
+                sizes = [15, 30, 15, 15]
+                for c, sz in zip(centers, sizes):
+                    push_centered(c, sz)
 
         normalized = []
         seen = set()
@@ -4746,6 +4778,7 @@ class Database:
         if len(existing_rows) != 1:
             return incoming_breaks_norm
 
+        direction_name = self._get_operator_direction_name_tx(cursor, operator_id)
         shift_id, existing_start_value, existing_end_value = existing_rows[0]
         existing_breaks = self._load_shift_breaks_tx(cursor, shift_id)
         if not existing_breaks:
@@ -4755,7 +4788,7 @@ class Database:
 
         existing_start_min, existing_end_min = self._schedule_interval_minutes(existing_start_value, existing_end_value)
         existing_duration = max(0, existing_end_min - existing_start_min)
-        existing_auto_breaks = self._compute_auto_shift_breaks_minutes(existing_start_min, existing_end_min)
+        existing_auto_breaks = self._compute_auto_shift_breaks_minutes(existing_start_min, existing_end_min, direction_name=direction_name)
         if existing_breaks != existing_auto_breaks:
             return incoming_breaks_norm
 
@@ -4779,6 +4812,7 @@ class Database:
     ):
         new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
         new_duration_min = max(0, new_end_min - new_start_min)
+        direction_name = self._get_operator_direction_name_tx(cursor, operator_id)
 
         prev_start_obj = None
         prev_end_obj = None
@@ -4807,11 +4841,11 @@ class Database:
             previous_start_min, previous_end_min = self._schedule_interval_minutes(previous_start_value, previous_end_value)
             previous_duration_min = max(0, previous_end_min - previous_start_min)
             previous_shift_breaks = self._load_shift_breaks_tx(cursor, previous_shift_id)
-            previous_auto_breaks = self._compute_auto_shift_breaks_minutes(previous_start_min, previous_end_min)
+            previous_auto_breaks = self._compute_auto_shift_breaks_minutes(previous_start_min, previous_end_min, direction_name=direction_name)
             previous_shift_breaks_were_auto = (previous_shift_breaks == previous_auto_breaks)
 
         if breaks is None:
-            breaks_norm = self._compute_auto_shift_breaks_minutes(new_start_min, new_end_min)
+            breaks_norm = self._compute_auto_shift_breaks_minutes(new_start_min, new_end_min, direction_name=direction_name)
         else:
             incoming_breaks_norm = self._normalize_shift_breaks(breaks)
             should_regenerate_auto_breaks = (
@@ -4821,7 +4855,7 @@ class Database:
                 and new_duration_min < previous_duration_min
             )
             breaks_norm = (
-                self._compute_auto_shift_breaks_minutes(new_start_min, new_end_min)
+                self._compute_auto_shift_breaks_minutes(new_start_min, new_end_min, direction_name=direction_name)
                 if should_regenerate_auto_breaks
                 else incoming_breaks_norm
             )
