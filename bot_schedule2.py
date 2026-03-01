@@ -5040,6 +5040,52 @@ def respond_shift_swap_request():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/work_schedules/shift_swap/journal', methods=['GET'])
+@require_api_key
+def get_shift_swap_journal():
+    """
+    Журнал замен за месяц для admin/sv.
+    Query params:
+      month=YYYY-MM (required)
+      limit=int (optional, default 500)
+    """
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+        requester_id = int(requester_id)
+
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+        role = str(user_data[3] or '')
+        if role not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+
+        month = request.args.get('month')
+        if not month:
+            return jsonify({"error": "month is required (YYYY-MM)"}), 400
+
+        raw_limit = request.args.get('limit')
+        try:
+            limit = int(raw_limit) if raw_limit is not None else 500
+        except Exception:
+            return jsonify({"error": "Invalid limit"}), 400
+
+        payload = db.get_shift_swap_journal_for_month(
+            month=month,
+            requester_role=role,
+            requester_id=requester_id,
+            limit=limit
+        )
+        return jsonify(payload), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error getting shift swap journal: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/work_schedules/operators', methods=['GET'])
 @require_api_key
 def get_operators_with_schedules():

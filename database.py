@@ -6151,6 +6151,70 @@ class Database:
             'outgoing': outgoing
         }
 
+    def get_shift_swap_journal_for_month(self, month, requester_role, requester_id, limit=500):
+        month_text = str(month or '').strip()
+        if not month_text:
+            raise ValueError("month is required (YYYY-MM)")
+        try:
+            month_start = datetime.strptime(month_text, '%Y-%m').date().replace(day=1)
+        except Exception:
+            raise ValueError("Invalid month format, expected YYYY-MM")
+
+        if month_start.month == 12:
+            month_end = date(month_start.year + 1, 1, 1)
+        else:
+            month_end = date(month_start.year, month_start.month + 1, 1)
+
+        role = str(requester_role or '').strip().lower()
+        if role not in ('admin', 'sv'):
+            raise ValueError("Only admin and sv can view swap journal")
+
+        int(requester_id)
+        limit = max(1, min(int(limit), 1000))
+
+        with self._get_cursor() as cursor:
+            query = """
+                SELECT
+                    r.id,
+                    r.requester_operator_id, req.name,
+                    r.target_operator_id, tgt.name,
+                    r.direction_id, d.name,
+                    r.start_date, r.end_date,
+                    r.status,
+                    r.request_comment,
+                    r.response_comment,
+                    r.requested_shifts_json,
+                    r.created_at,
+                    r.updated_at,
+                    r.responded_at,
+                    r.accepted_at,
+                    r.responded_by,
+                    resp.name
+                FROM work_shift_swap_requests r
+                JOIN users req ON req.id = r.requester_operator_id
+                JOIN users tgt ON tgt.id = r.target_operator_id
+                LEFT JOIN directions d ON d.id = r.direction_id
+                LEFT JOIN users resp ON resp.id = r.responded_by
+                WHERE r.start_date >= %s
+                  AND r.start_date < %s
+            """
+            params = [month_start, month_end]
+
+            query += """
+                ORDER BY r.start_date DESC, r.created_at DESC, r.id DESC
+                LIMIT %s
+            """
+            params.append(limit)
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall() or []
+
+        items = [self._serialize_shift_swap_request_row(row) for row in rows]
+        return {
+            'month': month_start.strftime('%Y-%m'),
+            'items': items
+        }
+
     def respond_shift_swap_request(self, request_id, responder_operator_id, action, response_comment=None):
         request_id = int(request_id)
         responder_operator_id = int(responder_operator_id)
