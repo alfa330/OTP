@@ -5359,6 +5359,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [swapJournalLoading, setSwapJournalLoading] = useState(false);
             const [swapJournalError, setSwapJournalError] = useState('');
             const [swapJournalItems, setSwapJournalItems] = useState([]);
+            const [swapJournalSearch, setSwapJournalSearch] = useState('');
             const [sidebarFilterMenus, setSidebarFilterMenus] = useState({
                 supervisors: false,
                 statuses: false,
@@ -7892,6 +7893,28 @@ const withAccessTokenHeader = (headers = {}) => {
                     minute: '2-digit'
                 });
             };
+            const swapJournalFilteredItems = useMemo(() => {
+                const raw = Array.isArray(swapJournalItems) ? swapJournalItems : [];
+                const query = String(swapJournalSearch || '').trim().toLowerCase();
+                if (!query) return raw;
+
+                return raw.filter(item => {
+                    const statusMeta = getSwapStatusMeta(item?.status);
+                    const haystack = [
+                        formatSwapIntervalLabel(item),
+                        item?.requester?.name,
+                        item?.target?.name,
+                        item?.direction?.name,
+                        statusMeta?.label,
+                        item?.status,
+                        item?.requestComment,
+                        item?.responseComment
+                    ]
+                        .map(v => String(v || '').toLowerCase())
+                        .join(' ');
+                    return haystack.includes(query);
+                });
+            }, [swapJournalItems, swapJournalSearch]);
             const myUpcomingShiftItems = useMemo(() => {
                 const now = new Date();
                 const nowTs = now.getTime();
@@ -11580,6 +11603,29 @@ const withAccessTokenHeader = (headers = {}) => {
                             <FaIcon className={`fas ${swapJournalLoading ? 'fa-spinner fa-spin' : 'fa-rotate'}`}></FaIcon>
                             Обновить
                         </button>
+                        <label className="text-sm min-w-[260px] flex-1">
+                            <div className="text-xs text-slate-600 mb-1">Поиск</div>
+                            <div className="relative">
+                                <input
+                                    type="text"
+                                    value={swapJournalSearch}
+                                    onChange={(e) => setSwapJournalSearch(e.target.value)}
+                                    placeholder="От кого, кому, статус, комментарий..."
+                                    className="w-full px-9 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+                                />
+                                <FaIcon className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></FaIcon>
+                                {swapJournalSearch && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setSwapJournalSearch('')}
+                                        className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 rounded-md hover:bg-slate-100 text-slate-500"
+                                        title="Очистить поиск"
+                                    >
+                                        <FaIcon className="fas fa-xmark"></FaIcon>
+                                    </button>
+                                )}
+                            </div>
+                        </label>
                     </div>
 
                     {swapJournalError && (
@@ -11597,8 +11643,17 @@ const withAccessTokenHeader = (headers = {}) => {
                         <div className="rounded-lg border border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
                             За выбранный месяц записей нет.
                         </div>
+                    ) : swapJournalFilteredItems.length === 0 ? (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
+                            По запросу ничего не найдено.
+                        </div>
                     ) : (
                         <div className="max-h-[65vh] overflow-auto rounded-lg border border-slate-200">
+                            <div className="px-3 py-2 text-xs text-slate-500 border-b border-slate-200 bg-slate-50">
+                                Показано: <span className="font-semibold tabular-nums">{swapJournalFilteredItems.length}</span>
+                                {' '}из{' '}
+                                <span className="font-semibold tabular-nums">{swapJournalItems.length}</span>
+                            </div>
                             <table className="min-w-full text-sm">
                                 <thead className="bg-slate-50 sticky top-0 z-10">
                                     <tr className="text-left text-slate-600">
@@ -11612,7 +11667,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {swapJournalItems.map(item => {
+                                    {swapJournalFilteredItems.map(item => {
                                         const statusMeta = getSwapStatusMeta(item?.status);
                                         const periodLabel = formatSwapIntervalLabel(item);
                                         return (
