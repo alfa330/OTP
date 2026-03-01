@@ -9018,7 +9018,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             На этот интервал нет доступных операторов.
                                                         </div>
                                                     ) : (
-                                                        <div className="space-y-2">
+                                                        <div className="max-h-80 overflow-y-auto pr-1 space-y-2">
                                                             {swapCandidates.map((item, idx) => {
                                                                 const isSelected = String(item?.id) === String(swapForm.targetOperatorId);
                                                                 const hasPriority = Number(item?.priorityScore || 0) > 0;
