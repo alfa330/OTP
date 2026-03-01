@@ -4506,8 +4506,46 @@ const withAccessTokenHeader = (headers = {}) => {
             const key = plannerNormalizeDirectionKey(directionValue);
             return key === 'чат менеджер' || key === 'chat manager';
             };
+            const plannerNormalizeBreakDurations = (value) => (
+                Array.isArray(value)
+                    ? value
+                        .map(v => Number(v))
+                        .filter(v => Number.isFinite(v) && v > 0)
+                        .map(v => Math.round(v))
+                    : []
+            );
+            const plannerPickBreakDurationsForShift = (durationMinutes, directionValue = null, breakRuleRanges = null) => {
+                const dur = Number(durationMinutes) || 0;
+                const rules = Array.isArray(breakRuleRanges) ? breakRuleRanges : [];
+                let selectedCustomRule = null;
+                rules.forEach(rule => {
+                    if (!rule || typeof rule !== 'object') return;
+                    const minMinutes = Number(rule.minMinutes);
+                    const maxMinutes = Number(rule.maxMinutes);
+                    if (!Number.isFinite(minMinutes) || !Number.isFinite(maxMinutes)) return;
+                    if (maxMinutes <= minMinutes) return;
+                    if (dur >= minMinutes && dur <= maxMinutes) {
+                        if (!selectedCustomRule || minMinutes >= Number(selectedCustomRule.minMinutes || -1)) {
+                            selectedCustomRule = rule;
+                        }
+                    }
+                });
+                if (selectedCustomRule) {
+                    return plannerNormalizeBreakDurations(selectedCustomRule.breakDurations);
+                }
 
-            function computeBreaksForShiftMinutes(startMin, endMin, directionValue = null) {
+                if (isChatManagerDirection(directionValue)) {
+                    if (dur >= 6 * 60 && dur < 9 * 60) return [30];
+                    if (dur >= 9 * 60 && dur <= 12 * 60) return [30, 30];
+                }
+                if (dur >= 5 * 60 && dur < 6 * 60) return [15];
+                if (dur >= 6 * 60 && dur < 8 * 60) return [15, 15];
+                if (dur >= 8 * 60 && dur < 11 * 60) return [15, 30, 15];
+                if (dur >= 11 * 60) return [15, 30, 15, 15];
+                return [];
+            };
+
+            function computeBreaksForShiftMinutes(startMin, endMin, directionValue = null, breakRuleRanges = null) {
             const dur = endMin - startMin;
             const breaks = [];
             const snap5 = (x) => Math.round(x / 5) * 5;
@@ -4516,32 +4554,13 @@ const withAccessTokenHeader = (headers = {}) => {
                 const s = snap5(center - size / 2);
                 breaks.push({ start: s, end: s + size });
             };
-            let useDefaultProfile = true;
-            if (isChatManagerDirection(directionValue)) {
-                if (dur >= 6 * 60 && dur < 9 * 60) {
-                pushCentered(startMin + dur * 0.5, 30);
-                useDefaultProfile = false;
-                } else if (dur >= 9 * 60 && dur <= 12 * 60) {
-                const centers = [startMin + dur / 3, startMin + 2 * dur / 3];
-                centers.forEach(c => pushCentered(c, 30));
-                useDefaultProfile = false;
-                }
-            }
-            if (useDefaultProfile) {
-                if (dur >= 5 * 60 && dur < 6 * 60) {
-                pushCentered(startMin + dur * 0.5, 15);
-                } else if (dur >= 6 * 60 && dur < 8 * 60) {
-                const centers = [startMin + dur / 3, startMin + 2 * dur / 3];
-                centers.forEach(c => pushCentered(c, 15));
-                } else if (dur >= 8 * 60 && dur < 11 * 60) {
-                const centers = [startMin + dur * 0.25, startMin + dur * 0.5, startMin + dur * 0.75];
-                const sizes = [15, 30, 15];
-                centers.forEach((c, i) => pushCentered(c, sizes[i]));
-                } else if (dur >= 11 * 60) {
-                const centers = [startMin + dur * 0.2, startMin + dur * 0.45, startMin + dur * 0.7, startMin + dur * 0.87];
-                const sizes = [15, 30, 15, 15];
-                centers.forEach((c, i) => pushCentered(c, sizes[i]));
-                }
+            const breakDurations = plannerPickBreakDurationsForShift(dur, directionValue, breakRuleRanges);
+            if (breakDurations.length > 0) {
+                const count = breakDurations.length;
+                breakDurations.forEach((size, idx) => {
+                    const center = startMin + (dur * ((idx + 1) / (count + 1)));
+                    pushCentered(center, Number(size) || 0);
+                });
             }
             return breaks
                 .map(b => ({ start: Math.max(startMin, Math.min(endMin, snap5(b.start))), end: Math.max(startMin, Math.min(endMin, snap5(b.end))) }))
@@ -5127,7 +5146,12 @@ const withAccessTokenHeader = (headers = {}) => {
             for (const seg of segs) {
                 const rawSegStart = seg.__startMin ?? timeToMinutes(seg.start);
                 const rawSegEnd = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
-                seg.breaks = seg.breaks ?? computeBreaksForShiftMinutes(rawSegStart, rawSegEnd, op?.direction);
+                seg.breaks = seg.breaks ?? computeBreaksForShiftMinutes(
+                    rawSegStart,
+                    rawSegEnd,
+                    op?.direction,
+                    getPlannerBreakRuleRangesForDirection(op?.direction)
+                );
                 const segStart = Math.max(0, rawSegStart);
                 const segEnd = Math.max(segStart, Math.min(2880, rawSegEnd));
                 const newBreaks = [];
@@ -5176,7 +5200,12 @@ const withAccessTokenHeader = (headers = {}) => {
             return merged.map(m => {
                 const startStr = minutesToTime(m.start);
                 const endStr = minutesToTime(m.end % 1440);
-                const breaks = computeBreaksForShiftMinutes(m.start, m.end, directionValue);
+                const breaks = computeBreaksForShiftMinutes(
+                    m.start,
+                    m.end,
+                    directionValue,
+                    getPlannerBreakRuleRangesForDirection(directionValue)
+                );
                 return { start: startStr, end: endStr, __startMin: m.start, __endMin: m.end, breaks };
             });
             }
@@ -5368,6 +5397,12 @@ const withAccessTokenHeader = (headers = {}) => {
             const [plannerStatusTimelineZoom, setPlannerStatusTimelineZoom] = useState(1);
             const [plannerStatusSpecialViewEnabled, setPlannerStatusSpecialViewEnabled] = useState(false);
             const [plannerStatusModalFocus, setPlannerStatusModalFocus] = useState(null);
+            const [showBreakRulesSettingsModal, setShowBreakRulesSettingsModal] = useState(false);
+            const [plannerBreakRulesLoading, setPlannerBreakRulesLoading] = useState(false);
+            const [plannerBreakRulesSaving, setPlannerBreakRulesSaving] = useState(false);
+            const [plannerBreakRulesError, setPlannerBreakRulesError] = useState('');
+            const [plannerBreakRulesByDirection, setPlannerBreakRulesByDirection] = useState({});
+            const [plannerSystemDirections, setPlannerSystemDirections] = useState([]);
             const [showPlannerTopActionsMenu, setShowPlannerTopActionsMenu] = useState(false);
             const [showSwapJournalModal, setShowSwapJournalModal] = useState(false);
             const [swapJournalMonth, setSwapJournalMonth] = useState(() => {
@@ -5726,6 +5761,46 @@ const withAccessTokenHeader = (headers = {}) => {
                 return () => { cancelled = true; };
             }, [user, initialOperators]);
 
+            useEffect(() => {
+                if (!user) return;
+                if (user?.role === 'operator') return;
+                let cancelled = false;
+                const loadBreakRules = async () => {
+                    try {
+                        const [breakRulesResp, directionsResp] = await Promise.all([
+                            fetch(`${API_BASE_URL}/api/work_schedules/break_rules`, {
+                                credentials: 'include',
+                                headers: withAccessTokenHeader()
+                            }),
+                            fetch(`${API_BASE_URL}/api/admin/directions`, {
+                                credentials: 'include',
+                                headers: withAccessTokenHeader()
+                            })
+                        ]);
+                        if (cancelled) return;
+
+                        const breakRulesPayload = await breakRulesResp.json().catch(() => ({}));
+                        if (breakRulesResp.ok) {
+                            setPlannerBreakRulesByDirection(normalizePlannerBreakRulesPayload(breakRulesPayload));
+                        }
+
+                        const directionsPayload = await directionsResp.json().catch(() => ({}));
+                        const directionsRaw = Array.isArray(directionsPayload?.directions) ? directionsPayload.directions : [];
+                        const directionNames = directionsRaw
+                            .map(item => String(item?.name || '').trim())
+                            .filter(Boolean)
+                            .sort((a, b) => a.localeCompare(b));
+                        if (directionNames.length > 0) {
+                            setPlannerSystemDirections(directionNames);
+                        }
+                    } catch (_) {
+                        // silent preload
+                    }
+                };
+                loadBreakRules();
+                return () => { cancelled = true; };
+            }, [user]);
+
             // Получаем уникальных супервайзеров (скрываем тех, у кого все операторы со статусом "fired")
             const uniqueSupervisors = useMemo(() => {
                 const supervisorsMap = new Map();
@@ -5765,6 +5840,92 @@ const withAccessTokenHeader = (headers = {}) => {
                 });
                 return Array.from(directionsMap.values()).sort((a, b) => a.localeCompare(b));
             }, [operators]);
+            const normalizePlannerBreakRuleRanges = (rules) => {
+                if (!Array.isArray(rules)) return [];
+                const normalized = rules
+                    .map(rule => {
+                        if (!rule || typeof rule !== 'object') return null;
+                        const minMinutesRaw = rule.minMinutes ?? rule.min_minutes ?? rule.min;
+                        const maxMinutesRaw = rule.maxMinutes ?? rule.max_minutes ?? rule.max;
+                        const minMinutes = Number(minMinutesRaw);
+                        const maxMinutes = Number(maxMinutesRaw);
+                        const breakDurations = plannerNormalizeBreakDurations(
+                            rule.breakDurations ?? rule.break_durations ?? rule.durations
+                        );
+                        if (!Number.isFinite(minMinutes) || !Number.isFinite(maxMinutes)) return null;
+                        if (maxMinutes <= minMinutes || minMinutes < 0) return null;
+                        return {
+                            minMinutes: Math.round(minMinutes),
+                            maxMinutes: Math.round(maxMinutes),
+                            breakDurations
+                        };
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => (a.minMinutes - b.minMinutes) || (a.maxMinutes - b.maxMinutes));
+
+                const compact = [];
+                normalized.forEach(rule => {
+                    const prev = compact[compact.length - 1];
+                    if (
+                        prev &&
+                        prev.minMinutes === rule.minMinutes &&
+                        prev.maxMinutes === rule.maxMinutes &&
+                        JSON.stringify(prev.breakDurations) === JSON.stringify(rule.breakDurations)
+                    ) {
+                        return;
+                    }
+                    compact.push(rule);
+                });
+                return compact;
+            };
+            const normalizePlannerBreakRulesPayload = (payload) => {
+                const rawList = Array.isArray(payload?.direction_rules)
+                    ? payload.direction_rules
+                    : (Array.isArray(payload?.directionRules)
+                        ? payload.directionRules
+                        : (Array.isArray(payload) ? payload : []));
+                const map = {};
+                rawList.forEach(item => {
+                    if (!item || typeof item !== 'object') return;
+                    const direction = String(item.direction ?? item.direction_name ?? '').trim();
+                    if (!direction) return;
+                    map[direction] = normalizePlannerBreakRuleRanges(item.rules);
+                });
+                return map;
+            };
+            const plannerBreakRulesLookup = useMemo(() => {
+                const map = new Map();
+                Object.entries(plannerBreakRulesByDirection || {}).forEach(([directionName, rules]) => {
+                    const key = plannerNormalizeDirectionKey(directionName);
+                    if (!key) return;
+                    map.set(key, normalizePlannerBreakRuleRanges(rules));
+                });
+                return map;
+            }, [plannerBreakRulesByDirection]);
+            const getPlannerBreakRuleRangesForDirection = (directionValue) => {
+                const key = plannerNormalizeDirectionKey(directionValue);
+                if (!key) return [];
+                return plannerBreakRulesLookup.get(key) || [];
+            };
+            const plannerBreakRuleDirections = useMemo(() => {
+                const map = new Map();
+                (uniqueDirections || []).forEach(directionName => {
+                    const key = plannerNormalizeDirectionKey(directionName);
+                    if (!key) return;
+                    map.set(key, directionName);
+                });
+                (plannerSystemDirections || []).forEach(directionName => {
+                    const key = plannerNormalizeDirectionKey(directionName);
+                    if (!key) return;
+                    if (!map.has(key)) map.set(key, directionName);
+                });
+                Object.keys(plannerBreakRulesByDirection || {}).forEach(directionName => {
+                    const key = plannerNormalizeDirectionKey(directionName);
+                    if (!key) return;
+                    if (!map.has(key)) map.set(key, directionName);
+                });
+                return Array.from(map.values()).sort((a, b) => a.localeCompare(b));
+            }, [uniqueDirections, plannerSystemDirections, plannerBreakRulesByDirection]);
             const breakDirectionGroupMembership = useMemo(() => {
                 const map = new Map();
                 (breakDirectionGroups || []).forEach((group, groupIndex) => {
@@ -6526,13 +6687,23 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (shouldRegenerateBreaksByShortening && !hasExplicitBreaks) {
                   const sMin = targetSeg.__startMin ?? timeToMinutes(targetSeg.start);
                   const eMin = targetSeg.__endMin ?? (timeToMinutes(targetSeg.end) + (timeToMinutes(targetSeg.end) <= timeToMinutes(targetSeg.start) ? 1440 : 0));
-                  seedBreaks = computeBreaksForShiftMinutes(sMin, eMin, simOp?.direction);
+                  seedBreaks = computeBreaksForShiftMinutes(
+                    sMin,
+                    eMin,
+                    simOp?.direction,
+                    getPlannerBreakRuleRangesForDirection(simOp?.direction)
+                  );
                 }
 
                 if ((!seedBreaks || seedBreaks.length === 0) && !hasExplicitBreaks) {
                   const sMin = targetSeg.__startMin ?? timeToMinutes(targetSeg.start);
                   const eMin = targetSeg.__endMin ?? (timeToMinutes(targetSeg.end) + (timeToMinutes(targetSeg.end) <= timeToMinutes(targetSeg.start) ? 1440 : 0));
-                  seedBreaks = computeBreaksForShiftMinutes(sMin, eMin, simOp?.direction);
+                  seedBreaks = computeBreaksForShiftMinutes(
+                    sMin,
+                    eMin,
+                    simOp?.direction,
+                    getPlannerBreakRuleRangesForDirection(simOp?.direction)
+                  );
                 }
 
                 targetSeg.breaks = seedBreaks.map(b => ({ start: b.start, end: b.end }));
@@ -6610,6 +6781,115 @@ const withAccessTokenHeader = (headers = {}) => {
                     return merged;
                 });
                 return data;
+            };
+
+            const loadPlannerBreakRulesFromServer = async ({ silent = false } = {}) => {
+                if (!silent) setPlannerBreakRulesLoading(true);
+                setPlannerBreakRulesError('');
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/break_rules`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader()
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    setPlannerBreakRulesByDirection(normalizePlannerBreakRulesPayload(payload));
+                    return payload;
+                } catch (error) {
+                    const msg = error?.message || 'Не удалось загрузить настройки перерывов';
+                    setPlannerBreakRulesError(msg);
+                    if (!silent) throw error;
+                    return null;
+                } finally {
+                    if (!silent) setPlannerBreakRulesLoading(false);
+                }
+            };
+
+            const openPlannerBreakRulesSettings = async () => {
+                setShowPlannerTopActionsMenu(false);
+                setShowBreakRulesSettingsModal(true);
+                if (Object.keys(plannerBreakRulesByDirection || {}).length === 0 && !plannerBreakRulesLoading) {
+                    try {
+                        await loadPlannerBreakRulesFromServer();
+                    } catch (_) { /* error already set in state */ }
+                }
+            };
+
+            const upsertPlannerBreakRulesForDirection = (directionName, updater) => {
+                const direction = String(directionName || '').trim();
+                if (!direction) return;
+                setPlannerBreakRulesByDirection(prev => {
+                    const currentRules = normalizePlannerBreakRuleRanges((prev || {})[direction] || []);
+                    const nextRules = normalizePlannerBreakRuleRanges(
+                        typeof updater === 'function' ? updater(currentRules) : updater
+                    );
+                    return {
+                        ...(prev || {}),
+                        [direction]: nextRules
+                    };
+                });
+            };
+
+            const addPlannerBreakRuleRow = (directionName) => {
+                upsertPlannerBreakRulesForDirection(directionName, (rules) => ([
+                    ...rules,
+                    { minMinutes: 360, maxMinutes: 480, breakDurations: [15] }
+                ]));
+            };
+
+            const removePlannerBreakRuleRow = (directionName, index) => {
+                upsertPlannerBreakRulesForDirection(directionName, (rules) => (
+                    rules.filter((_, idx) => idx !== index)
+                ));
+            };
+
+            const updatePlannerBreakRuleRowField = (directionName, index, fieldName, fieldValue) => {
+                upsertPlannerBreakRulesForDirection(directionName, (rules) => rules.map((rule, idx) => {
+                    if (idx !== index) return rule;
+                    if (fieldName === 'breakDurations') {
+                        const durations = plannerNormalizeBreakDurations(
+                            String(fieldValue || '')
+                                .split(',')
+                                .map(x => x.trim())
+                                .filter(Boolean)
+                        );
+                        return { ...rule, breakDurations: durations };
+                    }
+                    const numeric = Number(fieldValue);
+                    if (!Number.isFinite(numeric)) return rule;
+                    return { ...rule, [fieldName]: Math.max(0, Math.round(numeric * 60)) };
+                }));
+            };
+
+            const savePlannerBreakRulesToServer = async () => {
+                const directionPayload = plannerBreakRuleDirections.map(directionName => ({
+                    direction: directionName,
+                    rules: normalizePlannerBreakRuleRanges((plannerBreakRulesByDirection || {})[directionName] || [])
+                }));
+                setPlannerBreakRulesSaving(true);
+                setPlannerBreakRulesError('');
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/break_rules`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: withAccessTokenHeader({
+                            'Content-Type': 'application/json'
+                        }),
+                        body: JSON.stringify({ direction_rules: directionPayload })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    setPlannerBreakRulesByDirection(normalizePlannerBreakRulesPayload(payload));
+                    setShowBreakRulesSettingsModal(false);
+                } catch (error) {
+                    setPlannerBreakRulesError(error?.message || 'Не удалось сохранить настройки перерывов');
+                } finally {
+                    setPlannerBreakRulesSaving(false);
+                }
             };
 
             const handlePlannerExcelExport = async () => {
@@ -7178,7 +7458,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 const brs = srcSeg.breaks ?? computeBreaksForShiftMinutes(
                     srcSeg.__startMin ?? timeToMinutes(srcSeg.start),
                     srcSeg.__endMin ?? (timeToMinutes(srcSeg.end) + (timeToMinutes(srcSeg.end) <= timeToMinutes(srcSeg.start) ? 1440 : 0)),
-                    op?.direction
+                    op?.direction,
+                    getPlannerBreakRuleRangesForDirection(op?.direction)
                 );
                 const res = [];
                 brs.forEach(b => {
@@ -7208,8 +7489,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (segDur <= 0) return null;
 
                 const generatedBreaks = seg
-                    ? (seg.breaks ?? computeBreaksForShiftMinutes(segStartMin, segEndMin, op?.direction))
-                    : computeBreaksForShiftMinutes(segStartMin, segEndMin, op?.direction);
+                    ? (seg.breaks ?? computeBreaksForShiftMinutes(segStartMin, segEndMin, op?.direction, getPlannerBreakRuleRangesForDirection(op?.direction)))
+                    : computeBreaksForShiftMinutes(segStartMin, segEndMin, op?.direction, getPlannerBreakRuleRangesForDirection(op?.direction));
                 const breaksLocal = (modalState.breaks && modalState.breaks.length ? modalState.breaks : generatedBreaks)
                     .map(b => ({ start: b.start, end: b.end }));
 
@@ -7968,7 +8249,12 @@ const withAccessTokenHeader = (headers = {}) => {
 
                         const breaksSource = Array.isArray(seg?.breaks)
                             ? seg.breaks
-                            : computeBreaksForShiftMinutes(sMin, eMin, myDirection);
+                            : computeBreaksForShiftMinutes(
+                                sMin,
+                                eMin,
+                                myDirection,
+                                getPlannerBreakRuleRangesForDirection(myDirection)
+                            );
                         const breaks = (Array.isArray(breaksSource) ? breaksSource : [])
                             .map(b => {
                                 const start = Number(b?.start);
@@ -8143,7 +8429,12 @@ const withAccessTokenHeader = (headers = {}) => {
 
                         const breaks = Array.isArray(seg?.breaks)
                             ? seg.breaks
-                            : computeBreaksForShiftMinutes(startBase, endBase, reminderDirection);
+                            : computeBreaksForShiftMinutes(
+                                startBase,
+                                endBase,
+                                reminderDirection,
+                                getPlannerBreakRuleRangesForDirection(reminderDirection)
+                            );
                         const isCrossing = timeToMinutes(seg?.end) <= timeToMinutes(seg?.start) && seg?.end !== '00:00';
                         const shiftLabel = `${seg?.start || '—'} — ${seg?.end || '—'}${isCrossing ? ' (+1)' : ''}`;
 
@@ -9758,6 +10049,15 @@ const withAccessTokenHeader = (headers = {}) => {
                                             >
                                                 <FaIcon className={`fas ${plannerStatusAnomalyLoading ? 'fa-spinner fa-spin' : 'fa-upload'}`}></FaIcon>
                                                 {plannerStatusAnomalyLoading ? 'Загрузка...' : 'Загрузить статусы'}
+                                            </button>
+
+                                            <button
+                                                onClick={openPlannerBreakRulesSettings}
+                                                className="w-full px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-sm font-medium flex items-center gap-2"
+                                                title="Настроить автогенерацию перерывов по направлениям"
+                                            >
+                                                <FaIcon className="fas fa-sliders-h"></FaIcon>
+                                                Настройка перерывов
                                             </button>
 
                                             {plannerStatusAnomalyAnalysis && (
@@ -12416,6 +12716,150 @@ const withAccessTokenHeader = (headers = {}) => {
                             </>
                         );
                     })()}
+                </SimpleModal>
+
+                <SimpleModal
+                    open={!!showBreakRulesSettingsModal && user?.role !== 'operator'}
+                    onClose={() => {
+                        if (plannerBreakRulesSaving) return;
+                        setShowBreakRulesSettingsModal(false);
+                    }}
+                >
+                    <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-200">
+                        <div>
+                            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                <FaIcon className="fas fa-sliders-h text-amber-600"></FaIcon>
+                                Настройка перерывов
+                            </h3>
+                            <div className="text-sm text-slate-600 mt-1">
+                                Правила автогенерации перерывов по направлениям
+                            </div>
+                        </div>
+                        <button
+                            onClick={() => {
+                                if (plannerBreakRulesSaving) return;
+                                setShowBreakRulesSettingsModal(false);
+                            }}
+                            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
+                            disabled={plannerBreakRulesSaving}
+                        >
+                            <FaIcon className="fas fa-times"></FaIcon>
+                        </button>
+                    </div>
+
+                    {plannerBreakRulesError && (
+                        <div className="mb-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                            {plannerBreakRulesError}
+                        </div>
+                    )}
+
+                    {plannerBreakRulesLoading ? (
+                        <div className="py-8 text-center text-slate-500">
+                            <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
+                            Загрузка настроек...
+                        </div>
+                    ) : (
+                        <div className="max-h-[64vh] overflow-auto pr-1 space-y-3">
+                            {plannerBreakRuleDirections.length === 0 ? (
+                                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+                                    Нет направлений для настройки.
+                                </div>
+                            ) : plannerBreakRuleDirections.map(directionName => {
+                                const rules = normalizePlannerBreakRuleRanges((plannerBreakRulesByDirection || {})[directionName] || []);
+                                return (
+                                    <div key={`planner-break-rules-${directionName}`} className="rounded-xl border border-slate-200 bg-white p-3">
+                                        <div className="flex items-center justify-between gap-3 mb-2">
+                                            <div className="font-semibold text-slate-900">{directionName}</div>
+                                            <button
+                                                type="button"
+                                                onClick={() => addPlannerBreakRuleRow(directionName)}
+                                                className="px-2.5 py-1.5 text-xs font-medium rounded-lg border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                                            >
+                                                <FaIcon className="fas fa-plus mr-1"></FaIcon>
+                                                Добавить правило
+                                            </button>
+                                        </div>
+
+                                        {rules.length === 0 ? (
+                                            <div className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded p-2">
+                                                Для этого направления используются дефолтные правила.
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                {rules.map((rule, idx) => (
+                                                    <div key={`planner-break-rule-row-${directionName}-${idx}`} className="grid grid-cols-12 gap-2 items-center">
+                                                        <div className="col-span-3">
+                                                            <label className="text-[11px] text-slate-500 block mb-1">От (ч)</label>
+                                                            <input
+                                                                type="number"
+                                                                min="0"
+                                                                step="0.25"
+                                                                value={((Number(rule.minMinutes || 0)) / 60).toFixed(2)}
+                                                                onChange={(e) => updatePlannerBreakRuleRowField(directionName, idx, 'minMinutes', e.target.value)}
+                                                                className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-300"
+                                                            />
+                                                        </div>
+                                                        <div className="col-span-3">
+                                                            <label className="text-[11px] text-slate-500 block mb-1">До (ч)</label>
+                                                            <input
+                                                                type="number"
+                                                                min="0"
+                                                                step="0.25"
+                                                                value={((Number(rule.maxMinutes || 0)) / 60).toFixed(2)}
+                                                                onChange={(e) => updatePlannerBreakRuleRowField(directionName, idx, 'maxMinutes', e.target.value)}
+                                                                className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-300"
+                                                            />
+                                                        </div>
+                                                        <div className="col-span-5">
+                                                            <label className="text-[11px] text-slate-500 block mb-1">Перерывы (минуты через запятую)</label>
+                                                            <input
+                                                                type="text"
+                                                                value={(rule.breakDurations || []).join(',')}
+                                                                onChange={(e) => updatePlannerBreakRuleRowField(directionName, idx, 'breakDurations', e.target.value)}
+                                                                placeholder="15,30,15"
+                                                                className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-300"
+                                                            />
+                                                        </div>
+                                                        <div className="col-span-1 pt-5">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => removePlannerBreakRuleRow(directionName, idx)}
+                                                                className="w-full h-9 rounded-lg border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                                                                title="Удалить правило"
+                                                            >
+                                                                <FaIcon className="fas fa-trash-alt text-xs"></FaIcon>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    <div className="mt-4 pt-3 border-t border-slate-200 flex items-center justify-between gap-2">
+                        <button
+                            type="button"
+                            onClick={() => loadPlannerBreakRulesFromServer()}
+                            disabled={plannerBreakRulesLoading || plannerBreakRulesSaving}
+                            className="px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                            <FaIcon className="fas fa-rotate mr-1"></FaIcon>
+                            Обновить
+                        </button>
+                        <button
+                            type="button"
+                            onClick={savePlannerBreakRulesToServer}
+                            disabled={plannerBreakRulesLoading || plannerBreakRulesSaving}
+                            className="px-4 py-2 rounded-lg border border-amber-300 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                            <FaIcon className={`fas ${plannerBreakRulesSaving ? 'fa-spinner fa-spin' : 'fa-save'} mr-1`}></FaIcon>
+                            {plannerBreakRulesSaving ? 'Сохранение...' : 'Сохранить'}
+                        </button>
+                    </div>
                 </SimpleModal>
 
                 <SimpleModal open={showDayBreaksModal} onClose={() => setShowDayBreaksModal(false)}>

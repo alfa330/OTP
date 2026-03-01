@@ -4597,7 +4597,63 @@ def _ws_is_chat_manager_direction(direction_value):
     return key in ('чат менеджер', 'chat manager')
 
 
-def _ws_compute_breaks_for_shift_minutes(start_min, end_min, direction_value=None):
+def _ws_normalize_break_durations(value):
+    if value is None:
+        return []
+    raw = value if isinstance(value, list) else []
+    result = []
+    for item in raw:
+        try:
+            minutes = int(item)
+        except Exception:
+            continue
+        if minutes > 0:
+            result.append(minutes)
+    return result
+
+
+def _ws_pick_break_durations_for_shift(duration_minutes, direction_value=None, break_rules_map=None):
+    dur = int(duration_minutes)
+    rules_map = break_rules_map if isinstance(break_rules_map, dict) else {}
+    selected_custom = None
+    direction_key = _ws_normalize_direction_key(direction_value)
+    direction_rules = rules_map.get(direction_key) or []
+    for rule in sorted(
+        [r for r in direction_rules if isinstance(r, dict)],
+        key=lambda x: (int(x.get('minMinutes', 0)), int(x.get('maxMinutes', 0)))
+    ):
+        try:
+            min_minutes = int(rule.get('minMinutes'))
+            max_minutes = int(rule.get('maxMinutes'))
+        except Exception:
+            continue
+        if max_minutes <= min_minutes:
+            continue
+        if dur >= min_minutes and dur <= max_minutes:
+            if selected_custom is None or min_minutes >= int(selected_custom.get('minMinutes', -1)):
+                selected_custom = rule
+
+    if selected_custom is not None:
+        return _ws_normalize_break_durations(selected_custom.get('breakDurations'))
+
+    if _ws_is_chat_manager_direction(direction_value):
+        if dur >= 6 * 60 and dur < 9 * 60:
+            return [30]
+        if dur >= 9 * 60 and dur <= 12 * 60:
+            return [30, 30]
+
+    if dur >= 5 * 60 and dur < 6 * 60:
+        return [15]
+    if dur >= 6 * 60 and dur < 8 * 60:
+        return [15, 15]
+    if dur >= 8 * 60 and dur < 11 * 60:
+        return [15, 30, 15]
+    if dur >= 11 * 60:
+        return [15, 30, 15, 15]
+    return []
+
+
+def _ws_compute_breaks_for_shift_minutes(start_min, end_min, direction_value=None, break_rules_map=None):
     dur = int(end_min) - int(start_min)
     if dur <= 0:
         return []
@@ -4615,32 +4671,16 @@ def _ws_compute_breaks_for_shift_minutes(start_min, end_min, direction_value=Non
         if e > s:
             breaks.append({'start': s, 'end': e})
 
-    use_default_profile = True
-    if _ws_is_chat_manager_direction(direction_value):
-        if dur >= 6 * 60 and dur < 9 * 60:
-            push_centered(start_min + dur * 0.5, 30)
-            use_default_profile = False
-        elif dur >= 9 * 60 and dur <= 12 * 60:
-            push_centered(start_min + dur / 3, 30)
-            push_centered(start_min + 2 * dur / 3, 30)
-            use_default_profile = False
-
-    if use_default_profile:
-        if dur >= 5 * 60 and dur < 6 * 60:
-            push_centered(start_min + dur * 0.5, 15)
-        elif dur >= 6 * 60 and dur < 8 * 60:
-            push_centered(start_min + dur / 3, 15)
-            push_centered(start_min + 2 * dur / 3, 15)
-        elif dur >= 8 * 60 and dur < 11 * 60:
-            centers = [start_min + dur * 0.25, start_min + dur * 0.5, start_min + dur * 0.75]
-            sizes = [15, 30, 15]
-            for c, sz in zip(centers, sizes):
-                push_centered(c, sz)
-        elif dur >= 11 * 60:
-            centers = [start_min + dur * 0.2, start_min + dur * 0.45, start_min + dur * 0.7, start_min + dur * 0.87]
-            sizes = [15, 30, 15, 15]
-            for c, sz in zip(centers, sizes):
-                push_centered(c, sz)
+    break_durations = _ws_pick_break_durations_for_shift(
+        duration_minutes=dur,
+        direction_value=direction_value,
+        break_rules_map=break_rules_map
+    )
+    if break_durations:
+        count = len(break_durations)
+        for idx, size in enumerate(break_durations):
+            center = int(start_min) + (dur * ((idx + 1) / (count + 1)))
+            push_centered(center, int(size))
 
     normalized = []
     seen = set()
@@ -4832,7 +4872,7 @@ def _ws_find_non_overlapping_start(desired_start, length, seg_start, seg_end, oc
     return None
 
 
-def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_direction_scope_key):
+def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_direction_scope_key, break_rules_map=None):
     segs = (op or {}).get('shifts', {}).get(date_str) or []
     if not segs:
         return
@@ -4851,7 +4891,12 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
         if not isinstance(seg.get('breaks'), list):
             seg['breaks'] = []
         if len(seg['breaks']) == 0:
-            seg['breaks'] = _ws_compute_breaks_for_shift_minutes(raw_seg_start, raw_seg_end, op.get('direction'))
+            seg['breaks'] = _ws_compute_breaks_for_shift_minutes(
+                raw_seg_start,
+                raw_seg_end,
+                op.get('direction'),
+                break_rules_map=break_rules_map
+            )
 
         seg_start = max(0, raw_seg_start)
         seg_end = max(seg_start, min(2880, raw_seg_end))
@@ -5160,6 +5205,88 @@ def get_operators_with_schedules():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error getting operators with schedules: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/work_schedules/break_rules', methods=['GET'])
+@require_api_key
+def get_work_schedule_break_rules():
+    """
+    Получить правила автоперерывов по направлениям.
+    """
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester_id = int(requester_id)
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+
+        if user_data[3] not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+
+        direction_rules = db.get_work_schedule_break_rules()
+        return jsonify({"direction_rules": direction_rules}), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error getting work schedule break rules: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/work_schedules/break_rules', methods=['POST'])
+@require_api_key
+def save_work_schedule_break_rules():
+    """
+    Сохранить правила автоперерывов по направлениям.
+    Body: {
+        "direction_rules": [
+            {
+                "direction": "Название направления",
+                "rules": [
+                    {"minMinutes": 360, "maxMinutes": 540, "breakDurations": [30]}
+                ]
+            }
+        ]
+    }
+    """
+    try:
+        requester_id = getattr(g, 'user_id', None) or request.headers.get('X-User-Id')
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester_id = int(requester_id)
+        user_data = db.get_user(id=requester_id)
+        if not user_data:
+            return jsonify({"error": "User not found"}), 404
+
+        if user_data[3] not in ['admin', 'sv']:
+            return jsonify({"error": "Forbidden"}), 403
+
+        data = request.get_json(silent=True) or {}
+        direction_rules = (
+            data.get('direction_rules')
+            if 'direction_rules' in data else (
+                data.get('directionRules')
+                if 'directionRules' in data else data.get('rules')
+            )
+        )
+        if not isinstance(direction_rules, list):
+            return jsonify({"error": "direction_rules must be a list"}), 400
+
+        saved = db.save_work_schedule_break_rules(direction_rules)
+        return jsonify({
+            "message": "Break rules saved successfully",
+            "direction_rules": saved
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error saving work schedule break rules: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -5837,6 +5964,7 @@ def import_work_schedules_excel():
         sim_operators = _ws_clone_ops_for_break_simulation(sim_source_operators)
         sim_op_by_id = {int(op.get('id')): op for op in sim_operators if op.get('id') is not None}
         scope_resolver = _ws_make_direction_scope_resolver(break_direction_groups)
+        break_rules_map = db.get_work_schedule_break_rules_map() or {}
 
         for entry in parsed_entries:
             op_id = int(entry.get('operator_id'))
@@ -5872,12 +6000,23 @@ def import_work_schedules_excel():
                     'end': _ws_minutes_to_time(emin),
                     '__startMin': smin,
                     '__endMin': emin,
-                    'breaks': _ws_compute_breaks_for_shift_minutes(smin, emin, sim_op.get('direction'))
+                    'breaks': _ws_compute_breaks_for_shift_minutes(
+                        smin,
+                        emin,
+                        sim_op.get('direction'),
+                        break_rules_map=break_rules_map
+                    )
                 })
 
             sim_op['shifts'][date_str] = prepared_shifts
             if prepared_shifts:
-                _ws_adjust_breaks_for_operator_on_date(sim_op, date_str, sim_operators, scope_resolver)
+                _ws_adjust_breaks_for_operator_on_date(
+                    sim_op,
+                    date_str,
+                    sim_operators,
+                    scope_resolver,
+                    break_rules_map=break_rules_map
+                )
 
             # Сохраняем в entry уже финальные перерывы после анти-пересечения
             final_shifts = []
