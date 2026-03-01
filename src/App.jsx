@@ -17721,7 +17721,12 @@ const withAccessTokenHeader = (headers = {}) => {
                         });
                     }
                     showToast('User updated successfully', 'success');
-                    fetchUsers();
+                    const updatedRole = editedUser?.role || userToEdit?.role;
+                    const refreshRequests = [fetchUsers()];
+                    if (updatedRole === 'sv') {
+                        refreshRequests.push(fetchSvList());
+                    }
+                    await Promise.allSettled(refreshRequests);
                     setShowUserEditModal(false);
                 } catch (err) {
                     console.error('Update user error:', err);
