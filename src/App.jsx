@@ -5374,6 +5374,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [swapCandidates, setSwapCandidates] = useState([]);
             const [swapSubmitting, setSwapSubmitting] = useState(false);
             const [swapRespondingId, setSwapRespondingId] = useState(null);
+            const [showSwapCreateModal, setShowSwapCreateModal] = useState(false);
             const [swapForm, setSwapForm] = useState({
                 swapDate: '',
                 startTime: '',
@@ -7760,6 +7761,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         comment: ''
                     }));
                     await loadSwapRequests({ silent: true });
+                    setShowSwapCreateModal(false);
                 } catch (error) {
                     notifySwapMessage(error?.message || 'Не удалось отправить запрос на замену', 'error');
                 } finally {
@@ -8214,7 +8216,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                         </h2>
                                         <div className="flex items-center gap-1 sm:ml-3">
                                             <button
-                                                onClick={() => setOperatorSelfTab('schedule')}
+                                                onClick={() => {
+                                                    setOperatorSelfTab('schedule');
+                                                    setShowSwapCreateModal(false);
+                                                }}
                                                 className={`px-2.5 sm:px-3 py-1 rounded text-sm ${operatorSelfTab === 'schedule' ? 'bg-slate-800 text-white' : 'bg-white'}`}
                                             >
                                                 Смены
@@ -8247,14 +8252,24 @@ const withAccessTokenHeader = (headers = {}) => {
                                             </>
                                         )}
                                         {operatorSelfTab === 'swaps' && (
-                                            <button
-                                                onClick={() => loadSwapRequests({ silent: false })}
-                                                className="sm:ml-2 px-3 py-1 rounded bg-white border border-slate-200 hover:bg-slate-50 text-sm inline-flex items-center gap-1"
-                                                disabled={swapRequestsLoading}
-                                            >
-                                                {swapRequestsLoading ? <FaIcon className="fas fa-spinner fa-spin"></FaIcon> : <FaIcon className="fas fa-rotate"></FaIcon>}
-                                                Обновить
-                                            </button>
+                                            <div className="sm:ml-2 flex items-center gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setShowSwapCreateModal(true)}
+                                                    className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white text-sm inline-flex items-center gap-1"
+                                                >
+                                                    <FaIcon className="fas fa-plus"></FaIcon>
+                                                    Новый запрос
+                                                </button>
+                                                <button
+                                                    onClick={() => loadSwapRequests({ silent: false })}
+                                                    className="px-3 py-1 rounded bg-white border border-slate-200 hover:bg-slate-50 text-sm inline-flex items-center gap-1"
+                                                    disabled={swapRequestsLoading}
+                                                >
+                                                    {swapRequestsLoading ? <FaIcon className="fas fa-spinner fa-spin"></FaIcon> : <FaIcon className="fas fa-rotate"></FaIcon>}
+                                                    Обновить
+                                                </button>
+                                            </div>
                                         )}
                                     </div>
                                     {operatorSelfTab === 'schedule' && (
@@ -8778,14 +8793,32 @@ const withAccessTokenHeader = (headers = {}) => {
                                     )}
                                     {operatorSelfTab === 'swaps' && (
                                         <div className="space-y-3 pb-2">
-                                            <div className="bg-white rounded-xl border border-slate-200 p-4">
+                                            {showSwapCreateModal && (
+                                                <div
+                                                    className="fixed inset-0 z-[80] bg-slate-900/45 p-2 sm:p-4 overflow-y-auto"
+                                                    onClick={(e) => {
+                                                        if (e.target === e.currentTarget) setShowSwapCreateModal(false);
+                                                    }}
+                                                >
+                                                    <div className="min-h-full flex items-start sm:items-center justify-center">
+                                                        <div className="w-full max-w-5xl bg-white rounded-xl border border-slate-200 p-4 shadow-2xl">
                                                 <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                                                     <div>
                                                         <div className="text-base font-semibold text-slate-900">Новый запрос на замену</div>
                                                         <div className="text-xs text-slate-500">Выберите дату, время и оператора того же направления, у которого нет смен в этот интервал</div>
                                                     </div>
-                                                    <div className="text-xs text-slate-500">
-                                                        Доступных дат со сменами: <span className="font-semibold tabular-nums">{mySwapSourceShiftDays.length}</span>
+                                                    <div className="flex items-center gap-2">
+                                                        <div className="text-xs text-slate-500">
+                                                            Доступных дат со сменами: <span className="font-semibold tabular-nums">{mySwapSourceShiftDays.length}</span>
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setShowSwapCreateModal(false)}
+                                                            className="w-8 h-8 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 inline-flex items-center justify-center"
+                                                            title="Закрыть"
+                                                        >
+                                                            <FaIcon className="fas fa-xmark"></FaIcon>
+                                                        </button>
                                                     </div>
                                                 </div>
                                                 <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
@@ -9060,6 +9093,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     )}
                                                 </div>
                                             </div>
+                                                    </div>
+                                                </div>
+                                            )}
 
                                             {swapRequestsError && (
                                                 <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm">
