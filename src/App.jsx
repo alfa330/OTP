@@ -5402,6 +5402,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [plannerBreakRulesSaving, setPlannerBreakRulesSaving] = useState(false);
             const [plannerBreakRulesError, setPlannerBreakRulesError] = useState('');
             const [plannerBreakRulesByDirection, setPlannerBreakRulesByDirection] = useState({});
+            const [plannerBreakRulesDraftByDirection, setPlannerBreakRulesDraftByDirection] = useState({});
             const [plannerSystemDirections, setPlannerSystemDirections] = useState([]);
             const [showPlannerTopActionsMenu, setShowPlannerTopActionsMenu] = useState(false);
             const [showSwapJournalModal, setShowSwapJournalModal] = useState(false);
@@ -5892,6 +5893,71 @@ const withAccessTokenHeader = (headers = {}) => {
                     map[direction] = normalizePlannerBreakRuleRanges(item.rules);
                 });
                 return map;
+            };
+            const plannerBreakRuleMinutesToText = (value) => {
+                const minutes = Math.max(0, Math.round(Number(value) || 0));
+                const hh = Math.floor(minutes / 60);
+                const mm = minutes % 60;
+                return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+            };
+            const plannerBreakRuleParseTextToMinutes = (rawValue) => {
+                const text = String(rawValue ?? '').trim();
+                if (!text) return null;
+                const m = text.match(/^(\d{1,2})(?::?(\d{1,2}))?$/);
+                if (!m) return null;
+                const hh = Number(m[1]);
+                const mm = Number(m[2] ?? 0);
+                if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+                if (hh < 0 || hh > 24 || mm < 0 || mm > 59) return null;
+                if (hh === 24 && mm > 0) return null;
+                return (hh * 60) + mm;
+            };
+            const buildPlannerBreakRulesDraftMap = (rulesByDirection, directionsList) => {
+                const map = {};
+                const source = rulesByDirection || {};
+                (Array.isArray(directionsList) ? directionsList : []).forEach(directionName => {
+                    const direction = String(directionName || '').trim();
+                    if (!direction) return;
+                    const rules = normalizePlannerBreakRuleRanges(source[direction] || []);
+                    map[direction] = rules.map(rule => ({
+                        minTime: plannerBreakRuleMinutesToText(rule.minMinutes),
+                        maxTime: plannerBreakRuleMinutesToText(rule.maxMinutes),
+                        breakDurations: plannerNormalizeBreakDurations(rule.breakDurations),
+                        addDurationInput: ''
+                    }));
+                });
+                return map;
+            };
+            const parsePlannerBreakRulesDraftMap = (draftMap, directionsList) => {
+                const output = {};
+                (Array.isArray(directionsList) ? directionsList : []).forEach(directionName => {
+                    const direction = String(directionName || '').trim();
+                    if (!direction) return;
+                    const rows = Array.isArray(draftMap?.[direction]) ? draftMap[direction] : [];
+                    const parsedRows = rows.map((row, rowIndex) => {
+                        const minMinutes = plannerBreakRuleParseTextToMinutes(row?.minTime);
+                        const maxMinutes = plannerBreakRuleParseTextToMinutes(row?.maxTime);
+                        if (minMinutes === null || maxMinutes === null) {
+                            throw new Error(`Некорректное время в правиле #${rowIndex + 1} для "${direction}"`);
+                        }
+                        if (maxMinutes <= minMinutes) {
+                            throw new Error(`В правиле #${rowIndex + 1} для "${direction}" время "До" должно быть больше "От"`);
+                        }
+                        return {
+                            minMinutes,
+                            maxMinutes,
+                            breakDurations: plannerNormalizeBreakDurations(row?.breakDurations)
+                        };
+                    }).sort((a, b) => (a.minMinutes - b.minMinutes) || (a.maxMinutes - b.maxMinutes));
+
+                    for (let i = 1; i < parsedRows.length; i++) {
+                        if (parsedRows[i].minMinutes < parsedRows[i - 1].maxMinutes) {
+                            throw new Error(`У "${direction}" диапазоны правил пересекаются`);
+                        }
+                    }
+                    output[direction] = parsedRows;
+                });
+                return output;
             };
             const plannerBreakRulesLookup = useMemo(() => {
                 const map = new Map();
@@ -6795,7 +6861,17 @@ const withAccessTokenHeader = (headers = {}) => {
                     if (!response.ok) {
                         throw new Error(payload?.error || `HTTP ${response.status}`);
                     }
-                    setPlannerBreakRulesByDirection(normalizePlannerBreakRulesPayload(payload));
+                    const normalized = normalizePlannerBreakRulesPayload(payload);
+                    setPlannerBreakRulesByDirection(normalized);
+                    if (showBreakRulesSettingsModal) {
+                        const mergedDirections = Array.from(new Set([
+                            ...plannerBreakRuleDirections,
+                            ...Object.keys(normalized || {})
+                        ])).sort((a, b) => a.localeCompare(b));
+                        setPlannerBreakRulesDraftByDirection(
+                            buildPlannerBreakRulesDraftMap(normalized, mergedDirections)
+                        );
+                    }
                     return payload;
                 } catch (error) {
                     const msg = error?.message || 'Не удалось загрузить настройки перерывов';
@@ -6810,63 +6886,103 @@ const withAccessTokenHeader = (headers = {}) => {
             const openPlannerBreakRulesSettings = async () => {
                 setShowPlannerTopActionsMenu(false);
                 setShowBreakRulesSettingsModal(true);
+                setPlannerBreakRulesDraftByDirection(
+                    buildPlannerBreakRulesDraftMap(plannerBreakRulesByDirection, plannerBreakRuleDirections)
+                );
                 if (Object.keys(plannerBreakRulesByDirection || {}).length === 0 && !plannerBreakRulesLoading) {
                     try {
-                        await loadPlannerBreakRulesFromServer();
+                        const payload = await loadPlannerBreakRulesFromServer();
+                        const normalized = normalizePlannerBreakRulesPayload(payload || {});
+                        const mergedDirections = Array.from(new Set([
+                            ...plannerBreakRuleDirections,
+                            ...Object.keys(normalized || {})
+                        ])).sort((a, b) => a.localeCompare(b));
+                        setPlannerBreakRulesDraftByDirection(
+                            buildPlannerBreakRulesDraftMap(normalized, mergedDirections)
+                        );
                     } catch (_) { /* error already set in state */ }
                 }
             };
 
-            const upsertPlannerBreakRulesForDirection = (directionName, updater) => {
+            const upsertPlannerBreakRulesDraftForDirection = (directionName, updater) => {
                 const direction = String(directionName || '').trim();
                 if (!direction) return;
-                setPlannerBreakRulesByDirection(prev => {
-                    const currentRules = normalizePlannerBreakRuleRanges((prev || {})[direction] || []);
-                    const nextRules = normalizePlannerBreakRuleRanges(
-                        typeof updater === 'function' ? updater(currentRules) : updater
-                    );
+                setPlannerBreakRulesDraftByDirection(prev => {
+                    const currentRows = Array.isArray((prev || {})[direction]) ? (prev || {})[direction] : [];
+                    const nextRows = typeof updater === 'function' ? updater(currentRows) : updater;
                     return {
                         ...(prev || {}),
-                        [direction]: nextRules
+                        [direction]: Array.isArray(nextRows) ? nextRows : currentRows
                     };
                 });
             };
 
             const addPlannerBreakRuleRow = (directionName) => {
-                upsertPlannerBreakRulesForDirection(directionName, (rules) => ([
-                    ...rules,
-                    { minMinutes: 360, maxMinutes: 480, breakDurations: [15] }
-                ]));
+                upsertPlannerBreakRulesDraftForDirection(directionName, (rows) => {
+                    const list = Array.isArray(rows) ? [...rows] : [];
+                    const lastRow = list[list.length - 1];
+                    const lastMaxMinutes = plannerBreakRuleParseTextToMinutes(lastRow?.maxTime) ?? 480;
+                    const nextStartMinutes = Math.max(0, Math.min((24 * 60) - 60, lastMaxMinutes));
+                    let nextEndMinutes = Math.min(24 * 60, nextStartMinutes + 120);
+                    if (nextEndMinutes <= nextStartMinutes) {
+                        nextEndMinutes = Math.min(24 * 60, nextStartMinutes + 60);
+                    }
+                    list.push({
+                        minTime: plannerBreakRuleMinutesToText(nextStartMinutes),
+                        maxTime: plannerBreakRuleMinutesToText(nextEndMinutes),
+                        breakDurations: [15],
+                        addDurationInput: ''
+                    });
+                    return list;
+                });
             };
 
             const removePlannerBreakRuleRow = (directionName, index) => {
-                upsertPlannerBreakRulesForDirection(directionName, (rules) => (
-                    rules.filter((_, idx) => idx !== index)
+                upsertPlannerBreakRulesDraftForDirection(directionName, (rows) => (
+                    (rows || []).filter((_, idx) => idx !== index)
                 ));
             };
 
             const updatePlannerBreakRuleRowField = (directionName, index, fieldName, fieldValue) => {
-                upsertPlannerBreakRulesForDirection(directionName, (rules) => rules.map((rule, idx) => {
-                    if (idx !== index) return rule;
-                    if (fieldName === 'breakDurations') {
-                        const durations = plannerNormalizeBreakDurations(
-                            String(fieldValue || '')
-                                .split(',')
-                                .map(x => x.trim())
-                                .filter(Boolean)
-                        );
-                        return { ...rule, breakDurations: durations };
-                    }
-                    const numeric = Number(fieldValue);
-                    if (!Number.isFinite(numeric)) return rule;
-                    return { ...rule, [fieldName]: Math.max(0, Math.round(numeric * 60)) };
+                upsertPlannerBreakRulesDraftForDirection(directionName, (rows) => (rows || []).map((row, idx) => {
+                    if (idx !== index) return row;
+                    return { ...row, [fieldName]: fieldValue };
+                }));
+            };
+
+            const addPlannerBreakRuleDuration = (directionName, index, durationMinutes) => {
+                const dur = Number(durationMinutes);
+                if (!Number.isFinite(dur) || dur <= 0) return;
+                upsertPlannerBreakRulesDraftForDirection(directionName, (rows) => (rows || []).map((row, idx) => {
+                    if (idx !== index) return row;
+                    const nextDurations = plannerNormalizeBreakDurations([...(row?.breakDurations || []), Math.round(dur)]);
+                    return { ...row, breakDurations: nextDurations };
+                }));
+            };
+
+            const removePlannerBreakRuleDuration = (directionName, index, durationIndex) => {
+                upsertPlannerBreakRulesDraftForDirection(directionName, (rows) => (rows || []).map((row, idx) => {
+                    if (idx !== index) return row;
+                    const nextDurations = (row?.breakDurations || []).filter((_, i) => i !== durationIndex);
+                    return { ...row, breakDurations: nextDurations };
                 }));
             };
 
             const savePlannerBreakRulesToServer = async () => {
+                let parsedRulesByDirection = {};
+                try {
+                    parsedRulesByDirection = parsePlannerBreakRulesDraftMap(
+                        plannerBreakRulesDraftByDirection,
+                        plannerBreakRuleDirections
+                    );
+                } catch (error) {
+                    setPlannerBreakRulesError(error?.message || 'Проверьте корректность введенных правил');
+                    return;
+                }
+
                 const directionPayload = plannerBreakRuleDirections.map(directionName => ({
                     direction: directionName,
-                    rules: normalizePlannerBreakRuleRanges((plannerBreakRulesByDirection || {})[directionName] || [])
+                    rules: normalizePlannerBreakRuleRanges(parsedRulesByDirection[directionName] || [])
                 }));
                 setPlannerBreakRulesSaving(true);
                 setPlannerBreakRulesError('');
@@ -6883,7 +6999,11 @@ const withAccessTokenHeader = (headers = {}) => {
                     if (!response.ok) {
                         throw new Error(payload?.error || `HTTP ${response.status}`);
                     }
-                    setPlannerBreakRulesByDirection(normalizePlannerBreakRulesPayload(payload));
+                    const normalized = normalizePlannerBreakRulesPayload(payload);
+                    setPlannerBreakRulesByDirection(normalized);
+                    setPlannerBreakRulesDraftByDirection(
+                        buildPlannerBreakRulesDraftMap(normalized, plannerBreakRuleDirections)
+                    );
                     setShowBreakRulesSettingsModal(false);
                 } catch (error) {
                     setPlannerBreakRulesError(error?.message || 'Не удалось сохранить настройки перерывов');
@@ -12765,7 +12885,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                     Нет направлений для настройки.
                                 </div>
                             ) : plannerBreakRuleDirections.map(directionName => {
-                                const rules = normalizePlannerBreakRuleRanges((plannerBreakRulesByDirection || {})[directionName] || []);
+                                const rules = Array.isArray(plannerBreakRulesDraftByDirection?.[directionName])
+                                    ? plannerBreakRulesDraftByDirection[directionName]
+                                    : [];
                                 return (
                                     <div key={`planner-break-rules-${directionName}`} className="rounded-xl border border-slate-200 bg-white p-3">
                                         <div className="flex items-center justify-between gap-3 mb-2">
@@ -12781,44 +12903,102 @@ const withAccessTokenHeader = (headers = {}) => {
                                         </div>
 
                                         {rules.length === 0 ? (
-                                            <div className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded p-2">
-                                                Для этого направления используются дефолтные правила.
-                                            </div>
-                                        ) : (
+                                                <div className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded p-2">
+                                                    Для этого направления используются дефолтные правила.
+                                                </div>
+                                            ) : (
                                             <div className="space-y-2">
                                                 {rules.map((rule, idx) => (
                                                     <div key={`planner-break-rule-row-${directionName}-${idx}`} className="grid grid-cols-12 gap-2 items-center">
-                                                        <div className="col-span-3">
-                                                            <label className="text-[11px] text-slate-500 block mb-1">От (ч)</label>
-                                                            <input
-                                                                type="number"
-                                                                min="0"
-                                                                step="0.25"
-                                                                value={((Number(rule.minMinutes || 0)) / 60).toFixed(2)}
-                                                                onChange={(e) => updatePlannerBreakRuleRowField(directionName, idx, 'minMinutes', e.target.value)}
-                                                                className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-300"
-                                                            />
-                                                        </div>
-                                                        <div className="col-span-3">
-                                                            <label className="text-[11px] text-slate-500 block mb-1">До (ч)</label>
-                                                            <input
-                                                                type="number"
-                                                                min="0"
-                                                                step="0.25"
-                                                                value={((Number(rule.maxMinutes || 0)) / 60).toFixed(2)}
-                                                                onChange={(e) => updatePlannerBreakRuleRowField(directionName, idx, 'maxMinutes', e.target.value)}
-                                                                className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-300"
-                                                            />
-                                                        </div>
-                                                        <div className="col-span-5">
-                                                            <label className="text-[11px] text-slate-500 block mb-1">Перерывы (минуты через запятую)</label>
+                                                        <div className="col-span-2">
+                                                            <label className="text-[11px] text-slate-500 block mb-1">От</label>
                                                             <input
                                                                 type="text"
-                                                                value={(rule.breakDurations || []).join(',')}
-                                                                onChange={(e) => updatePlannerBreakRuleRowField(directionName, idx, 'breakDurations', e.target.value)}
-                                                                placeholder="15,30,15"
+                                                                inputMode="numeric"
+                                                                value={rule?.minTime ?? ''}
+                                                                placeholder="06:00"
+                                                                onChange={(e) => updatePlannerBreakRuleRowField(directionName, idx, 'minTime', e.target.value)}
+                                                                onBlur={(e) => {
+                                                                    const parsed = plannerBreakRuleParseTextToMinutes(e.target.value);
+                                                                    if (parsed === null) return;
+                                                                    updatePlannerBreakRuleRowField(directionName, idx, 'minTime', plannerBreakRuleMinutesToText(parsed));
+                                                                }}
                                                                 className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-300"
                                                             />
+                                                        </div>
+                                                        <div className="col-span-2">
+                                                            <label className="text-[11px] text-slate-500 block mb-1">До</label>
+                                                            <input
+                                                                type="text"
+                                                                inputMode="numeric"
+                                                                value={rule?.maxTime ?? ''}
+                                                                placeholder="09:00"
+                                                                onChange={(e) => updatePlannerBreakRuleRowField(directionName, idx, 'maxTime', e.target.value)}
+                                                                onBlur={(e) => {
+                                                                    const parsed = plannerBreakRuleParseTextToMinutes(e.target.value);
+                                                                    if (parsed === null) return;
+                                                                    updatePlannerBreakRuleRowField(directionName, idx, 'maxTime', plannerBreakRuleMinutesToText(parsed));
+                                                                }}
+                                                                className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-300"
+                                                            />
+                                                        </div>
+                                                        <div className="col-span-7">
+                                                            <label className="text-[11px] text-slate-500 block mb-1">Перерывы (мин)</label>
+                                                            <div className="rounded-lg border border-slate-300 px-2 py-1.5 bg-slate-50">
+                                                                <div className="flex flex-wrap items-center gap-1.5">
+                                                                    {(rule?.breakDurations || []).map((duration, durationIndex) => (
+                                                                        <span key={`planner-break-duration-${directionName}-${idx}-${durationIndex}`} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-800 text-xs">
+                                                                            {duration}м
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => removePlannerBreakRuleDuration(directionName, idx, durationIndex)}
+                                                                                className="text-amber-700 hover:text-rose-700"
+                                                                                title="Удалить перерыв"
+                                                                            >
+                                                                                <FaIcon className="fas fa-times text-[10px]"></FaIcon>
+                                                                            </button>
+                                                                        </span>
+                                                                    ))}
+                                                                    {(rule?.breakDurations || []).length === 0 && (
+                                                                        <span className="text-xs text-slate-400">Не задано</span>
+                                                                    )}
+                                                                </div>
+                                                                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => addPlannerBreakRuleDuration(directionName, idx, 15)}
+                                                                        className="px-2 py-1 rounded border border-slate-200 bg-white text-xs text-slate-700 hover:bg-slate-100"
+                                                                    >
+                                                                        +15
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => addPlannerBreakRuleDuration(directionName, idx, 30)}
+                                                                        className="px-2 py-1 rounded border border-slate-200 bg-white text-xs text-slate-700 hover:bg-slate-100"
+                                                                    >
+                                                                        +30
+                                                                    </button>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="1"
+                                                                        step="1"
+                                                                        value={rule?.addDurationInput ?? ''}
+                                                                        onChange={(e) => updatePlannerBreakRuleRowField(directionName, idx, 'addDurationInput', e.target.value)}
+                                                                        className="w-20 px-2 py-1 rounded border border-slate-300 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-amber-300"
+                                                                        placeholder="мин"
+                                                                    />
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => {
+                                                                            addPlannerBreakRuleDuration(directionName, idx, rule?.addDurationInput);
+                                                                            updatePlannerBreakRuleRowField(directionName, idx, 'addDurationInput', '');
+                                                                        }}
+                                                                        className="px-2 py-1 rounded border border-amber-200 bg-amber-50 text-xs text-amber-800 hover:bg-amber-100"
+                                                                    >
+                                                                        Добавить
+                                                                    </button>
+                                                                </div>
+                                                            </div>
                                                         </div>
                                                         <div className="col-span-1 pt-5">
                                                             <button
