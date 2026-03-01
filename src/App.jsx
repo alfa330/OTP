@@ -5351,6 +5351,14 @@ const withAccessTokenHeader = (headers = {}) => {
             const [plannerStatusSpecialViewEnabled, setPlannerStatusSpecialViewEnabled] = useState(false);
             const [plannerStatusModalFocus, setPlannerStatusModalFocus] = useState(null);
             const [showPlannerTopActionsMenu, setShowPlannerTopActionsMenu] = useState(false);
+            const [showSwapJournalModal, setShowSwapJournalModal] = useState(false);
+            const [swapJournalMonth, setSwapJournalMonth] = useState(() => {
+                const now = new Date();
+                return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+            });
+            const [swapJournalLoading, setSwapJournalLoading] = useState(false);
+            const [swapJournalError, setSwapJournalError] = useState('');
+            const [swapJournalItems, setSwapJournalItems] = useState([]);
             const [sidebarFilterMenus, setSidebarFilterMenus] = useState({
                 supervisors: false,
                 statuses: false,
@@ -7807,6 +7815,39 @@ const withAccessTokenHeader = (headers = {}) => {
                     setSwapRespondingId(null);
                 }
             };
+            const loadSwapJournal = useCallback(async (monthValue = swapJournalMonth) => {
+                const month = String(monthValue || '').trim();
+                if (!month) return;
+                try {
+                    setSwapJournalLoading(true);
+                    setSwapJournalError('');
+                    const query = new URLSearchParams({
+                        month,
+                        limit: '1000'
+                    }).toString();
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_swap/journal?${query}`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader()
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(payload?.error || `HTTP ${response.status}`);
+                    }
+                    setSwapJournalItems(Array.isArray(payload?.items) ? payload.items : []);
+                    if (payload?.month && typeof payload.month === 'string' && payload.month !== month) {
+                        setSwapJournalMonth(payload.month);
+                    }
+                } catch (error) {
+                    setSwapJournalItems([]);
+                    setSwapJournalError(error?.message || 'Не удалось загрузить журнал замен');
+                } finally {
+                    setSwapJournalLoading(false);
+                }
+            }, [swapJournalMonth]);
+            useEffect(() => {
+                if (!showSwapJournalModal) return;
+                loadSwapJournal(swapJournalMonth);
+            }, [showSwapJournalModal, swapJournalMonth, loadSwapJournal]);
             const swapPendingIncomingCount = useMemo(
                 () => (swapIncomingRequests || []).filter(item => item?.status === 'pending').length,
                 [swapIncomingRequests]
@@ -7838,6 +7879,18 @@ const withAccessTokenHeader = (headers = {}) => {
                         : `${formatDateRuShort(req.startDate)} — ${formatDateRuShort(req.endDate)}`;
                 }
                 return '—';
+            };
+            const formatSwapJournalDateTime = (value) => {
+                if (!value) return '—';
+                const d = new Date(value);
+                if (Number.isNaN(d.getTime())) return String(value);
+                return d.toLocaleString('ru-RU', {
+                    day: '2-digit',
+                    month: '2-digit',
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                });
             };
             const myUpcomingShiftItems = useMemo(() => {
                 const now = new Date();
@@ -9672,6 +9725,20 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     Открыть отчет статусов
                                                 </button>
                                             )}
+
+                                            {(user?.role === 'admin' || user?.role === 'sv') && (
+                                                <button
+                                                    onClick={() => {
+                                                        setShowPlannerTopActionsMenu(false);
+                                                        setShowSwapJournalModal(true);
+                                                    }}
+                                                    className="w-full px-3 py-2 rounded-xl border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-700 text-sm font-medium flex items-center gap-2"
+                                                    title="Журнал запросов на замену за выбранный месяц"
+                                                >
+                                                    <FaIcon className="fas fa-right-left"></FaIcon>
+                                                    Журнал замен
+                                                </button>
+                                            )}
                                         </div>
 
                                         <div className="border-t border-slate-200 p-2 space-y-1">
@@ -11462,6 +11529,135 @@ const withAccessTokenHeader = (headers = {}) => {
                             </>
                         );
                     })()}
+                </SimpleModal>
+
+                <SimpleModal
+                    open={!!showSwapJournalModal && (user?.role === 'admin' || user?.role === 'sv')}
+                    onClose={() => setShowSwapJournalModal(false)}
+                    panelClassName="w-[calc(100vw-2rem)] max-w-[1200px]"
+                >
+                    <div className="flex items-start justify-between gap-3 mb-4 pb-3 border-b border-slate-200">
+                        <div>
+                            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                <FaIcon className="fas fa-right-left text-sky-600"></FaIcon>
+                                Журнал замен
+                            </h3>
+                            <div className="text-sm text-slate-600 mt-1">
+                                Запросы на замену смен за выбранный месяц
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setShowSwapJournalModal(false)}
+                            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
+                            title="Закрыть"
+                        >
+                            <FaIcon className="fas fa-times"></FaIcon>
+                        </button>
+                    </div>
+
+                    <div className="mb-3 flex flex-wrap items-end gap-2">
+                        <label className="text-sm">
+                            <div className="text-xs text-slate-600 mb-1">Месяц</div>
+                            <input
+                                type="month"
+                                value={swapJournalMonth}
+                                onChange={(e) => setSwapJournalMonth(e.target.value)}
+                                className="px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+                                disabled={swapJournalLoading}
+                            />
+                        </label>
+                        <button
+                            type="button"
+                            onClick={() => loadSwapJournal(swapJournalMonth)}
+                            disabled={swapJournalLoading || !swapJournalMonth}
+                            className={`px-3 py-2 rounded-lg border text-sm inline-flex items-center gap-2 ${
+                                swapJournalLoading || !swapJournalMonth
+                                    ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                            }`}
+                        >
+                            <FaIcon className={`fas ${swapJournalLoading ? 'fa-spinner fa-spin' : 'fa-rotate'}`}></FaIcon>
+                            Обновить
+                        </button>
+                    </div>
+
+                    {swapJournalError && (
+                        <div className="mb-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+                            {swapJournalError}
+                        </div>
+                    )}
+
+                    {swapJournalLoading ? (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
+                            <FaIcon className="fas fa-spinner fa-spin mr-2"></FaIcon>
+                            Загрузка журнала...
+                        </div>
+                    ) : swapJournalItems.length === 0 ? (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
+                            За выбранный месяц записей нет.
+                        </div>
+                    ) : (
+                        <div className="max-h-[65vh] overflow-auto rounded-lg border border-slate-200">
+                            <table className="min-w-full text-sm">
+                                <thead className="bg-slate-50 sticky top-0 z-10">
+                                    <tr className="text-left text-slate-600">
+                                        <th className="px-3 py-2 border-b border-slate-200">Период</th>
+                                        <th className="px-3 py-2 border-b border-slate-200">От кого</th>
+                                        <th className="px-3 py-2 border-b border-slate-200">Кому</th>
+                                        <th className="px-3 py-2 border-b border-slate-200">Направление</th>
+                                        <th className="px-3 py-2 border-b border-slate-200">Статус</th>
+                                        <th className="px-3 py-2 border-b border-slate-200">Создан</th>
+                                        <th className="px-3 py-2 border-b border-slate-200">Ответ</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {swapJournalItems.map(item => {
+                                        const statusMeta = getSwapStatusMeta(item?.status);
+                                        const periodLabel = formatSwapIntervalLabel(item);
+                                        return (
+                                            <tr key={`swap-journal-${item?.id}`} className="align-top odd:bg-white even:bg-slate-50/50">
+                                                <td className="px-3 py-2 border-b border-slate-100">
+                                                    <div className="font-medium text-slate-900">{periodLabel}</div>
+                                                    <div className="text-xs text-slate-500">
+                                                        Длительность: {formatMinutesOnly(item?.summary?.totalMinutes ?? 0)}
+                                                    </div>
+                                                    {item?.requestComment && (
+                                                        <div className="text-xs text-slate-600 mt-1">Комментарий: {item.requestComment}</div>
+                                                    )}
+                                                </td>
+                                                <td className="px-3 py-2 border-b border-slate-100 text-slate-700">
+                                                    {item?.requester?.name || '—'}
+                                                </td>
+                                                <td className="px-3 py-2 border-b border-slate-100 text-slate-700">
+                                                    {item?.target?.name || '—'}
+                                                </td>
+                                                <td className="px-3 py-2 border-b border-slate-100 text-slate-600">
+                                                    {item?.direction?.name || '—'}
+                                                </td>
+                                                <td className="px-3 py-2 border-b border-slate-100">
+                                                    <span className={`px-2 py-0.5 rounded-md border text-xs font-semibold ${statusMeta.className}`}>
+                                                        {statusMeta.label}
+                                                    </span>
+                                                </td>
+                                                <td className="px-3 py-2 border-b border-slate-100 text-slate-600 whitespace-nowrap">
+                                                    {formatSwapJournalDateTime(item?.createdAt)}
+                                                </td>
+                                                <td className="px-3 py-2 border-b border-slate-100 text-slate-600 whitespace-nowrap">
+                                                    {formatSwapJournalDateTime(item?.respondedAt || item?.acceptedAt)}
+                                                    {item?.responseComment && (
+                                                        <div className="text-xs text-slate-500 mt-1 whitespace-normal max-w-[260px]">
+                                                            {item.responseComment}
+                                                        </div>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
                 </SimpleModal>
 
                 <SimpleModal
