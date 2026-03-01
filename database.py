@@ -535,6 +535,19 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS work_schedule_break_rules (
+                    id SERIAL PRIMARY KEY,
+                    direction_name VARCHAR(255) NOT NULL,
+                    min_shift_minutes INTEGER NOT NULL,
+                    max_shift_minutes INTEGER NOT NULL,
+                    break_durations_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CHECK (min_shift_minutes >= 0),
+                    CHECK (max_shift_minutes > min_shift_minutes)
+                );
+            """)
 
             # Days off table
             cursor.execute("""
@@ -646,6 +659,14 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_shift_breaks_shift_id
                 ON shift_breaks(shift_id);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_work_schedule_break_rules_direction
+                ON work_schedule_break_rules(LOWER(direction_name));
+            """)
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_work_schedule_break_rules_direction_range
+                ON work_schedule_break_rules(LOWER(direction_name), min_shift_minutes, max_shift_minutes);
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_operator_start
@@ -4421,6 +4442,216 @@ class Database:
         # Вызов генератора — один проход, файл формируется сразу с колонкой "Супервайзер"
         return self.generate_excel_report_from_view({"operators": ops}, trainings_map, month, filename=filename, include_supervisor=True)
 
+    def _normalize_break_durations_list(self, value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            parts = [p.strip() for p in value.split(',')]
+            raw_items = [p for p in parts if p]
+        elif isinstance(value, list):
+            raw_items = value
+        else:
+            raise ValueError("break_durations must be a list of minutes")
+
+        result = []
+        for item in raw_items:
+            try:
+                minutes = int(item)
+            except Exception:
+                raise ValueError("break_durations must contain integer minutes")
+            if minutes <= 0:
+                raise ValueError("break_durations values must be > 0")
+            if minutes > 240:
+                raise ValueError("break_durations values must be <= 240")
+            result.append(minutes)
+        return result
+
+    def _normalize_break_rule_ranges(self, rules):
+        if rules is None:
+            return []
+        if not isinstance(rules, list):
+            raise ValueError("rules must be a list")
+
+        normalized = []
+
+        def _to_minutes(item, minutes_key, minutes_key_alt, hours_key, hours_key_alt):
+            if item.get(minutes_key) is not None:
+                return int(item.get(minutes_key))
+            if item.get(minutes_key_alt) is not None:
+                return int(item.get(minutes_key_alt))
+            if item.get(hours_key) is not None:
+                return int(round(float(item.get(hours_key)) * 60))
+            if item.get(hours_key_alt) is not None:
+                return int(round(float(item.get(hours_key_alt)) * 60))
+            return None
+
+        for rule in rules:
+            if not isinstance(rule, dict):
+                raise ValueError("Each rule must be an object")
+            min_minutes = _to_minutes(rule, 'min_minutes', 'minMinutes', 'min_hours', 'minHours')
+            max_minutes = _to_minutes(rule, 'max_minutes', 'maxMinutes', 'max_hours', 'maxHours')
+            if min_minutes is None or max_minutes is None:
+                raise ValueError("Each rule must contain min/max hours or minutes")
+            if min_minutes < 0:
+                raise ValueError("min_minutes must be >= 0")
+            if max_minutes <= min_minutes:
+                raise ValueError("max_minutes must be > min_minutes")
+            break_durations = self._normalize_break_durations_list(
+                rule.get('break_durations')
+                if 'break_durations' in rule else (
+                    rule.get('breakDurations')
+                    if 'breakDurations' in rule else rule.get('durations')
+                )
+            )
+            normalized.append({
+                'minMinutes': int(min_minutes),
+                'maxMinutes': int(max_minutes),
+                'breakDurations': break_durations
+            })
+
+        normalized.sort(key=lambda x: (x['minMinutes'], x['maxMinutes']))
+        prev = None
+        for cur in normalized:
+            if prev is not None and cur['minMinutes'] < prev['maxMinutes']:
+                raise ValueError("Break rules ranges must not overlap within one direction")
+            prev = cur
+        return normalized
+
+    def get_work_schedule_break_rules(self):
+        """
+        Возвращает правила автоперерывов по направлениям.
+        Формат:
+        [
+          {
+            "direction": "Название",
+            "rules": [
+              {"minMinutes": 360, "maxMinutes": 540, "breakDurations": [30]}
+            ]
+          }
+        ]
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT direction_name, min_shift_minutes, max_shift_minutes, break_durations_json
+                FROM work_schedule_break_rules
+                ORDER BY LOWER(direction_name), min_shift_minutes, max_shift_minutes, id
+            """)
+            rows = cursor.fetchall() or []
+
+        by_direction = {}
+        for direction_name, min_shift_minutes, max_shift_minutes, break_durations_json in rows:
+            direction_label = str(direction_name or '').strip()
+            if not direction_label:
+                continue
+            item = by_direction.setdefault(direction_label, {"direction": direction_label, "rules": []})
+            item["rules"].append({
+                "minMinutes": int(min_shift_minutes),
+                "maxMinutes": int(max_shift_minutes),
+                "breakDurations": self._normalize_break_durations_list(break_durations_json)
+            })
+
+        result = list(by_direction.values())
+        result.sort(key=lambda x: str(x.get('direction') or '').lower())
+        return result
+
+    def get_work_schedule_break_rules_map(self):
+        """
+        Возвращает map по normalized direction key -> rules list.
+        """
+        result = {}
+        for item in (self.get_work_schedule_break_rules() or []):
+            direction = str(item.get('direction') or '').strip()
+            key = self._normalize_direction_key(direction)
+            if not key:
+                continue
+            result[key] = [dict(rule) for rule in (item.get('rules') or []) if isinstance(rule, dict)]
+        return result
+
+    def _get_work_schedule_break_rules_for_direction_tx(self, cursor, direction_name):
+        direction_label = str(direction_name or '').strip()
+        if not direction_label:
+            return []
+        cursor.execute("""
+            SELECT min_shift_minutes, max_shift_minutes, break_durations_json
+            FROM work_schedule_break_rules
+            WHERE LOWER(direction_name) = LOWER(%s)
+            ORDER BY min_shift_minutes, max_shift_minutes, id
+        """, (direction_label,))
+        rows = cursor.fetchall() or []
+        return [
+            {
+                "minMinutes": int(min_shift_minutes),
+                "maxMinutes": int(max_shift_minutes),
+                "breakDurations": self._normalize_break_durations_list(break_durations_json)
+            }
+            for min_shift_minutes, max_shift_minutes, break_durations_json in rows
+        ]
+
+    def save_work_schedule_break_rules(self, direction_rules):
+        """
+        Сохранить правила автоперерывов по направлениям.
+        direction_rules:
+        [
+          {"direction": "Название", "rules": [{"minMinutes": 360, "maxMinutes": 540, "breakDurations": [30]}]}
+        ]
+        Для направления переданные rules полностью заменяют старые.
+        """
+        if not isinstance(direction_rules, list):
+            raise ValueError("direction_rules must be a list")
+
+        normalized_payload = []
+        seen = set()
+        for item in direction_rules:
+            if not isinstance(item, dict):
+                raise ValueError("Each direction_rules item must be an object")
+            direction = str(item.get('direction') or item.get('direction_name') or '').strip()
+            if not direction:
+                raise ValueError("direction is required")
+            direction_key = self._normalize_direction_key(direction)
+            if not direction_key:
+                raise ValueError("direction is required")
+            if direction_key in seen:
+                raise ValueError("Duplicate direction in direction_rules")
+            seen.add(direction_key)
+            rules = self._normalize_break_rule_ranges(item.get('rules'))
+            normalized_payload.append({
+                'direction': direction,
+                'rules': rules
+            })
+
+        with self._get_cursor() as cursor:
+            for item in normalized_payload:
+                direction = item['direction']
+                cursor.execute("""
+                    DELETE FROM work_schedule_break_rules
+                    WHERE LOWER(direction_name) = LOWER(%s)
+                """, (direction,))
+
+                rows_to_insert = item['rules']
+                if not rows_to_insert:
+                    continue
+
+                cursor.executemany("""
+                    INSERT INTO work_schedule_break_rules (
+                        direction_name,
+                        min_shift_minutes,
+                        max_shift_minutes,
+                        break_durations_json,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP)
+                """, [
+                    (
+                        direction,
+                        int(rule['minMinutes']),
+                        int(rule['maxMinutes']),
+                        json.dumps(rule['breakDurations'], ensure_ascii=False)
+                    )
+                    for rule in rows_to_insert
+                ])
+
+        return self.get_work_schedule_break_rules()
+
     # ==================== Work Shifts Methods ====================
     
     def _normalize_schedule_date(self, value):
@@ -4510,7 +4741,48 @@ class Database:
         row = cursor.fetchone()
         return row[0] if row else None
 
-    def _compute_auto_shift_breaks_minutes(self, start_min, end_min, direction_name=None):
+    def _pick_break_durations_for_shift(self, duration_minutes, direction_name=None, direction_rules=None):
+        dur = int(duration_minutes)
+        rules = direction_rules if isinstance(direction_rules, list) else []
+        selected_custom = None
+        for rule in sorted(
+            [r for r in rules if isinstance(r, dict)],
+            key=lambda x: (int(x.get('minMinutes', 0)), int(x.get('maxMinutes', 0)))
+        ):
+            try:
+                min_minutes = int(rule.get('minMinutes'))
+                max_minutes = int(rule.get('maxMinutes'))
+            except Exception:
+                continue
+            if max_minutes <= min_minutes:
+                continue
+            if dur >= min_minutes and dur <= max_minutes:
+                # При совпадении нескольких диапазонов берем с максимальным minMinutes
+                # (например, 6-9 и 9-12 -> для 9ч сработает 9-12).
+                if selected_custom is None or min_minutes >= int(selected_custom.get('minMinutes', -1)):
+                    selected_custom = rule
+
+        if selected_custom is not None:
+            return self._normalize_break_durations_list(selected_custom.get('breakDurations'))
+
+        # Fallback: действующий базовый профиль + чат-менеджер по умолчанию.
+        if self._is_chat_manager_direction(direction_name):
+            if dur >= 6 * 60 and dur < 9 * 60:
+                return [30]
+            if dur >= 9 * 60 and dur <= 12 * 60:
+                return [30, 30]
+
+        if dur >= 5 * 60 and dur < 6 * 60:
+            return [15]
+        if dur >= 6 * 60 and dur < 8 * 60:
+            return [15, 15]
+        if dur >= 8 * 60 and dur < 11 * 60:
+            return [15, 30, 15]
+        if dur >= 11 * 60:
+            return [15, 30, 15, 15]
+        return []
+
+    def _compute_auto_shift_breaks_minutes(self, start_min, end_min, direction_name=None, direction_rules=None):
         """
         Серверная автогенерация перерывов (зеркалит фронтенд-базовую логику по длительности смены).
         Возвращает список интервалов в минутах от начала дня; для ночных смен end_min может быть > 1440.
@@ -4535,32 +4807,16 @@ class Database:
             if e > s:
                 breaks.append({'start': s, 'end': e})
 
-        use_default_profile = True
-        if self._is_chat_manager_direction(direction_name):
-            if dur >= 6 * 60 and dur < 9 * 60:
-                push_centered(start_min + dur * 0.5, 30)
-                use_default_profile = False
-            elif dur >= 9 * 60 and dur <= 12 * 60:
-                push_centered(start_min + dur / 3, 30)
-                push_centered(start_min + 2 * dur / 3, 30)
-                use_default_profile = False
-
-        if use_default_profile:
-            if dur >= 5 * 60 and dur < 6 * 60:
-                push_centered(start_min + dur * 0.5, 15)
-            elif dur >= 6 * 60 and dur < 8 * 60:
-                push_centered(start_min + dur / 3, 15)
-                push_centered(start_min + 2 * dur / 3, 15)
-            elif dur >= 8 * 60 and dur < 11 * 60:
-                centers = [start_min + dur * 0.25, start_min + dur * 0.5, start_min + dur * 0.75]
-                sizes = [15, 30, 15]
-                for c, sz in zip(centers, sizes):
-                    push_centered(c, sz)
-            elif dur >= 11 * 60:
-                centers = [start_min + dur * 0.2, start_min + dur * 0.45, start_min + dur * 0.7, start_min + dur * 0.87]
-                sizes = [15, 30, 15, 15]
-                for c, sz in zip(centers, sizes):
-                    push_centered(c, sz)
+        break_durations = self._pick_break_durations_for_shift(
+            duration_minutes=dur,
+            direction_name=direction_name,
+            direction_rules=direction_rules
+        )
+        if break_durations:
+            count = len(break_durations)
+            for idx, size in enumerate(break_durations):
+                center = start_min + (dur * ((idx + 1) / (count + 1)))
+                push_centered(center, int(size))
 
         normalized = []
         seen = set()
@@ -4779,6 +5035,7 @@ class Database:
             return incoming_breaks_norm
 
         direction_name = self._get_operator_direction_name_tx(cursor, operator_id)
+        direction_rules = self._get_work_schedule_break_rules_for_direction_tx(cursor, direction_name)
         shift_id, existing_start_value, existing_end_value = existing_rows[0]
         existing_breaks = self._load_shift_breaks_tx(cursor, shift_id)
         if not existing_breaks:
@@ -4788,7 +5045,12 @@ class Database:
 
         existing_start_min, existing_end_min = self._schedule_interval_minutes(existing_start_value, existing_end_value)
         existing_duration = max(0, existing_end_min - existing_start_min)
-        existing_auto_breaks = self._compute_auto_shift_breaks_minutes(existing_start_min, existing_end_min, direction_name=direction_name)
+        existing_auto_breaks = self._compute_auto_shift_breaks_minutes(
+            existing_start_min,
+            existing_end_min,
+            direction_name=direction_name,
+            direction_rules=direction_rules
+        )
         if existing_breaks != existing_auto_breaks:
             return incoming_breaks_norm
 
@@ -4813,6 +5075,7 @@ class Database:
         new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
         new_duration_min = max(0, new_end_min - new_start_min)
         direction_name = self._get_operator_direction_name_tx(cursor, operator_id)
+        direction_rules = self._get_work_schedule_break_rules_for_direction_tx(cursor, direction_name)
 
         prev_start_obj = None
         prev_end_obj = None
@@ -4841,11 +5104,21 @@ class Database:
             previous_start_min, previous_end_min = self._schedule_interval_minutes(previous_start_value, previous_end_value)
             previous_duration_min = max(0, previous_end_min - previous_start_min)
             previous_shift_breaks = self._load_shift_breaks_tx(cursor, previous_shift_id)
-            previous_auto_breaks = self._compute_auto_shift_breaks_minutes(previous_start_min, previous_end_min, direction_name=direction_name)
+            previous_auto_breaks = self._compute_auto_shift_breaks_minutes(
+                previous_start_min,
+                previous_end_min,
+                direction_name=direction_name,
+                direction_rules=direction_rules
+            )
             previous_shift_breaks_were_auto = (previous_shift_breaks == previous_auto_breaks)
 
         if breaks is None:
-            breaks_norm = self._compute_auto_shift_breaks_minutes(new_start_min, new_end_min, direction_name=direction_name)
+            breaks_norm = self._compute_auto_shift_breaks_minutes(
+                new_start_min,
+                new_end_min,
+                direction_name=direction_name,
+                direction_rules=direction_rules
+            )
         else:
             incoming_breaks_norm = self._normalize_shift_breaks(breaks)
             should_regenerate_auto_breaks = (
@@ -4855,7 +5128,12 @@ class Database:
                 and new_duration_min < previous_duration_min
             )
             breaks_norm = (
-                self._compute_auto_shift_breaks_minutes(new_start_min, new_end_min, direction_name=direction_name)
+                self._compute_auto_shift_breaks_minutes(
+                    new_start_min,
+                    new_end_min,
+                    direction_name=direction_name,
+                    direction_rules=direction_rules
+                )
                 if should_regenerate_auto_breaks
                 else incoming_breaks_norm
             )
