@@ -5139,10 +5139,13 @@ const withAccessTokenHeader = (headers = {}) => {
             return null;
             }
 
-            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators, getDirectionBreakScopeKey) {
+            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection = null) {
             const segs = op.shifts?.[dateStr];
             if (!segs || segs.length === 0) return;
             let occupied = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id, op?.direction, getDirectionBreakScopeKey);
+            const breakRuleRanges = (typeof getBreakRuleRangesForDirection === 'function')
+                ? getBreakRuleRangesForDirection(op?.direction)
+                : null;
             for (const seg of segs) {
                 const rawSegStart = seg.__startMin ?? timeToMinutes(seg.start);
                 const rawSegEnd = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
@@ -5150,7 +5153,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     rawSegStart,
                     rawSegEnd,
                     op?.direction,
-                    getPlannerBreakRuleRangesForDirection(op?.direction)
+                    breakRuleRanges
                 );
                 const segStart = Math.max(0, rawSegStart);
                 const segEnd = Math.max(segStart, Math.min(2880, rawSegEnd));
@@ -5175,7 +5178,7 @@ const withAccessTokenHeader = (headers = {}) => {
             }
             }
 
-            function mergeSegments(segments, directionValue = null) {
+            function mergeSegments(segments, directionValue = null, getBreakRuleRangesForDirection = null) {
             if (!Array.isArray(segments) || segments.length === 0) return [];
             const intervals = segments.map(s => {
                 const start = timeToMinutes(s.start);
@@ -5200,11 +5203,14 @@ const withAccessTokenHeader = (headers = {}) => {
             return merged.map(m => {
                 const startStr = minutesToTime(m.start);
                 const endStr = minutesToTime(m.end % 1440);
+                const breakRuleRanges = (typeof getBreakRuleRangesForDirection === 'function')
+                    ? getBreakRuleRangesForDirection(directionValue)
+                    : null;
                 const breaks = computeBreaksForShiftMinutes(
                     m.start,
                     m.end,
                     directionValue,
-                    getPlannerBreakRuleRangesForDirection(directionValue)
+                    breakRuleRanges
                 );
                 return { start: startStr, end: endStr, __startMin: m.start, __endMin: m.end, breaks };
             });
@@ -6732,7 +6738,7 @@ const withAccessTokenHeader = (headers = {}) => {
                   existing[editIndex] = { start, end };
                 }
 
-                const merged = mergeSegments(existing, simOp?.direction);
+                const merged = mergeSegments(existing, simOp?.direction, getPlannerBreakRuleRangesForDirection);
                 const inputStartMin = timeToMinutes(start);
                 const inputEndMin = timeToMinutes(end);
                 const inputEndNorm = (inputEndMin <= inputStartMin) ? (inputEndMin + 1440) : inputEndMin;
@@ -6775,7 +6781,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 targetSeg.breaks = seedBreaks.map(b => ({ start: b.start, end: b.end }));
                 simOp.shifts[date] = merged;
 
-                try { adjustBreaksForOperatorOnDate(simOp, date, simulated, getBreakConflictDirectionScopeKey); } catch (e) { /* ignore */ }
+                try { adjustBreaksForOperatorOnDate(simOp, date, simulated, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection); } catch (e) { /* ignore */ }
 
                 const adjustedTarget = (simOp.shifts?.[date] ?? []).find(s => {
                   const sMin = s.__startMin ?? timeToMinutes(s.start);
@@ -7313,7 +7319,7 @@ const withAccessTokenHeader = (headers = {}) => {
                       if (!touchedPairs.has(pairKey)) return;
                       const op = copy.find(x => x.id === target.opId);
                       if (!op) return;
-                      try { adjustBreaksForOperatorOnDate(op, target.date, copy, getBreakConflictDirectionScopeKey); } catch (e) { /* ignore */ }
+                      try { adjustBreaksForOperatorOnDate(op, target.date, copy, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection); } catch (e) { /* ignore */ }
                       touchedPairs.delete(pairKey);
                     });
                     return copy;
@@ -7468,14 +7474,14 @@ const withAccessTokenHeader = (headers = {}) => {
                     } else {
                       arr[editIndex] = { start, end };
                     }
-                    const merged = mergeSegments(arr, op?.direction);
+                    const merged = mergeSegments(arr, op?.direction, getPlannerBreakRuleRangesForDirection);
                     // подставим перерывы, если они были
                     if (breaksToSend && editIndex !== null) {
                       const seg = merged.find(s => s.start === effectiveStart && s.end === effectiveEnd);
                       if (seg) seg.breaks = breaksToSend.map(b => ({ start: b.start, end: b.end }));
                     }
                     op.shifts[date] = merged;
-                    try { adjustBreaksForOperatorOnDate(op, date, copy, getBreakConflictDirectionScopeKey); } catch (e) { /* ignore */ }
+                    try { adjustBreaksForOperatorOnDate(op, date, copy, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection); } catch (e) { /* ignore */ }
                     return copy;
                   });
               
@@ -7519,7 +7525,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     if (!op) return prev;
                     const arr = (op.shifts[date] ?? []).slice();
                     arr.splice(index, 1);
-                    if (arr.length === 0) delete op.shifts[date]; else op.shifts[date] = mergeSegments(arr, op?.direction);
+                    if (arr.length === 0) delete op.shifts[date]; else op.shifts[date] = mergeSegments(arr, op?.direction, getPlannerBreakRuleRangesForDirection);
                     return copy;
                     });
                 } catch (error) {
