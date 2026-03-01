@@ -2150,9 +2150,29 @@ def get_user_hours():
 @require_api_key
 def get_sv_list():
     try:
-        supervisors = db.get_supervisors()
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, name, hours_table_url, role, hire_date, status, gender, birth_date
+                FROM users
+                WHERE role = 'sv'
+                ORDER BY name
+            """)
+            supervisors = cursor.fetchall()
+
         logging.info(f"Fetched {len(supervisors)} supervisors")
-        sv_data = [{"id": sv[0], "name": sv[1], "table": sv[2],"role": sv[3], "hire_date": sv[4].strftime('%d-%m-%Y') if sv[4] else None, "status": sv[5]} for sv in supervisors]
+        sv_data = [
+            {
+                "id": sv[0],
+                "name": sv[1],
+                "table": sv[2],
+                "role": sv[3],
+                "hire_date": sv[4].strftime('%d-%m-%Y') if sv[4] else None,
+                "status": sv[5],
+                "gender": sv[6],
+                "birth_date": sv[7].strftime('%d-%m-%Y') if sv[7] else None
+            }
+            for sv in supervisors
+        ]
         return jsonify({"status": "success", "sv_list": sv_data})
     except Exception as e:
         logging.error(f"Error fetching SV list: {e}", exc_info=True)
