@@ -330,6 +330,34 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
     const currentDir = directions?.find(d => d.id === selectedDirId) || directions?.[0] || null;
     const criteria = currentDir?.criteria || [];
     const monthsRu = ['янв.','февр.','мар.','апр.','май','июн.','июл.','авг.','сент.','окт.','ноя.','дек.'];
+    const monthAliases = [
+        ['янв', 'январь', 'января'],
+        ['фев', 'февр', 'февраль', 'февраля'],
+        ['мар', 'март', 'марта'],
+        ['апр', 'апрель', 'апреля'],
+        ['май', 'мая'],
+        ['июн', 'июнь', 'июня'],
+        ['июл', 'июль', 'июля'],
+        ['авг', 'август', 'августа'],
+        ['сен', 'сент', 'сентябрь', 'сентября'],
+        ['окт', 'октябрь', 'октября'],
+        ['ноя', 'ноябрь', 'ноября'],
+        ['дек', 'декабрь', 'декабря']
+    ];
+    const normalizeMonthToken = (value) =>
+        String(value || '')
+            .toLowerCase()
+            .replace(/\./g, '')
+            .replace(/[^а-яё]/g, '');
+    const resolveMonthIndex = (token) => {
+        const norm = normalizeMonthToken(token);
+        if (!norm) return -1;
+        for (let i = 0; i < monthAliases.length; i++) {
+            const variants = monthAliases[i];
+            if (variants.some(v => norm === v || norm.startsWith(v))) return i;
+        }
+        return -1;
+    };
     const parseDateSafe = (value) => {
         if (!value) return null;
         const raw = String(value).trim();
@@ -452,8 +480,10 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
             if (d.length > 12) f += ':' + d.slice(12,14);
             return f;
         } else {
-            const hasMonth = monthsRu.some(m => input.toLowerCase().includes(m.toLowerCase()));
-            if (hasMonth) return input;
+            const raw = String(input || '');
+            if (/[а-яё]/i.test(raw)) return raw;
+            if (/^\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?$/.test(raw.trim())) return raw;
+            if (/^\d{4}-\d{2}-\d{2}[ T]\d{1,2}:\d{2}(?::\d{2})?$/.test(raw.trim())) return raw;
             let d = input.replace(/\D/g,'');
             if (d.length <= 2) return d;
             if (d.length <= 4) { const m = parseInt(d.slice(2,4)); return m>=1&&m<=12 ? d.slice(0,2)+' '+monthsRu[m-1] : d.slice(0,2); }
@@ -483,12 +513,13 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
                 const [, dd, mm, yyyy, hh, mi, ss] = dmy;
                 return `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}T${String(hh).padStart(2, '0')}:${mi}:${(ss || '00').padStart(2, '0')}`;
             }
-            const m = appealDate.trim().match(/^(\d{1,2})\s+([а-яё]+\.?)\s+(\d{1,2}):(\d{2})$/i);
-            if (!m) return null;
-            const mi = monthsRu.findIndex(x => x.replace(/\./,'').toLowerCase() === m[2].toLowerCase().replace(/\./,''));
-            if (mi === -1) return null;
-            const year = Number((assignedMonth || '').split('-')[0]) || new Date().getFullYear();
-            return `${year}-${String(mi+1).padStart(2,'0')}-${m[1].padStart(2,'0')}T${m[3].padStart(2,'0')}:${m[4]}:00`;
+            const textDate = appealDate.trim().match(/^(\d{1,2})\s+([а-яё.]+)(?:\s+(\d{4}))?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/i);
+            if (!textDate) return null;
+            const [, dd, monthToken, explicitYear, hh, minute, ss] = textDate;
+            const monthIndex = resolveMonthIndex(monthToken);
+            if (monthIndex === -1) return null;
+            const year = Number(explicitYear) || Number((assignedMonth || '').split('-')[0]) || new Date().getFullYear();
+            return `${year}-${String(monthIndex+1).padStart(2,'0')}-${String(dd).padStart(2,'0')}T${String(hh).padStart(2,'0')}:${minute}:${(ss || '00').padStart(2,'0')}`;
         }
     };
 
