@@ -513,13 +513,16 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
                 const [, dd, mm, yyyy, hh, mi, ss] = dmy;
                 return `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}T${String(hh).padStart(2, '0')}:${mi}:${(ss || '00').padStart(2, '0')}`;
             }
-            const textDate = appealDate.trim().match(/^(\d{1,2})\s+([а-яё.]+)(?:\s+(\d{4}))?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/i);
+            const textDate = appealDate.trim().match(/^(\d{1,2})\s+([а-яё.]+)(?:\s+(\d{4}))?(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/i);
             if (!textDate) return null;
-            const [, dd, monthToken, explicitYear, hh, minute, ss] = textDate;
+            const [, dd, monthToken, explicitYear, hhRaw, minuteRaw, ssRaw] = textDate;
             const monthIndex = resolveMonthIndex(monthToken);
             if (monthIndex === -1) return null;
             const year = Number(explicitYear) || Number((assignedMonth || '').split('-')[0]) || new Date().getFullYear();
-            return `${year}-${String(monthIndex+1).padStart(2,'0')}-${String(dd).padStart(2,'0')}T${String(hh).padStart(2,'0')}:${minute}:${(ss || '00').padStart(2,'0')}`;
+            const hh = String(hhRaw ?? '00').padStart(2, '0');
+            const minute = String(minuteRaw ?? '00').padStart(2, '0');
+            const ss = String(ssRaw ?? '00').padStart(2, '0');
+            return `${year}-${String(monthIndex+1).padStart(2,'0')}-${String(dd).padStart(2,'0')}T${hh}:${minute}:${ss}`;
         }
     };
 
@@ -664,7 +667,7 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
                                 type="text"
                                 value={appealDate}
                                 onChange={e => setAppealDate(fmtDate(e.target.value))}
-                                placeholder={currentDir?.hasFileUpload ? 'DD-MM-YYYY HH:MM:SS' : 'DD месяц HH:MM'}
+                                placeholder={currentDir?.hasFileUpload ? 'DD-MM-YYYY HH:MM:SS' : 'DD месяц HH:MM или DD месяц YYYY'}
                                 readOnly={isLocked}
                                 style={{fontFamily: 'var(--font-mono)'}}
                             />
