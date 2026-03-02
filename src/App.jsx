@@ -8059,7 +8059,8 @@ const withAccessTokenHeader = (headers = {}) => {
                         nextDaySegments: [],
                         totalMinutes: 0,
                         nextDayTotalMinutes: 0,
-                        selectedInterval: null
+                        selectedInterval: null,
+                        selectedIntervalNextDay: null
                     };
                 }
 
@@ -8124,6 +8125,12 @@ const withAccessTokenHeader = (headers = {}) => {
                         end: Math.max(0, Math.min(1440, parsedRange.endMin))
                     }
                     : null;
+                const selectedIntervalNextDay = (parsedRange.isValid && parsedRange.endMin > 1440)
+                    ? {
+                        start: 0,
+                        end: Math.max(0, Math.min(1440, parsedRange.endMin - 1440))
+                    }
+                    : null;
 
                 return {
                     date: swapDate,
@@ -8134,7 +8141,8 @@ const withAccessTokenHeader = (headers = {}) => {
                     nextDaySegments,
                     totalMinutes: segments.reduce((acc, item) => acc + (item.minutes || 0), 0),
                     nextDayTotalMinutes: nextDaySegments.reduce((acc, item) => acc + (item.minutes || 0), 0),
-                    selectedInterval
+                    selectedInterval,
+                    selectedIntervalNextDay
                 };
             }, [
                 swapForm.swapDate,
@@ -9578,6 +9586,16 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                 title={`${seg.label} (${formatMinutesOnly(seg.minutes)})`}
                                                                             ></div>
                                                                         ))}
+                                                                        {swapDayTimeline.selectedIntervalNextDay && (
+                                                                            <div
+                                                                                className="absolute top-0 bottom-0 bg-emerald-400/25 border-x-2 border-emerald-500 pointer-events-none"
+                                                                                style={{
+                                                                                    left: `${(swapDayTimeline.selectedIntervalNextDay.start / 1440) * 100}%`,
+                                                                                    width: `${((swapDayTimeline.selectedIntervalNextDay.end - swapDayTimeline.selectedIntervalNextDay.start) / 1440) * 100}%`
+                                                                                }}
+                                                                                title={`Выбранный интервал: ${swapForm.startTime} — ${swapForm.endTime}`}
+                                                                            ></div>
+                                                                        )}
                                                                     </div>
                                                                     <div className="mt-2 flex flex-wrap gap-1.5">
                                                                         {swapDayTimeline.nextDaySegments.map(seg => (
