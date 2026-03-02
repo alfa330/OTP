@@ -4727,6 +4727,27 @@ class Database:
         key = self._normalize_direction_key(direction_name)
         return key in ('чат менеджер', 'chat manager')
 
+    def _is_smz_direction(self, direction_name):
+        key = self._normalize_direction_key(direction_name)
+        return key in ('смз', 'smz')
+
+    def _is_line_direction(self, direction_name):
+        key = self._normalize_direction_key(direction_name)
+        return key in ('линия', 'line')
+
+    def _are_swap_directions_compatible(self, requester_direction_name, target_direction_name):
+        requester_key = self._normalize_direction_key(requester_direction_name)
+        target_key = self._normalize_direction_key(target_direction_name)
+        if not requester_key or not target_key:
+            return False
+        if requester_key == target_key:
+            return True
+        requester_is_smz_or_line = self._is_smz_direction(requester_direction_name) or self._is_line_direction(requester_direction_name)
+        target_is_smz_or_line = self._is_smz_direction(target_direction_name) or self._is_line_direction(target_direction_name)
+        if requester_is_smz_or_line and target_is_smz_or_line:
+            return True
+        return False
+
     def _get_operator_direction_name_tx(self, cursor, operator_id):
         cursor.execute(
             """
@@ -6325,9 +6346,10 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT id, role, direction_id
-                FROM users
-                WHERE id = %s
+                SELECT u.id, u.role, u.direction_id, COALESCE(d.name, '')
+                FROM users u
+                LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE u.id = %s
                 LIMIT 1
                 """,
                 (requester_operator_id,)
@@ -6338,6 +6360,7 @@ class Database:
             if str(requester_row[1]) != 'operator':
                 raise ValueError("Only operators can request swap candidates")
             requester_direction_id = requester_row[2]
+            requester_direction_name = requester_row[3]
             if requester_direction_id is None:
                 raise ValueError("У вашего профиля не задано направление")
 
@@ -6355,13 +6378,16 @@ class Database:
                 LEFT JOIN users s ON s.id = u.supervisor_id
                 WHERE u.role = 'operator'
                   AND u.id <> %s
-                  AND u.direction_id = %s
                   AND COALESCE(u.status, 'working') <> 'fired'
                 ORDER BY LOWER(u.name), u.id
                 """,
-                (requester_operator_id, requester_direction_id)
+                (requester_operator_id,)
             )
             candidate_rows = cursor.fetchall() or []
+            candidate_rows = [
+                row for row in candidate_rows
+                if self._are_swap_directions_compatible(requester_direction_name, row[2])
+            ]
             if not candidate_rows:
                 return []
 
@@ -6494,9 +6520,16 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT id, role, direction_id, name, COALESCE(status, 'working')
-                FROM users
-                WHERE id = ANY(%s)
+                SELECT
+                    u.id,
+                    u.role,
+                    u.direction_id,
+                    u.name,
+                    COALESCE(u.status, 'working'),
+                    COALESCE(d.name, '')
+                FROM users u
+                LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE u.id = ANY(%s)
                 """,
                 ([requester_operator_id, target_operator_id],)
             )
@@ -6515,10 +6548,12 @@ class Database:
 
             requester_direction_id = requester[2]
             target_direction_id = target[2]
+            requester_direction_name = requester[5]
+            target_direction_name = target[5]
             if requester_direction_id is None or target_direction_id is None:
                 raise ValueError("У операторов должно быть указано направление")
-            if int(requester_direction_id) != int(target_direction_id):
-                raise ValueError("Оператор для замены должен быть в том же направлении")
+            if not self._are_swap_directions_compatible(requester_direction_name, target_direction_name):
+                raise ValueError("Оператор для замены должен быть в том же направлении (СМЗ и Линия взаимозаменяемы)")
 
             cursor.execute(
                 """

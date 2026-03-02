@@ -9549,7 +9549,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                                                     <div>
                                                         <div className="text-base font-semibold text-slate-900">Новый запрос на замену</div>
-                                                        <div className="text-xs text-slate-500">Выберите дату, время и оператора того же направления, у которого нет смен в этот интервал</div>
+                                                        <div className="text-xs text-slate-500">Выберите дату, время и оператора совместимого направления, у которого нет смен в этот интервал (СМЗ и Линия взаимозаменяемы)</div>
                                                     </div>
                                                     <div className="flex items-center gap-2">
                                                         <div className="text-xs text-slate-500">
