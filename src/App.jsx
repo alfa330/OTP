@@ -7844,6 +7844,41 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (h < 0 || h > 23 || m < 0 || m > 59) return NaN;
                 return h * 60 + m;
             }, []);
+            const parseSwapRangeMinutes = useCallback((startValue, endValue) => {
+                const startMin = timeStrToMinutesSafe(startValue);
+                const endRawMin = timeStrToMinutesSafe(endValue);
+                if (!Number.isFinite(startMin) || !Number.isFinite(endRawMin)) {
+                    return {
+                        isValid: false,
+                        startMin,
+                        endMin: endRawMin
+                    };
+                }
+                if (endRawMin === startMin) {
+                    return {
+                        isValid: false,
+                        startMin,
+                        endMin: endRawMin
+                    };
+                }
+                let endMin = endRawMin;
+                if (endMin < startMin) {
+                    // Интервал через полночь, например 22:00 -> 02:00.
+                    endMin += 1440;
+                }
+                if ((endMin - startMin) > 1440) {
+                    return {
+                        isValid: false,
+                        startMin,
+                        endMin
+                    };
+                }
+                return {
+                    isValid: true,
+                    startMin,
+                    endMin
+                };
+            }, [timeStrToMinutesSafe]);
             const mySwapSourceShiftDays = useMemo(() => {
                 const src = myLiveScheduleData || myScheduleData;
                 const shiftsByDate = src?.shifts;
@@ -7856,16 +7891,23 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (!dayKey) return [];
                 const src = myLiveScheduleData || myScheduleData;
                 const dayShifts = Array.isArray(src?.shifts?.[dayKey]) ? src.shifts[dayKey] : [];
+                const nextDayKey = todayDateStr(addDays(parseDateStr(dayKey), 1));
+                const nextDayShifts = Array.isArray(src?.shifts?.[nextDayKey]) ? src.shifts[nextDayKey] : [];
                 const rawIntervals = [];
-                dayShifts.forEach(seg => {
+
+                const appendShiftInterval = (seg, dayOffset = 0) => {
                     const s = timeToMinutes(seg?.start);
                     let e = timeToMinutes(seg?.end);
                     if (!Number.isFinite(s) || !Number.isFinite(e)) return;
                     if (e <= s) e += 1440;
-                    const start = Math.max(0, Math.min(1440, s));
-                    const end = Math.max(0, Math.min(1440, e));
+                    const start = Math.max(0, Math.min(2880, s + dayOffset));
+                    const end = Math.max(0, Math.min(2880, e + dayOffset));
                     if (end > start) rawIntervals.push({ start, end });
-                });
+                };
+
+                dayShifts.forEach(seg => appendShiftInterval(seg, 0));
+                nextDayShifts.forEach(seg => appendShiftInterval(seg, 1440));
+
                 rawIntervals.sort((a, b) => (a.start - b.start) || (a.end - b.end));
                 const merged = [];
                 rawIntervals.forEach(interval => {
@@ -7901,9 +7943,8 @@ const withAccessTokenHeader = (headers = {}) => {
                     const intervals = buildLocalSwapIntervalsForDate(swapDate);
                     let startTime = prev.startTime;
                     let endTime = prev.endTime;
-                    const startMin = timeStrToMinutesSafe(startTime);
-                    const endMin = timeStrToMinutesSafe(endTime);
-                    if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) {
+                    const parsedRange = parseSwapRangeMinutes(startTime, endTime);
+                    if (!parsedRange.isValid) {
                         if (intervals.length > 0) {
                             const firstInterval = intervals[0];
                             startTime = minutesToTime(firstInterval.start);
@@ -7928,7 +7969,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         endTime
                     };
                 });
-            }, [isOperatorSelfSchedules, mySwapSourceShiftDays, buildLocalSwapIntervalsForDate, timeStrToMinutesSafe]);
+            }, [isOperatorSelfSchedules, mySwapSourceShiftDays, buildLocalSwapIntervalsForDate, parseSwapRangeMinutes]);
             const swapTimeValidation = useMemo(() => {
                 const swapDate = swapForm.swapDate;
                 const startTime = swapForm.startTime;
@@ -7951,8 +7992,9 @@ const withAccessTokenHeader = (headers = {}) => {
                         durationMin: 0
                     };
                 }
-                const startMin = timeStrToMinutesSafe(startTime);
-                const endMin = timeStrToMinutesSafe(endTime);
+                const parsedRange = parseSwapRangeMinutes(startTime, endTime);
+                const startMin = parsedRange.startMin;
+                const endMin = parsedRange.endMin;
                 if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) {
                     return {
                         isValid: false,
@@ -7962,10 +8004,10 @@ const withAccessTokenHeader = (headers = {}) => {
                         durationMin: 0
                     };
                 }
-                if (endMin <= startMin) {
+                if (!parsedRange.isValid) {
                     return {
                         isValid: false,
-                        message: 'Время окончания должно быть позже времени начала',
+                        message: 'Некорректный интервал. Допустимо время через полночь (например 22:00 — 02:00).',
                         startMin,
                         endMin,
                         durationMin: 0
@@ -8004,22 +8046,29 @@ const withAccessTokenHeader = (headers = {}) => {
                     endMin,
                     durationMin: Math.max(0, endMin - startMin)
                 };
-            }, [swapForm.swapDate, swapForm.startTime, swapForm.endTime, buildLocalSwapIntervalsForDate, timeStrToMinutesSafe]);
+            }, [swapForm.swapDate, swapForm.startTime, swapForm.endTime, buildLocalSwapIntervalsForDate, parseSwapRangeMinutes]);
             const swapDayTimeline = useMemo(() => {
                 const swapDate = swapForm.swapDate;
                 if (!swapDate) {
                     return {
                         date: '',
+                        nextDayDate: '',
                         hasShifts: false,
+                        hasNextDayShifts: false,
                         segments: [],
+                        nextDaySegments: [],
                         totalMinutes: 0,
+                        nextDayTotalMinutes: 0,
                         selectedInterval: null
                     };
                 }
 
                 const src = myLiveScheduleData || myScheduleData;
                 const dayShifts = Array.isArray(src?.shifts?.[swapDate]) ? src.shifts[swapDate] : [];
+                const nextDayDate = todayDateStr(addDays(parseDateStr(swapDate), 1));
+                const nextDayShifts = Array.isArray(src?.shifts?.[nextDayDate]) ? src.shifts[nextDayDate] : [];
                 const segments = [];
+                const nextDaySegments = [];
                 dayShifts.forEach((seg, idx) => {
                     const startRaw = timeToMinutes(seg?.start);
                     let endRaw = timeToMinutes(seg?.end);
@@ -8035,23 +8084,56 @@ const withAccessTokenHeader = (headers = {}) => {
                         label: `${minutesToTime(start)} — ${minutesToTime(end % 1440)}`,
                         minutes: Math.max(0, end - start)
                     });
+                    if (endRaw > 1440) {
+                        const carryStart = 0;
+                        const carryEnd = Math.max(0, Math.min(1440, endRaw - 1440));
+                        if (carryEnd > carryStart) {
+                            nextDaySegments.push({
+                                id: `${swapDate}-${idx}-carry`,
+                                start: carryStart,
+                                end: carryEnd,
+                                label: `${minutesToTime(carryStart)} — ${minutesToTime(carryEnd)} (из смены прошлого дня)`,
+                                minutes: Math.max(0, carryEnd - carryStart)
+                            });
+                        }
+                    }
                 });
                 segments.sort((a, b) => (a.start - b.start) || (a.end - b.end));
+                nextDayShifts.forEach((seg, idx) => {
+                    const startRaw = timeToMinutes(seg?.start);
+                    let endRaw = timeToMinutes(seg?.end);
+                    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return;
+                    if (endRaw <= startRaw) endRaw += 1440;
+                    const start = Math.max(0, Math.min(1440, startRaw));
+                    const end = Math.max(0, Math.min(1440, endRaw));
+                    if (end <= start) return;
+                    nextDaySegments.push({
+                        id: `${nextDayDate}-${idx}-${seg?.start || ''}-${seg?.end || ''}`,
+                        start,
+                        end,
+                        label: `${minutesToTime(start)} — ${minutesToTime(end % 1440)}`,
+                        minutes: Math.max(0, end - start)
+                    });
+                });
+                nextDaySegments.sort((a, b) => (a.start - b.start) || (a.end - b.end));
 
-                const selectedStart = timeStrToMinutesSafe(swapForm.startTime);
-                const selectedEnd = timeStrToMinutesSafe(swapForm.endTime);
-                const selectedInterval = (Number.isFinite(selectedStart) && Number.isFinite(selectedEnd) && selectedEnd > selectedStart)
+                const parsedRange = parseSwapRangeMinutes(swapForm.startTime, swapForm.endTime);
+                const selectedInterval = parsedRange.isValid
                     ? {
-                        start: Math.max(0, Math.min(1440, selectedStart)),
-                        end: Math.max(0, Math.min(1440, selectedEnd))
+                        start: Math.max(0, Math.min(1440, parsedRange.startMin)),
+                        end: Math.max(0, Math.min(1440, parsedRange.endMin))
                     }
                     : null;
 
                 return {
                     date: swapDate,
+                    nextDayDate,
                     hasShifts: segments.length > 0,
+                    hasNextDayShifts: nextDaySegments.length > 0,
                     segments,
+                    nextDaySegments,
                     totalMinutes: segments.reduce((acc, item) => acc + (item.minutes || 0), 0),
+                    nextDayTotalMinutes: nextDaySegments.reduce((acc, item) => acc + (item.minutes || 0), 0),
                     selectedInterval
                 };
             }, [
@@ -8060,7 +8142,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 swapForm.endTime,
                 myLiveScheduleData,
                 myScheduleData,
-                timeStrToMinutesSafe
+                parseSwapRangeMinutes
             ]);
             const loadSwapRequests = useCallback(async ({ silent = false } = {}) => {
                 if (!isOperatorSelfSchedules || !user) return;
@@ -9467,6 +9549,48 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     </span>
                                                                 ))}
                                                             </div>
+                                                            {swapDayTimeline.hasNextDayShifts && (
+                                                                <div className="mt-3 border-t border-slate-200 pt-2">
+                                                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                                                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                                                                            Таймлайн следующего дня
+                                                                        </div>
+                                                                        <div className="text-[11px] text-slate-500">
+                                                                            {formatDateRuShort(swapDayTimeline.nextDayDate)} • {formatMinutesOnly(swapDayTimeline.nextDayTotalMinutes)}
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="relative h-9 rounded-lg border border-slate-300 bg-white overflow-hidden">
+                                                                        {[0, 6, 12, 18, 24].map(hour => (
+                                                                            <div
+                                                                                key={`swap-next-timeline-mark-${hour}`}
+                                                                                className="absolute top-0 bottom-0 border-l border-slate-200"
+                                                                                style={{ left: `${(hour / 24) * 100}%` }}
+                                                                            ></div>
+                                                                        ))}
+                                                                        {swapDayTimeline.nextDaySegments.map(seg => (
+                                                                            <div
+                                                                                key={`swap-next-timeline-seg-${seg.id}`}
+                                                                                className="absolute top-1 bottom-1 rounded bg-indigo-500/80 border border-indigo-600/80"
+                                                                                style={{
+                                                                                    left: `${(seg.start / 1440) * 100}%`,
+                                                                                    width: `${((seg.end - seg.start) / 1440) * 100}%`
+                                                                                }}
+                                                                                title={`${seg.label} (${formatMinutesOnly(seg.minutes)})`}
+                                                                            ></div>
+                                                                        ))}
+                                                                    </div>
+                                                                    <div className="mt-2 flex flex-wrap gap-1.5">
+                                                                        {swapDayTimeline.nextDaySegments.map(seg => (
+                                                                            <span
+                                                                                key={`swap-next-seg-chip-${seg.id}`}
+                                                                                className="px-2 py-0.5 rounded-md text-xs border border-indigo-200 bg-indigo-50 text-indigo-700"
+                                                                            >
+                                                                                {seg.label} ({formatMinutesOnly(seg.minutes)})
+                                                                            </span>
+                                                                        ))}
+                                                                    </div>
+                                                                </div>
+                                                            )}
                                                         </>
                                                     ) : (
                                                         <div className="text-xs text-slate-500">
@@ -9543,6 +9667,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 const matchStart = !!item?.matchStartsAtRequestEnd;
                                                                 const matchEnd = !!item?.matchEndsAtRequestStart;
                                                                 const dayShifts = Array.isArray(item?.dayShifts) ? item.dayShifts : [];
+                                                                const nextDayShifts = Array.isArray(item?.nextDayShifts) ? item.nextDayShifts : [];
+                                                                const nextDayDate = String(item?.nextDayDate || '');
                                                                 return (
                                                                     <div
                                                                         key={`swap-candidate-card-${item?.id}`}
@@ -9599,8 +9725,19 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                 Смены на дату: {dayShifts.map(seg => {
                                                                                     const s = String(seg?.start || '');
                                                                                     const e = String(seg?.end || '');
-                                                                                    const crossing = timeToMinutes(e) <= timeToMinutes(s) && e !== '00:00';
+                                                                                    const crossing = (typeof seg?.continuesNextDay === 'boolean')
+                                                                                        ? !!seg?.continuesNextDay
+                                                                                        : (timeToMinutes(e) <= timeToMinutes(s) && e !== '00:00');
                                                                                     return `${s} — ${e}${crossing ? ' (+1)' : ''}`;
+                                                                                }).join(', ')}
+                                                                            </div>
+                                                                        )}
+                                                                        {nextDayShifts.length > 0 && (
+                                                                            <div className="mt-1 text-xs text-indigo-700">
+                                                                                Таймлайн след. дня{nextDayDate ? ` (${formatDateRuShort(nextDayDate)})` : ''}: {nextDayShifts.map(seg => {
+                                                                                    const s = String(seg?.start || '');
+                                                                                    const e = String(seg?.end || '');
+                                                                                    return `${s} — ${e}`;
                                                                                 }).join(', ')}
                                                                             </div>
                                                                         )}
