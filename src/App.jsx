@@ -434,6 +434,8 @@ const withAccessTokenHeader = (headers = {}) => {
         const [isSavingCell, setIsSavingCell] = useState(false);
         const [selectedHourCells, setSelectedHourCells] = useState([]);
         const [isBulkDeletingHours, setIsBulkDeletingHours] = useState(false);
+        const hourSelectionDragRef = useRef({ active: false, moved: false, anchor: null, baseSelection: [], lastKey: null });
+        const ignoreNextHourCellClickRef = useRef(false);
 
         // upload per day preview
         const [selectedDayUpload, setSelectedDayUpload] = useState(null);
@@ -570,28 +572,37 @@ const withAccessTokenHeader = (headers = {}) => {
         }
 
         function handleHoursCellClick(e, operator, day) {
+            if (ignoreNextHourCellClickRef.current) {
+            ignoreNextHourCellClickRef.current = false;
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+            }
             if (e?.ctrlKey || e?.metaKey) {
             e.preventDefault();
             e.stopPropagation();
-            setSelectedHourCells(prev => {
-                const next = Array.isArray(prev) ? [...prev] : [];
-                const key = makeSelectedHourCellKey(operator?.operator_id, day);
-                const idx = next.findIndex(item => makeSelectedHourCellKey(item.operator_id, item.day) === key);
-                if (idx >= 0) {
-                next.splice(idx, 1);
-                return next;
-                }
-                next.push({
-                operator_id: operator?.operator_id,
-                name: operator?.name,
-                day: Number(day)
-                });
-                return next;
-            });
             return;
             }
             openCellDetail(operator, day);
         }
+
+        const toggleSelectedHourCell = useCallback((operator, day) => {
+            setSelectedHourCells(prev => {
+            const next = Array.isArray(prev) ? [...prev] : [];
+            const key = makeSelectedHourCellKey(operator?.operator_id, day);
+            const idx = next.findIndex(item => makeSelectedHourCellKey(item.operator_id, item.day) === key);
+            if (idx >= 0) {
+                next.splice(idx, 1);
+                return next;
+            }
+            next.push({
+                operator_id: operator?.operator_id,
+                name: operator?.name,
+                day: Number(day)
+            });
+            return next;
+            });
+        }, []);
 
         // ====== Upload-per-day (preview) ======
         function openUploadForDay(day) {
@@ -876,7 +887,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
             const selected = Array.isArray(selectedHourCells) ? selectedHourCells : [];
             if (selected.length === 0) {
-            fallbackToast('Сначала выберите ячейки (Ctrl/Cmd + клик)', 'error');
+            fallbackToast('Сначала выберите ячейки (Ctrl/Cmd + клик или Ctrl/Cmd + зажатый ЛКМ)', 'error');
             return;
             }
 
@@ -1123,6 +1134,121 @@ const withAccessTokenHeader = (headers = {}) => {
         const selectedHourCellKeySet = useMemo(() => {
             return new Set((selectedHourCells || []).map(cell => makeSelectedHourCellKey(cell.operator_id, cell.day)));
         }, [selectedHourCells]);
+
+        const renderedHourOperators = useMemo(() => {
+            const ordered = [];
+            for (const dirKey of Object.keys(groupedByDirection || {})) {
+            const groupOps = groupedByDirection[dirKey] || [];
+            for (const op of groupOps) ordered.push(op);
+            }
+            return ordered;
+        }, [groupedByDirection]);
+
+        const renderedHourOperatorIndexMap = useMemo(() => {
+            const map = new Map();
+            renderedHourOperators.forEach((op, idx) => {
+            map.set(String(op.operator_id), idx);
+            });
+            return map;
+        }, [renderedHourOperators]);
+
+        function buildHourSelectionRange(anchor, target) {
+            const anchorRow = renderedHourOperatorIndexMap.get(String(anchor?.operator_id));
+            const targetRow = renderedHourOperatorIndexMap.get(String(target?.operator_id));
+            if (anchorRow == null || targetRow == null) {
+            return [{
+                operator_id: target?.operator_id,
+                name: target?.name,
+                day: Number(target?.day)
+            }];
+            }
+
+            const fromRow = Math.min(anchorRow, targetRow);
+            const toRow = Math.max(anchorRow, targetRow);
+            const fromDay = Math.max(1, Math.min(Number(anchor?.day), Number(target?.day)));
+            const toDay = Math.min(daysInMonth, Math.max(Number(anchor?.day), Number(target?.day)));
+            const range = [];
+
+            for (let row = fromRow; row <= toRow; row += 1) {
+            const op = renderedHourOperators[row];
+            if (!op) continue;
+            for (let day = fromDay; day <= toDay; day += 1) {
+                range.push({
+                operator_id: op.operator_id,
+                name: op.name,
+                day
+                });
+            }
+            }
+            return range;
+        }
+
+        function mergeHourCellSelections(baseSelection, extraSelection) {
+            const map = new Map();
+            const append = (cells) => {
+            for (const cell of (Array.isArray(cells) ? cells : [])) {
+                const key = makeSelectedHourCellKey(cell?.operator_id, cell?.day);
+                if (!map.has(key)) {
+                map.set(key, {
+                    operator_id: cell?.operator_id,
+                    name: cell?.name,
+                    day: Number(cell?.day)
+                });
+                }
+            }
+            };
+            append(baseSelection);
+            append(extraSelection);
+            return Array.from(map.values());
+        }
+
+        function startHourSelectionDrag(e, operator, day) {
+            if (!(e?.ctrlKey || e?.metaKey) || e?.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            ignoreNextHourCellClickRef.current = true;
+            hourSelectionDragRef.current = {
+            active: true,
+            moved: false,
+            anchor: {
+                operator_id: operator?.operator_id,
+                name: operator?.name,
+                day: Number(day)
+            },
+            baseSelection: Array.isArray(selectedHourCells) ? selectedHourCells.slice() : [],
+            lastKey: makeSelectedHourCellKey(operator?.operator_id, day)
+            };
+        }
+
+        function updateHourSelectionDrag(operator, day) {
+            const drag = hourSelectionDragRef.current;
+            if (!drag?.active || !drag.anchor) return;
+            const target = { operator_id: operator?.operator_id, name: operator?.name, day: Number(day) };
+            const targetKey = makeSelectedHourCellKey(target.operator_id, target.day);
+            if (drag.lastKey === targetKey && drag.moved) return;
+            const rangeCells = buildHourSelectionRange(drag.anchor, target);
+            setSelectedHourCells(mergeHourCellSelections(drag.baseSelection, rangeCells));
+            drag.moved = drag.moved || targetKey !== makeSelectedHourCellKey(drag.anchor.operator_id, drag.anchor.day);
+            drag.lastKey = targetKey;
+        }
+
+        const finishHourSelectionDrag = useCallback(() => {
+            const drag = hourSelectionDragRef.current;
+            if (!drag?.active) return;
+            if (!drag.moved && drag.anchor) {
+            toggleSelectedHourCell(drag.anchor, drag.anchor.day);
+            }
+            hourSelectionDragRef.current = { active: false, moved: false, anchor: null, baseSelection: [], lastKey: null };
+            window.setTimeout(() => {
+            ignoreNextHourCellClickRef.current = false;
+            }, 0);
+        }, [toggleSelectedHourCell]);
+
+        useEffect(() => {
+            const onMouseUp = () => finishHourSelectionDrag();
+            window.addEventListener('mouseup', onMouseUp);
+            return () => window.removeEventListener('mouseup', onMouseUp);
+        }, [finishHourSelectionDrag]);
 
         // ====== FOOTER AGGREGATES ======
         const footerTotals = useMemo(() => {
@@ -1617,7 +1743,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
             <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-blue-100 bg-blue-50/60 px-3 py-2">
                 <span className="text-sm text-gray-700">
-                Мультивыбор ячеек: <span className="font-medium">Ctrl/Cmd + клик</span>
+                Мультивыбор ячеек: <span className="font-medium">Ctrl/Cmd + клик</span> или <span className="font-medium">Ctrl/Cmd + зажатый ЛКМ (диапазон)</span>
                 </span>
                 <span className="text-xs text-gray-500">Тренинги при удалении не затрагиваются</span>
                 {selectedHourCells.length > 0 && (
@@ -1780,9 +1906,15 @@ const withAccessTokenHeader = (headers = {}) => {
                                     return (
                                     <button
                                     type="button"
+                                    onMouseDown={(e) => startHourSelectionDrag(e, op, day)}
+                                    onMouseEnter={(e) => {
+                                    if ((e.buttons & 1) !== 1) return;
+                                    updateHourSelectionDrag(op, day);
+                                    }}
+                                    onMouseUp={finishHourSelectionDrag}
                                     onClick={(e) => handleHoursCellClick(e, op, day)}
                                     className={`w-full h-8 rounded-md text-sm flex items-center justify-center ${isSelected ? 'ring-2 ring-blue-500 ring-offset-1 ring-offset-white bg-blue-50' : ''}`}
-                                    title={isSelected ? 'Выбрано. Ctrl/Cmd+клик чтобы снять выбор' : 'Клик: открыть. Ctrl/Cmd+клик: выбрать для массового удаления'}
+                                    title={isSelected ? 'Выбрано. Ctrl/Cmd+клик чтобы снять выбор' : 'Клик: открыть. Ctrl/Cmd+клик: выбрать. Ctrl/Cmd+зажатый ЛКМ: выделить диапазон'}
                                     aria-label={`Данные ${op.name} за ${day}-${monthLabel}`}>
                                     {renderCellByMetricWithStyleAndMarker(op, day, selectedTab)}
                                     </button>
