@@ -8070,6 +8070,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 const nextDayShifts = Array.isArray(src?.shifts?.[nextDayDate]) ? src.shifts[nextDayDate] : [];
                 const segments = [];
                 const nextDaySegments = [];
+                let hasCurrentDayCrossingShift = false;
                 dayShifts.forEach((seg, idx) => {
                     const startRaw = timeToMinutes(seg?.start);
                     let endRaw = timeToMinutes(seg?.end);
@@ -8086,6 +8087,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         minutes: Math.max(0, end - start)
                     });
                     if (endRaw > 1440) {
+                        hasCurrentDayCrossingShift = true;
                         const carryStart = 0;
                         const carryEnd = Math.max(0, Math.min(1440, endRaw - 1440));
                         if (carryEnd > carryStart) {
@@ -8131,18 +8133,20 @@ const withAccessTokenHeader = (headers = {}) => {
                         end: Math.max(0, Math.min(1440, parsedRange.endMin - 1440))
                     }
                     : null;
+                const showNextDayTimeline = hasCurrentDayCrossingShift && nextDaySegments.length > 0;
+                const nextDaySegmentsForDisplay = showNextDayTimeline ? nextDaySegments : [];
 
                 return {
                     date: swapDate,
                     nextDayDate,
                     hasShifts: segments.length > 0,
-                    hasNextDayShifts: nextDaySegments.length > 0,
+                    hasNextDayShifts: nextDaySegmentsForDisplay.length > 0,
                     segments,
-                    nextDaySegments,
+                    nextDaySegments: nextDaySegmentsForDisplay,
                     totalMinutes: segments.reduce((acc, item) => acc + (item.minutes || 0), 0),
-                    nextDayTotalMinutes: nextDaySegments.reduce((acc, item) => acc + (item.minutes || 0), 0),
+                    nextDayTotalMinutes: nextDaySegmentsForDisplay.reduce((acc, item) => acc + (item.minutes || 0), 0),
                     selectedInterval,
-                    selectedIntervalNextDay
+                    selectedIntervalNextDay: showNextDayTimeline ? selectedIntervalNextDay : null
                 };
             }, [
                 swapForm.swapDate,
