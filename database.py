@@ -4729,11 +4729,17 @@ class Database:
 
     def _is_smz_direction(self, direction_name):
         key = self._normalize_direction_key(direction_name)
-        return key in ('смз', 'smz')
+        if not key:
+            return False
+        # Поддерживаем варианты вида "СМЗ 1", "smz team" и смешанную запись "sмz".
+        return ('смз' in key) or ('smz' in key) or ('sмz' in key)
 
     def _is_line_direction(self, direction_name):
         key = self._normalize_direction_key(direction_name)
-        return key in ('линия', 'line')
+        if not key:
+            return False
+        # Поддерживаем варианты вида "Линия 1", "line 2".
+        return ('линия' in key) or ('line' in key)
 
     def _are_swap_directions_compatible(self, requester_direction_name, target_direction_name):
         requester_key = self._normalize_direction_key(requester_direction_name)
