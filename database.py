@@ -4738,8 +4738,8 @@ class Database:
         key = self._normalize_direction_key(direction_name)
         if not key:
             return False
-        # Поддерживаем варианты вида "Линия 1", "line 2".
-        return ('линия' in key) or ('line' in key)
+        # Поддерживаем варианты вида "Основа 1", "Линия 2", "osnova team", "line 2".
+        return ('основа' in key) or ('osnova' in key) or ('линия' in key) or ('line' in key)
 
     def _are_swap_directions_compatible(self, requester_direction_name, target_direction_name):
         requester_key = self._normalize_direction_key(requester_direction_name)
@@ -6559,7 +6559,7 @@ class Database:
             if requester_direction_id is None or target_direction_id is None:
                 raise ValueError("У операторов должно быть указано направление")
             if not self._are_swap_directions_compatible(requester_direction_name, target_direction_name):
-                raise ValueError("Оператор для замены должен быть в том же направлении (СМЗ и Линия взаимозаменяемы)")
+                raise ValueError("Оператор для замены должен быть в том же направлении (СМЗ и Основа взаимозаменяемы)")
 
             cursor.execute(
                 """
