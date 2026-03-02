@@ -330,6 +330,25 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
     const currentDir = directions?.find(d => d.id === selectedDirId) || directions?.[0] || null;
     const criteria = currentDir?.criteria || [];
     const monthsRu = ['янв.','февр.','мар.','апр.','май','июн.','июл.','авг.','сент.','окт.','ноя.','дек.'];
+    const parseDateSafe = (value) => {
+        if (!value) return null;
+        const raw = String(value).trim();
+        if (!raw || raw === '-') return null;
+
+        const direct = new Date(raw);
+        if (!Number.isNaN(direct.getTime())) return direct;
+
+        const isoLike = new Date(raw.replace(' ', 'T'));
+        if (!Number.isNaN(isoLike.getTime())) return isoLike;
+
+        const dmy = raw.match(/^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+        if (dmy) {
+            const [, dd, mm, yyyy, hh, mi, ss] = dmy;
+            return new Date(Number(yyyy), Number(mm) - 1, Number(dd), Number(hh), Number(mi), Number(ss || '0'));
+        }
+
+        return null;
+    };
 
     const MIN_TOL = 3, PCT_TOL = 0.15;
     const fmtSec = (s) => {
@@ -352,10 +371,14 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
                 setExpectedDuration(ed ? parseFloat(ed) : null);
                 setActualDuration(null); setDurationMismatch(false);
                 setPhoneNumber(existingEvaluation.phoneNumber || '');
-                const date = new Date(existingEvaluation.appeal_date);
-                setAppealDate(initDir?.hasFileUpload
-                    ? `${date.getDate().toString().padStart(2,'0')}-${(date.getMonth()+1).toString().padStart(2,'0')}-${date.getFullYear()} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}:${date.getSeconds().toString().padStart(2,'0')}`
-                    : `${date.getDate()} ${monthsRu[date.getMonth()]} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}`);
+                const date = parseDateSafe(existingEvaluation.appeal_date);
+                if (date) {
+                    setAppealDate(initDir?.hasFileUpload
+                        ? `${date.getDate().toString().padStart(2,'0')}-${(date.getMonth()+1).toString().padStart(2,'0')}-${date.getFullYear()} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}:${date.getSeconds().toString().padStart(2,'0')}`
+                        : `${date.getDate()} ${monthsRu[date.getMonth()]} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}`);
+                } else {
+                    setAppealDate(existingEvaluation.appeal_date || '');
+                }
                 setScores(initDir?.criteria?.map(()=>'Correct') || []);
                 setComments(initDir?.criteria?.map(()=>'') || []);
                 setCommentVisible(initDir?.criteria?.map(()=>false) || []);
@@ -369,10 +392,14 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
                 setAudioUrl(existingEvaluation.audioUrl || null);
                 setActualDuration(null); setDurationMismatch(false);
                 if (existingEvaluation.appeal_date) {
-                    const date = new Date(existingEvaluation.appeal_date);
-                    setAppealDate(initDir?.hasFileUpload
-                        ? `${date.getDate().toString().padStart(2,'0')}-${(date.getMonth()+1).toString().padStart(2,'0')}-${date.getFullYear()} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}:${date.getSeconds().toString().padStart(2,'0')}`
-                        : `${date.getDate()} ${monthsRu[date.getMonth()]} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}`);
+                    const date = parseDateSafe(existingEvaluation.appeal_date);
+                    if (date) {
+                        setAppealDate(initDir?.hasFileUpload
+                            ? `${date.getDate().toString().padStart(2,'0')}-${(date.getMonth()+1).toString().padStart(2,'0')}-${date.getFullYear()} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}:${date.getSeconds().toString().padStart(2,'0')}`
+                            : `${date.getDate()} ${monthsRu[date.getMonth()]} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}`);
+                    } else {
+                        setAppealDate(String(existingEvaluation.appeal_date || '').trim());
+                    }
                 } else setAppealDate('');
                 setPhoneError('');
             }
@@ -446,11 +473,22 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
             if (d.length !== 14) return null;
             return `${d.slice(4,8)}-${d.slice(2,4)}-${d.slice(0,2)}T${d.slice(8,10)}:${d.slice(10,12)}:${d.slice(12,14)}`;
         } else {
+            const isoLike = appealDate.trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+            if (isoLike) {
+                const [, yyyy, mm, dd, hh, mi, ss] = isoLike;
+                return `${yyyy}-${mm}-${dd}T${hh.padStart(2, '0')}:${mi}:${(ss || '00').padStart(2, '0')}`;
+            }
+            const dmy = appealDate.trim().match(/^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+            if (dmy) {
+                const [, dd, mm, yyyy, hh, mi, ss] = dmy;
+                return `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}T${String(hh).padStart(2, '0')}:${mi}:${(ss || '00').padStart(2, '0')}`;
+            }
             const m = appealDate.trim().match(/^(\d{1,2})\s+([а-яё]+\.?)\s+(\d{1,2}):(\d{2})$/i);
             if (!m) return null;
             const mi = monthsRu.findIndex(x => x.replace(/\./,'').toLowerCase() === m[2].toLowerCase().replace(/\./,''));
             if (mi === -1) return null;
-            return `${new Date().getFullYear()}-${String(mi+1).padStart(2,'0')}-${m[1].padStart(2,'0')}T${m[3].padStart(2,'0')}:${m[4]}:00`;
+            const year = Number((assignedMonth || '').split('-')[0]) || new Date().getFullYear();
+            return `${year}-${String(mi+1).padStart(2,'0')}-${m[1].padStart(2,'0')}T${m[3].padStart(2,'0')}:${m[4]}:00`;
         }
     };
 
@@ -470,11 +508,18 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
 
     const isSubmitDisabled = !currentDir || !criteria.length ||
         (currentDir?.hasFileUpload && !callFile && !audioUrl) ||
+        !getAppealDateISO() ||
         scores.some((s,i) => (s==='Error'||s==='Incorrect') && !comments[i]?.trim()) ||
         durationMismatch;
 
     const handleSubmit = async (draft = false) => {
         setIsSubmitting(true);
+        const ad = getAppealDateISO();
+        if (!ad) {
+            alert('Укажите дату обращения в корректном формате');
+            setIsSubmitting(false);
+            return;
+        }
         const fd = new FormData();
         fd.append('evaluator', userName);
         fd.append('operator', operator.name);
@@ -486,8 +531,7 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
         fd.append('scores', JSON.stringify(scores));
         fd.append('criterion_comments', JSON.stringify(comments));
         fd.append('direction', currentDir?.id ?? operator?.direction_id);
-        const ad = getAppealDateISO();
-        if (ad) fd.append('appeal_date', ad);
+        fd.append('appeal_date', ad);
         if (existingEvaluation?.isReevaluation) { fd.append('previous_version_id', existingEvaluation.id); fd.append('is_correction', true); }
         if (callFile) fd.append('audio_file', callFile);
         try {
@@ -711,7 +755,7 @@ const App = ({ user, initialSelection }) => {
         date: ev.evaluation_date ? ev.evaluation_date.split('T')[0] : '',
         phoneNumber: ev.phone_number,
         combinedComment: ev.comment,
-        appeal_date: ev.appeal_date || '-',
+        appeal_date: ev.appeal_date || '',
         selectedDirection: ev.direction?.name || operator?.direction || '-',
         directionId: ev.direction?.id ?? null,
         directions: [{name: ev.direction?.name || '-', hasFileUpload: ev.direction?.hasFileUpload ?? true, criteria: ev.direction?.criteria || []}],
