@@ -9805,8 +9805,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </button>
                                                     </div>
                                                 </div>
-                                                <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-12 gap-2 sm:gap-3 items-end">
-                                                    <label className="text-sm col-span-2 sm:col-span-1 lg:col-span-4">
+                                                <div className="grid grid-cols-2 sm:grid-cols-2 gap-2 sm:gap-3 items-end lg:flex lg:flex-nowrap lg:items-end lg:gap-3">
+                                                    <label className="text-sm col-span-2 sm:col-span-1 lg:w-[290px] lg:flex-none">
                                                         <div className="text-xs lg:text-sm text-slate-600 mb-1">Дата начала</div>
                                                         <select
                                                             value={swapForm.swapDate}
@@ -9829,15 +9829,21 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             ))}
                                                         </select>
                                                     </label>
-                                                    <div className="text-sm col-span-2 sm:col-span-1 lg:col-span-4">
-                                                        <div className="text-xs lg:text-sm text-slate-600 mb-1">Режим интервала</div>
-                                                        <div className="rounded-lg border border-slate-300 bg-slate-50 p-1.5 sm:p-2 lg:p-2.5">
-                                                            <div className="grid grid-cols-2 gap-1.5 lg:gap-2">
+                                                    <div className="text-sm col-span-2 sm:col-span-1 lg:w-[320px] lg:flex-none">
+                                                        <div className="flex items-center justify-between gap-2 mb-1">
+                                                            <span className="text-xs lg:text-sm text-slate-600">Режим интервала</span>
+                                                            <span className="hidden lg:inline text-[11px] text-slate-500">
+                                                                {swapForm.swapDate
+                                                                    ? (swapEndsNextDay ? `Старт: ${formatDateRuShort(swapNextDayDate)}` : `Старт: ${formatDateRuShort(swapForm.swapDate)}`)
+                                                                    : '—'}
+                                                            </span>
+                                                        </div>
+                                                        <div className="inline-flex w-full rounded-lg border border-slate-300 bg-slate-50 p-1 gap-1">
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => setSwapForm(prev => ({ ...prev, endDate: prev.swapDate || '', targetOperatorId: '' }))}
                                                                     disabled={!swapForm.swapDate}
-                                                                    className={`px-2.5 lg:px-3 py-1.5 lg:py-2 rounded-md border text-xs lg:text-sm font-semibold ${
+                                                                    className={`flex-1 px-2 py-1 rounded-md border text-[11px] font-medium ${
                                                                         !swapForm.swapDate
                                                                             ? 'border-slate-200 text-slate-400 cursor-not-allowed'
                                                                             : (!swapEndsNextDay
@@ -9855,7 +9861,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                         targetOperatorId: ''
                                                                     }))}
                                                                     disabled={!swapForm.swapDate}
-                                                                    className={`px-2.5 lg:px-3 py-1.5 lg:py-2 rounded-md border text-xs lg:text-sm font-semibold ${
+                                                                    className={`flex-1 px-2 py-1 rounded-md border text-[11px] font-medium ${
                                                                         !swapForm.swapDate
                                                                             ? 'border-slate-200 text-slate-400 cursor-not-allowed'
                                                                             : (swapEndsNextDay
@@ -9865,9 +9871,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 >
                                                                     След. день
                                                                 </button>
-                                                            </div>
                                                         </div>
-                                                        <div className="mt-1.5 text-[11px] lg:text-sm text-slate-600">
+                                                        <div className="mt-1 text-[11px] text-slate-500 lg:hidden">
                                                             {swapForm.swapDate
                                                                 ? (swapEndsNextDay
                                                                     ? `Интервал начнется на ${formatDateRuShort(swapNextDayDate)}`
@@ -9875,7 +9880,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 : 'Сначала выберите дату начала'}
                                                         </div>
                                                     </div>
-                                                    <label className="text-sm lg:col-span-2">
+                                                    <label className="text-sm lg:w-[140px] lg:flex-none">
                                                         <div className="text-xs text-slate-600 mb-1">С</div>
                                                         <input
                                                             type="time"
@@ -9885,7 +9890,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             step={300}
                                                         />
                                                     </label>
-                                                    <label className="text-sm lg:col-span-2">
+                                                    <label className="text-sm lg:w-[140px] lg:flex-none">
                                                         <div className="text-xs text-slate-600 mb-1">По</div>
                                                         <input
                                                             type="time"
