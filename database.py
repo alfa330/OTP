@@ -5842,6 +5842,54 @@ class Database:
             'endMin': int(end_min)
         }
 
+    def _normalize_swap_time_range_for_date(self, swap_date, start_time, end_time, end_date=None):
+        """
+        Нормализует интервал запроса замены относительно стартовой даты swap_date.
+        Возвращает start/end в минутах в окне [0..2880) и итоговую дату окончания.
+        """
+        swap_date_obj = self._normalize_schedule_date(swap_date)
+        base_interval = self._normalize_swap_time_range(start_time, end_time)
+        start_min = int(base_interval['startMin'] % (24 * 60))
+        end_raw_min = _time_to_minutes(base_interval['endTime'])
+
+        if end_date is None or str(end_date).strip() == '':
+            resolved_end_date_obj = swap_date_obj + timedelta(days=1) if int(base_interval['endMin']) > 1440 else swap_date_obj
+            return {
+                'startTime': base_interval['startTime'],
+                'endTime': base_interval['endTime'],
+                'startMin': int(base_interval['startMin']),
+                'endMin': int(base_interval['endMin']),
+                'swapDateObj': swap_date_obj,
+                'endDateObj': resolved_end_date_obj
+            }
+
+        end_date_obj = self._normalize_schedule_date(end_date)
+        day_diff = int((end_date_obj - swap_date_obj).days)
+        if day_diff < 0:
+            raise ValueError("end_date must be >= swap_date")
+
+        end_min = day_diff * 1440 + int(end_raw_min)
+        resolved_end_date_obj = end_date_obj
+
+        # Оставляем поддержку legacy-поведения: если даты равны и время end < start, считаем через полночь.
+        if day_diff == 0 and int(end_raw_min) < start_min:
+            end_min += 1440
+            resolved_end_date_obj = swap_date_obj + timedelta(days=1)
+
+        if end_min <= start_min:
+            raise ValueError("end_time must be greater than start_time for selected dates")
+        if (end_min - start_min) > 1440:
+            raise ValueError("swap interval cannot be longer than 24 hours")
+
+        return {
+            'startTime': base_interval['startTime'],
+            'endTime': base_interval['endTime'],
+            'startMin': int(start_min),
+            'endMin': int(end_min),
+            'swapDateObj': swap_date_obj,
+            'endDateObj': resolved_end_date_obj
+        }
+
     def _normalize_swap_request_payload(self, raw_payload, fallback_date=None):
         payload = raw_payload
         if payload is None:
@@ -6337,15 +6385,20 @@ class Database:
         )
         return cursor.fetchone()
 
-    def get_shift_swap_candidates(self, requester_operator_id, swap_date, start_time, end_time):
+    def get_shift_swap_candidates(self, requester_operator_id, swap_date, start_time, end_time, end_date=None):
         requester_operator_id = int(requester_operator_id)
-        swap_date_obj = self._normalize_schedule_date(swap_date)
+        interval = self._normalize_swap_time_range_for_date(
+            swap_date=swap_date,
+            start_time=start_time,
+            end_time=end_time,
+            end_date=end_date
+        )
+        swap_date_obj = interval['swapDateObj']
         swap_date_str = swap_date_obj.strftime('%Y-%m-%d')
         prev_date_obj = swap_date_obj - timedelta(days=1)
         next_date_obj = swap_date_obj + timedelta(days=1)
         prev_date_str = prev_date_obj.strftime('%Y-%m-%d')
         next_date_str = next_date_obj.strftime('%Y-%m-%d')
-        interval = self._normalize_swap_time_range(start_time, end_time)
         interval_start_min = interval['startMin']
         interval_end_min = interval['endMin']
 
@@ -6500,6 +6553,7 @@ class Database:
         swap_date,
         start_time,
         end_time,
+        end_date=None,
         request_comment=None
     ):
         requester_operator_id = int(requester_operator_id)
@@ -6507,16 +6561,21 @@ class Database:
         if requester_operator_id == target_operator_id:
             raise ValueError("Нельзя отправить запрос самому себе")
 
-        swap_date_obj = self._normalize_schedule_date(swap_date)
+        interval = self._normalize_swap_time_range_for_date(
+            swap_date=swap_date,
+            start_time=start_time,
+            end_time=end_time,
+            end_date=end_date
+        )
+        swap_date_obj = interval['swapDateObj']
         swap_date_str = swap_date_obj.strftime('%Y-%m-%d')
         prev_date_obj = swap_date_obj - timedelta(days=1)
         next_date_obj = swap_date_obj + timedelta(days=1)
         prev_date_str = prev_date_obj.strftime('%Y-%m-%d')
         next_date_str = next_date_obj.strftime('%Y-%m-%d')
-        interval = self._normalize_swap_time_range(start_time, end_time)
         interval_start_min = interval['startMin']
         interval_end_min = interval['endMin']
-        request_end_date_obj = next_date_obj if int(interval_end_min) > 1440 else swap_date_obj
+        request_end_date_obj = interval['endDateObj']
 
         request_comment_norm = None
         if request_comment is not None:
@@ -6619,6 +6678,7 @@ class Database:
             payload = {
                 'mode': 'time_range_v1',
                 'swapDate': swap_date_str,
+                'endDate': request_end_date_obj.strftime('%Y-%m-%d'),
                 'interval': {
                     'start': interval['startTime'],
                     'end': interval['endTime'],
