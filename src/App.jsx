@@ -9670,19 +9670,6 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </select>
                                                     </label>
                                                 </div>
-                                                <div className="mt-2">
-                                                    <label className="text-sm block">
-                                                        <div className="text-xs text-slate-600 mb-1">Поиск среди кандидатов</div>
-                                                        <input
-                                                            type="text"
-                                                            value={swapCandidatesSearch}
-                                                            onChange={(e) => setSwapCandidatesSearch(e.target.value)}
-                                                            placeholder="ФИО или супервайзер"
-                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
-                                                            disabled={!swapTimeValidation.isValid || swapCandidatesLoading}
-                                                        />
-                                                    </label>
-                                                </div>
                                                 <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
                                                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                                                         <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide">
@@ -9853,6 +9840,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 : 'По приоритету совпадения границ интервала'}
                                                         </div>
                                                     </div>
+                                                    <label className="text-sm block mb-2">
+                                                        <div className="text-xs text-slate-600 mb-1">Поиск среди кандидатов</div>
+                                                        <input
+                                                            type="text"
+                                                            value={swapCandidatesSearch}
+                                                            onChange={(e) => setSwapCandidatesSearch(e.target.value)}
+                                                            placeholder="ФИО или супервайзер"
+                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+                                                            disabled={!swapTimeValidation.isValid || swapCandidatesLoading}
+                                                        />
+                                                    </label>
                                                     {!swapTimeValidation.isValid ? (
                                                         <div className="text-xs text-slate-500">
                                                             Выберите корректный интервал, чтобы увидеть список кандидатов.
