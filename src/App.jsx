@@ -9570,7 +9570,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                         <div className="space-y-3 pb-2">
                                             {showSwapCreateModal && (
                                                 <div
-                                                    className="fixed inset-0 z-[80] bg-slate-900/45 p-2 sm:p-4 overflow-y-auto"
+                                                    className="fixed inset-0 z-[80] bg-slate-900/55 sm:bg-slate-900/45 p-0 sm:p-4 overflow-hidden"
                                                     onClick={(e) => {
                                                         if (e.target === e.currentTarget) {
                                                             setShowSwapCreateModal(false);
@@ -9578,14 +9578,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         }
                                                     }}
                                                 >
-                                                    <div className="min-h-full flex items-start sm:items-center justify-center">
-                                                        <div className="w-full max-w-5xl bg-white rounded-xl border border-slate-200 p-4 shadow-2xl">
-                                                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                                                    <div>
+                                                    <div className="min-h-full flex items-stretch sm:items-center justify-center">
+                                                        <div className="w-full sm:max-w-5xl bg-white h-[100dvh] sm:h-auto sm:max-h-[92vh] rounded-none sm:rounded-xl border-0 sm:border border-slate-200 p-3 sm:p-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:pb-4 shadow-none sm:shadow-2xl overflow-y-auto overscroll-contain">
+                                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3 sticky top-0 z-10 bg-white/95 backdrop-blur pb-2 border-b border-slate-200">
+                                                    <div className="min-w-0">
                                                         <div className="text-base font-semibold text-slate-900">Новый запрос на замену</div>
                                                         <div className="text-xs text-slate-500">Выберите дату, время и оператора совместимого направления, у которого нет смен в этот интервал (СМЗ и Основа взаимозаменяемы)</div>
                                                     </div>
-                                                    <div className="flex items-center gap-2">
+                                                    <div className="flex items-center justify-between sm:justify-end gap-2">
                                                         <div className="text-xs text-slate-500">
                                                             Доступных дат со сменами: <span className="font-semibold tabular-nums">{mySwapSourceShiftDays.length}</span>
                                                         </div>
@@ -9602,7 +9602,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </button>
                                                     </div>
                                                 </div>
-                                                <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
+                                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
                                                     <label className="text-sm">
                                                         <div className="text-xs text-slate-600 mb-1">Дата</div>
                                                         <select
@@ -9670,7 +9670,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </select>
                                                     </label>
                                                 </div>
-                                                <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                                <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5 sm:p-3">
                                                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                                                         <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide">
                                                             Смена на выбранную дату
@@ -9791,8 +9791,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </div>
                                                     )}
                                                 </div>
-                                                <div className="mt-3 grid grid-cols-1 lg:grid-cols-4 gap-3 items-end">
-                                                    <label className="lg:col-span-3 text-sm">
+                                                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 items-end">
+                                                    <label className="sm:col-span-2 lg:col-span-3 text-sm">
                                                         <div className="text-xs text-slate-600 mb-1">Комментарий (опционально)</div>
                                                         <input
                                                             type="text"
@@ -9807,7 +9807,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         type="button"
                                                         onClick={handleCreateSwapRequest}
                                                         disabled={swapSubmitting || !swapTimeValidation.isValid || !swapForm.targetOperatorId}
-                                                        className={`px-3 py-2 rounded-lg text-sm font-medium transition ${
+                                                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition ${
                                                             swapSubmitting || !swapTimeValidation.isValid || !swapForm.targetOperatorId
                                                                 ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
                                                                 : 'bg-blue-600 text-white hover:bg-blue-700'
@@ -9829,7 +9829,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <div className="text-rose-600 mt-1">{swapCandidatesError}</div>
                                                     )}
                                                 </div>
-                                                <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                                                <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5 sm:p-3">
                                                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                                                         <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide">
                                                             Кандидаты на замену
@@ -9866,7 +9866,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 : 'На этот интервал нет доступных операторов.'}
                                                         </div>
                                                     ) : (
-                                                        <div className="max-h-80 overflow-y-auto pr-1 space-y-2">
+                                                        <div className="max-h-[42vh] sm:max-h-80 overflow-y-auto pr-1 space-y-2">
                                                             {swapCandidatesFiltered.map((item, idx) => {
                                                                 const isSelected = String(item?.id) === String(swapForm.targetOperatorId);
                                                                 const hasPriority = Number(item?.priorityScore || 0) > 0;
