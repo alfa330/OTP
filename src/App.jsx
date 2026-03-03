@@ -8549,12 +8549,31 @@ const withAccessTokenHeader = (headers = {}) => {
                         return { label: status || '—', className: 'bg-slate-100 text-slate-700 border-slate-200' };
                 }
             };
+            const formatSwapDateTimeRangeLabel = (startDateStr, startTimeStr, endTimeStr, explicitEndDateStr = '') => {
+                const startDate = String(startDateStr || '').trim();
+                const startTime = String(startTimeStr || '').trim();
+                const endTime = String(endTimeStr || '').trim();
+                if (!startDate || !startTime || !endTime) return '';
+
+                let endDate = String(explicitEndDateStr || '').trim();
+                if (!endDate) {
+                    const parsedRange = parseSwapRangeMinutes(startTime, endTime);
+                    if (parsedRange?.isValid && Number(parsedRange.endMin) >= 1440) {
+                        endDate = todayDateStr(addDays(parseDateStr(startDate), 1));
+                    }
+                }
+
+                if (endDate && endDate !== startDate) {
+                    return `${formatDateRuShort(startDate)} ${startTime} — ${formatDateRuShort(endDate)} ${endTime}`;
+                }
+                return `${formatDateRuShort(startDate)} ${startTime} — ${endTime}`;
+            };
             const formatSwapIntervalLabel = (req) => {
                 const dateStr = req?.swapDate || req?.startDate || '';
                 const startTime = req?.startTime || '';
                 const endTime = req?.endTime || '';
                 if (dateStr && startTime && endTime) {
-                    return `${formatDateRuShort(dateStr)} ${startTime} — ${endTime}`;
+                    return formatSwapDateTimeRangeLabel(dateStr, startTime, endTime, req?.endDate || '');
                 }
                 if (req?.startDate && req?.endDate) {
                     return req.startDate === req.endDate
@@ -9822,7 +9841,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     )}
                                                     {swapTimeValidation.isValid && (
                                                         <div className="text-slate-500">
-                                                            Интервал: {formatDateRuShort(swapForm.swapDate)} {swapForm.startTime} — {swapForm.endTime} ({formatMinutesOnly(swapTimeValidation.durationMin)})
+                                                            Интервал: {formatSwapDateTimeRangeLabel(swapForm.swapDate, swapForm.startTime, swapForm.endTime)} ({formatMinutesOnly(swapTimeValidation.durationMin)})
                                                         </div>
                                                     )}
                                                     {swapCandidatesError && (
