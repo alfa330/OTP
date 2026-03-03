@@ -4993,6 +4993,7 @@ def get_shift_swap_candidates():
     - без смен в выбранном интервале времени на выбранную дату
     Query params:
       swap_date=YYYY-MM-DD
+      end_date=YYYY-MM-DD (optional, default: swap_date)
       start_time=HH:MM
       end_time=HH:MM
     """
@@ -5002,6 +5003,7 @@ def get_shift_swap_candidates():
             return jsonify({"error": err[0]}), err[1]
 
         swap_date = request.args.get('swap_date')
+        end_date = request.args.get('end_date')
         start_time = request.args.get('start_time')
         end_time = request.args.get('end_time')
         if not swap_date or not start_time or not end_time:
@@ -5010,12 +5012,14 @@ def get_shift_swap_candidates():
         candidates = db.get_shift_swap_candidates(
             requester_operator_id=requester_id,
             swap_date=swap_date,
+            end_date=end_date,
             start_time=start_time,
             end_time=end_time
         )
         return jsonify({
             "candidates": candidates,
             "swap_date": swap_date,
+            "end_date": end_date or swap_date,
             "start_time": start_time,
             "end_time": end_time
         }), 200
@@ -5055,6 +5059,7 @@ def shift_swap_requests():
         data = request.get_json(silent=True) or {}
         target_operator_id = data.get('target_operator_id')
         swap_date = data.get('swap_date')
+        end_date = data.get('end_date')
         start_time = data.get('start_time')
         end_time = data.get('end_time')
         request_comment = data.get('comment')
@@ -5065,6 +5070,7 @@ def shift_swap_requests():
             requester_operator_id=requester_id,
             target_operator_id=target_operator_id,
             swap_date=swap_date,
+            end_date=end_date,
             start_time=start_time,
             end_time=end_time,
             request_comment=request_comment
