@@ -5849,8 +5849,22 @@ class Database:
         """
         swap_date_obj = self._normalize_schedule_date(swap_date)
         base_interval = self._normalize_swap_time_range(start_time, end_time)
-        start_min = int(base_interval['startMin'] % (24 * 60))
+        start_raw_min = _time_to_minutes(base_interval['startTime'])
         end_raw_min = _time_to_minutes(base_interval['endTime'])
+        start_raw_min = int(start_raw_min)
+        end_raw_min = int(end_raw_min)
+
+        def _build_valid_candidate(candidate_start, candidate_end):
+            c_start = int(candidate_start)
+            c_end = int(candidate_end)
+            if c_end <= c_start:
+                return None
+            duration = c_end - c_start
+            if duration <= 0 or duration > (24 * 60):
+                return None
+            if c_start < 0 or c_end > (2 * 24 * 60):
+                return None
+            return {'start': c_start, 'end': c_end, 'duration': duration}
 
         if end_date is None or str(end_date).strip() == '':
             resolved_end_date_obj = swap_date_obj + timedelta(days=1) if int(base_interval['endMin']) > 1440 else swap_date_obj
@@ -5867,19 +5881,41 @@ class Database:
         day_diff = int((end_date_obj - swap_date_obj).days)
         if day_diff < 0:
             raise ValueError("end_date must be >= swap_date")
+        if day_diff > 1:
+            raise ValueError("end_date can be only swap_date or next day")
 
-        end_min = day_diff * 1440 + int(end_raw_min)
-        resolved_end_date_obj = end_date_obj
+        candidates = []
+        # Вариант A: интервал начинается в swap_date.
+        anchored_end = day_diff * 1440 + end_raw_min
+        if day_diff == 0 and end_raw_min < start_raw_min:
+            anchored_end += 1440
+        candidate_a = _build_valid_candidate(start_raw_min, anchored_end)
+        if candidate_a:
+            candidate_a['kind'] = 'anchored'
+            candidates.append(candidate_a)
 
-        # Оставляем поддержку legacy-поведения: если даты равны и время end < start, считаем через полночь.
-        if day_diff == 0 and int(end_raw_min) < start_min:
-            end_min += 1440
-            resolved_end_date_obj = swap_date_obj + timedelta(days=1)
+        # Вариант B: при end_date=next day считаем, что интервал может быть полностью на следующем дне.
+        if day_diff > 0:
+            shifted_start = day_diff * 1440 + start_raw_min
+            shifted_end = day_diff * 1440 + end_raw_min
+            if shifted_end <= shifted_start:
+                shifted_end += 1440
+            candidate_b = _build_valid_candidate(shifted_start, shifted_end)
+            if candidate_b:
+                candidate_b['kind'] = 'shifted'
+                candidates.append(candidate_b)
 
-        if end_min <= start_min:
-            raise ValueError("end_time must be greater than start_time for selected dates")
-        if (end_min - start_min) > 1440:
-            raise ValueError("swap interval cannot be longer than 24 hours")
+        if not candidates:
+            raise ValueError("Invalid swap interval for selected dates")
+
+        # Предпочитаем минимальную длительность; при равенстве — anchored.
+        candidates.sort(key=lambda x: (int(x['duration']), 0 if x.get('kind') == 'anchored' else 1))
+        chosen = candidates[0]
+        start_min = int(chosen['start'])
+        end_min = int(chosen['end'])
+
+        end_day_offset = int(end_min // 1440)
+        resolved_end_date_obj = swap_date_obj + timedelta(days=end_day_offset)
 
         return {
             'startTime': base_interval['startTime'],
@@ -5912,6 +5948,12 @@ class Database:
                 swap_date = self._normalize_schedule_date(swap_date).strftime('%Y-%m-%d')
             except Exception:
                 swap_date = None
+        end_date = payload.get('endDate') or payload.get('end_date')
+        if end_date:
+            try:
+                end_date = self._normalize_schedule_date(end_date).strftime('%Y-%m-%d')
+            except Exception:
+                end_date = None
 
         interval_raw = payload.get('interval') if isinstance(payload.get('interval'), dict) else {}
         start_time = interval_raw.get('start') or interval_raw.get('start_time')
@@ -5921,11 +5963,26 @@ class Database:
 
         if start_time and end_time:
             try:
-                normalized_interval = self._normalize_swap_time_range(start_time, end_time)
-                start_time = normalized_interval['startTime']
-                end_time = normalized_interval['endTime']
-                start_min = normalized_interval['startMin']
-                end_min = normalized_interval['endMin']
+                if swap_date:
+                    normalized_interval = self._normalize_swap_time_range_for_date(
+                        swap_date=swap_date,
+                        start_time=start_time,
+                        end_time=end_time,
+                        end_date=end_date
+                    )
+                    start_time = normalized_interval['startTime']
+                    end_time = normalized_interval['endTime']
+                    start_min = normalized_interval['startMin']
+                    end_min = normalized_interval['endMin']
+                    end_date_obj = normalized_interval.get('endDateObj')
+                    if isinstance(end_date_obj, date):
+                        end_date = end_date_obj.strftime('%Y-%m-%d')
+                else:
+                    normalized_interval = self._normalize_swap_time_range(start_time, end_time)
+                    start_time = normalized_interval['startTime']
+                    end_time = normalized_interval['endTime']
+                    start_min = normalized_interval['startMin']
+                    end_min = normalized_interval['endMin']
             except Exception:
                 start_time = None
                 end_time = None
@@ -5948,6 +6005,13 @@ class Database:
                 if start_min is not None and end_min is not None and (end_min - start_min) > (24 * 60):
                     start_min = None
                     end_min = None
+                if swap_date and start_min is not None and end_min is not None:
+                    try:
+                        base_date_obj = self._normalize_schedule_date(swap_date)
+                        end_offset_days = int(end_min // (24 * 60))
+                        end_date = (base_date_obj + timedelta(days=end_offset_days)).strftime('%Y-%m-%d')
+                    except Exception:
+                        pass
 
         requested_segments_raw = payload.get('requestedSegments') if isinstance(payload.get('requestedSegments'), list) else []
         requested_segments = []
@@ -5988,6 +6052,7 @@ class Database:
 
         return {
             'swapDate': swap_date,
+            'endDate': end_date,
             'startTime': start_time,
             'endTime': end_time,
             'startMin': start_min if start_min is not None else None,

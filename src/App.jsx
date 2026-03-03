@@ -7994,6 +7994,15 @@ const withAccessTokenHeader = (headers = {}) => {
                         endDate: endDateStr || ''
                     };
                 }
+                if (endRawMin === startMin) {
+                    return {
+                        isValid: false,
+                        startMin,
+                        endMin: endRawMin,
+                        startDate: startDateStr || '',
+                        endDate: endDateStr || ''
+                    };
+                }
                 if (!startDateStr || !endDateStr) {
                     return {
                         isValid: false,
@@ -8031,7 +8040,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 const startUtc = Date.UTC(startDateObj.getFullYear(), startDateObj.getMonth(), startDateObj.getDate());
                 const endUtc = Date.UTC(endDateObj.getFullYear(), endDateObj.getMonth(), endDateObj.getDate());
                 let dayDiff = Math.round((endUtc - startUtc) / 86400000);
-                if (!Number.isFinite(dayDiff) || dayDiff < 0) {
+                if (!Number.isFinite(dayDiff) || dayDiff < 0 || dayDiff > 1) {
                     return {
                         isValid: false,
                         startMin,
@@ -8041,39 +8050,67 @@ const withAccessTokenHeader = (headers = {}) => {
                     };
                 }
 
-                let endMin = dayDiff * 1440 + endRawMin;
-                let normalizedEndDateStr = endDateStr;
-                if (dayDiff === 0 && endRawMin < startMin) {
-                    // Keep backward compatibility: time range can cross midnight even with same end date.
-                    endMin += 1440;
-                    normalizedEndDateStr = todayDateStr(addDays(startDateObj, 1));
-                    dayDiff = 1;
+                const candidates = [];
+                const pushCandidate = (candidateStart, candidateEnd, key) => {
+                    const cStart = Number(candidateStart);
+                    const cEnd = Number(candidateEnd);
+                    if (!Number.isFinite(cStart) || !Number.isFinite(cEnd)) return;
+                    if (cEnd <= cStart) return;
+                    const duration = cEnd - cStart;
+                    if (duration <= 0 || duration > 1440) return;
+                    if (cStart < 0 || cEnd > 2880) return;
+                    candidates.push({ key, start: cStart, end: cEnd, duration });
+                };
+
+                // Variant A: interval starts on startDate.
+                let anchoredEnd = dayDiff * 1440 + endRawMin;
+                if (dayDiff === 0 && endRawMin < startMin) anchoredEnd += 1440;
+                pushCandidate(startMin, anchoredEnd, 'anchored');
+
+                // Variant B: when endDate is next day, allow interval fully on next day.
+                if (dayDiff > 0) {
+                    let shiftedStart = dayDiff * 1440 + startMin;
+                    let shiftedEnd = dayDiff * 1440 + endRawMin;
+                    if (shiftedEnd <= shiftedStart) shiftedEnd += 1440;
+                    pushCandidate(shiftedStart, shiftedEnd, 'shifted');
                 }
-                if (endMin <= startMin) {
+
+                if (candidates.length === 0) {
                     return {
                         isValid: false,
                         startMin,
-                        endMin,
+                        endMin: endRawMin,
                         startDate: startDateStr,
-                        endDate: normalizedEndDateStr
+                        endDate: endDateStr
                     };
                 }
-                if ((endMin - startMin) > 1440) {
+                candidates.sort((a, b) => {
+                    if (a.duration !== b.duration) return a.duration - b.duration;
+                    if (a.key === b.key) return 0;
+                    return a.key === 'anchored' ? -1 : 1;
+                });
+                const chosen = candidates[0];
+                const effectiveStartDate = todayDateStr(addDays(parseDateStr(startDateStr), Math.floor(chosen.start / 1440)));
+                const effectiveEndDate = todayDateStr(addDays(parseDateStr(startDateStr), Math.floor(chosen.end / 1440)));
+
+                if ((chosen.end - chosen.start) > 1440) {
                     return {
                         isValid: false,
                         startMin,
-                        endMin,
+                        endMin: endRawMin,
                         startDate: startDateStr,
-                        endDate: normalizedEndDateStr
+                        endDate: effectiveEndDate,
+                        effectiveStartDate
                     };
                 }
 
                 return {
                     isValid: true,
-                    startMin,
-                    endMin,
+                    startMin: chosen.start,
+                    endMin: chosen.end,
                     startDate: startDateStr,
-                    endDate: normalizedEndDateStr
+                    endDate: effectiveEndDate,
+                    effectiveStartDate
                 };
             }, [timeStrToMinutesSafe]);
             const mySwapSourceShiftDays = useMemo(() => {
@@ -8197,6 +8234,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     return {
                         isValid: false,
                         message: 'Выберите дату для запроса',
+                        effectiveStartDate: '',
                         effectiveEndDate: '',
                         startMin: NaN,
                         endMin: NaN,
@@ -8207,6 +8245,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     return {
                         isValid: false,
                         message: 'Выберите дату окончания',
+                        effectiveStartDate: '',
                         effectiveEndDate: '',
                         startMin: NaN,
                         endMin: NaN,
@@ -8217,6 +8256,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     return {
                         isValid: false,
                         message: 'Выберите время начала и окончания',
+                        effectiveStartDate: swapDate,
                         effectiveEndDate: endDate,
                         startMin: NaN,
                         endMin: NaN,
@@ -8226,11 +8266,13 @@ const withAccessTokenHeader = (headers = {}) => {
                 const parsedRange = parseSwapRangeWithDates(swapDate, startTime, endDate, endTime);
                 const startMin = parsedRange.startMin;
                 const endMin = parsedRange.endMin;
+                const effectiveStartDate = parsedRange?.effectiveStartDate || swapDate;
                 const effectiveEndDate = parsedRange?.endDate || endDate;
                 if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) {
                     return {
                         isValid: false,
                         message: 'Некорректный формат даты или времени',
+                        effectiveStartDate,
                         effectiveEndDate,
                         startMin,
                         endMin,
@@ -8241,6 +8283,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     return {
                         isValid: false,
                         message: 'Некорректный интервал. Проверьте даты/время (длительность до 24 часов).',
+                        effectiveStartDate,
                         effectiveEndDate,
                         startMin,
                         endMin,
@@ -8252,6 +8295,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     return {
                         isValid: false,
                         message: 'На выбранную дату у вас нет смен',
+                        effectiveStartDate,
                         effectiveEndDate,
                         startMin,
                         endMin,
@@ -8269,6 +8313,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     return {
                         isValid: false,
                         message: 'Выбранный интервал должен полностью находиться внутри ваших смен',
+                        effectiveStartDate,
                         effectiveEndDate,
                         startMin,
                         endMin,
@@ -8278,6 +8323,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 return {
                     isValid: true,
                     message: '',
+                    effectiveStartDate,
                     effectiveEndDate,
                     startMin,
                     endMin,
@@ -8385,7 +8431,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     swapForm.endDate || swapDate,
                     swapForm.endTime
                 );
-                const selectedInterval = parsedRange.isValid
+                const selectedInterval = (parsedRange.isValid && parsedRange.startMin < 1440)
                     ? {
                         start: Math.max(0, Math.min(1440, parsedRange.startMin)),
                         end: Math.max(0, Math.min(1440, parsedRange.endMin))
@@ -8393,7 +8439,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     : null;
                 const selectedIntervalNextDay = (parsedRange.isValid && parsedRange.endMin > 1440)
                     ? {
-                        start: 0,
+                        start: Math.max(0, Math.min(1440, parsedRange.startMin - 1440)),
                         end: Math.max(0, Math.min(1440, parsedRange.endMin - 1440))
                     }
                     : null;
@@ -8693,14 +8739,16 @@ const withAccessTokenHeader = (headers = {}) => {
 
                 let endDate = String(explicitEndDateStr || '').trim();
                 const parsedRange = parseSwapRangeWithDates(startDate, startTime, endDate || startDate, endTime);
-                if (parsedRange?.isValid && parsedRange?.endDate) {
-                    endDate = String(parsedRange.endDate);
+                let displayStartDate = startDate;
+                if (parsedRange?.isValid) {
+                    if (parsedRange?.effectiveStartDate) displayStartDate = String(parsedRange.effectiveStartDate);
+                    if (parsedRange?.endDate) endDate = String(parsedRange.endDate);
                 }
 
-                if (endDate && endDate !== startDate) {
-                    return `${formatDateRuShort(startDate)} ${startTime} — ${formatDateRuShort(endDate)} ${endTime}`;
+                if (endDate && endDate !== displayStartDate) {
+                    return `${formatDateRuShort(displayStartDate)} ${startTime} — ${formatDateRuShort(endDate)} ${endTime}`;
                 }
-                return `${formatDateRuShort(startDate)} ${startTime} — ${endTime}`;
+                return `${formatDateRuShort(displayStartDate)} ${startTime} — ${endTime}`;
             };
             const formatSwapIntervalLabel = (req) => {
                 const dateStr = req?.swapDate || req?.startDate || '';
