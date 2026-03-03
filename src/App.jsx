@@ -5574,6 +5574,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const [swapCandidatesLoading, setSwapCandidatesLoading] = useState(false);
             const [swapCandidatesError, setSwapCandidatesError] = useState('');
             const [swapCandidates, setSwapCandidates] = useState([]);
+            const [swapCandidatesSearch, setSwapCandidatesSearch] = useState('');
             const [swapSubmitting, setSwapSubmitting] = useState(false);
             const [swapRespondingId, setSwapRespondingId] = useState(null);
             const [showSwapCreateModal, setShowSwapCreateModal] = useState(false);
@@ -8387,6 +8388,31 @@ const withAccessTokenHeader = (headers = {}) => {
                 swapForm.startTime,
                 swapForm.endTime
             ]);
+            const swapCandidatesFiltered = useMemo(() => {
+                const raw = Array.isArray(swapCandidates) ? swapCandidates : [];
+                const query = String(swapCandidatesSearch || '').trim().toLowerCase();
+                if (!query) return raw;
+
+                return raw.filter(item => {
+                    const haystack = [
+                        item?.name,
+                        item?.supervisorName
+                    ]
+                        .map(v => String(v || '').toLowerCase())
+                        .join(' ');
+                    return haystack.includes(query);
+                });
+            }, [swapCandidates, swapCandidatesSearch]);
+            useEffect(() => {
+                const selectedId = String(swapForm.targetOperatorId || '').trim();
+                if (!selectedId) return;
+                const hasSelected = swapCandidatesFiltered.some(item => String(item?.id) === selectedId);
+                if (hasSelected) return;
+                setSwapForm(prev => {
+                    if (String(prev.targetOperatorId || '').trim() !== selectedId) return prev;
+                    return { ...prev, targetOperatorId: '' };
+                });
+            }, [swapCandidatesFiltered, swapForm.targetOperatorId]);
             const handleCreateSwapRequest = async () => {
                 if (swapSubmitting) return;
                 if (!swapTimeValidation.isValid) {
@@ -8427,6 +8453,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     }));
                     await loadSwapRequests({ silent: true });
                     setShowSwapCreateModal(false);
+                    setSwapCandidatesSearch('');
                 } catch (error) {
                     notifySwapMessage(error?.message || 'Не удалось отправить запрос на замену', 'error');
                 } finally {
@@ -8963,6 +8990,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 onClick={() => {
                                                     setOperatorSelfTab('schedule');
                                                     setShowSwapCreateModal(false);
+                                                    setSwapCandidatesSearch('');
                                                 }}
                                                 className={`px-2.5 sm:px-3 py-1 rounded text-sm ${operatorSelfTab === 'schedule' ? 'bg-slate-800 text-white' : 'bg-white'}`}
                                             >
@@ -8999,7 +9027,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                             <div className="sm:ml-2 flex items-center gap-2">
                                                 <button
                                                     type="button"
-                                                    onClick={() => setShowSwapCreateModal(true)}
+                                                    onClick={() => {
+                                                        setSwapCandidatesSearch('');
+                                                        setShowSwapCreateModal(true);
+                                                    }}
                                                     className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white text-sm inline-flex items-center gap-1"
                                                 >
                                                     <FaIcon className="fas fa-plus"></FaIcon>
@@ -9541,7 +9572,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 <div
                                                     className="fixed inset-0 z-[80] bg-slate-900/45 p-2 sm:p-4 overflow-y-auto"
                                                     onClick={(e) => {
-                                                        if (e.target === e.currentTarget) setShowSwapCreateModal(false);
+                                                        if (e.target === e.currentTarget) {
+                                                            setShowSwapCreateModal(false);
+                                                            setSwapCandidatesSearch('');
+                                                        }
                                                     }}
                                                 >
                                                     <div className="min-h-full flex items-start sm:items-center justify-center">
@@ -9557,7 +9591,10 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </div>
                                                         <button
                                                             type="button"
-                                                            onClick={() => setShowSwapCreateModal(false)}
+                                                            onClick={() => {
+                                                                setShowSwapCreateModal(false);
+                                                                setSwapCandidatesSearch('');
+                                                            }}
                                                             className="w-8 h-8 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 inline-flex items-center justify-center"
                                                             title="Закрыть"
                                                         >
@@ -9621,16 +9658,29 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     ? 'Сначала выберите корректный интервал'
                                                                     : swapCandidatesLoading
                                                                         ? 'Загрузка кандидатов...'
-                                                                        : swapCandidates.length === 0
-                                                                            ? 'Нет доступных операторов'
+                                                                        : swapCandidatesFiltered.length === 0
+                                                                            ? (String(swapCandidatesSearch || '').trim() ? 'По поиску нет совпадений' : 'Нет доступных операторов')
                                                                             : 'Выберите оператора'}
                                                             </option>
-                                                            {swapCandidates.map(item => (
+                                                            {swapCandidatesFiltered.map(item => (
                                                                 <option key={`swap-candidate-${item.id}`} value={String(item.id)}>
                                                                     {item.name}{item.supervisorName ? ` • ${item.supervisorName}` : ''}
                                                                 </option>
                                                             ))}
                                                         </select>
+                                                    </label>
+                                                </div>
+                                                <div className="mt-2">
+                                                    <label className="text-sm block">
+                                                        <div className="text-xs text-slate-600 mb-1">Поиск среди кандидатов</div>
+                                                        <input
+                                                            type="text"
+                                                            value={swapCandidatesSearch}
+                                                            onChange={(e) => setSwapCandidatesSearch(e.target.value)}
+                                                            placeholder="ФИО или супервайзер"
+                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+                                                            disabled={!swapTimeValidation.isValid || swapCandidatesLoading}
+                                                        />
                                                     </label>
                                                 </div>
                                                 <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
@@ -9798,7 +9848,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             Кандидаты на замену
                                                         </div>
                                                         <div className="text-xs text-slate-500">
-                                                            По приоритету совпадения границ интервала
+                                                            {String(swapCandidatesSearch || '').trim()
+                                                                ? `Найдено: ${swapCandidatesFiltered.length} из ${swapCandidates.length}`
+                                                                : 'По приоритету совпадения границ интервала'}
                                                         </div>
                                                     </div>
                                                     {!swapTimeValidation.isValid ? (
@@ -9809,13 +9861,15 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <div className="text-xs text-slate-500">
                                                             <FaIcon className="fas fa-spinner fa-spin mr-1"></FaIcon>Подбираем кандидатов...
                                                         </div>
-                                                    ) : swapCandidates.length === 0 ? (
+                                                    ) : swapCandidatesFiltered.length === 0 ? (
                                                         <div className="text-xs text-slate-500">
-                                                            На этот интервал нет доступных операторов.
+                                                            {String(swapCandidatesSearch || '').trim()
+                                                                ? 'По текущему поиску кандидаты не найдены.'
+                                                                : 'На этот интервал нет доступных операторов.'}
                                                         </div>
                                                     ) : (
                                                         <div className="max-h-80 overflow-y-auto pr-1 space-y-2">
-                                                            {swapCandidates.map((item, idx) => {
+                                                            {swapCandidatesFiltered.map((item, idx) => {
                                                                 const isSelected = String(item?.id) === String(swapForm.targetOperatorId);
                                                                 const hasPriority = Number(item?.priorityScore || 0) > 0;
                                                                 const matchStart = !!item?.matchStartsAtRequestEnd;
