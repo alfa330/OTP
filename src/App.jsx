@@ -5583,7 +5583,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 endDate: '',
                 startTime: '',
                 endTime: '',
-                targetOperatorId: '',
+                targetOperatorIds: [],
                 comment: ''
             });
             const [breakReminderPermissionState, setBreakReminderPermissionState] = useState(() => {
@@ -8183,7 +8183,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             endDate: '',
                             startTime: '',
                             endTime: '',
-                            targetOperatorId: ''
+                            targetOperatorIds: []
                         };
                     }
                     const firstDate = mySwapSourceShiftDays[0];
@@ -8546,9 +8546,14 @@ const withAccessTokenHeader = (headers = {}) => {
                         const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
                         setSwapCandidates(candidates);
                         setSwapForm(prev => {
-                            const keepSelected = candidates.some(item => String(item.id) === String(prev.targetOperatorId));
-                            if (keepSelected) return prev;
-                            return { ...prev, targetOperatorId: '' };
+                            const selected = Array.isArray(prev.targetOperatorIds)
+                                ? prev.targetOperatorIds.map(v => String(v)).filter(Boolean)
+                                : [];
+                            if (selected.length === 0) return prev;
+                            const allowed = new Set((candidates || []).map(item => String(item?.id)));
+                            const nextSelected = selected.filter(id => allowed.has(id));
+                            if (nextSelected.length === selected.length) return prev;
+                            return { ...prev, targetOperatorIds: nextSelected };
                         });
                     } catch (error) {
                         if (cancelled) return;
@@ -8586,60 +8591,87 @@ const withAccessTokenHeader = (headers = {}) => {
                     return haystack.includes(query);
                 });
             }, [swapCandidates, swapCandidatesSearch]);
-            useEffect(() => {
-                const selectedId = String(swapForm.targetOperatorId || '').trim();
-                if (!selectedId) return;
-                const hasSelected = swapCandidatesFiltered.some(item => String(item?.id) === selectedId);
-                if (hasSelected) return;
-                setSwapForm(prev => {
-                    if (String(prev.targetOperatorId || '').trim() !== selectedId) return prev;
-                    return { ...prev, targetOperatorId: '' };
-                });
-            }, [swapCandidatesFiltered, swapForm.targetOperatorId]);
+            const swapSelectedTargetIds = useMemo(() => {
+                const raw = Array.isArray(swapForm.targetOperatorIds) ? swapForm.targetOperatorIds : [];
+                return Array.from(new Set(raw.map(v => String(v)).filter(Boolean)));
+            }, [swapForm.targetOperatorIds]);
             const handleCreateSwapRequest = async () => {
                 if (swapSubmitting) return;
                 if (!swapTimeValidation.isValid) {
                     notifySwapMessage(swapTimeValidation.message || 'Выберите корректный интервал', 'warning');
                     return;
                 }
-                const targetOperatorId = Number(swapForm.targetOperatorId);
-                if (!Number.isFinite(targetOperatorId) || targetOperatorId <= 0) {
-                    notifySwapMessage('Выберите кандидата в блоке ниже', 'warning');
+                const selectedTargetIds = swapSelectedTargetIds
+                    .map(v => Number(v))
+                    .filter(v => Number.isFinite(v) && v > 0);
+                if (selectedTargetIds.length === 0) {
+                    notifySwapMessage('Выберите хотя бы одного кандидата в блоке ниже', 'warning');
                     return;
                 }
 
                 try {
                     setSwapSubmitting(true);
-                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_swap/requests`, {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: withAccessTokenHeader({
-                            'Content-Type': 'application/json'
-                        }),
-                        body: JSON.stringify({
-                            target_operator_id: targetOperatorId,
-                            swap_date: swapForm.swapDate,
-                            end_date: swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate,
-                            start_time: swapForm.startTime,
-                            end_time: swapForm.endTime,
-                            comment: (swapForm.comment || '').trim() || null
-                        })
-                    });
-                    const payload = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(payload?.error || `HTTP ${response.status}`);
-                    }
-                    notifySwapMessage('Запрос на замену отправлен', 'success');
-                    setSwapForm(prev => ({
-                        ...prev,
-                        targetOperatorId: '',
-                        comment: ''
+                    const sendResults = await Promise.all(selectedTargetIds.map(async (targetOperatorId) => {
+                        try {
+                            const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_swap/requests`, {
+                                method: 'POST',
+                                credentials: 'include',
+                                headers: withAccessTokenHeader({
+                                    'Content-Type': 'application/json'
+                                }),
+                                body: JSON.stringify({
+                                    target_operator_id: targetOperatorId,
+                                    swap_date: swapForm.swapDate,
+                                    end_date: swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate,
+                                    start_time: swapForm.startTime,
+                                    end_time: swapForm.endTime,
+                                    comment: (swapForm.comment || '').trim() || null
+                                })
+                            });
+                            const payload = await response.json().catch(() => ({}));
+                            if (!response.ok) {
+                                throw new Error(payload?.error || `HTTP ${response.status}`);
+                            }
+                            return { ok: true, targetOperatorId };
+                        } catch (error) {
+                            return {
+                                ok: false,
+                                targetOperatorId,
+                                error: (error && error.message) ? String(error.message) : 'Ошибка отправки'
+                            };
+                        }
                     }));
-                    await loadSwapRequests({ silent: true });
-                    setShowSwapCreateModal(false);
-                    setSwapCandidatesSearch('');
-                } catch (error) {
-                    notifySwapMessage(error?.message || 'Не удалось отправить запрос на замену', 'error');
+
+                    const okItems = sendResults.filter(item => item?.ok);
+                    const failItems = sendResults.filter(item => !item?.ok);
+
+                    if (okItems.length > 0) {
+                        await loadSwapRequests({ silent: true });
+                    }
+
+                    if (failItems.length === 0) {
+                        notifySwapMessage(
+                            okItems.length > 1 ? `Отправлено запросов: ${okItems.length}` : 'Запрос на замену отправлен',
+                            'success'
+                        );
+                        setSwapForm(prev => ({
+                            ...prev,
+                            targetOperatorIds: [],
+                            comment: ''
+                        }));
+                        setShowSwapCreateModal(false);
+                        setSwapCandidatesSearch('');
+                    } else if (okItems.length === 0) {
+                        const firstError = failItems[0]?.error || 'Не удалось отправить запросы';
+                        notifySwapMessage(firstError, 'error');
+                    } else {
+                        const failedIds = failItems.map(item => String(item.targetOperatorId));
+                        setSwapForm(prev => ({ ...prev, targetOperatorIds: failedIds }));
+                        notifySwapMessage(
+                            `Отправлено: ${okItems.length}. Ошибок: ${failItems.length}. Проверьте выбранных кандидатов.`,
+                            'warning'
+                        );
+                    }
                 } finally {
                     setSwapSubmitting(false);
                 }
@@ -9816,7 +9848,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     ...prev,
                                                                     swapDate: nextDate,
                                                                     endDate: nextDate || '',
-                                                                    targetOperatorId: ''
+                                                                    targetOperatorIds: []
                                                                 }));
                                                             }}
                                                             className="w-full px-3 py-2 lg:py-2.5 rounded-lg border border-slate-300 text-sm lg:text-base bg-white"
@@ -9841,7 +9873,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <div className="inline-flex w-full rounded-lg border border-slate-300 bg-slate-50 p-1 gap-1">
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => setSwapForm(prev => ({ ...prev, endDate: prev.swapDate || '', targetOperatorId: '' }))}
+                                                                    onClick={() => setSwapForm(prev => ({ ...prev, endDate: prev.swapDate || '', targetOperatorIds: [] }))}
                                                                     disabled={!swapForm.swapDate}
                                                                     className={`flex-1 px-2 py-1 rounded-md border text-[11px] font-medium ${
                                                                         !swapForm.swapDate
@@ -9858,7 +9890,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     onClick={() => setSwapForm(prev => ({
                                                                         ...prev,
                                                                         endDate: prev.swapDate ? swapNextDayDate : '',
-                                                                        targetOperatorId: ''
+                                                                        targetOperatorIds: []
                                                                     }))}
                                                                     disabled={!swapForm.swapDate}
                                                                     className={`flex-1 px-2 py-1 rounded-md border text-[11px] font-medium ${
@@ -9885,7 +9917,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <input
                                                             type="time"
                                                             value={swapForm.startTime}
-                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, startTime: e.target.value, targetOperatorId: '' }))}
+                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, startTime: e.target.value, targetOperatorIds: [] }))}
                                                             className="w-full px-3 py-2 lg:py-2.5 rounded-lg border border-slate-300 text-sm lg:text-base bg-white"
                                                             step={300}
                                                         />
@@ -9895,7 +9927,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <input
                                                             type="time"
                                                             value={swapForm.endTime}
-                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, endTime: e.target.value, targetOperatorId: '' }))}
+                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, endTime: e.target.value, targetOperatorIds: [] }))}
                                                             className="w-full px-3 py-2 lg:py-2.5 rounded-lg border border-slate-300 text-sm lg:text-base bg-white"
                                                             step={300}
                                                         />
@@ -10037,14 +10069,18 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     <button
                                                         type="button"
                                                         onClick={handleCreateSwapRequest}
-                                                        disabled={swapSubmitting || !swapTimeValidation.isValid || !swapForm.targetOperatorId}
+                                                        disabled={swapSubmitting || !swapTimeValidation.isValid || swapSelectedTargetIds.length === 0}
                                                         className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition ${
-                                                            swapSubmitting || !swapTimeValidation.isValid || !swapForm.targetOperatorId
+                                                            swapSubmitting || !swapTimeValidation.isValid || swapSelectedTargetIds.length === 0
                                                                 ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
                                                                 : 'bg-blue-600 text-white hover:bg-blue-700'
                                                         }`}
                                                     >
-                                                        {swapSubmitting ? 'Отправка...' : 'Отправить запрос'}
+                                                        {swapSubmitting
+                                                            ? 'Отправка...'
+                                                            : (swapSelectedTargetIds.length > 1
+                                                                ? `Отправить запросы (${swapSelectedTargetIds.length})`
+                                                                : 'Отправить запрос')}
                                                     </button>
                                                 </div>
                                                 <div className="mt-2 text-xs">
@@ -10071,9 +10107,11 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             Кандидаты на замену
                                                         </div>
                                                         <div className="text-xs text-slate-500">
-                                                            {String(swapCandidatesSearch || '').trim()
-                                                                ? `Найдено: ${swapCandidatesFiltered.length} из ${swapCandidates.length}`
-                                                                : 'По приоритету совпадения границ интервала'}
+                                                            {swapSelectedTargetIds.length > 0
+                                                                ? `Выбрано: ${swapSelectedTargetIds.length}`
+                                                                : (String(swapCandidatesSearch || '').trim()
+                                                                    ? `Найдено: ${swapCandidatesFiltered.length} из ${swapCandidates.length}`
+                                                                    : 'По приоритету совпадения границ интервала')}
                                                         </div>
                                                     </div>
                                                     <label className="text-sm block mb-2">
@@ -10104,7 +10142,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     ) : (
                                                         <div className="max-h-[42vh] sm:max-h-80 overflow-y-auto pr-1 space-y-2">
                                                             {swapCandidatesFiltered.map((item, idx) => {
-                                                                const isSelected = String(item?.id) === String(swapForm.targetOperatorId);
+                                                                const itemId = String(item?.id || '');
+                                                                const isSelected = swapSelectedTargetIds.includes(itemId);
                                                                 const hasPriority = Number(item?.priorityScore || 0) > 0;
                                                                 const matchStart = !!item?.matchStartsAtRequestEnd;
                                                                 const matchEnd = !!item?.matchEndsAtRequestStart;
@@ -10131,7 +10170,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                             </div>
                                                                             <button
                                                                                 type="button"
-                                                                                onClick={() => setSwapForm(prev => ({ ...prev, targetOperatorId: String(item?.id || '') }))}
+                                                                                onClick={() => setSwapForm(prev => {
+                                                                                    const raw = Array.isArray(prev.targetOperatorIds) ? prev.targetOperatorIds : [];
+                                                                                    const selected = Array.from(new Set(raw.map(v => String(v)).filter(Boolean)));
+                                                                                    const nextSelected = selected.includes(itemId)
+                                                                                        ? selected.filter(v => v !== itemId)
+                                                                                        : [...selected, itemId];
+                                                                                    return { ...prev, targetOperatorIds: nextSelected };
+                                                                                })}
                                                                                 className={`px-2.5 py-1 rounded-md text-xs font-medium border ${
                                                                                     isSelected
                                                                                         ? 'bg-blue-600 text-white border-blue-600'
