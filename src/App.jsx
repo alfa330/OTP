@@ -9602,8 +9602,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </button>
                                                     </div>
                                                 </div>
-                                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
-                                                    <label className="text-sm">
+                                                <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
+                                                    <label className="text-sm col-span-2 sm:col-span-1 lg:col-span-1">
                                                         <div className="text-xs text-slate-600 mb-1">Дата</div>
                                                         <select
                                                             value={swapForm.swapDate}
@@ -9645,7 +9645,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             step={300}
                                                         />
                                                     </label>
-                                                    <label className="text-sm">
+                                                    <label className="text-sm col-span-2 sm:col-span-1 lg:col-span-1">
                                                         <div className="text-xs text-slate-600 mb-1">Оператор для замены</div>
                                                         <select
                                                             value={swapForm.targetOperatorId}
