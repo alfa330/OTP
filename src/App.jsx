@@ -59,6 +59,20 @@ const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const CALL_EVALUATION_EMBED_STATE_KEY = 'call_evaluation_embed_state';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
+const emitAppToast = (message, type = 'info') => {
+    const text = String(message ?? '');
+    try {
+        if (typeof window !== 'undefined' && typeof window.showToast === 'function') {
+            window.showToast(text, type);
+            return true;
+        }
+    } catch (error) {
+        console.warn('Failed to emit toast:', error);
+    }
+    if (type === 'error') console.error(text);
+    else console.warn(text);
+    return false;
+};
 
 const readAuthToken = (key) => {
     if (typeof window === 'undefined') return '';
@@ -486,9 +500,9 @@ const withAccessTokenHeader = (headers = {}) => {
             try {
             if (showToast) showToast(msg, type);
             else if (window.showToast) window.showToast(msg, type);
-            else alert(msg);
+            else emitAppToast(msg, type);
             } catch (e) {
-            alert(msg);
+            emitAppToast(msg, type);
             }
         }
 
@@ -2865,7 +2879,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 recomputeOperatorMap(allRows, minDVal, maxDVal, Number(sampleCount) || 0, Number(varVal) || 0, operatorParams);
                 } catch (err) {
                 console.error('parse error', err);
-                alert('Ошибка парсинга файлов');
+                fallbackToast('Ошибка парсинга файлов', 'error');
                 } finally { setParsing(false); }
             }
 
@@ -3572,7 +3586,10 @@ const withAccessTokenHeader = (headers = {}) => {
 
             function handleAssign() {
                 const picks = calls.filter(c => selectedCalls.has(c.id));
-                if (picks.length === 0) return alert('Выберите звонки для назначения');
+                if (picks.length === 0) {
+                fallbackToast('Выберите звонки для назначения', 'warning');
+                return;
+                }
                 if (typeof onAssignSelected === 'function') onAssignSelected(picks);
                 else {
                 const csv = ['id,datetime,type,phone,project,operator,durationSec'];
@@ -3606,7 +3623,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                 if (distributionTab === 'by_operator' && selectedOperatorsForShuffle.size === 0) {
                 if (typeof showToast === 'function') showToast?.('Сначала выберите хотя бы одного оператора', 'warning');
-                else alert('Сначала выберите хотя бы одного оператора');
+                else fallbackToast('Сначала выберите хотя бы одного оператора', 'warning');
                 return;
                 }
 
@@ -3644,7 +3661,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                 if (toProcess.length === 0) {
                 if (typeof showToast === 'function') showToast?.('Нет операторов для распределения по текущим условиям', 'warning');
-                else alert('Нет операторов для распределения по текущим условиям');
+                else fallbackToast('Нет операторов для распределения по текущим условиям', 'warning');
                 return;
                 }
 
@@ -3718,7 +3735,7 @@ const withAccessTokenHeader = (headers = {}) => {
             setShuffleResult(null); // сбрасываем предыдущий результат
             try {
                 if (typeof axios === 'undefined') {
-                alert('axios is not available to send request');
+                fallbackToast('axios is not available to send request', 'error');
                 setShuffling(false);
                 return;
                 }
@@ -3757,12 +3774,12 @@ const withAccessTokenHeader = (headers = {}) => {
                 // не закрываем модал — показываем результат, пользователь видит ответ
                 } else {
                 if (typeof showToast === 'function') showToast?.(data?.error || 'Ошибка при отправке распределения', 'error');
-                else alert(data?.error || 'Ошибка при отправке распределения');
+                else fallbackToast(data?.error || 'Ошибка при отправке распределения', 'error');
                 }
             } catch (err) {
                 console.error('Shuffle error', err);
                 if (typeof showToast === 'function') showToast?.(err.response?.data?.error || 'Ошибка при отправке распределения', 'error');
-                else alert('Ошибка при отправке распределения');
+                else fallbackToast(err.response?.data?.error || 'Ошибка при отправке распределения', 'error');
 
                 // Записываем ошибку в shuffleResult чтобы отобразить пользователю
                 setShuffleResult({
@@ -6212,7 +6229,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 });
                 const nextGroup = Array.from(draftMap.values());
                 if (nextGroup.length < 2) {
-                    alert('Выберите минимум 2 направления для группы');
+                    emitAppToast('Выберите минимум 2 направления для группы', 'warning');
                     return;
                 }
 
@@ -6584,28 +6601,28 @@ const withAccessTokenHeader = (headers = {}) => {
                 const statusComment = String(modalState.statusComment || '').trim();
 
                 if (!statusCode) {
-                    alert('Выберите статус');
+                    emitAppToast('Выберите статус', 'warning');
                     return;
                 }
                 if (!startDate) {
-                    alert('Укажите дату начала');
+                    emitAppToast('Укажите дату начала', 'warning');
                     return;
                 }
                 if (!isDismissal && !endDate) {
-                    alert('Укажите дату окончания');
+                    emitAppToast('Укажите дату окончания', 'warning');
                     return;
                 }
                 if (isDismissal) {
                     if (!dismissalReason) {
-                        alert('Укажите причину увольнения');
+                        emitAppToast('Укажите причину увольнения', 'warning');
                         return;
                     }
                     if (dismissalIsBlacklist && endDateRaw) {
-                        alert('Для ЧС-увольнения дата окончания не используется');
+                        emitAppToast('Для ЧС-увольнения дата окончания не используется', 'warning');
                         return;
                     }
                     if (!statusComment) {
-                        alert('Комментарий обязателен для увольнения');
+                        emitAppToast('Комментарий обязателен для увольнения', 'warning');
                         return;
                     }
                 }
@@ -6672,7 +6689,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 } catch (error) {
                     console.error('Error saving status period:', error);
                     setModalState(m => ({ ...m, statusSaving: false }));
-                    alert(`Ошибка сохранения статуса: ${error?.message || error}`);
+                    emitAppToast(`Ошибка сохранения статуса: ${error?.message || error}`, 'error');
                 }
             };
 
@@ -6730,7 +6747,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     }
                 } catch (error) {
                     console.error('Error deleting status period:', error);
-                    alert(`Ошибка удаления статуса: ${error?.message || error}`);
+                    emitAppToast(`Ошибка удаления статуса: ${error?.message || error}`, 'error');
                     setModalState(m => ({ ...m, statusDeleting: false }));
                 }
             };
@@ -6800,7 +6817,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     setModalState(m => ({ ...m, isDayOff: result.is_day_off }));
                 } catch (error) {
                     console.error('Error toggling day off:', error);
-                    alert('Ошибка изменения выходного дня');
+                    emitAppToast('Ошибка изменения выходного дня', 'error');
                 }
             };
 
@@ -7207,7 +7224,7 @@ const withAccessTokenHeader = (headers = {}) => {
             const handlePlannerExcelExport = async () => {
                 if (user?.role === 'operator') return;
                 if (!Array.isArray(visibleRange) || visibleRange.length === 0) {
-                    alert('Нет дат для экспорта');
+                    emitAppToast('Нет дат для экспорта', 'warning');
                     return;
                 }
                 const sortedDates = [...visibleRange].sort();
@@ -7235,7 +7252,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     window.URL.revokeObjectURL(url);
                 } catch (error) {
                     console.error('Error exporting excel schedule:', error);
-                    alert(`Ошибка экспорта Excel: ${error?.message || error}`);
+                    emitAppToast(`Ошибка экспорта Excel: ${error?.message || error}`, 'error');
                 } finally {
                     setExcelTransferState(prev => ({ ...prev, exporting: false }));
                 }
@@ -7515,7 +7532,7 @@ const withAccessTokenHeader = (headers = {}) => {
                   setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], showAddPanel: false }));
                 } catch (error) {
                   console.error('Error saving multiple shifts:', error);
-                  alert('Ошибка массового сохранения смен');
+                  emitAppToast('Ошибка массового сохранения смен', 'error');
                 }
             };
 
@@ -7565,7 +7582,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], showAddPanel: false }));
                 } catch (error) {
                     console.error('Error setting multiple day offs:', error);
-                    alert('Ошибка массового назначения выходного');
+                    emitAppToast('Ошибка массового назначения выходного', 'error');
                 }
             };
 
@@ -7604,7 +7621,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     setModalState(m => ({ ...m, open: false, multipleDates: null, multipleTargets: null, breaks: [], showAddPanel: false }));
                 } catch (error) {
                     console.error('Error deleting multiple shifts:', error);
-                    alert('Ошибка массовой очистки дней');
+                    emitAppToast('Ошибка массовой очистки дней', 'error');
                 }
             };
 
@@ -7674,7 +7691,7 @@ const withAccessTokenHeader = (headers = {}) => {
                   setModalState(m => ({ ...m, editIndex: null, multipleDates: null, multipleTargets: null, showAddPanel: false, breaks: [] }));
                 } catch (error) {
                   console.error('Error saving shift:', error);
-                  alert('Ошибка сохранения смены');
+                  emitAppToast('Ошибка сохранения смены', 'error');
                 }
               };              
 
@@ -7716,7 +7733,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     });
                 } catch (error) {
                     console.error('Error deleting shift:', error);
-                    alert('Ошибка удаления смены');
+                    emitAppToast('Ошибка удаления смены', 'error');
                 }
             };
 
@@ -8017,9 +8034,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 } catch (e) {
                     console.warn('Failed to show swap toast:', e);
                 }
-                if (typeof window !== 'undefined') {
-                    window.alert(message);
-                }
+                emitAppToast(message, type);
             };
             const timeStrToMinutesSafe = useCallback((value) => {
                 if (typeof value !== 'string' || !/^\d{2}:\d{2}$/.test(value)) return NaN;
@@ -14198,9 +14213,9 @@ const withAccessTokenHeader = (headers = {}) => {
         const copyJSON = async () => {
             try {
             await navigator.clipboard.writeText(JSON.stringify(result, null, 2));
-            alert("JSON скопирован в буфер обмена");
+            emitAppToast('JSON скопирован в буфер обмена', 'success');
             } catch {
-            alert("Не удалось скопировать");
+            emitAppToast('Не удалось скопировать', 'error');
             }
         };
 
@@ -14522,9 +14537,9 @@ const withAccessTokenHeader = (headers = {}) => {
         const copyJSON = async () => {
             try {
             await navigator.clipboard.writeText(JSON.stringify(result, null, 2));
-            alert('JSON скопирован в буфер обмена');
+            emitAppToast('JSON скопирован в буфер обмена', 'success');
             } catch {
-            alert('Не удалось скопировать');
+            emitAppToast('Не удалось скопировать', 'error');
             }
         };
 
@@ -18382,7 +18397,7 @@ const withAccessTokenHeader = (headers = {}) => {
 
                 const handleSendRequest = async () => {
                     if (!requestMessage.trim()) {
-                    alert('Введите сообщение для запроса');
+                    showToast('Введите сообщение для запроса', 'warning');
                     return;
                     }
 

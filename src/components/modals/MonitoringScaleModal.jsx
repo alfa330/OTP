@@ -43,7 +43,7 @@ const MonitoringScaleModal = ({ isOpen, onClose, onSave, initialDirections }) =>
     
     const handleAddDirection = () => {
         if (!newDirectionName) {
-            alert('Пожалуйста, введите название направления.');
+            showToast('Пожалуйста, введите название направления.', 'error');
             return;
         }
         setDirections([...directions, { name: newDirectionName, hasFileUpload: newDirectionFileUpload, criteria: [] }]);
@@ -56,7 +56,7 @@ const MonitoringScaleModal = ({ isOpen, onClose, onSave, initialDirections }) =>
     
     const handleEditDirection = () => {
         if (!newDirectionName) {
-            alert('Пожалуйста, введите название направления.');
+            showToast('Пожалуйста, введите название направления.', 'error');
             return;
         }
         setDirections(directions.map((direction, index) => 
