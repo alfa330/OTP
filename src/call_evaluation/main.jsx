@@ -56,6 +56,20 @@ const getAudioUrl = async (evalId, userId) => {
     } catch { return null; }
 };
 
+const emitCallEvaluationToast = (message, type = 'info') => {
+    const text = String(message ?? '');
+    try {
+        if (typeof window !== 'undefined' && typeof window.showToast === 'function') {
+            window.showToast(text, type);
+            return;
+        }
+    } catch (error) {
+        console.warn('Failed to emit call-evaluation toast:', error);
+    }
+    if (type === 'error') console.error(text);
+    else console.warn(text);
+};
+
 const escapeHtml = (s) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
 
 const parseToHtml = (text) => {
@@ -228,8 +242,8 @@ const SvRequestButton = ({ call, userId, userRole, fetchEvaluations, onReevaluat
             if (!r.ok) throw new Error(d.error);
             await fetchEvaluations?.({ force: true });
             setShowModal(false); setComment('');
-            alert('Заявка отправлена');
-        } catch(e) { alert('Ошибка: ' + e.message); }
+            emitCallEvaluationToast('Заявка отправлена', 'success');
+        } catch(e) { emitCallEvaluationToast('Ошибка: ' + e.message, 'error'); }
         finally { setLoading(false); }
     };
 
@@ -496,8 +510,8 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
             if (res.status === 'success') {
                 onSubmit({ id: res.evaluation_id, evaluator: userName, operator: operator.name, phoneNumber, totalScore: totalScore.toFixed(2), comment: fd.get('comment'), selectedDirection: currentDir?.name, directionId: currentDir?.id, is_imported: false, directions: [{name: currentDir?.name, hasFileUpload: currentDir?.hasFileUpload, criteria}], scores, criterionComments: comments, audioUrl: currentDir?.hasFileUpload ? audioUrl : null, isDraft: draft, assignedMonth, isCorrection: existingEvaluation?.isReevaluation || false, appeal_date: ad });
                 onClose();
-            } else alert('Ошибка: ' + res.error);
-        } catch(e) { alert('Ошибка отправки: ' + e.message); }
+            } else emitCallEvaluationToast('Ошибка: ' + res.error, 'error');
+        } catch(e) { emitCallEvaluationToast('Ошибка отправки: ' + e.message, 'error'); }
         finally { setIsSubmitting(false); }
     };
 
@@ -507,8 +521,8 @@ const EvaluationModal = ({ isOpen, onClose, onSubmit, directions, operator, sele
             const r = await authFetch(`${API_BASE_URL}/api/call_evaluation/${existingEvaluation.id}`, { method:'DELETE', headers:{'X-User-Id':userId} });
             const res = await r.json();
             if (res.status === 'success') { onSubmit(null); onClose(); }
-            else alert('Ошибка удаления: ' + res.error);
-        } catch(e) { alert('Ошибка: ' + e.message); }
+            else emitCallEvaluationToast('Ошибка удаления: ' + res.error, 'error');
+        } catch(e) { emitCallEvaluationToast('Ошибка: ' + e.message, 'error'); }
     };
 
     if (!isOpen) return null;
@@ -924,7 +938,7 @@ const App = ({ user, initialSelection }) => {
                 }
                 return nextCalls;
             });
-        } catch(e) { alert('Ошибка: ' + e.message); }
+        } catch(e) { emitCallEvaluationToast('Ошибка: ' + e.message, 'error'); }
     };
 
     const callsByMonth = calls.filter(c => c.assignedMonth === selectedMonth);
