@@ -8467,6 +8467,8 @@ const withAccessTokenHeader = (headers = {}) => {
                 myScheduleData,
                 parseSwapRangeWithDates
             ]);
+            const swapNextDayDate = swapForm.swapDate ? todayDateStr(addDays(parseDateStr(swapForm.swapDate), 1)) : '';
+            const swapEndsNextDay = !!swapForm.swapDate && String(swapForm.endDate || '') === String(swapNextDayDate || '');
             const loadSwapRequests = useCallback(async ({ silent = false } = {}) => {
                 if (!isOperatorSelfSchedules || !user) return;
                 if (!silent) {
@@ -8602,7 +8604,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 }
                 const targetOperatorId = Number(swapForm.targetOperatorId);
                 if (!Number.isFinite(targetOperatorId) || targetOperatorId <= 0) {
-                    notifySwapMessage('Выберите оператора для замены', 'warning');
+                    notifySwapMessage('Выберите кандидата в блоке ниже', 'warning');
                     return;
                 }
 
@@ -9803,9 +9805,9 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </button>
                                                     </div>
                                                 </div>
-                                                <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-6 gap-2 sm:gap-3">
-                                                    <label className="text-sm col-span-2 sm:col-span-1 lg:col-span-2">
-                                                        <div className="text-xs text-slate-600 mb-1">Дата начала</div>
+                                                <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-12 gap-2 sm:gap-3 items-end">
+                                                    <label className="text-sm col-span-2 sm:col-span-1 lg:col-span-4">
+                                                        <div className="text-xs lg:text-sm text-slate-600 mb-1">Дата начала</div>
                                                         <select
                                                             value={swapForm.swapDate}
                                                             onChange={(e) => {
@@ -9817,7 +9819,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     targetOperatorId: ''
                                                                 }));
                                                             }}
-                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+                                                            className="w-full px-3 py-2 lg:py-2.5 rounded-lg border border-slate-300 text-sm lg:text-base bg-white"
                                                         >
                                                             <option value="">Выберите дату смены</option>
                                                             {mySwapSourceShiftDays.map(dayKey => (
@@ -9827,19 +9829,19 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             ))}
                                                         </select>
                                                     </label>
-                                                    <label className="text-sm col-span-2 sm:col-span-1 lg:col-span-2">
-                                                        <div className="flex items-center justify-between gap-2 mb-1">
-                                                            <span className="text-xs text-slate-600">Дата окончания</span>
-                                                            <div className="flex items-center gap-1">
+                                                    <div className="text-sm col-span-2 sm:col-span-1 lg:col-span-4">
+                                                        <div className="text-xs lg:text-sm text-slate-600 mb-1">Режим интервала</div>
+                                                        <div className="rounded-lg border border-slate-300 bg-slate-50 p-1.5 sm:p-2 lg:p-2.5">
+                                                            <div className="grid grid-cols-2 gap-1.5 lg:gap-2">
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => setSwapForm(prev => ({ ...prev, endDate: prev.swapDate || '', targetOperatorId: '' }))}
                                                                     disabled={!swapForm.swapDate}
-                                                                    className={`px-2 py-0.5 rounded-md border text-[11px] ${
+                                                                    className={`px-2.5 lg:px-3 py-1.5 lg:py-2 rounded-md border text-xs lg:text-sm font-semibold ${
                                                                         !swapForm.swapDate
                                                                             ? 'border-slate-200 text-slate-400 cursor-not-allowed'
-                                                                            : (String(swapForm.endDate || '') === String(swapForm.swapDate || '')
-                                                                                ? 'border-blue-200 bg-blue-50 text-blue-700'
+                                                                            : (!swapEndsNextDay
+                                                                                ? 'border-blue-300 bg-blue-50 text-blue-700 shadow-[inset_0_0_0_1px_rgba(59,130,246,0.15)]'
                                                                                 : 'border-slate-300 text-slate-600 hover:bg-slate-50')
                                                                     }`}
                                                                 >
@@ -9849,15 +9851,15 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     type="button"
                                                                     onClick={() => setSwapForm(prev => ({
                                                                         ...prev,
-                                                                        endDate: prev.swapDate ? todayDateStr(addDays(parseDateStr(prev.swapDate), 1)) : '',
+                                                                        endDate: prev.swapDate ? swapNextDayDate : '',
                                                                         targetOperatorId: ''
                                                                     }))}
                                                                     disabled={!swapForm.swapDate}
-                                                                    className={`px-2 py-0.5 rounded-md border text-[11px] ${
+                                                                    className={`px-2.5 lg:px-3 py-1.5 lg:py-2 rounded-md border text-xs lg:text-sm font-semibold ${
                                                                         !swapForm.swapDate
                                                                             ? 'border-slate-200 text-slate-400 cursor-not-allowed'
-                                                                            : (swapForm.swapDate && String(swapForm.endDate || '') === String(todayDateStr(addDays(parseDateStr(swapForm.swapDate), 1)))
-                                                                                ? 'border-blue-200 bg-blue-50 text-blue-700'
+                                                                            : (swapEndsNextDay
+                                                                                ? 'border-blue-300 bg-blue-50 text-blue-700 shadow-[inset_0_0_0_1px_rgba(59,130,246,0.15)]'
                                                                                 : 'border-slate-300 text-slate-600 hover:bg-slate-50')
                                                                     }`}
                                                                 >
@@ -9865,57 +9867,33 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 </button>
                                                             </div>
                                                         </div>
-                                                        <div className="text-[11px] text-slate-500">
+                                                        <div className="mt-1.5 text-[11px] lg:text-sm text-slate-600">
                                                             {swapForm.swapDate
-                                                                ? (String(swapForm.endDate || '') === String(todayDateStr(addDays(parseDateStr(swapForm.swapDate), 1)))
-                                                                    ? `Выбрано: ${formatDateRuShort(todayDateStr(addDays(parseDateStr(swapForm.swapDate), 1)))}`
-                                                                    : `Выбрано: ${formatDateRuShort(swapForm.swapDate)}`)
+                                                                ? (swapEndsNextDay
+                                                                    ? `Интервал начнется на ${formatDateRuShort(swapNextDayDate)}`
+                                                                    : `Интервал в пределах ${formatDateRuShort(swapForm.swapDate)}`)
                                                                 : 'Сначала выберите дату начала'}
                                                         </div>
-                                                    </label>
-                                                    <label className="text-sm lg:col-span-1">
+                                                    </div>
+                                                    <label className="text-sm lg:col-span-2">
                                                         <div className="text-xs text-slate-600 mb-1">С</div>
                                                         <input
                                                             type="time"
                                                             value={swapForm.startTime}
                                                             onChange={(e) => setSwapForm(prev => ({ ...prev, startTime: e.target.value, targetOperatorId: '' }))}
-                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+                                                            className="w-full px-3 py-2 lg:py-2.5 rounded-lg border border-slate-300 text-sm lg:text-base bg-white"
                                                             step={300}
                                                         />
                                                     </label>
-                                                    <label className="text-sm lg:col-span-1">
+                                                    <label className="text-sm lg:col-span-2">
                                                         <div className="text-xs text-slate-600 mb-1">По</div>
                                                         <input
                                                             type="time"
                                                             value={swapForm.endTime}
                                                             onChange={(e) => setSwapForm(prev => ({ ...prev, endTime: e.target.value, targetOperatorId: '' }))}
-                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
+                                                            className="w-full px-3 py-2 lg:py-2.5 rounded-lg border border-slate-300 text-sm lg:text-base bg-white"
                                                             step={300}
                                                         />
-                                                    </label>
-                                                    <label className="text-sm col-span-2 lg:col-span-6">
-                                                        <div className="text-xs text-slate-600 mb-1">Оператор для замены</div>
-                                                        <select
-                                                            value={swapForm.targetOperatorId}
-                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, targetOperatorId: e.target.value }))}
-                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
-                                                            disabled={!swapTimeValidation.isValid || swapCandidatesLoading}
-                                                        >
-                                                            <option value="">
-                                                                {!swapTimeValidation.isValid
-                                                                    ? 'Сначала выберите корректный интервал'
-                                                                    : swapCandidatesLoading
-                                                                        ? 'Загрузка кандидатов...'
-                                                                        : swapCandidatesFiltered.length === 0
-                                                                            ? (String(swapCandidatesSearch || '').trim() ? 'По поиску нет совпадений' : 'Нет доступных операторов')
-                                                                            : 'Выберите оператора'}
-                                                            </option>
-                                                            {swapCandidatesFiltered.map(item => (
-                                                                <option key={`swap-candidate-${item.id}`} value={String(item.id)}>
-                                                                    {item.name}{item.supervisorName ? ` • ${item.supervisorName}` : ''}
-                                                                </option>
-                                                            ))}
-                                                        </select>
                                                     </label>
                                                 </div>
                                                 <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5 sm:p-3">
