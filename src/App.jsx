@@ -5583,9 +5583,10 @@ const withAccessTokenHeader = (headers = {}) => {
                 endDate: '',
                 startTime: '',
                 endTime: '',
-                targetOperatorIds: [],
+                targetOperatorId: '',
                 comment: ''
             });
+            const [swapDraftRequests, setSwapDraftRequests] = useState([]);
             const [breakReminderPermissionState, setBreakReminderPermissionState] = useState(() => {
                 if (typeof window === 'undefined') return 'unsupported';
                 return ('Notification' in window) ? window.Notification.permission : 'unsupported';
@@ -8183,7 +8184,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             endDate: '',
                             startTime: '',
                             endTime: '',
-                            targetOperatorIds: []
+                            targetOperatorId: ''
                         };
                     }
                     const firstDate = mySwapSourceShiftDays[0];
@@ -8546,14 +8547,11 @@ const withAccessTokenHeader = (headers = {}) => {
                         const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
                         setSwapCandidates(candidates);
                         setSwapForm(prev => {
-                            const selected = Array.isArray(prev.targetOperatorIds)
-                                ? prev.targetOperatorIds.map(v => String(v)).filter(Boolean)
-                                : [];
-                            if (selected.length === 0) return prev;
-                            const allowed = new Set((candidates || []).map(item => String(item?.id)));
-                            const nextSelected = selected.filter(id => allowed.has(id));
-                            if (nextSelected.length === selected.length) return prev;
-                            return { ...prev, targetOperatorIds: nextSelected };
+                            const selectedId = String(prev.targetOperatorId || '').trim();
+                            if (!selectedId) return prev;
+                            const keepSelected = candidates.some(item => String(item?.id) === selectedId);
+                            if (keepSelected) return prev;
+                            return { ...prev, targetOperatorId: '' };
                         });
                     } catch (error) {
                         if (cancelled) return;
@@ -8591,27 +8589,100 @@ const withAccessTokenHeader = (headers = {}) => {
                     return haystack.includes(query);
                 });
             }, [swapCandidates, swapCandidatesSearch]);
-            const swapSelectedTargetIds = useMemo(() => {
-                const raw = Array.isArray(swapForm.targetOperatorIds) ? swapForm.targetOperatorIds : [];
-                return Array.from(new Set(raw.map(v => String(v)).filter(Boolean)));
-            }, [swapForm.targetOperatorIds]);
-            const handleCreateSwapRequest = async () => {
-                if (swapSubmitting) return;
+            const selectedSwapCandidate = useMemo(() => {
+                const selectedId = String(swapForm.targetOperatorId || '').trim();
+                if (!selectedId) return null;
+                return (Array.isArray(swapCandidates) ? swapCandidates : []).find(item => String(item?.id) === selectedId) || null;
+            }, [swapCandidates, swapForm.targetOperatorId]);
+            const buildSwapDraftFromCurrentForm = useCallback(({ notifyErrors = true } = {}) => {
                 if (!swapTimeValidation.isValid) {
-                    notifySwapMessage(swapTimeValidation.message || 'Выберите корректный интервал', 'warning');
+                    if (notifyErrors) notifySwapMessage(swapTimeValidation.message || 'Выберите корректный интервал', 'warning');
+                    return null;
+                }
+                const targetOperatorId = Number(swapForm.targetOperatorId);
+                if (!Number.isFinite(targetOperatorId) || targetOperatorId <= 0) {
+                    if (notifyErrors) notifySwapMessage('Выберите кандидата в блоке ниже', 'warning');
+                    return null;
+                }
+                const effectiveEndDate = swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate;
+                const comment = String(swapForm.comment || '').trim();
+                return {
+                    localId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                    targetOperatorId,
+                    targetOperatorName: String(selectedSwapCandidate?.name || 'Оператор'),
+                    targetSupervisorName: String(selectedSwapCandidate?.supervisorName || ''),
+                    swapDate: swapForm.swapDate,
+                    endDate: effectiveEndDate,
+                    startTime: swapForm.startTime,
+                    endTime: swapForm.endTime,
+                    durationMin: Number(swapTimeValidation.durationMin) || 0,
+                    comment
+                };
+            }, [
+                swapForm.swapDate,
+                swapForm.endDate,
+                swapForm.startTime,
+                swapForm.endTime,
+                swapForm.targetOperatorId,
+                swapForm.comment,
+                swapTimeValidation.isValid,
+                swapTimeValidation.message,
+                swapTimeValidation.effectiveEndDate,
+                swapTimeValidation.durationMin,
+                selectedSwapCandidate
+            ]);
+            const getSwapDraftSignature = useCallback((draft) => {
+                const targetOperatorId = Number(draft?.targetOperatorId || 0);
+                const swapDate = String(draft?.swapDate || '');
+                const endDate = String(draft?.endDate || swapDate);
+                const startTime = String(draft?.startTime || '');
+                const endTime = String(draft?.endTime || '');
+                return `${targetOperatorId}|${swapDate}|${endDate}|${startTime}|${endTime}`;
+            }, []);
+            const handleAddSwapDraft = () => {
+                if (swapSubmitting) return;
+                const draft = buildSwapDraftFromCurrentForm({ notifyErrors: true });
+                if (!draft) return;
+                const draftSignature = getSwapDraftSignature(draft);
+                const exists = (Array.isArray(swapDraftRequests) ? swapDraftRequests : []).some(item => getSwapDraftSignature(item) === draftSignature);
+                if (exists) {
+                    notifySwapMessage('Такой запрос уже добавлен в список', 'warning');
                     return;
                 }
-                const selectedTargetIds = swapSelectedTargetIds
-                    .map(v => Number(v))
-                    .filter(v => Number.isFinite(v) && v > 0);
-                if (selectedTargetIds.length === 0) {
-                    notifySwapMessage('Выберите хотя бы одного кандидата в блоке ниже', 'warning');
-                    return;
+                setSwapDraftRequests(prev => [...(Array.isArray(prev) ? prev : []), draft]);
+                setSwapForm(prev => ({
+                    ...prev,
+                    targetOperatorId: '',
+                    comment: ''
+                }));
+                setSwapCandidatesSearch('');
+                notifySwapMessage('Запрос добавлен в список', 'success');
+            };
+            const handleRemoveSwapDraft = (localId) => {
+                setSwapDraftRequests(prev => (Array.isArray(prev) ? prev.filter(item => item?.localId !== localId) : []));
+            };
+            const swapDraftTotalMinutes = useMemo(
+                () => (Array.isArray(swapDraftRequests) ? swapDraftRequests : []).reduce((acc, item) => acc + (Number(item?.durationMin) || 0), 0),
+                [swapDraftRequests]
+            );
+            const canSubmitCurrentSwapDraft = useMemo(() => {
+                const targetOperatorId = Number(swapForm.targetOperatorId);
+                return swapTimeValidation.isValid && Number.isFinite(targetOperatorId) && targetOperatorId > 0;
+            }, [swapForm.targetOperatorId, swapTimeValidation.isValid]);
+            const canSendSwapRequests = (Array.isArray(swapDraftRequests) && swapDraftRequests.length > 0) || canSubmitCurrentSwapDraft;
+            const handleCreateSwapRequest = async () => {
+                if (swapSubmitting) return;
+                let requestsToSend = Array.isArray(swapDraftRequests) ? swapDraftRequests.slice() : [];
+                const sendingCurrentOnly = requestsToSend.length === 0;
+                if (sendingCurrentOnly) {
+                    const currentDraft = buildSwapDraftFromCurrentForm({ notifyErrors: true });
+                    if (!currentDraft) return;
+                    requestsToSend = [currentDraft];
                 }
 
                 try {
                     setSwapSubmitting(true);
-                    const sendResults = await Promise.all(selectedTargetIds.map(async (targetOperatorId) => {
+                    const sendResults = await Promise.all(requestsToSend.map(async (draft) => {
                         try {
                             const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_swap/requests`, {
                                 method: 'POST',
@@ -8620,23 +8691,23 @@ const withAccessTokenHeader = (headers = {}) => {
                                     'Content-Type': 'application/json'
                                 }),
                                 body: JSON.stringify({
-                                    target_operator_id: targetOperatorId,
-                                    swap_date: swapForm.swapDate,
-                                    end_date: swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate,
-                                    start_time: swapForm.startTime,
-                                    end_time: swapForm.endTime,
-                                    comment: (swapForm.comment || '').trim() || null
+                                    target_operator_id: Number(draft?.targetOperatorId),
+                                    swap_date: String(draft?.swapDate || ''),
+                                    end_date: String(draft?.endDate || draft?.swapDate || ''),
+                                    start_time: String(draft?.startTime || ''),
+                                    end_time: String(draft?.endTime || ''),
+                                    comment: String(draft?.comment || '').trim() || null
                                 })
                             });
                             const payload = await response.json().catch(() => ({}));
                             if (!response.ok) {
                                 throw new Error(payload?.error || `HTTP ${response.status}`);
                             }
-                            return { ok: true, targetOperatorId };
+                            return { ok: true, draft };
                         } catch (error) {
                             return {
                                 ok: false,
-                                targetOperatorId,
+                                draft,
                                 error: (error && error.message) ? String(error.message) : 'Ошибка отправки'
                             };
                         }
@@ -8654,19 +8725,22 @@ const withAccessTokenHeader = (headers = {}) => {
                             okItems.length > 1 ? `Отправлено запросов: ${okItems.length}` : 'Запрос на замену отправлен',
                             'success'
                         );
+                        setSwapDraftRequests([]);
                         setSwapForm(prev => ({
                             ...prev,
-                            targetOperatorIds: [],
+                            targetOperatorId: '',
                             comment: ''
                         }));
                         setShowSwapCreateModal(false);
                         setSwapCandidatesSearch('');
                     } else if (okItems.length === 0) {
+                        if (!sendingCurrentOnly) {
+                            setSwapDraftRequests(failItems.map(item => item?.draft).filter(Boolean));
+                        }
                         const firstError = failItems[0]?.error || 'Не удалось отправить запросы';
                         notifySwapMessage(firstError, 'error');
                     } else {
-                        const failedIds = failItems.map(item => String(item.targetOperatorId));
-                        setSwapForm(prev => ({ ...prev, targetOperatorIds: failedIds }));
+                        setSwapDraftRequests(failItems.map(item => item?.draft).filter(Boolean));
                         notifySwapMessage(
                             `Отправлено: ${okItems.length}. Ошибок: ${failItems.length}. Проверьте выбранных кандидатов.`,
                             'warning'
@@ -9226,6 +9300,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     setOperatorSelfTab('schedule');
                                                     setShowSwapCreateModal(false);
                                                     setSwapCandidatesSearch('');
+                                                    setSwapDraftRequests([]);
                                                 }}
                                                 className={`px-2.5 sm:px-3 py-1 rounded text-sm ${operatorSelfTab === 'schedule' ? 'bg-slate-800 text-white' : 'bg-white'}`}
                                             >
@@ -9264,6 +9339,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     type="button"
                                                     onClick={() => {
                                                         setSwapCandidatesSearch('');
+                                                        setSwapDraftRequests([]);
+                                                        setSwapForm(prev => ({ ...prev, targetOperatorId: '', comment: '' }));
                                                         setShowSwapCreateModal(true);
                                                     }}
                                                     className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white text-sm inline-flex items-center gap-1"
@@ -9810,6 +9887,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         if (e.target === e.currentTarget) {
                                                             setShowSwapCreateModal(false);
                                                             setSwapCandidatesSearch('');
+                                                            setSwapDraftRequests([]);
                                                         }
                                                     }}
                                                 >
@@ -9829,6 +9907,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             onClick={() => {
                                                                 setShowSwapCreateModal(false);
                                                                 setSwapCandidatesSearch('');
+                                                                setSwapDraftRequests([]);
                                                             }}
                                                             className="w-8 h-8 rounded-lg border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 inline-flex items-center justify-center"
                                                             title="Закрыть"
@@ -9848,7 +9927,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     ...prev,
                                                                     swapDate: nextDate,
                                                                     endDate: nextDate || '',
-                                                                    targetOperatorIds: []
+                                                                    targetOperatorId: ''
                                                                 }));
                                                             }}
                                                             className="w-full px-3 py-2 lg:py-2.5 rounded-lg border border-slate-300 text-sm lg:text-base bg-white"
@@ -9873,7 +9952,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <div className="inline-flex w-full rounded-lg border border-slate-300 bg-slate-50 p-1 gap-1">
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => setSwapForm(prev => ({ ...prev, endDate: prev.swapDate || '', targetOperatorIds: [] }))}
+                                                                    onClick={() => setSwapForm(prev => ({ ...prev, endDate: prev.swapDate || '', targetOperatorId: '' }))}
                                                                     disabled={!swapForm.swapDate}
                                                                     className={`flex-1 px-2 py-1 rounded-md border text-[11px] font-medium ${
                                                                         !swapForm.swapDate
@@ -9890,7 +9969,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     onClick={() => setSwapForm(prev => ({
                                                                         ...prev,
                                                                         endDate: prev.swapDate ? swapNextDayDate : '',
-                                                                        targetOperatorIds: []
+                                                                        targetOperatorId: ''
                                                                     }))}
                                                                     disabled={!swapForm.swapDate}
                                                                     className={`flex-1 px-2 py-1 rounded-md border text-[11px] font-medium ${
@@ -9917,7 +9996,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <input
                                                             type="time"
                                                             value={swapForm.startTime}
-                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, startTime: e.target.value, targetOperatorIds: [] }))}
+                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, startTime: e.target.value, targetOperatorId: '' }))}
                                                             className="w-full px-3 py-2 lg:py-2.5 rounded-lg border border-slate-300 text-sm lg:text-base bg-white"
                                                             step={300}
                                                         />
@@ -9927,7 +10006,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <input
                                                             type="time"
                                                             value={swapForm.endTime}
-                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, endTime: e.target.value, targetOperatorIds: [] }))}
+                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, endTime: e.target.value, targetOperatorId: '' }))}
                                                             className="w-full px-3 py-2 lg:py-2.5 rounded-lg border border-slate-300 text-sm lg:text-base bg-white"
                                                             step={300}
                                                         />
@@ -10054,7 +10133,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </div>
                                                     )}
                                                 </div>
-                                                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 items-end">
+                                                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2 sm:gap-3 items-end">
                                                     <label className="sm:col-span-2 lg:col-span-3 text-sm">
                                                         <div className="text-xs text-slate-600 mb-1">Комментарий (опционально)</div>
                                                         <input
@@ -10068,18 +10147,30 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     </label>
                                                     <button
                                                         type="button"
-                                                        onClick={handleCreateSwapRequest}
-                                                        disabled={swapSubmitting || !swapTimeValidation.isValid || swapSelectedTargetIds.length === 0}
+                                                        onClick={handleAddSwapDraft}
+                                                        disabled={swapSubmitting || !canSubmitCurrentSwapDraft}
                                                         className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition ${
-                                                            swapSubmitting || !swapTimeValidation.isValid || swapSelectedTargetIds.length === 0
+                                                            swapSubmitting || !canSubmitCurrentSwapDraft
+                                                                ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                                                                : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-50'
+                                                        }`}
+                                                    >
+                                                        Добавить в список
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleCreateSwapRequest}
+                                                        disabled={swapSubmitting || !canSendSwapRequests}
+                                                        className={`w-full lg:col-span-2 px-3 py-2 rounded-lg text-sm font-medium transition ${
+                                                            swapSubmitting || !canSendSwapRequests
                                                                 ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
                                                                 : 'bg-blue-600 text-white hover:bg-blue-700'
                                                         }`}
                                                     >
                                                         {swapSubmitting
                                                             ? 'Отправка...'
-                                                            : (swapSelectedTargetIds.length > 1
-                                                                ? `Отправить запросы (${swapSelectedTargetIds.length})`
+                                                            : (swapDraftRequests.length > 0
+                                                                ? `Отправить запросы (${swapDraftRequests.length})`
                                                                 : 'Отправить запрос')}
                                                     </button>
                                                 </div>
@@ -10101,14 +10192,67 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <div className="text-rose-600 mt-1">{swapCandidatesError}</div>
                                                     )}
                                                 </div>
+                                                <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/60 p-2.5 sm:p-3">
+                                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                                                        <div className="text-xs font-semibold text-amber-900 uppercase tracking-wide">
+                                                            Список к отправке
+                                                        </div>
+                                                        <div className="text-xs text-amber-800">
+                                                            Добавлено: <span className="font-semibold tabular-nums">{swapDraftRequests.length}</span>
+                                                            {' '}• {formatMinutesOnly(swapDraftTotalMinutes)}
+                                                        </div>
+                                                    </div>
+                                                    {swapDraftRequests.length === 0 ? (
+                                                        <div className="text-xs text-slate-600">
+                                                            Выберите интервал и одного кандидата, нажмите «Добавить в список». Затем можно выбрать другой интервал и другого кандидата.
+                                                        </div>
+                                                    ) : (
+                                                        <div className="max-h-40 overflow-y-auto pr-1 space-y-1.5">
+                                                            {swapDraftRequests.map((draft, idx) => (
+                                                                <div
+                                                                    key={`swap-draft-${draft?.localId || idx}`}
+                                                                    className="rounded-md border border-amber-200 bg-white px-2.5 py-2 flex items-start justify-between gap-2"
+                                                                >
+                                                                    <div className="min-w-0">
+                                                                        <div className="text-xs font-medium text-slate-900">
+                                                                            {idx + 1}. {draft?.targetOperatorName || 'Оператор'}
+                                                                            {draft?.targetSupervisorName ? ` • ${draft.targetSupervisorName}` : ''}
+                                                                        </div>
+                                                                        <div className="text-[11px] text-slate-600">
+                                                                            {formatSwapDateTimeRangeLabel(
+                                                                                String(draft?.swapDate || ''),
+                                                                                String(draft?.startTime || ''),
+                                                                                String(draft?.endTime || ''),
+                                                                                String(draft?.endDate || draft?.swapDate || '')
+                                                                            )} ({formatMinutesOnly(Number(draft?.durationMin) || 0)})
+                                                                        </div>
+                                                                        {!!draft?.comment && (
+                                                                            <div className="text-[11px] text-slate-500">
+                                                                                Комментарий: {String(draft.comment)}
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => handleRemoveSwapDraft(draft?.localId)}
+                                                                        className="shrink-0 w-7 h-7 rounded-md border border-rose-200 text-rose-600 bg-rose-50 hover:bg-rose-100 inline-flex items-center justify-center"
+                                                                        title="Убрать из списка"
+                                                                    >
+                                                                        <FaIcon className="fas fa-trash"></FaIcon>
+                                                                    </button>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
                                                 <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5 sm:p-3">
                                                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                                                         <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide">
                                                             Кандидаты на замену
                                                         </div>
                                                         <div className="text-xs text-slate-500">
-                                                            {swapSelectedTargetIds.length > 0
-                                                                ? `Выбрано: ${swapSelectedTargetIds.length}`
+                                                            {swapForm.targetOperatorId
+                                                                ? `Выбран: ${selectedSwapCandidate?.name || '1 кандидат'}`
                                                                 : (String(swapCandidatesSearch || '').trim()
                                                                     ? `Найдено: ${swapCandidatesFiltered.length} из ${swapCandidates.length}`
                                                                     : 'По приоритету совпадения границ интервала')}
@@ -10143,7 +10287,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         <div className="max-h-[42vh] sm:max-h-80 overflow-y-auto pr-1 space-y-2">
                                                             {swapCandidatesFiltered.map((item, idx) => {
                                                                 const itemId = String(item?.id || '');
-                                                                const isSelected = swapSelectedTargetIds.includes(itemId);
+                                                                const isSelected = itemId === String(swapForm.targetOperatorId || '');
                                                                 const hasPriority = Number(item?.priorityScore || 0) > 0;
                                                                 const matchStart = !!item?.matchStartsAtRequestEnd;
                                                                 const matchEnd = !!item?.matchEndsAtRequestStart;
@@ -10170,21 +10314,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                             </div>
                                                                             <button
                                                                                 type="button"
-                                                                                onClick={() => setSwapForm(prev => {
-                                                                                    const raw = Array.isArray(prev.targetOperatorIds) ? prev.targetOperatorIds : [];
-                                                                                    const selected = Array.from(new Set(raw.map(v => String(v)).filter(Boolean)));
-                                                                                    const nextSelected = selected.includes(itemId)
-                                                                                        ? selected.filter(v => v !== itemId)
-                                                                                        : [...selected, itemId];
-                                                                                    return { ...prev, targetOperatorIds: nextSelected };
-                                                                                })}
+                                                                                onClick={() => setSwapForm(prev => ({
+                                                                                    ...prev,
+                                                                                    targetOperatorId: String(prev.targetOperatorId || '') === itemId ? '' : itemId
+                                                                                }))}
                                                                                 className={`px-2.5 py-1 rounded-md text-xs font-medium border ${
                                                                                     isSelected
                                                                                         ? 'bg-blue-600 text-white border-blue-600'
                                                                                         : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
                                                                                 }`}
                                                                             >
-                                                                                {isSelected ? 'Выбран' : 'Выбрать'}
+                                                                                {isSelected ? 'Снять' : 'Выбрать'}
                                                                             </button>
                                                                         </div>
                                                                         <div className="mt-1.5 flex flex-wrap gap-1.5">
