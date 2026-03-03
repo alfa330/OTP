@@ -5587,6 +5587,57 @@ const withAccessTokenHeader = (headers = {}) => {
                 comment: ''
             });
             const [swapDraftRequests, setSwapDraftRequests] = useState([]);
+            const swapDraftColorPalette = useMemo(() => ([
+                {
+                    key: 'amber',
+                    timelineClass: 'bg-amber-300/30 border-x-2 border-amber-500',
+                    listClass: 'border-amber-200 bg-amber-50/60 text-amber-800',
+                    dotClass: 'bg-amber-500'
+                },
+                {
+                    key: 'sky',
+                    timelineClass: 'bg-sky-300/30 border-x-2 border-sky-500',
+                    listClass: 'border-sky-200 bg-sky-50/60 text-sky-800',
+                    dotClass: 'bg-sky-500'
+                },
+                {
+                    key: 'violet',
+                    timelineClass: 'bg-violet-300/30 border-x-2 border-violet-500',
+                    listClass: 'border-violet-200 bg-violet-50/60 text-violet-800',
+                    dotClass: 'bg-violet-500'
+                },
+                {
+                    key: 'rose',
+                    timelineClass: 'bg-rose-300/30 border-x-2 border-rose-500',
+                    listClass: 'border-rose-200 bg-rose-50/60 text-rose-800',
+                    dotClass: 'bg-rose-500'
+                },
+                {
+                    key: 'teal',
+                    timelineClass: 'bg-teal-300/30 border-x-2 border-teal-500',
+                    listClass: 'border-teal-200 bg-teal-50/60 text-teal-800',
+                    dotClass: 'bg-teal-500'
+                }
+            ]), []);
+            const swapCurrentIntervalTone = useMemo(() => ({
+                timelineClass: 'bg-emerald-400/25 border-x-2 border-emerald-500',
+                legendClass: 'border-emerald-200 bg-emerald-50 text-emerald-700'
+            }), []);
+            const getSwapDraftColorTone = useCallback((draft, fallbackIndex = 0) => {
+                const palette = Array.isArray(swapDraftColorPalette) ? swapDraftColorPalette : [];
+                if (palette.length === 0) {
+                    return {
+                        key: 'default',
+                        timelineClass: 'bg-amber-300/30 border-x-2 border-amber-500',
+                        listClass: 'border-amber-200 bg-amber-50/60',
+                        dotClass: 'bg-amber-500'
+                    };
+                }
+                const rawIndex = Number(draft?.colorIndex);
+                const index = Number.isFinite(rawIndex) ? rawIndex : Number(fallbackIndex || 0);
+                const normalized = ((index % palette.length) + palette.length) % palette.length;
+                return palette[normalized] || palette[0];
+            }, [swapDraftColorPalette]);
             const [breakReminderPermissionState, setBreakReminderPermissionState] = useState(() => {
                 if (typeof window === 'undefined') return 'unsupported';
                 return ('Notification' in window) ? window.Notification.permission : 'unsupported';
@@ -8343,6 +8394,8 @@ const withAccessTokenHeader = (headers = {}) => {
                         nextDaySegments: [],
                         totalMinutes: 0,
                         nextDayTotalMinutes: 0,
+                        draftIntervals: [],
+                        draftIntervalsNextDay: [],
                         selectedInterval: null,
                         selectedIntervalNextDay: null
                     };
@@ -8444,8 +8497,48 @@ const withAccessTokenHeader = (headers = {}) => {
                         end: Math.max(0, Math.min(1440, parsedRange.endMin - 1440))
                     }
                     : null;
+                const draftIntervals = [];
+                const draftIntervalsNextDay = [];
+                (Array.isArray(swapDraftRequests) ? swapDraftRequests : []).forEach((draft, idx) => {
+                    if (!draft) return;
+                    if (String(draft?.swapDate || '') !== String(swapDate || '')) return;
+                    const parsedDraft = parseSwapRangeWithDates(
+                        String(draft?.swapDate || ''),
+                        String(draft?.startTime || ''),
+                        String(draft?.endDate || draft?.swapDate || ''),
+                        String(draft?.endTime || '')
+                    );
+                    if (!parsedDraft?.isValid) return;
+                    const tone = getSwapDraftColorTone(draft, idx);
+                    const dayStart = Math.max(0, Math.min(1440, Number(parsedDraft.startMin)));
+                    const dayEnd = Math.max(0, Math.min(1440, Number(parsedDraft.endMin)));
+                    const nextStart = Math.max(0, Math.min(1440, Number(parsedDraft.startMin) - 1440));
+                    const nextEnd = Math.max(0, Math.min(1440, Number(parsedDraft.endMin) - 1440));
+                    const intervalLabel = `${String(draft?.targetOperatorName || 'Оператор')}: ${String(draft?.startTime || '')} — ${String(draft?.endTime || '')}`;
+                    if (dayEnd > dayStart) {
+                        draftIntervals.push({
+                            id: `swap-draft-day-${draft?.localId || idx}`,
+                            start: dayStart,
+                            end: dayEnd,
+                            label: intervalLabel,
+                            tone
+                        });
+                    }
+                    if (nextEnd > nextStart) {
+                        draftIntervalsNextDay.push({
+                            id: `swap-draft-next-${draft?.localId || idx}`,
+                            start: nextStart,
+                            end: nextEnd,
+                            label: intervalLabel,
+                            tone
+                        });
+                    }
+                });
+                draftIntervals.sort((a, b) => (a.start - b.start) || (a.end - b.end));
+                draftIntervalsNextDay.sort((a, b) => (a.start - b.start) || (a.end - b.end));
                 const showNextDayTimeline = hasCurrentDayCrossingShift && nextDaySegments.length > 0;
                 const nextDaySegmentsForDisplay = showNextDayTimeline ? nextDaySegments : [];
+                const draftIntervalsNextDayForDisplay = showNextDayTimeline ? draftIntervalsNextDay : [];
 
                 return {
                     date: swapDate,
@@ -8456,6 +8549,8 @@ const withAccessTokenHeader = (headers = {}) => {
                     nextDaySegments: nextDaySegmentsForDisplay,
                     totalMinutes: segments.reduce((acc, item) => acc + (item.minutes || 0), 0),
                     nextDayTotalMinutes: nextDaySegmentsForDisplay.reduce((acc, item) => acc + (item.minutes || 0), 0),
+                    draftIntervals,
+                    draftIntervalsNextDay: draftIntervalsNextDayForDisplay,
                     selectedInterval,
                     selectedIntervalNextDay: showNextDayTimeline ? selectedIntervalNextDay : null
                 };
@@ -8464,9 +8559,11 @@ const withAccessTokenHeader = (headers = {}) => {
                 swapForm.endDate,
                 swapForm.startTime,
                 swapForm.endTime,
+                swapDraftRequests,
                 myLiveScheduleData,
                 myScheduleData,
-                parseSwapRangeWithDates
+                parseSwapRangeWithDates,
+                getSwapDraftColorTone
             ]);
             const swapNextDayDate = swapForm.swapDate ? todayDateStr(addDays(parseDateStr(swapForm.swapDate), 1)) : '';
             const swapEndsNextDay = !!swapForm.swapDate && String(swapForm.endDate || '') === String(swapNextDayDate || '');
@@ -8649,7 +8746,11 @@ const withAccessTokenHeader = (headers = {}) => {
                     notifySwapMessage('Такой запрос уже добавлен в список', 'warning');
                     return;
                 }
-                setSwapDraftRequests(prev => [...(Array.isArray(prev) ? prev : []), draft]);
+                setSwapDraftRequests(prev => {
+                    const base = Array.isArray(prev) ? prev : [];
+                    const colorIndex = base.length;
+                    return [...base, { ...draft, colorIndex }];
+                });
                 setSwapForm(prev => ({
                     ...prev,
                     targetOperatorId: '',
@@ -10044,9 +10145,20 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                         title={`${seg.label} (${formatMinutesOnly(seg.minutes)})`}
                                                                     ></div>
                                                                 ))}
+                                                                {(Array.isArray(swapDayTimeline.draftIntervals) ? swapDayTimeline.draftIntervals : []).map(item => (
+                                                                    <div
+                                                                        key={`swap-timeline-draft-${item.id}`}
+                                                                        className={`absolute top-0 bottom-0 pointer-events-none ${item?.tone?.timelineClass || 'bg-amber-300/30 border-x-2 border-amber-500'}`}
+                                                                        style={{
+                                                                            left: `${(item.start / 1440) * 100}%`,
+                                                                            width: `${((item.end - item.start) / 1440) * 100}%`
+                                                                        }}
+                                                                        title={`Добавлено в список: ${item.label}`}
+                                                                    ></div>
+                                                                ))}
                                                                 {swapDayTimeline.selectedInterval && (
                                                                     <div
-                                                                        className="absolute top-0 bottom-0 bg-emerald-400/25 border-x-2 border-emerald-500 pointer-events-none"
+                                                                        className={`absolute top-0 bottom-0 pointer-events-none ${swapCurrentIntervalTone.timelineClass}`}
                                                                         style={{
                                                                             left: `${(swapDayTimeline.selectedInterval.start / 1440) * 100}%`,
                                                                             width: `${((swapDayTimeline.selectedInterval.end - swapDayTimeline.selectedInterval.start) / 1440) * 100}%`
@@ -10072,6 +10184,23 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                     </span>
                                                                 ))}
                                                             </div>
+                                                            {((Array.isArray(swapDayTimeline.draftIntervals) && swapDayTimeline.draftIntervals.length > 0) || swapDayTimeline.selectedInterval) && (
+                                                                <div className="mt-2 flex flex-wrap gap-1.5">
+                                                                    {(Array.isArray(swapDayTimeline.draftIntervals) ? swapDayTimeline.draftIntervals : []).map(item => (
+                                                                        <span
+                                                                            key={`swap-day-draft-legend-${item.id}`}
+                                                                            className={`px-2 py-0.5 rounded-md text-xs border ${item?.tone?.listClass || 'border-amber-200 bg-amber-50/60'}`}
+                                                                        >
+                                                                            {item.label}
+                                                                        </span>
+                                                                    ))}
+                                                                    {swapDayTimeline.selectedInterval && (
+                                                                        <span className={`px-2 py-0.5 rounded-md text-xs border ${swapCurrentIntervalTone.legendClass}`}>
+                                                                            Текущий интервал: {swapForm.startTime} — {swapForm.endTime}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                            )}
                                                             {swapDayTimeline.hasNextDayShifts && (
                                                                 <div className="mt-3 border-t border-slate-200 pt-2">
                                                                     <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
@@ -10101,9 +10230,20 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                 title={`${seg.label} (${formatMinutesOnly(seg.minutes)})`}
                                                                             ></div>
                                                                         ))}
+                                                                        {(Array.isArray(swapDayTimeline.draftIntervalsNextDay) ? swapDayTimeline.draftIntervalsNextDay : []).map(item => (
+                                                                            <div
+                                                                                key={`swap-next-timeline-draft-${item.id}`}
+                                                                                className={`absolute top-0 bottom-0 pointer-events-none ${item?.tone?.timelineClass || 'bg-amber-300/30 border-x-2 border-amber-500'}`}
+                                                                                style={{
+                                                                                    left: `${(item.start / 1440) * 100}%`,
+                                                                                    width: `${((item.end - item.start) / 1440) * 100}%`
+                                                                                }}
+                                                                                title={`Добавлено в список: ${item.label}`}
+                                                                            ></div>
+                                                                        ))}
                                                                         {swapDayTimeline.selectedIntervalNextDay && (
                                                                             <div
-                                                                                className="absolute top-0 bottom-0 bg-emerald-400/25 border-x-2 border-emerald-500 pointer-events-none"
+                                                                                className={`absolute top-0 bottom-0 pointer-events-none ${swapCurrentIntervalTone.timelineClass}`}
                                                                                 style={{
                                                                                     left: `${(swapDayTimeline.selectedIntervalNextDay.start / 1440) * 100}%`,
                                                                                     width: `${((swapDayTimeline.selectedIntervalNextDay.end - swapDayTimeline.selectedIntervalNextDay.start) / 1440) * 100}%`
@@ -10121,6 +10261,19 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                                 {seg.label} ({formatMinutesOnly(seg.minutes)})
                                                                             </span>
                                                                         ))}
+                                                                        {(Array.isArray(swapDayTimeline.draftIntervalsNextDay) ? swapDayTimeline.draftIntervalsNextDay : []).map(item => (
+                                                                            <span
+                                                                                key={`swap-next-day-draft-legend-${item.id}`}
+                                                                                className={`px-2 py-0.5 rounded-md text-xs border ${item?.tone?.listClass || 'border-amber-200 bg-amber-50/60'}`}
+                                                                            >
+                                                                                {item.label}
+                                                                            </span>
+                                                                        ))}
+                                                                        {swapDayTimeline.selectedIntervalNextDay && (
+                                                                            <span className={`px-2 py-0.5 rounded-md text-xs border ${swapCurrentIntervalTone.legendClass}`}>
+                                                                                Текущий интервал: {swapForm.startTime} — {swapForm.endTime}
+                                                                            </span>
+                                                                        )}
                                                                     </div>
                                                                 </div>
                                                             )}
@@ -10208,40 +10361,46 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         </div>
                                                     ) : (
                                                         <div className="max-h-40 overflow-y-auto pr-1 space-y-1.5">
-                                                            {swapDraftRequests.map((draft, idx) => (
-                                                                <div
-                                                                    key={`swap-draft-${draft?.localId || idx}`}
-                                                                    className="rounded-md border border-amber-200 bg-white px-2.5 py-2 flex items-start justify-between gap-2"
-                                                                >
-                                                                    <div className="min-w-0">
-                                                                        <div className="text-xs font-medium text-slate-900">
-                                                                            {idx + 1}. {draft?.targetOperatorName || 'Оператор'}
-                                                                            {draft?.targetSupervisorName ? ` • ${draft.targetSupervisorName}` : ''}
-                                                                        </div>
-                                                                        <div className="text-[11px] text-slate-600">
-                                                                            {formatSwapDateTimeRangeLabel(
-                                                                                String(draft?.swapDate || ''),
-                                                                                String(draft?.startTime || ''),
-                                                                                String(draft?.endTime || ''),
-                                                                                String(draft?.endDate || draft?.swapDate || '')
-                                                                            )} ({formatMinutesOnly(Number(draft?.durationMin) || 0)})
-                                                                        </div>
-                                                                        {!!draft?.comment && (
-                                                                            <div className="text-[11px] text-slate-500">
-                                                                                Комментарий: {String(draft.comment)}
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => handleRemoveSwapDraft(draft?.localId)}
-                                                                        className="shrink-0 w-7 h-7 rounded-md border border-rose-200 text-rose-600 bg-rose-50 hover:bg-rose-100 inline-flex items-center justify-center"
-                                                                        title="Убрать из списка"
+                                                            {swapDraftRequests.map((draft, idx) => {
+                                                                const tone = getSwapDraftColorTone(draft, idx);
+                                                                return (
+                                                                    <div
+                                                                        key={`swap-draft-${draft?.localId || idx}`}
+                                                                        className={`rounded-md border px-2.5 py-2 flex items-start justify-between gap-2 ${tone?.listClass || 'border-amber-200 bg-amber-50/60'}`}
                                                                     >
-                                                                        <FaIcon className="fas fa-trash"></FaIcon>
-                                                                    </button>
-                                                                </div>
-                                                            ))}
+                                                                        <div className="min-w-0">
+                                                                            <div className="text-xs font-medium text-slate-900 flex items-center gap-1">
+                                                                                <span className={`inline-block w-2 h-2 rounded-full ${tone?.dotClass || 'bg-amber-500'}`}></span>
+                                                                                <span>
+                                                                                    {idx + 1}. {draft?.targetOperatorName || 'Оператор'}
+                                                                                    {draft?.targetSupervisorName ? ` • ${draft.targetSupervisorName}` : ''}
+                                                                                </span>
+                                                                            </div>
+                                                                            <div className="text-[11px] text-slate-700">
+                                                                                {formatSwapDateTimeRangeLabel(
+                                                                                    String(draft?.swapDate || ''),
+                                                                                    String(draft?.startTime || ''),
+                                                                                    String(draft?.endTime || ''),
+                                                                                    String(draft?.endDate || draft?.swapDate || '')
+                                                                                )} ({formatMinutesOnly(Number(draft?.durationMin) || 0)})
+                                                                            </div>
+                                                                            {!!draft?.comment && (
+                                                                                <div className="text-[11px] text-slate-600">
+                                                                                    Комментарий: {String(draft.comment)}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => handleRemoveSwapDraft(draft?.localId)}
+                                                                            className="shrink-0 w-7 h-7 rounded-md border border-rose-200 text-rose-600 bg-rose-50 hover:bg-rose-100 inline-flex items-center justify-center"
+                                                                            title="Убрать из списка"
+                                                                        >
+                                                                            <FaIcon className="fas fa-trash"></FaIcon>
+                                                                        </button>
+                                                                    </div>
+                                                                );
+                                                            })}
                                                         </div>
                                                     )}
                                                 </div>
