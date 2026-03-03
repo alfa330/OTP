@@ -9865,15 +9865,13 @@ const withAccessTokenHeader = (headers = {}) => {
                                                                 </button>
                                                             </div>
                                                         </div>
-                                                        <input
-                                                            type="date"
-                                                            value={swapForm.endDate || ''}
-                                                            onChange={(e) => setSwapForm(prev => ({ ...prev, endDate: e.target.value, targetOperatorId: '' }))}
-                                                            className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white"
-                                                            min={swapForm.swapDate || undefined}
-                                                            max={swapForm.swapDate ? todayDateStr(addDays(parseDateStr(swapForm.swapDate), 1)) : undefined}
-                                                            disabled={!swapForm.swapDate}
-                                                        />
+                                                        <div className="text-[11px] text-slate-500">
+                                                            {swapForm.swapDate
+                                                                ? (String(swapForm.endDate || '') === String(todayDateStr(addDays(parseDateStr(swapForm.swapDate), 1)))
+                                                                    ? `Выбрано: ${formatDateRuShort(todayDateStr(addDays(parseDateStr(swapForm.swapDate), 1)))}`
+                                                                    : `Выбрано: ${formatDateRuShort(swapForm.swapDate)}`)
+                                                                : 'Сначала выберите дату начала'}
+                                                        </div>
                                                     </label>
                                                     <label className="text-sm lg:col-span-1">
                                                         <div className="text-xs text-slate-600 mb-1">С</div>
