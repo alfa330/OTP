@@ -19093,6 +19093,34 @@ const withAccessTokenHeader = (headers = {}) => {
                     return status;
                 };
                 const isPeriodStatusValue = (v) => PERIOD_STATUSES.has(String(v || '').trim());
+                const syncUserAvatar = async (targetUserId, avatarFile, avatarRemove) => {
+                    if (!targetUserId || (!avatarFile && !avatarRemove)) {
+                        return null;
+                    }
+                    const commonHeaders = withAccessTokenHeader({
+                        'X-API-Key': user.apiKey,
+                        'X-User-Id': user.id
+                    });
+                    if (avatarFile) {
+                        const formData = new FormData();
+                        formData.append('target_user_id', String(targetUserId));
+                        formData.append('avatar', avatarFile, avatarFile.name || 'avatar.webp');
+                        const response = await axios.post(
+                            `${API_BASE_URL}/api/user/avatar`,
+                            formData,
+                            { headers: commonHeaders }
+                        );
+                        return response?.data || null;
+                    }
+                    const response = await axios.delete(`${API_BASE_URL}/api/user/avatar`, {
+                        data: {
+                            target_user_id: Number(targetUserId),
+                            remove: true
+                        },
+                        headers: commonHeaders
+                    });
+                    return response?.data || null;
+                };
                 const saveUserStatusPeriodViaPlannerApi = async (targetUserId, sourceUser) => {
                     const rawStatusCode = String(sourceUser?.status || '').trim();
                     if (!isPeriodStatusValue(rawStatusCode)) return;
@@ -19179,6 +19207,14 @@ const withAccessTokenHeader = (headers = {}) => {
 
                         const data = response.data;
                         if (data.status === 'success') {
+                            let avatarWarning = '';
+                            if (data?.id && (editedUser?.avatar_file || editedUser?.avatar_remove)) {
+                                try {
+                                    await syncUserAvatar(data.id, editedUser?.avatar_file || null, !!editedUser?.avatar_remove);
+                                } catch (avatarErr) {
+                                    avatarWarning = avatarErr?.response?.data?.error || avatarErr?.message || 'Ошибка загрузки аватара';
+                                }
+                            }
                             if (editedUser?.use_schedule_status_period && isPeriodStatusValue(editedUser?.status) && data?.id) {
                                 await saveUserStatusPeriodViaPlannerApi(data.id, editedUser);
                             } else if (editedUser?.status && !isPeriodStatusValue(editedUser.status) && editedUser.status !== 'working' && data?.id) {
@@ -19196,6 +19232,9 @@ const withAccessTokenHeader = (headers = {}) => {
                             if (data.login || data.password) {
                             // например reuse переменной newCredentials (если есть) или просто показать toast
                             showToast(`Логин: ${data.login || '-'}, Пароль: ${data.password || '-'}`, 'success');
+                            }
+                            if (avatarWarning) {
+                                showToast(`Сотрудник создан, но аватар не сохранён: ${avatarWarning}`, 'error');
                             }
                             await fetchUsers(); // обновим список операторов на клиенте
                             setShowUserEditModal(false);
@@ -19312,6 +19351,13 @@ const withAccessTokenHeader = (headers = {}) => {
                         }, {
                             headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                         });
+                    }
+                    if (editedUser?.avatar_file || editedUser?.avatar_remove) {
+                        try {
+                            await syncUserAvatar(editedUser.id, editedUser?.avatar_file || null, !!editedUser?.avatar_remove);
+                        } catch (avatarErr) {
+                            showToast(`Профиль обновлен, но аватар не сохранён: ${avatarErr?.response?.data?.error || avatarErr?.message || 'ошибка'}`, 'error');
+                        }
                     }
                     showToast('User updated successfully', 'success');
                     const updatedRole = editedUser?.role || userToEdit?.role;
@@ -22215,7 +22261,18 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     <tbody className="bg-white divide-y divide-gray-200">
                                                     {svUsers.map((u) => (
                                                         <tr key={u.id} className="hover:bg-gray-50 transition-colors duration-200 group">
-                                                        <td className="px-6 py-4 truncate">{u.name}</td>
+                                                        <td className="px-6 py-4">
+                                                            <div className="flex items-center gap-3 min-w-0">
+                                                                <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
+                                                                    {u.avatar_url ? (
+                                                                        <img src={u.avatar_url} alt={u.name || 'avatar'} className="h-full w-full object-cover" />
+                                                                    ) : (
+                                                                        (u.name || 'U').charAt(0).toUpperCase()
+                                                                    )}
+                                                                </div>
+                                                                <span className="truncate">{u.name}</span>
+                                                            </div>
+                                                        </td>
                                                         <td className="px-6 py-4">{u.direction || "-"}</td>
                                                         <td className="px-6 py-4">
                                                             {renderEmployeeStatusBadge(u.status)}
@@ -23075,8 +23132,12 @@ const withAccessTokenHeader = (headers = {}) => {
                                       <div className="space-y-6">
                                         {/* Profile header - avatar and name */}
                                         <div className="flex flex-col sm:flex-row items-center gap-4 pb-4 sm:pb-6 border-b border-gray-200">
-                                          <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-3xl sm:text-4xl font-bold shadow-lg">
-                                            {(profileData.name || 'U').charAt(0).toUpperCase()}
+                                          <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-3xl sm:text-4xl font-bold shadow-lg overflow-hidden">
+                                            {profileData.avatar_url ? (
+                                                <img src={profileData.avatar_url} alt={profileData.name || 'avatar'} className="w-full h-full object-cover" />
+                                            ) : (
+                                                (profileData.name || 'U').charAt(0).toUpperCase()
+                                            )}
                                           </div>
                                           <div className="text-center sm:text-left">
                                             <h3 className="text-xl sm:text-2xl font-bold text-gray-900">{profileData.name || '-'}</h3>

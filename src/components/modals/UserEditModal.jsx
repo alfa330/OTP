@@ -22,6 +22,67 @@ const DISMISSAL_REASON_OPTIONS = [
     'По семейным обстоятельствам'
 ];
 
+const AVATAR_MAX_DIMENSION = 512;
+const AVATAR_TARGET_BYTES = 180 * 1024;
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+
+const canvasToBlob = (canvas, type, quality) => (
+    new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+            if (blob) resolve(blob);
+            else reject(new Error("Не удалось обработать изображение"));
+        }, type, quality);
+    })
+);
+
+const loadImageFromFile = (file) => (
+    new Promise((resolve, reject) => {
+        const objectUrl = URL.createObjectURL(file);
+        const image = new Image();
+        image.onload = () => {
+            URL.revokeObjectURL(objectUrl);
+            resolve(image);
+        };
+        image.onerror = () => {
+            URL.revokeObjectURL(objectUrl);
+            reject(new Error("Не удалось прочитать изображение"));
+        };
+        image.src = objectUrl;
+    })
+);
+
+const compressAvatarImageFile = async (sourceFile) => {
+    const image = await loadImageFromFile(sourceFile);
+    const width = image.naturalWidth || image.width || AVATAR_MAX_DIMENSION;
+    const height = image.naturalHeight || image.height || AVATAR_MAX_DIMENSION;
+    const scale = Math.min(1, AVATAR_MAX_DIMENSION / Math.max(width, height));
+    const targetWidth = Math.max(1, Math.round(width * scale));
+    const targetHeight = Math.max(1, Math.round(height * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) throw new Error("Не удалось подготовить canvas для сжатия");
+    context.drawImage(image, 0, 0, targetWidth, targetHeight);
+
+    let quality = 0.86;
+    let blob = await canvasToBlob(canvas, 'image/webp', quality);
+    while (blob.size > AVATAR_TARGET_BYTES && quality > 0.45) {
+        quality = Math.max(0.45, quality - 0.08);
+        blob = await canvasToBlob(canvas, 'image/webp', quality);
+    }
+
+    const baseName = String(sourceFile.name || 'avatar')
+        .replace(/\.[^/.]+$/, '')
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .slice(0, 64) || 'avatar';
+    return new File([blob], `${baseName}.webp`, {
+        type: 'image/webp',
+        lastModified: Date.now()
+    });
+};
+
 const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], onSave, user }) => {
     const [editedUser, setEditedUser] = useState(userToEdit || {});
     const [isLoading, setIsLoading] = useState(false);
@@ -29,6 +90,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const [createdCredentials, setCreatedCredentials] = useState(null); // { login, password }
     const [activeTab, setActiveTab] = useState("data");
     const nameRef = React.useRef(null);
+    const avatarInputRef = React.useRef(null);
+    const avatarObjectUrlRef = React.useRef('');
+    const [avatarPreviewUrl, setAvatarPreviewUrl] = useState("");
+    const [avatarUploadFile, setAvatarUploadFile] = useState(null);
+    const [avatarRemoveRequested, setAvatarRemoveRequested] = useState(false);
+    const [avatarError, setAvatarError] = useState("");
+    const [isAvatarProcessing, setIsAvatarProcessing] = useState(false);
     const toDateInputValue = (value) => {
         if (!value) return "";
         const str = String(value).trim();
@@ -62,6 +130,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return String(draft?.status_period_dismissal_reason || '').trim() === DISMISSAL_REASON_WITH_END_DATE;
     };
 
+    const revokeAvatarPreviewUrl = React.useCallback(() => {
+        if (avatarObjectUrlRef.current && avatarObjectUrlRef.current.startsWith('blob:')) {
+            URL.revokeObjectURL(avatarObjectUrlRef.current);
+        }
+        avatarObjectUrlRef.current = '';
+    }, []);
+
     useEffect(() => {
         // Устанавливаем defaults при открытии для режима создания
         const base = userToEdit || {};
@@ -92,7 +167,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setModalError("");
         setCreatedCredentials(null);
         setActiveTab("data");
-    }, [userToEdit, user]);
+        revokeAvatarPreviewUrl();
+        setAvatarPreviewUrl((base.avatar_url || '').trim());
+        setAvatarUploadFile(null);
+        setAvatarRemoveRequested(false);
+        setAvatarError("");
+        setIsAvatarProcessing(false);
+        if (avatarInputRef.current) avatarInputRef.current.value = '';
+    }, [userToEdit, user, revokeAvatarPreviewUrl]);
 
     useEffect(() => {
         if (isOpen) {
@@ -101,6 +183,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         }, 50);
         }
     }, [isOpen]);
+
+    useEffect(() => (() => {
+        revokeAvatarPreviewUrl();
+    }), [revokeAvatarPreviewUrl]);
 
     const copyToClipboard = (text) => {
         if (!text) return;
@@ -114,7 +200,50 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         );
     };
 
+    const applyAvatarPreviewFromFile = (file) => {
+        revokeAvatarPreviewUrl();
+        const objectUrl = URL.createObjectURL(file);
+        avatarObjectUrlRef.current = objectUrl;
+        setAvatarPreviewUrl(objectUrl);
+    };
+
+    const handleAvatarSelect = async (event) => {
+        const input = event.target;
+        const sourceFile = input?.files?.[0];
+        if (!sourceFile) return;
+
+        setAvatarError("");
+        setIsAvatarProcessing(true);
+        try {
+            if (!String(sourceFile.type || '').startsWith('image/')) {
+                throw new Error("Можно загружать только изображения");
+            }
+            const compressedAvatar = await compressAvatarImageFile(sourceFile);
+            if (compressedAvatar.size > AVATAR_MAX_BYTES) {
+                throw new Error("Аватар слишком большой после сжатия");
+            }
+            setAvatarUploadFile(compressedAvatar);
+            setAvatarRemoveRequested(false);
+            applyAvatarPreviewFromFile(compressedAvatar);
+        } catch (error) {
+            setAvatarError(error?.message || "Не удалось обработать аватар");
+        } finally {
+            setIsAvatarProcessing(false);
+            if (input) input.value = '';
+        }
+    };
+
+    const handleAvatarRemove = () => {
+        revokeAvatarPreviewUrl();
+        setAvatarPreviewUrl("");
+        setAvatarUploadFile(null);
+        setAvatarRemoveRequested(true);
+        setAvatarError("");
+        if (avatarInputRef.current) avatarInputRef.current.value = '';
+    };
+
     const resetForCreate = () => {
+        revokeAvatarPreviewUrl();
         setEditedUser({
         name: "",
         rate: 1.0,
@@ -134,6 +263,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setModalError("");
         setCreatedCredentials(null);
         setActiveTab("data");
+        setAvatarPreviewUrl("");
+        setAvatarUploadFile(null);
+        setAvatarRemoveRequested(false);
+        setAvatarError("");
+        setIsAvatarProcessing(false);
+        if (avatarInputRef.current) avatarInputRef.current.value = '';
         setTimeout(() => nameRef.current?.focus(), 50);
     };
 
@@ -158,6 +293,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
         if (!editedUser.hire_date) {
         setModalError("Дата найма обязательна.");
+        return;
+        }
+
+        if (isAvatarProcessing) {
+        setModalError("Дождитесь завершения обработки аватара.");
         return;
         }
 
@@ -193,7 +333,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setIsLoading(true);
 
         try {
-        const result = await onSave(editedUser); // ожидаем, что onSave возвращает результат от бэка при создании
+        const result = await onSave({
+            ...editedUser,
+            avatar_file: avatarUploadFile || null,
+            avatar_remove: !!avatarRemoveRequested
+        }); // ожидаем, что onSave возвращает результат от бэка при создании
 
         // Если мы в режиме создания (нет id у редактируемого пользователя) — не закрываем модалку,
         // а показываем логин/пароль, если бэк их вернул
@@ -235,6 +379,69 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         { id: "data", label: "Данные" },
         { id: "account", label: "Аккаунт" }
     ];
+    const avatarInitial = String(editedUser?.name || 'U').charAt(0).toUpperCase();
+    const avatarDisabled = isLoading || !!createdCredentials || isAvatarProcessing;
+    const renderAvatarEditor = () => (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <div className="flex items-center gap-3">
+                <div className="h-16 w-16 overflow-hidden rounded-full border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700">
+                    {avatarPreviewUrl ? (
+                        <img
+                            src={avatarPreviewUrl}
+                            alt="Avatar preview"
+                            className="h-full w-full object-cover"
+                        />
+                    ) : (
+                        <div className="flex h-full w-full items-center justify-center text-xl font-bold text-white">
+                            {avatarInitial}
+                        </div>
+                    )}
+                </div>
+                <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium text-slate-800">Аватар</div>
+                    <div className="text-xs text-slate-500">
+                        JPEG/PNG/WebP. Авто-сжатие до ~180 KB, максимум 512x512.
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                        <label className={`inline-flex cursor-pointer items-center rounded-md px-3 py-1.5 text-xs font-medium ${avatarDisabled ? 'bg-slate-300 text-slate-600 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
+                            <input
+                                ref={avatarInputRef}
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp,image/gif"
+                                className="hidden"
+                                onChange={handleAvatarSelect}
+                                disabled={avatarDisabled}
+                            />
+                            {isAvatarProcessing ? 'Обработка...' : (avatarPreviewUrl ? 'Заменить' : 'Загрузить')}
+                        </label>
+                        {avatarPreviewUrl && (
+                            <button
+                                type="button"
+                                onClick={handleAvatarRemove}
+                                className="inline-flex items-center rounded-md bg-white px-3 py-1.5 text-xs font-medium text-red-600 border border-red-200 hover:bg-red-50"
+                                disabled={avatarDisabled}
+                            >
+                                Удалить
+                            </button>
+                        )}
+                    </div>
+                </div>
+            </div>
+            {avatarUploadFile && (
+                <div className="mt-2 text-xs text-emerald-700">
+                    Подготовлен файл: {(avatarUploadFile.size / 1024).toFixed(0)} KB (WebP).
+                </div>
+            )}
+            {avatarRemoveRequested && !avatarUploadFile && (
+                <div className="mt-2 text-xs text-amber-700">
+                    Аватар будет удалён после сохранения.
+                </div>
+            )}
+            {avatarError && (
+                <div className="mt-2 text-xs text-red-600">{avatarError}</div>
+            )}
+        </div>
+    );
 
     return (
         <>
@@ -319,6 +526,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 <>
                 {activeTab === "data" && (
                     <>
+                    {renderAvatarEditor()}
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Имя</label>
                         <input
@@ -567,6 +775,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     <>
                     {activeTab === "data" && (
                         <>
+                        {renderAvatarEditor()}
                         <div>
                             <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Имя</label>
                             <input
@@ -925,12 +1134,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                     <button
                         onClick={handleSave}
-                        disabled={isLoading}
+                        disabled={isLoading || isAvatarProcessing}
                         className={`px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all duration-200 font-medium flex items-center gap-2 ${
-                        isLoading ? "opacity-60 cursor-not-allowed" : ""
+                        (isLoading || isAvatarProcessing) ? "opacity-60 cursor-not-allowed" : ""
                         }`}
                     >
-                        {isLoading ? (
+                        {(isLoading || isAvatarProcessing) ? (
                         <>
                             <FaIcon className="fas fa-spinner fa-spin" /> Сохранение...
                         </>
