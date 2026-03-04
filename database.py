@@ -321,6 +321,14 @@ class Database:
                     ADD COLUMN IF NOT EXISTS gender VARCHAR(20) CHECK (gender IN ('male', 'female')),
                     ADD COLUMN IF NOT EXISTS birth_date DATE;
             """)
+            cursor.execute("""
+                ALTER TABLE users
+                    ADD COLUMN IF NOT EXISTS avatar_bucket VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS avatar_blob_path TEXT,
+                    ADD COLUMN IF NOT EXISTS avatar_content_type VARCHAR(128),
+                    ADD COLUMN IF NOT EXISTS avatar_file_size INTEGER,
+                    ADD COLUMN IF NOT EXISTS avatar_updated_at TIMESTAMP;
+            """)
             # Calls table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_activity_logs (
@@ -1705,7 +1713,7 @@ class Database:
                 params.append(value)
         
         query = f"""
-            SELECT u.id, u.telegram_id, u.name, u.role, d.name, u.hire_date, u.supervisor_id, u.login, u.hours_table_url, u.scores_table_url, u.is_active, u.status, u.rate, u.gender, u.birth_date
+            SELECT u.id, u.telegram_id, u.name, u.role, d.name, u.hire_date, u.supervisor_id, u.login, u.hours_table_url, u.scores_table_url, u.is_active, u.status, u.rate, u.gender, u.birth_date, u.avatar_bucket, u.avatar_blob_path, u.avatar_content_type, u.avatar_file_size, u.avatar_updated_at
             FROM users u
             LEFT JOIN directions d ON u.direction_id = d.id
             WHERE {' AND '.join(conditions)}
@@ -2181,7 +2189,7 @@ class Database:
     def get_operators_by_supervisor(self, supervisor_id):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.name, u.direction_id, u.hire_date, u.hours_table_url, u.scores_table_url, s.name as supervisor_name, u.status, u.rate, u.gender, u.birth_date
+                SELECT u.id, u.name, u.direction_id, u.hire_date, u.hours_table_url, u.scores_table_url, s.name as supervisor_name, u.status, u.rate, u.gender, u.birth_date, u.avatar_bucket, u.avatar_blob_path, u.avatar_updated_at
                 FROM users u
                 LEFT JOIN directions d ON u.direction_id = d.id
                 LEFT JOIN users s ON u.supervisor_id = s.id
@@ -2199,7 +2207,10 @@ class Database:
                     'status': row[7],
                     'rate': row[8],
                     'gender': row[9],
-                    'birth_date': row[10].strftime('%d-%m-%Y') if row[10] else None
+                    'birth_date': row[10].strftime('%d-%m-%Y') if row[10] else None,
+                    'avatar_bucket': row[11],
+                    'avatar_blob_path': row[12],
+                    'avatar_updated_at': row[13].isoformat() if row[13] else None
                 } for row in cursor.fetchall()
             ]
 
@@ -2322,7 +2333,7 @@ class Database:
     def get_user_by_login(self, login):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, telegram_id, name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url, scores_table_url 
+                SELECT id, telegram_id, name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url, scores_table_url, avatar_bucket, avatar_blob_path, avatar_content_type, avatar_file_size, avatar_updated_at
                 FROM users WHERE login = %s
             """, (login,))
             return cursor.fetchone()
@@ -2871,6 +2882,62 @@ class Database:
                 """, (user_id, changed_by, field, old_value, str(value)))
             
             return updated
+
+    def get_user_avatar_storage(self, user_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT avatar_bucket, avatar_blob_path, avatar_content_type, avatar_file_size, avatar_updated_at
+                FROM users
+                WHERE id = %s
+            """, (user_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "avatar_bucket": row[0],
+                "avatar_blob_path": row[1],
+                "avatar_content_type": row[2],
+                "avatar_file_size": int(row[3]) if row[3] is not None else None,
+                "avatar_updated_at": row[4].isoformat() if row[4] else None
+            }
+
+    def set_user_avatar(self, user_id, bucket_name, blob_path, content_type=None, file_size=None):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE users
+                SET avatar_bucket = %s,
+                    avatar_blob_path = %s,
+                    avatar_content_type = %s,
+                    avatar_file_size = %s,
+                    avatar_updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING avatar_bucket, avatar_blob_path, avatar_content_type, avatar_file_size, avatar_updated_at
+            """, (bucket_name, blob_path, content_type, file_size, user_id))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "avatar_bucket": row[0],
+                "avatar_blob_path": row[1],
+                "avatar_content_type": row[2],
+                "avatar_file_size": int(row[3]) if row[3] is not None else None,
+                "avatar_updated_at": row[4].isoformat() if row[4] else None
+            }
+
+    def clear_user_avatar(self, user_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE users
+                SET avatar_bucket = NULL,
+                    avatar_blob_path = NULL,
+                    avatar_content_type = NULL,
+                    avatar_file_size = NULL,
+                    avatar_updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING id
+            """, (user_id,))
+            row = cursor.fetchone()
+            return bool(row)
 
     def get_all_operators(self):
         with self._get_cursor() as cursor:

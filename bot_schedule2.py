@@ -151,11 +151,41 @@ def _hash_token(raw_token):
 
 
 def _get_user_payload(user):
+    avatar_bucket = None
+    avatar_blob_path = None
+    avatar_updated_at = None
+    role = None
+    user_id = None
+    name = None
+    telegram_id = None
+    if isinstance(user, (tuple, list)):
+        role = user[3]
+        user_id = user[0]
+        name = user[2]
+        telegram_id = user[1]
+        if len(user) >= 20:
+            avatar_bucket = user[15]
+            avatar_blob_path = user[16]
+            avatar_updated_at = user[19]
+        elif len(user) >= 16:
+            avatar_bucket = user[11]
+            avatar_blob_path = user[12]
+            avatar_updated_at = user[15]
+    elif isinstance(user, dict):
+        role = user.get("role")
+        user_id = user.get("id")
+        name = user.get("name")
+        telegram_id = user.get("telegram_id")
+        avatar_bucket = user.get("avatar_bucket")
+        avatar_blob_path = user.get("avatar_blob_path")
+        avatar_updated_at = user.get("avatar_updated_at")
     return {
-        "role": user[3],
-        "id": user[0],
-        "name": user[2],
-        "telegram_id": user[1]
+        "role": role,
+        "id": user_id,
+        "name": name,
+        "telegram_id": telegram_id,
+        "avatar_url": _build_avatar_signed_url(avatar_bucket, avatar_blob_path),
+        "avatar_updated_at": avatar_updated_at.isoformat() if hasattr(avatar_updated_at, "isoformat") else avatar_updated_at
     }
 
 
@@ -591,11 +621,60 @@ TASK_ALLOWED_ACTIONS = {'in_progress', 'completed', 'accepted', 'returned', 'reo
 TASK_MAX_FILES = 10
 TASK_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 TASK_ATTACHMENTS_UPLOAD_FOLDER = (os.getenv('TASK_ATTACHMENTS_UPLOAD_FOLDER') or 'TaskAttachments/').strip()
+AVATAR_MAX_UPLOAD_BYTES = int(os.getenv('AVATAR_MAX_UPLOAD_BYTES', str(2 * 1024 * 1024)))
+AVATAR_SIGNED_URL_TTL_SECONDS = int(os.getenv('AVATAR_SIGNED_URL_TTL_SECONDS', str(12 * 60 * 60)))
+AVATAR_UPLOAD_FOLDER = (os.getenv('AVATAR_UPLOAD_FOLDER') or 'AvatarUploads/').strip()
 TASK_TAG_LABELS = {
     'task': 'Задача',
     'problem': 'Проблема',
     'suggestion': 'Предложение'
 }
+
+
+def _build_avatar_signed_url(bucket_name, blob_path):
+    bucket_name = (bucket_name or '').strip()
+    blob_path = (blob_path or '').strip()
+    if not bucket_name or not blob_path:
+        return None
+    try:
+        gcs_client = get_gcs_client()
+        bucket = gcs_client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(seconds=AVATAR_SIGNED_URL_TTL_SECONDS),
+            method="GET"
+        )
+    except Exception as e:
+        logging.warning(f"Failed to build avatar signed URL for bucket={bucket_name}: {e}")
+        return None
+
+
+def _build_avatar_blob_path(user_id, source_filename):
+    upload_folder = AVATAR_UPLOAD_FOLDER.strip('/')
+    upload_prefix = f"{upload_folder}/" if upload_folder else ""
+    safe_name = secure_filename(source_filename or "") or "avatar.webp"
+    extension = os.path.splitext(safe_name)[1].lower()
+    if not extension or not re.match(r'^\.[a-z0-9]{1,10}$', extension):
+        extension = '.webp'
+    return (
+        f"{upload_prefix}avatars/{int(user_id)}/"
+        f"{datetime.utcnow().strftime('%Y/%m/%d')}/"
+        f"{uuid.uuid4().hex}{extension}"
+    )
+
+
+def _resolve_avatar_target_user(requester, requester_id, target_user_id):
+    target_user = db.get_user(id=target_user_id)
+    if not target_user:
+        return None, ("User not found", 404)
+    if requester[3] == 'admin':
+        return target_user, None
+    if requester_id == target_user[0]:
+        return target_user, None
+    if requester[3] == 'sv' and target_user[3] == 'operator' and target_user[6] == requester_id:
+        return target_user, None
+    return None, ("You do not have access to manage this avatar", 403)
 
 
 def _resolve_requester():
@@ -1243,7 +1322,9 @@ def get_user_profile():
             "scores_table_url": user[9] or None,
             "hours_table_url": user[8] or None,
             "status": user[11],  # Adjust index based on query
-            "rate": float(user[12]) if user[12] else 1.0
+            "rate": float(user[12]) if user[12] else 1.0,
+            "avatar_url": _build_avatar_signed_url(user[15], user[16]),
+            "avatar_updated_at": user[19].isoformat() if len(user) > 19 and user[19] else None
         }
 
         logging.info(f"Profile data fetched successfully for user_id: {user_id}")
@@ -1251,6 +1332,132 @@ def get_user_profile():
     except Exception as e:
         logging.error(f"Error fetching user profile for user_id {user_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+@app.route('/api/user/avatar', methods=['POST', 'DELETE', 'OPTIONS'])
+@require_api_key
+def manage_user_avatar():
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
+        requester_id_raw = request.headers.get('X-User-Id') or getattr(g, 'user_id', None)
+        if not requester_id_raw:
+            return jsonify({"error": "Missing X-User-Id header"}), 400
+        try:
+            requester_id = int(requester_id_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid X-User-Id"}), 400
+
+        requester = db.get_user(id=requester_id)
+        if not requester:
+            return jsonify({"error": "Requester not found"}), 404
+
+        json_payload = request.get_json(silent=True) or {}
+        target_user_id_raw = request.form.get('target_user_id') if request.method == 'POST' else json_payload.get('target_user_id')
+        if target_user_id_raw in (None, ''):
+            target_user_id = requester_id
+        else:
+            try:
+                target_user_id = int(target_user_id_raw)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid target_user_id"}), 400
+
+        target_user, access_error = _resolve_avatar_target_user(requester, requester_id, target_user_id)
+        if access_error:
+            message, status_code = access_error
+            return jsonify({"error": message}), status_code
+
+        remove_flag_raw = request.form.get('remove') if request.method == 'POST' else json_payload.get('remove')
+        remove_flag = request.method == 'DELETE' or str(remove_flag_raw or '').strip().lower() in ('1', 'true', 'yes')
+        previous_avatar = db.get_user_avatar_storage(target_user_id) or {}
+
+        if remove_flag:
+            if not db.clear_user_avatar(target_user_id):
+                return jsonify({"error": "Failed to clear avatar"}), 500
+
+            prev_bucket = (previous_avatar.get('avatar_bucket') or '').strip()
+            prev_blob_path = (previous_avatar.get('avatar_blob_path') or '').strip()
+            if prev_bucket and prev_blob_path:
+                try:
+                    client = get_gcs_client()
+                    client.bucket(prev_bucket).blob(prev_blob_path).delete()
+                except Exception:
+                    pass
+
+            updated_avatar = db.get_user_avatar_storage(target_user_id) or {}
+            return jsonify({
+                "status": "success",
+                "message": "Avatar removed",
+                "target_user_id": target_user[0],
+                "avatar_url": None,
+                "avatar_updated_at": updated_avatar.get("avatar_updated_at")
+            }), 200
+
+        file_storage = request.files.get('avatar')
+        if not file_storage or not file_storage.filename:
+            return jsonify({"error": "Missing avatar file"}), 400
+
+        avatar_bytes = file_storage.read() or b''
+        if not avatar_bytes:
+            return jsonify({"error": "Uploaded avatar is empty"}), 400
+        if len(avatar_bytes) > AVATAR_MAX_UPLOAD_BYTES:
+            return jsonify({"error": f"Avatar exceeds {AVATAR_MAX_UPLOAD_BYTES // 1024} KB limit"}), 400
+
+        content_type = (file_storage.mimetype or '').strip().lower()
+        if not content_type.startswith('image/'):
+            return jsonify({"error": "Only image files are allowed"}), 400
+
+        bucket_name = (
+            os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_AVATARS')
+            or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS')
+            or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
+            or ''
+        ).strip()
+        if not bucket_name:
+            return jsonify({"error": "Avatar bucket is not configured"}), 500
+
+        blob_path = _build_avatar_blob_path(target_user_id, file_storage.filename)
+        gcs_client = get_gcs_client()
+        gcs_bucket = gcs_client.bucket(bucket_name)
+        blob = gcs_bucket.blob(blob_path)
+        blob.cache_control = "public, max-age=31536000, immutable"
+        blob.upload_from_string(avatar_bytes, content_type=content_type)
+
+        saved_avatar = db.set_user_avatar(
+            user_id=target_user_id,
+            bucket_name=bucket_name,
+            blob_path=blob_path,
+            content_type=content_type,
+            file_size=len(avatar_bytes)
+        )
+        if not saved_avatar:
+            try:
+                gcs_bucket.blob(blob_path).delete()
+            except Exception:
+                pass
+            return jsonify({"error": "Failed to save avatar metadata"}), 500
+
+        prev_bucket = (previous_avatar.get('avatar_bucket') or '').strip()
+        prev_blob_path = (previous_avatar.get('avatar_blob_path') or '').strip()
+        if prev_bucket and prev_blob_path and (prev_bucket != bucket_name or prev_blob_path != blob_path):
+            try:
+                client = get_gcs_client()
+                client.bucket(prev_bucket).blob(prev_blob_path).delete()
+            except Exception:
+                pass
+
+        return jsonify({
+            "status": "success",
+            "message": "Avatar updated",
+            "target_user_id": target_user[0],
+            "avatar_url": _build_avatar_signed_url(saved_avatar.get("avatar_bucket"), saved_avatar.get("avatar_blob_path")),
+            "avatar_updated_at": saved_avatar.get("avatar_updated_at"),
+            "avatar_file_size": saved_avatar.get("avatar_file_size")
+        }), 200
+    except Exception as e:
+        logging.error(f"Error in /api/user/avatar: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/average_scores', methods=['GET'])
@@ -1436,7 +1643,7 @@ def get_admin_users():
         requester_id = int(request.headers.get('X-User-Id'))
         with db._get_cursor() as cursor:
             cursor.execute("""
-                    SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role, u.status, u.rate, u.hire_date, u.gender, u.birth_date
+                    SELECT u.id, u.name, d.name as direction, s.name as supervisor_name, u.direction_id, u.supervisor_id, u.role, u.status, u.rate, u.hire_date, u.gender, u.birth_date, u.avatar_bucket, u.avatar_blob_path, u.avatar_updated_at
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -1456,7 +1663,9 @@ def get_admin_users():
                         "rate": float(row[8]),
                         "hire_date": row[9].strftime('%d-%m-%Y') if row[9] else None,
                         "gender": row[10],
-                        "birth_date": row[11].strftime('%d-%m-%Y') if row[11] else None
+                        "birth_date": row[11].strftime('%d-%m-%Y') if row[11] else None,
+                        "avatar_url": _build_avatar_signed_url(row[12], row[13]),
+                        "avatar_updated_at": row[14].isoformat() if row[14] else None
                     })
         return jsonify({"status": "success", "users": users}), 200
     except Exception as e:
@@ -2754,6 +2963,13 @@ def get_sv_operators_moderka():
             return jsonify({"error": "Unauthorized: Only supervisors can access this"}), 403
         
         operators = db.get_operators_by_supervisor(supervisor_id)
+        for operator in operators:
+            operator['avatar_url'] = _build_avatar_signed_url(
+                operator.get('avatar_bucket'),
+                operator.get('avatar_blob_path')
+            )
+            operator.pop('avatar_bucket', None)
+            operator.pop('avatar_blob_path', None)
         return jsonify({"status": "success", "operators": operators}), 200
     except Exception as e:
         logging.error(f"Error fetching operators: {e}")
