@@ -150,6 +150,7 @@
     }
     .sidebar-menu-scroll {
       direction: ltr;
+      overflow-x: hidden;
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
