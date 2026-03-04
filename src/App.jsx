@@ -16872,6 +16872,13 @@ const withAccessTokenHeader = (headers = {}) => {
                 };
             }, [showToast]);
             const [openMenuId, setOpenMenuId] = useState(null);
+            const [selectedManageUsersIds, setSelectedManageUsersIds] = useState(new Set());
+            const [bulkManageUsersChanges, setBulkManageUsersChanges] = useState({
+                supervisor_id: '',
+                direction_id: '',
+                rate: ''
+            });
+            const [isBulkManageUsersSaving, setIsBulkManageUsersSaving] = useState(false);
             const [showSidebarAccountDropdown, setShowSidebarAccountDropdown] = useState(false);
             const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
             const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -20255,6 +20262,120 @@ const withAccessTokenHeader = (headers = {}) => {
                 (u.supervisor_name || '').toLowerCase().includes(searchQuery.toLowerCase())
             );
 
+            const toggleManageUsersSelection = useCallback((userId) => {
+                const numericId = Number(userId);
+                if (!Number.isFinite(numericId)) return;
+                setSelectedManageUsersIds((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(numericId)) next.delete(numericId);
+                    else next.add(numericId);
+                    return next;
+                });
+            }, []);
+
+            const clearManageUsersSelection = useCallback(() => {
+                setSelectedManageUsersIds(new Set());
+            }, []);
+
+            const handleManageUserRowClick = useCallback((event, userId) => {
+                if (!(event?.ctrlKey || event?.metaKey)) return;
+                event.preventDefault();
+                toggleManageUsersSelection(userId);
+            }, [toggleManageUsersSelection]);
+
+            const applyBulkManageUsersChanges = useCallback(async () => {
+                const selectedIds = Array.from(selectedManageUsersIds)
+                    .map((id) => Number(id))
+                    .filter((id) => Number.isFinite(id));
+                if (!selectedIds.length) {
+                    showToast('Выберите сотрудников через Ctrl + клик', 'error');
+                    return;
+                }
+
+                const payloadChanges = {};
+                if (bulkManageUsersChanges.supervisor_id !== '') {
+                    payloadChanges.supervisor_id = Number(bulkManageUsersChanges.supervisor_id);
+                }
+                if (bulkManageUsersChanges.direction_id !== '') {
+                    payloadChanges.direction_id = Number(bulkManageUsersChanges.direction_id);
+                }
+                if (bulkManageUsersChanges.rate !== '') {
+                    const rate = Number(bulkManageUsersChanges.rate);
+                    if (![1, 0.75, 0.5].includes(rate)) {
+                        showToast('Некорректная ставка', 'error');
+                        return;
+                    }
+                    payloadChanges.rate = rate;
+                }
+
+                if (!Object.keys(payloadChanges).length) {
+                    showToast('Выберите, что менять: супервайзера, направление или ставку', 'error');
+                    return;
+                }
+
+                setIsBulkManageUsersSaving(true);
+                try {
+                    const response = await axios.post(
+                        `${API_BASE_URL}/api/admin/users/bulk_update`,
+                        {
+                            user_ids: selectedIds,
+                            changes: payloadChanges
+                        },
+                        {
+                            headers: withAccessTokenHeader({
+                                'X-API-Key': user.apiKey,
+                                'X-User-Id': user.id
+                            })
+                        }
+                    );
+
+                    const data = response?.data || {};
+                    if (data.status !== 'success') {
+                        showToast(data.error || 'Не удалось выполнить массовое обновление', 'error');
+                        return;
+                    }
+
+                    const updatedCount = Number(data.updated_count || 0);
+                    const failedIds = Array.isArray(data.failed_user_ids) ? data.failed_user_ids : [];
+                    if (failedIds.length > 0) {
+                        showToast(
+                            `Обновлено: ${updatedCount}. Не обновлены ID: ${failedIds.join(', ')}`,
+                            updatedCount > 0 ? 'warning' : 'error'
+                        );
+                    } else {
+                        showToast(`Обновлено сотрудников: ${updatedCount}`, 'success');
+                    }
+
+                    await fetchUsers();
+                    clearManageUsersSelection();
+                    setBulkManageUsersChanges({
+                        supervisor_id: '',
+                        direction_id: '',
+                        rate: ''
+                    });
+                } catch (err) {
+                    console.error('Bulk manage users update error:', err);
+                    showToast(err.response?.data?.error || 'Ошибка массового изменения сотрудников', 'error');
+                } finally {
+                    setIsBulkManageUsersSaving(false);
+                }
+            }, [selectedManageUsersIds, bulkManageUsersChanges, user, showToast, fetchUsers, clearManageUsersSelection]);
+
+            useEffect(() => {
+                setSelectedManageUsersIds((prev) => {
+                    if (!prev.size) return prev;
+                    const availableIds = new Set((users || []).map((u) => Number(u.id)).filter((id) => Number.isFinite(id)));
+                    const next = new Set([...prev].filter((id) => availableIds.has(id)));
+                    return next.size === prev.size ? prev : next;
+                });
+            }, [users]);
+
+            useEffect(() => {
+                if (view !== 'manage_users') {
+                    clearManageUsersSelection();
+                }
+            }, [view, clearManageUsersSelection]);
+
             const fetchProfileData = async () => {
                 setIsLoading(true);
                 
@@ -22307,6 +22428,15 @@ const withAccessTokenHeader = (headers = {}) => {
                                         const sortedUsersFlat = [...searched].sort((a, b) => compareUsersByField(a, b, usersSortField));
                                         const grouped = { __all__: sortedUsersFlat };
                                         const sortedSvNames = ['__all__'];
+                                        const selectedManageUsersCount = selectedManageUsersIds.size;
+                                        const hasBulkManageUsersChanges =
+                                            bulkManageUsersChanges.supervisor_id !== '' ||
+                                            bulkManageUsersChanges.direction_id !== '' ||
+                                            bulkManageUsersChanges.rate !== '';
+                                        const canApplyBulkManageUsersChanges =
+                                            selectedManageUsersCount > 0 && hasBulkManageUsersChanges && !isBulkManageUsersSaving;
+                                        const availableSupervisors = (svList || [])
+                                            .filter((sv) => sv.status === 'working' || sv.status === 'unpaid_leave' || !sv.status);
 
                                         return (
                                         <div className="overflow-x-auto rounded-lg border border-gray-200">
@@ -22318,6 +22448,76 @@ const withAccessTokenHeader = (headers = {}) => {
                                                 onChange={(e) => setSearchQuery(e.target.value)}
                                                 className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                                             />
+                                            </div>
+
+                                            <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-4">
+                                                <div className="flex flex-col gap-3">
+                                                    <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                                                        <div className="text-blue-900">
+                                                            Зажмите <span className="font-semibold">Ctrl</span> и кликните по строкам для мультивыбора.
+                                                            <span className="ml-2 font-semibold">Выбрано: {selectedManageUsersCount}</span>
+                                                        </div>
+                                                        {selectedManageUsersCount > 0 && (
+                                                            <button
+                                                                onClick={clearManageUsersSelection}
+                                                                className="px-3 py-1.5 rounded-lg border border-blue-300 text-blue-800 hover:bg-blue-100 transition"
+                                                            >
+                                                                Снять выбор
+                                                            </button>
+                                                        )}
+                                                    </div>
+
+                                                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                                        <select
+                                                            value={bulkManageUsersChanges.supervisor_id}
+                                                            onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, supervisor_id: e.target.value }))}
+                                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white text-gray-900"
+                                                        >
+                                                            <option value="">Супервайзер: не менять</option>
+                                                            {availableSupervisors.map((sv) => (
+                                                                <option key={sv.id} value={sv.id}>
+                                                                    {sv.name}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+
+                                                        <select
+                                                            value={bulkManageUsersChanges.direction_id}
+                                                            onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, direction_id: e.target.value }))}
+                                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white text-gray-900"
+                                                        >
+                                                            <option value="">Направление: не менять</option>
+                                                            {directions.map((dir) => (
+                                                                <option key={dir.id} value={dir.id}>
+                                                                    {dir.name}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+
+                                                        <select
+                                                            value={bulkManageUsersChanges.rate}
+                                                            onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, rate: e.target.value }))}
+                                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white text-gray-900"
+                                                        >
+                                                            <option value="">Ставка: не менять</option>
+                                                            <option value="1">1.00</option>
+                                                            <option value="0.75">0.75</option>
+                                                            <option value="0.5">0.50</option>
+                                                        </select>
+
+                                                        <button
+                                                            onClick={applyBulkManageUsersChanges}
+                                                            disabled={!canApplyBulkManageUsersChanges}
+                                                            className={`w-full px-4 py-2 rounded-lg text-white transition ${
+                                                                canApplyBulkManageUsersChanges
+                                                                    ? 'bg-blue-600 hover:bg-blue-700'
+                                                                    : 'bg-gray-300 cursor-not-allowed'
+                                                            }`}
+                                                        >
+                                                            {isBulkManageUsersSaving ? 'Сохраняю...' : 'Применить массово'}
+                                                        </button>
+                                                    </div>
+                                                </div>
                                             </div>
 
                                             {/* Группировка по супервайзерам */}
@@ -22377,8 +22577,17 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     </thead>
 
                                                     <tbody className="bg-white divide-y divide-gray-200">
-                                                    {svUsers.map((u) => (
-                                                        <tr key={u.id} className="hover:bg-gray-50 transition-colors duration-200 group">
+                                                    {svUsers.map((u) => {
+                                                        const isSelectedForBulk = selectedManageUsersIds.has(Number(u.id));
+                                                        return (
+                                                        <tr
+                                                            key={u.id}
+                                                            onClick={(event) => handleManageUserRowClick(event, u.id)}
+                                                            className={`transition-colors duration-200 group cursor-pointer ${
+                                                                isSelectedForBulk ? 'bg-blue-100/70 hover:bg-blue-100' : 'hover:bg-gray-50'
+                                                            }`}
+                                                            title="Для мультивыбора: Ctrl + клик"
+                                                        >
                                                         <td className="px-6 py-4">
                                                             <div className="flex items-center gap-3 min-w-0">
                                                                 <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
@@ -22409,10 +22618,16 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             <RateCircle rate={u.rate || 1.0} />
                                                             </div>
                                                         </td>
-                                                        <td className={`px-2 py-4 text-right transition-opacity duration-200 ${openMenuId === u.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                                                        <td
+                                                            onClick={(e) => e.stopPropagation()}
+                                                            className={`px-2 py-4 text-right transition-opacity duration-200 ${openMenuId === u.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                                                        >
                                                             <div className="relative inline-block text-left">
                                                             <button
-                                                                onClick={() => setOpenMenuId(openMenuId === u.id ? null : u.id)}
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    setOpenMenuId(openMenuId === u.id ? null : u.id);
+                                                                }}
                                                                 className="p-2 rounded-full hover:bg-gray-100"
                                                             >
                                                                 <FaIcon className="fas fa-ellipsis-v"></FaIcon>
@@ -22456,7 +22671,8 @@ const withAccessTokenHeader = (headers = {}) => {
                                                             </div>
                                                         </td>
                                                         </tr>
-                                                    ))}
+                                                        );
+                                                    })}
                                                     </tbody>
 
                                                     <tfoot className="bg-gray-50">
