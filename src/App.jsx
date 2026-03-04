@@ -20955,7 +20955,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 if (user?.role === 'admin' && view === 'admin_sessions') {
                     refreshAdminSessions();
                 }
-            }, [user, view, refreshAdminSessions]);
+            }, [user?.id, user?.role, view]);
 
             if (isAuthInitializing) {
                 return (
