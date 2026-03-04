@@ -157,7 +157,7 @@
       direction: ltr;
     }
     .sidebar-menu-scroll::-webkit-scrollbar {
-      width: 4px;
+      width: 2px;
     }
     .sidebar-menu-scroll::-webkit-scrollbar-track {
       background: transparent;
