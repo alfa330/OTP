@@ -25,6 +25,60 @@ const DISMISSAL_REASON_OPTIONS = [
 const AVATAR_MAX_DIMENSION = 512;
 const AVATAR_TARGET_BYTES = 180 * 1024;
 const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+const AVATAR_CROP_PREVIEW_SIZE = 256;
+const AVATAR_MIN_ZOOM = 1;
+const AVATAR_MAX_ZOOM_CAP = 6;
+
+const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
+
+const getAvatarMaxZoom = (sourceWidth, sourceHeight) => {
+    const minSide = Math.max(1, Math.min(sourceWidth, sourceHeight));
+    return clampNumber(minSide / 64, AVATAR_MIN_ZOOM, AVATAR_MAX_ZOOM_CAP);
+};
+
+const getAvatarCropMetrics = (sourceWidth, sourceHeight, zoom) => {
+    const minSide = Math.max(1, Math.min(sourceWidth, sourceHeight));
+    const cropSize = minSide / Math.max(AVATAR_MIN_ZOOM, zoom);
+    const halfCrop = cropSize / 2;
+    return { minSide, cropSize, halfCrop };
+};
+
+const normalizeAvatarCropState = (draft) => {
+    if (!draft) return draft;
+    const sourceWidth = Math.max(1, Number(draft.sourceWidth) || AVATAR_MAX_DIMENSION);
+    const sourceHeight = Math.max(1, Number(draft.sourceHeight) || AVATAR_MAX_DIMENSION);
+    const maxZoom = clampNumber(
+        Number(draft.maxZoom) || getAvatarMaxZoom(sourceWidth, sourceHeight),
+        AVATAR_MIN_ZOOM,
+        AVATAR_MAX_ZOOM_CAP
+    );
+    const zoom = clampNumber(Number(draft.zoom) || AVATAR_MIN_ZOOM, AVATAR_MIN_ZOOM, maxZoom);
+    const { cropSize, halfCrop } = getAvatarCropMetrics(sourceWidth, sourceHeight, zoom);
+    const minCenterX = halfCrop;
+    const maxCenterX = Math.max(halfCrop, sourceWidth - halfCrop);
+    const minCenterY = halfCrop;
+    const maxCenterY = Math.max(halfCrop, sourceHeight - halfCrop);
+    const centerX = clampNumber(
+        Number(draft.centerX) || sourceWidth / 2,
+        minCenterX,
+        maxCenterX
+    );
+    const centerY = clampNumber(
+        Number(draft.centerY) || sourceHeight / 2,
+        minCenterY,
+        maxCenterY
+    );
+    return {
+        ...draft,
+        sourceWidth,
+        sourceHeight,
+        maxZoom,
+        zoom,
+        centerX,
+        centerY,
+        cropSize
+    };
+};
 
 const canvasToBlob = (canvas, type, quality) => (
     new Promise((resolve, reject) => {
@@ -51,25 +105,71 @@ const loadImageFromFile = (file) => (
     })
 );
 
-const compressAvatarImageFile = async (sourceFile) => {
+const detectPrimaryFaceCenter = async (image) => {
+    try {
+        const FaceDetectorCtor = typeof window !== 'undefined' ? window.FaceDetector : null;
+        if (!FaceDetectorCtor) return null;
+        const detector = new FaceDetectorCtor({
+            fastMode: true,
+            maxDetectedFaces: 3
+        });
+        const faces = await detector.detect(image);
+        if (!Array.isArray(faces) || faces.length === 0) return null;
+        const primaryFace = faces
+            .map((face) => face?.boundingBox || null)
+            .filter(Boolean)
+            .sort((a, b) => (b.width * b.height) - (a.width * a.height))[0];
+        if (!primaryFace) return null;
+        return {
+            x: primaryFace.x + primaryFace.width / 2,
+            y: primaryFace.y + primaryFace.height / 2
+        };
+    } catch (_) {
+        return null;
+    }
+};
+
+const compressAvatarImageFile = async (sourceFile, cropState = null) => {
     const image = await loadImageFromFile(sourceFile);
     const width = image.naturalWidth || image.width || AVATAR_MAX_DIMENSION;
     const height = image.naturalHeight || image.height || AVATAR_MAX_DIMENSION;
-    const scale = Math.min(1, AVATAR_MAX_DIMENSION / Math.max(width, height));
-    const targetWidth = Math.max(1, Math.round(width * scale));
-    const targetHeight = Math.max(1, Math.round(height * scale));
+    const normalizedCrop = normalizeAvatarCropState({
+        sourceWidth: width,
+        sourceHeight: height,
+        maxZoom: getAvatarMaxZoom(width, height),
+        zoom: cropState?.zoom ?? AVATAR_MIN_ZOOM,
+        centerX: cropState?.centerX ?? (width / 2),
+        centerY: cropState?.centerY ?? (height / 2)
+    });
+    const { cropSize } = getAvatarCropMetrics(width, height, normalizedCrop.zoom);
+    const maxSx = Math.max(0, width - cropSize);
+    const maxSy = Math.max(0, height - cropSize);
+    const sx = clampNumber(normalizedCrop.centerX - (cropSize / 2), 0, maxSx);
+    const sy = clampNumber(normalizedCrop.centerY - (cropSize / 2), 0, maxSy);
 
     const canvas = document.createElement('canvas');
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
+    canvas.width = AVATAR_MAX_DIMENSION;
+    canvas.height = AVATAR_MAX_DIMENSION;
     const context = canvas.getContext('2d', { alpha: false });
     if (!context) throw new Error("Не удалось подготовить canvas для сжатия");
-    context.drawImage(image, 0, 0, targetWidth, targetHeight);
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(
+        image,
+        sx,
+        sy,
+        cropSize,
+        cropSize,
+        0,
+        0,
+        AVATAR_MAX_DIMENSION,
+        AVATAR_MAX_DIMENSION
+    );
 
-    let quality = 0.86;
+    let quality = 0.9;
     let blob = await canvasToBlob(canvas, 'image/webp', quality);
-    while (blob.size > AVATAR_TARGET_BYTES && quality > 0.45) {
-        quality = Math.max(0.45, quality - 0.08);
+    while (blob.size > AVATAR_TARGET_BYTES && quality > 0.42) {
+        quality = Math.max(0.42, quality - 0.07);
         blob = await canvasToBlob(canvas, 'image/webp', quality);
     }
 
@@ -92,11 +192,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const nameRef = React.useRef(null);
     const avatarInputRef = React.useRef(null);
     const avatarObjectUrlRef = React.useRef('');
+    const avatarCropObjectUrlRef = React.useRef('');
+    const avatarCropDragRef = React.useRef(null);
     const [avatarPreviewUrl, setAvatarPreviewUrl] = useState("");
     const [avatarUploadFile, setAvatarUploadFile] = useState(null);
     const [avatarRemoveRequested, setAvatarRemoveRequested] = useState(false);
     const [avatarError, setAvatarError] = useState("");
     const [isAvatarProcessing, setIsAvatarProcessing] = useState(false);
+    const [avatarCropState, setAvatarCropState] = useState(null);
     const toDateInputValue = (value) => {
         if (!value) return "";
         const str = String(value).trim();
@@ -137,6 +240,19 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         avatarObjectUrlRef.current = '';
     }, []);
 
+    const revokeAvatarCropSourceUrl = React.useCallback(() => {
+        if (avatarCropObjectUrlRef.current && avatarCropObjectUrlRef.current.startsWith('blob:')) {
+            URL.revokeObjectURL(avatarCropObjectUrlRef.current);
+        }
+        avatarCropObjectUrlRef.current = '';
+    }, []);
+
+    const closeAvatarCropEditor = React.useCallback(() => {
+        avatarCropDragRef.current = null;
+        setAvatarCropState(null);
+        revokeAvatarCropSourceUrl();
+    }, [revokeAvatarCropSourceUrl]);
+
     useEffect(() => {
         // Устанавливаем defaults при открытии для режима создания
         const base = userToEdit || {};
@@ -168,13 +284,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setCreatedCredentials(null);
         setActiveTab("data");
         revokeAvatarPreviewUrl();
+        closeAvatarCropEditor();
         setAvatarPreviewUrl((base.avatar_url || '').trim());
         setAvatarUploadFile(null);
         setAvatarRemoveRequested(false);
         setAvatarError("");
         setIsAvatarProcessing(false);
         if (avatarInputRef.current) avatarInputRef.current.value = '';
-    }, [userToEdit, user, revokeAvatarPreviewUrl]);
+    }, [userToEdit, user, revokeAvatarPreviewUrl, closeAvatarCropEditor]);
 
     useEffect(() => {
         if (isOpen) {
@@ -186,7 +303,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
     useEffect(() => (() => {
         revokeAvatarPreviewUrl();
-    }), [revokeAvatarPreviewUrl]);
+        revokeAvatarCropSourceUrl();
+    }), [revokeAvatarPreviewUrl, revokeAvatarCropSourceUrl]);
 
     const copyToClipboard = (text) => {
         if (!text) return;
@@ -218,13 +336,23 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             if (!String(sourceFile.type || '').startsWith('image/')) {
                 throw new Error("Можно загружать только изображения");
             }
-            const compressedAvatar = await compressAvatarImageFile(sourceFile);
-            if (compressedAvatar.size > AVATAR_MAX_BYTES) {
-                throw new Error("Аватар слишком большой после сжатия");
-            }
-            setAvatarUploadFile(compressedAvatar);
-            setAvatarRemoveRequested(false);
-            applyAvatarPreviewFromFile(compressedAvatar);
+            const image = await loadImageFromFile(sourceFile);
+            const sourceWidth = image.naturalWidth || image.width || AVATAR_MAX_DIMENSION;
+            const sourceHeight = image.naturalHeight || image.height || AVATAR_MAX_DIMENSION;
+            const faceCenter = await detectPrimaryFaceCenter(image);
+            const nextCrop = normalizeAvatarCropState({
+                sourceFile,
+                sourceUrl: URL.createObjectURL(sourceFile),
+                sourceWidth,
+                sourceHeight,
+                maxZoom: getAvatarMaxZoom(sourceWidth, sourceHeight),
+                zoom: AVATAR_MIN_ZOOM,
+                centerX: faceCenter?.x ?? (sourceWidth / 2),
+                centerY: faceCenter?.y ?? (sourceHeight / 2)
+            });
+            revokeAvatarCropSourceUrl();
+            avatarCropObjectUrlRef.current = nextCrop.sourceUrl;
+            setAvatarCropState(nextCrop);
         } catch (error) {
             setAvatarError(error?.message || "Не удалось обработать аватар");
         } finally {
@@ -233,8 +361,83 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         }
     };
 
+    const handleAvatarCropZoomChange = (event) => {
+        const nextZoom = Number(event.target.value);
+        if (!Number.isFinite(nextZoom)) return;
+        setAvatarCropState((prev) => normalizeAvatarCropState(prev ? { ...prev, zoom: nextZoom } : prev));
+    };
+
+    const handleAvatarCropPointerDown = (event) => {
+        if (!avatarCropState) return;
+        event.preventDefault();
+        avatarCropDragRef.current = {
+            pointerId: event.pointerId,
+            lastX: event.clientX,
+            lastY: event.clientY
+        };
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+    };
+
+    const handleAvatarCropPointerMove = (event) => {
+        const drag = avatarCropDragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        setAvatarCropState((prev) => {
+            if (!prev) return prev;
+            const dx = event.clientX - drag.lastX;
+            const dy = event.clientY - drag.lastY;
+            drag.lastX = event.clientX;
+            drag.lastY = event.clientY;
+            const { minSide } = getAvatarCropMetrics(prev.sourceWidth, prev.sourceHeight, prev.zoom);
+            const displayScale = (AVATAR_CROP_PREVIEW_SIZE * prev.zoom) / minSide;
+            if (!Number.isFinite(displayScale) || displayScale <= 0) return prev;
+            return normalizeAvatarCropState({
+                ...prev,
+                centerX: prev.centerX - (dx / displayScale),
+                centerY: prev.centerY - (dy / displayScale)
+            });
+        });
+    };
+
+    const handleAvatarCropPointerUp = (event) => {
+        const drag = avatarCropDragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        avatarCropDragRef.current = null;
+        event.currentTarget.releasePointerCapture?.(event.pointerId);
+    };
+
+    const handleAvatarCropWheel = (event) => {
+        event.preventDefault();
+        const zoomStep = event.deltaY < 0 ? 0.08 : -0.08;
+        setAvatarCropState((prev) => normalizeAvatarCropState(prev ? { ...prev, zoom: prev.zoom + zoomStep } : prev));
+    };
+
+    const handleAvatarCropCancel = () => {
+        closeAvatarCropEditor();
+    };
+
+    const handleAvatarCropApply = async () => {
+        if (!avatarCropState?.sourceFile) return;
+        setAvatarError("");
+        setIsAvatarProcessing(true);
+        try {
+            const compressedAvatar = await compressAvatarImageFile(avatarCropState.sourceFile, avatarCropState);
+            if (compressedAvatar.size > AVATAR_MAX_BYTES) {
+                throw new Error("Аватар слишком большой после сжатия");
+            }
+            setAvatarUploadFile(compressedAvatar);
+            setAvatarRemoveRequested(false);
+            applyAvatarPreviewFromFile(compressedAvatar);
+            closeAvatarCropEditor();
+        } catch (error) {
+            setAvatarError(error?.message || "Не удалось обработать аватар");
+        } finally {
+            setIsAvatarProcessing(false);
+        }
+    };
+
     const handleAvatarRemove = () => {
         revokeAvatarPreviewUrl();
+        closeAvatarCropEditor();
         setAvatarPreviewUrl("");
         setAvatarUploadFile(null);
         setAvatarRemoveRequested(true);
@@ -244,6 +447,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
     const resetForCreate = () => {
         revokeAvatarPreviewUrl();
+        closeAvatarCropEditor();
         setEditedUser({
         name: "",
         rate: 1.0,
@@ -298,6 +502,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
         if (isAvatarProcessing) {
         setModalError("Дождитесь завершения обработки аватара.");
+        return;
+        }
+
+        if (avatarCropState) {
+        setModalError("Завершите обрезку аватара (Применить или Отмена).");
         return;
         }
 
@@ -359,6 +568,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             }
         } else {
             // режим редактирования — закрываем модалку после успешного onSave
+            closeAvatarCropEditor();
             onClose();
         }
         } catch (error) {
@@ -380,7 +590,26 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         { id: "account", label: "Аккаунт" }
     ];
     const avatarInitial = String(editedUser?.name || 'U').charAt(0).toUpperCase();
-    const avatarDisabled = isLoading || !!createdCredentials || isAvatarProcessing;
+    const avatarDisabled = isLoading || !!createdCredentials || isAvatarProcessing || !!avatarCropState;
+    const avatarCropViewStyle = React.useMemo(() => {
+        if (!avatarCropState) return null;
+        const { minSide } = getAvatarCropMetrics(
+            avatarCropState.sourceWidth,
+            avatarCropState.sourceHeight,
+            avatarCropState.zoom
+        );
+        const displayScale = (AVATAR_CROP_PREVIEW_SIZE * avatarCropState.zoom) / minSide;
+        const width = avatarCropState.sourceWidth * displayScale;
+        const height = avatarCropState.sourceHeight * displayScale;
+        const left = (AVATAR_CROP_PREVIEW_SIZE / 2) - (avatarCropState.centerX * displayScale);
+        const top = (AVATAR_CROP_PREVIEW_SIZE / 2) - (avatarCropState.centerY * displayScale);
+        return {
+            width: `${width}px`,
+            height: `${height}px`,
+            left: `${left}px`,
+            top: `${top}px`
+        };
+    }, [avatarCropState]);
     const renderAvatarEditor = () => (
         <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
             <div className="flex items-center gap-3">
@@ -400,7 +629,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 <div className="min-w-0 flex-1">
                     <div className="text-sm font-medium text-slate-800">Аватар</div>
                     <div className="text-xs text-slate-500">
-                        JPEG/PNG/WebP. Авто-сжатие до ~180 KB, максимум 512x512.
+                        JPEG/PNG/WebP. Квадратная обрезка + зум, затем авто-сжатие до ~180 KB (512x512).
                     </div>
                     <div className="mt-2 flex flex-wrap gap-2">
                         <label className={`inline-flex cursor-pointer items-center rounded-md px-3 py-1.5 text-xs font-medium ${avatarDisabled ? 'bg-slate-300 text-slate-600 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
@@ -451,6 +680,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             onClick={() => {
             setModalError("");
             setCreatedCredentials(null);
+            closeAvatarCropEditor();
             onClose();
             }}
             aria-hidden="true"
@@ -462,10 +692,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             tabIndex={-1}
             onKeyDown={(e) => {
             if (e.key === "Escape") {
-                setModalError("");
-                setCreatedCredentials(null);
-                onClose();
-            }
+                    setModalError("");
+                    setCreatedCredentials(null);
+                    closeAvatarCropEditor();
+                    onClose();
+                    }
             }}
         >
             <div
@@ -493,6 +724,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     onClick={() => {
                     setModalError("");
                     setCreatedCredentials(null);
+                    closeAvatarCropEditor();
                     onClose();
                     }}
                     aria-label="Закрыть"
@@ -1102,6 +1334,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <button
                         onClick={() => {
                             setCreatedCredentials(null);
+                            closeAvatarCropEditor();
                             onClose();
                         }}
                         className="px-3 py-1 bg-gray-100 rounded-md hover:bg-gray-200 text-sm"
@@ -1124,6 +1357,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         onClick={() => {
                         setModalError("");
                         setCreatedCredentials(null);
+                        closeAvatarCropEditor();
                         onClose();
                         }}
                         className="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 transition-all duration-200 font-medium"
@@ -1163,6 +1397,95 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             </div>
             </div>
         </div>
+        {avatarCropState && (
+            <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+                <div
+                    className="absolute inset-0 bg-slate-900/65 backdrop-blur-[1px]"
+                    onClick={handleAvatarCropCancel}
+                    aria-hidden="true"
+                />
+                <div
+                    className="relative w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl"
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <div className="flex items-start justify-between gap-3">
+                        <div>
+                            <div className="text-base font-semibold text-slate-900">Обрезка аватара</div>
+                            <div className="text-xs text-slate-500">
+                                Перетащите фото и выберите приближение.
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={handleAvatarCropCancel}
+                            className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100"
+                            aria-label="Закрыть обрезку"
+                        >
+                            <FaIcon className="fas fa-times" />
+                        </button>
+                    </div>
+
+                    <div className="mt-3 flex justify-center">
+                        <div
+                            className="relative overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 touch-none select-none"
+                            style={{ width: `${AVATAR_CROP_PREVIEW_SIZE}px`, height: `${AVATAR_CROP_PREVIEW_SIZE}px`, cursor: 'grab' }}
+                            onPointerDown={handleAvatarCropPointerDown}
+                            onPointerMove={handleAvatarCropPointerMove}
+                            onPointerUp={handleAvatarCropPointerUp}
+                            onPointerCancel={handleAvatarCropPointerUp}
+                            onWheel={handleAvatarCropWheel}
+                        >
+                            {avatarCropState?.sourceUrl && avatarCropViewStyle && (
+                                <img
+                                    src={avatarCropState.sourceUrl}
+                                    alt="Avatar crop source"
+                                    className="pointer-events-none absolute max-w-none select-none"
+                                    style={avatarCropViewStyle}
+                                    draggable={false}
+                                />
+                            )}
+                            <div className="pointer-events-none absolute inset-0 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.65)]" />
+                            <div className="pointer-events-none absolute inset-[9%] rounded-full border border-white/80" />
+                        </div>
+                    </div>
+
+                    <div className="mt-4">
+                        <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
+                            <span>Приближение</span>
+                            <span>{avatarCropState.zoom.toFixed(2)}x</span>
+                        </div>
+                        <input
+                            type="range"
+                            min={AVATAR_MIN_ZOOM}
+                            max={avatarCropState.maxZoom}
+                            step="0.01"
+                            value={avatarCropState.zoom}
+                            onChange={handleAvatarCropZoomChange}
+                            className="w-full accent-sky-500"
+                        />
+                    </div>
+
+                    <div className="mt-4 flex justify-end gap-2">
+                        <button
+                            type="button"
+                            onClick={handleAvatarCropCancel}
+                            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                            disabled={isAvatarProcessing}
+                        >
+                            Отмена
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleAvatarCropApply}
+                            className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                            disabled={isAvatarProcessing}
+                        >
+                            {isAvatarProcessing ? 'Обработка...' : 'Применить'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
         </>
     );
     };
