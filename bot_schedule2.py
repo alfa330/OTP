@@ -2362,7 +2362,7 @@ def get_sv_list():
     try:
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, name, hours_table_url, role, hire_date, status, gender, birth_date
+                SELECT id, name, hours_table_url, role, hire_date, status, gender, birth_date, avatar_bucket, avatar_blob_path
                 FROM users
                 WHERE role = 'sv'
                 ORDER BY name
@@ -2379,7 +2379,8 @@ def get_sv_list():
                 "hire_date": sv[4].strftime('%d-%m-%Y') if sv[4] else None,
                 "status": sv[5],
                 "gender": sv[6],
-                "birth_date": sv[7].strftime('%d-%m-%Y') if sv[7] else None
+                "birth_date": sv[7].strftime('%d-%m-%Y') if sv[7] else None,
+                "avatar_url": _build_avatar_signed_url(sv[8], sv[9])
             }
             for sv in supervisors
         ]

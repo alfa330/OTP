@@ -21697,7 +21697,18 @@ const withAccessTokenHeader = (headers = {}) => {
                                             <td className="px-6 py-4">{idx + 1}</td>
 
                                             {/* Name */}
-                                            <td className="px-6 py-4 truncate">{sv.name}</td>
+                                            <td className="px-6 py-4">
+                                                <div className="flex items-center gap-3 min-w-0">
+                                                    <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
+                                                        {sv.avatar_url ? (
+                                                            <img src={sv.avatar_url} alt={sv.name || 'avatar'} className="h-full w-full object-cover" />
+                                                        ) : (
+                                                            (sv.name || 'U').charAt(0).toUpperCase()
+                                                        )}
+                                                    </div>
+                                                    <span className="truncate">{sv.name}</span>
+                                                </div>
+                                            </td>
 
                                             {/* Status */}
                                             <td className="px-6 py-4 text-center">
