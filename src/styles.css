@@ -138,14 +138,14 @@
       min-width: 18px;
     }
     .sidebar button > .sidebar-avatar {
-      flex: 0 0 22px;
-      width: 22px;
-      height: 22px;
-      min-width: 22px;
+      flex: 0 0 26px;
+      width: 26px;
+      height: 26px;
+      min-width: 26px;
       border-radius: 9999px;
       overflow: hidden;
-      margin-left: -2px;
-      margin-right: -2px;
+      margin-left: -4px;
+      margin-right: -4px;
       box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
     }
     .main-content {
