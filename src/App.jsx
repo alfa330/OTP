@@ -21062,7 +21062,7 @@ const withAccessTokenHeader = (headers = {}) => {
                     ></div>
                     
                     <div className={`sidebar fixed top-0 left-0 h-full bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 overflow-visible ${sidebarCollapsed ? 'collapsed' : ''} ${mobileMenuOpen ? 'mobile-open' : ''}`}>
-                        <div className="p-4">
+                        <div className="p-4 h-full flex flex-col">
                             {/* Кнопка сворачивания для десктопа */}
                             <button 
                                 className="sidebar-collapse-btn absolute top-4 -right-4 w-8 h-8 rounded-full bg-blue-700 hover:bg-blue-600 flex items-center justify-center transition-all shadow-lg border-2 border-white"
@@ -21086,7 +21086,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
                               </span>
                             </h1>
-                            <ul className="space-y-2">
+                            <ul className="space-y-2 flex-1 overflow-y-auto min-h-0">
                                 {user.role === 'admin' && (
                                     <>
                                         <li>
@@ -21283,8 +21283,6 @@ const withAccessTokenHeader = (headers = {}) => {
                                     </button>
                                 </li>
 
-                                <hr className="border-t border-white-700 my-2 opacity-40" />
-
                                 {/*
                                 <li>
                                         <button onClick={() => { console.log('DevLetter button clicked'); showToast?.('Открываю галерею команды'); setShowDevLetterModal(true); try { startConfetti(); } catch(e){}; setMobileMenuOpen(false); }} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}>
@@ -21292,54 +21290,55 @@ const withAccessTokenHeader = (headers = {}) => {
                                     </button>
                                 </li>
                                 */}
+                            </ul>
+                            <ul className="mt-3 pt-3 border-t border-white/30 space-y-2">
+                                <li className="relative" ref={sidebarAccountRef}>
+                                    <button
+                                        onClick={handleToggleDropdown}
+                                        className="group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative"
+                                        aria-expanded={showSidebarAccountDropdown}
+                                        aria-haspopup="menu"
+                                    >
+                                        <span className="sidebar-avatar border border-white/40 bg-blue-500 flex items-center justify-center text-xs font-semibold text-white shrink-0">
+                                            {user?.avatar_url ? (
+                                                <img src={user.avatar_url} alt={user?.name || 'avatar'} className="h-full w-full object-cover" />
+                                            ) : (
+                                                (user?.name || 'U').charAt(0).toUpperCase()
+                                            )}
+                                        </span>
+                                        <span className="sidebar-text">Аккаунт</span>
 
-                               <li className="relative" ref={sidebarAccountRef}>
-                                <button
-                                    onClick={handleToggleDropdown}
-                                    className="group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative"
-                                    aria-expanded={showSidebarAccountDropdown}
-                                    aria-haspopup="menu"
-                                >
-                                    <span className="sidebar-avatar border border-white/40 bg-blue-500 flex items-center justify-center text-xs font-semibold text-white shrink-0">
-                                        {user?.avatar_url ? (
-                                            <img src={user.avatar_url} alt={user?.name || 'avatar'} className="h-full w-full object-cover" />
-                                        ) : (
-                                            (user?.name || 'U').charAt(0).toUpperCase()
-                                        )}
-                                    </span>
-                                    <span className="sidebar-text">Аккаунт</span>
+                                        {/* Стрелка появляется только при hover */}
+                                        <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
+                                    </button>
 
-                                    {/* Стрелка появляется только при hover */}
-                                    <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
-                                </button>
- 
-                                {(showSidebarAccountDropdown || isClosing) && (
-                                    <div
-                                    className={`absolute left-full top-0 ml-2 w-56 origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
+                                    {(showSidebarAccountDropdown || isClosing) && (
+                                        <div
+                                            className={`absolute left-full top-0 ml-2 w-56 origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
                                         ${showSidebarAccountDropdown && !isClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
-                                    >
-                                    <button
-                                        onClick={() => { setShowChangeLoginForm(true); handleToggleDropdown(true); }}
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
-                                    >
-                                        <FaIcon className="fas fa-user-edit mr-2"></FaIcon> Смена логина
-                                    </button>
+                                        >
+                                            <button
+                                                onClick={() => { setShowChangeLoginForm(true); handleToggleDropdown(true); }}
+                                                className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
+                                            >
+                                                <FaIcon className="fas fa-user-edit mr-2"></FaIcon> Смена логина
+                                            </button>
 
-                                    <div className="border-t border-gray-200" />
+                                            <div className="border-t border-gray-200" />
 
-                                    <button
-                                        onClick={() => { setShowChangePasswordForm(true); handleToggleDropdown(true); }}
-                                        className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
-                                    >
-                                        <FaIcon className="fas fa-lock mr-2"></FaIcon> Смена пароля
-                                    </button>
-                                    </div>
-                                )}
+                                            <button
+                                                onClick={() => { setShowChangePasswordForm(true); handleToggleDropdown(true); }}
+                                                className="w-full text-left px-4 py-2 hover:bg-gray-100 text-black"
+                                            >
+                                                <FaIcon className="fas fa-lock mr-2"></FaIcon> Смена пароля
+                                            </button>
+                                        </div>
+                                    )}
                                 </li>
                                 <li>
-                                <button onClick={handleLogout} className="w-full text-left py-3 px-4 rounded-lg hover:bg-red-700 bg-red-600 transition-all duration-200 flex items-center gap-3">
-                                    <FaIcon className="fas fa-sign-out-alt"></FaIcon> <span className="sidebar-text">Выход</span>
-                                </button>
+                                    <button onClick={handleLogout} className="w-full text-left py-3 px-4 rounded-lg hover:bg-red-700 bg-red-600 transition-all duration-200 flex items-center gap-3">
+                                        <FaIcon className="fas fa-sign-out-alt"></FaIcon> <span className="sidebar-text">Выход</span>
+                                    </button>
                                 </li>
                             </ul>
                         </div>
