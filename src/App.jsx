@@ -21061,7 +21061,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         onClick={() => setMobileMenuOpen(false)}
                     ></div>
                     
-                    <div className={`sidebar scrollbar-hide fixed top-0 left-0 h-full bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 overflow-visible ${sidebarCollapsed ? 'collapsed' : ''} ${mobileMenuOpen ? 'mobile-open' : ''}`}>
+                    <div className={`sidebar fixed top-0 left-0 h-full bg-gradient-to-b from-blue-800 to-blue-900 text-white shadow-2xl z-50 overflow-visible ${sidebarCollapsed ? 'collapsed' : ''} ${mobileMenuOpen ? 'mobile-open' : ''}`}>
                         <div className="p-4 h-full flex flex-col">
                             {/* Кнопка сворачивания для десктопа */}
                             <button 
@@ -21086,7 +21086,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
                               </span>
                             </h1>
-                            <ul className="space-y-2 flex-1 overflow-y-auto min-h-0 scrollbar-hide">
+                            <ul className="space-y-2 flex-1 overflow-y-auto min-h-0 sidebar-menu-scroll">
                                 {user.role === 'admin' && (
                                     <>
                                         <li>
