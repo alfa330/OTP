@@ -59,6 +59,7 @@ const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const CALL_EVALUATION_EMBED_STATE_KEY = 'call_evaluation_embed_state';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
+const ADMIN_SESSIONS_PAGE_SIZE = 100;
 const emitAppToast = (message, type = 'info') => {
     const text = String(message ?? '');
     try {
@@ -15971,19 +15972,32 @@ const withAccessTokenHeader = (headers = {}) => {
         };
 
         const SessionsPanel = ({
-        groupedAdminSessions,
+        adminSessions,
+        adminSessionsSummary,
         isAdminSessionsLoading,
+        isAdminSessionsLoadingMore,
+        hasMoreAdminSessions,
         fetchAdminSessions,
+        loadMoreAdminSessions,
+        onSearchAdminSessions,
+        initialSearch,
         revokingSessionId,       // одиночное прерывание — внешнее состояние
         handleRevokeAdminSession,
         formatDate,
         }) => {
-        const [search, setSearch]     = React.useState('');
+        const [search, setSearch]     = React.useState(initialSearch || '');
         const [roleFilter, setRole]   = React.useState('all');
         const [sortKey, setSortKey]   = React.useState('last_seen_at');
         const [sortDir, setSortDir]   = React.useState('desc');
-
         const [deviceFilter, setDeviceFilter] = React.useState('all'); // 'all' | 'desktop' | 'mobile' | 'tablet' | 'bot' | 'unknown'
+        const lastAppliedSearchRef = React.useRef((initialSearch || '').trim());
+        const loadMoreRef = React.useRef(null);
+
+        React.useEffect(() => {
+            const next = initialSearch || '';
+            setSearch(next);
+            lastAppliedSearchRef.current = next.trim();
+        }, [initialSearch]);
 
         // ── UA Parser ────────────────────────────────────────────────────────────
         const parseUA = React.useCallback((ua) => {
@@ -16041,29 +16055,27 @@ const withAccessTokenHeader = (headers = {}) => {
         const [confirmOpen, setConfirmOpen]   = React.useState(false);
 
         // ── Flatten + enrich with parsed device ──────────────────────────────────
-        const allRows = React.useMemo(() => {
-            const rows = [];
-            const push = (group, extra = {}) =>
-            (group.sessions || []).forEach((s) => {
-                const device = parseUA(s.user_agent);
-                rows.push({ ...s, user_name: group.user_name, user_id: group.user_id,
-                            user_role: group.user_role, user_login: group.user_login,
-                            avatar_url: s.avatar_url || group.avatar_url || null,
-                            device, ...extra });
-            });
-            (groupedAdminSessions.admins      || []).forEach((g) => push(g));
-            (groupedAdminSessions.supervisors || []).forEach((g) => push(g));
-            (groupedAdminSessions.operatorGroups || []).forEach((og) =>
-            (og.operators || []).forEach((g) => push(g, { supervisor_name: og.supervisor_name }))
-            );
-            return rows;
-        }, [groupedAdminSessions, parseUA]);
+        const allRows = React.useMemo(
+            () => (adminSessions || []).map((session) => ({
+                ...session,
+                device: parseUA(session.user_agent)
+            })),
+            [adminSessions, parseUA]
+        );
 
         const statCounts = React.useMemo(() => {
+            const roleCounts = adminSessionsSummary?.role_counts;
+            if (roleCounts) {
+                return {
+                    admin: Number(roleCounts.admin || 0),
+                    sv: Number(roleCounts.sv || 0),
+                    operator: Number(roleCounts.operator || 0)
+                };
+            }
             const c = { admin: 0, sv: 0, operator: 0 };
             allRows.forEach((r) => { if (r.user_role in c) c[r.user_role]++; });
             return c;
-        }, [allRows]);
+        }, [adminSessionsSummary, allRows]);
 
         const deviceCounts = React.useMemo(() => {
             const c = { desktop: 0, mobile: 0, tablet: 0, bot: 0, unknown: 0 };
@@ -16071,34 +16083,23 @@ const withAccessTokenHeader = (headers = {}) => {
             return c;
         }, [allRows]);
 
-        const totalUsers =
-            (groupedAdminSessions.admins?.length      || 0) +
-            (groupedAdminSessions.supervisors?.length || 0) +
-            (groupedAdminSessions.operatorGroups || []).reduce((s, g) => s + (g.operators?.length || 0), 0);
+        const totalSessions = Number(adminSessionsSummary?.total_sessions ?? allRows.length);
+        const totalUsers = Number(adminSessionsSummary?.total_users ?? 0);
 
         // ── Filtered + sorted ────────────────────────────────────────────────────
         const filtered = React.useMemo(() => {
-            const q = search.toLowerCase().trim();
             return allRows
             .filter((r) => {
                 if (roleFilter !== 'all' && r.user_role !== roleFilter) return false;
                 if (deviceFilter !== 'all' && r.device?.type !== deviceFilter) return false;
-                if (!q) return true;
-                return (
-                r.user_name?.toLowerCase().includes(q)  ||
-                r.user_login?.toLowerCase().includes(q) ||
-                r.ip_address?.toLowerCase().includes(q) ||
-                r.session_id?.toLowerCase().includes(q) ||
-                r.user_agent?.toLowerCase().includes(q) ||
-                r.device?.label?.toLowerCase().includes(q)
-                );
+                return true;
             })
             .sort((a, b) => {
                 const av = a[sortKey] ?? '', bv = b[sortKey] ?? '';
                 const cmp = av < bv ? -1 : av > bv ? 1 : 0;
                 return sortDir === 'asc' ? cmp : -cmp;
             });
-        }, [allRows, search, roleFilter, deviceFilter, sortKey, sortDir]);
+        }, [allRows, roleFilter, deviceFilter, sortKey, sortDir]);
 
         // ── Selection helpers ────────────────────────────────────────────────────
         const visibleIds      = filtered.map((r) => r.session_id);
@@ -16126,6 +16127,17 @@ const withAccessTokenHeader = (headers = {}) => {
         };
 
         const clearSelection = () => setSelected(new Set());
+
+        React.useEffect(() => {
+            const timer = window.setTimeout(() => {
+                const normalized = search.trim();
+                if (normalized === lastAppliedSearchRef.current) return;
+                lastAppliedSearchRef.current = normalized;
+                setSelected(new Set());
+                onSearchAdminSessions(normalized);
+            }, 350);
+            return () => window.clearTimeout(timer);
+        }, [search, onSearchAdminSessions]);
 
         // ── Bulk revoke ───────────────────────────────────────────────────────────
         const handleBulkRevoke = async () => {
@@ -16173,6 +16185,27 @@ const withAccessTokenHeader = (headers = {}) => {
         React.useEffect(() => {
             if (headerCheckRef.current) headerCheckRef.current.indeterminate = someVisChecked;
         }, [someVisChecked]);
+
+        React.useEffect(() => {
+            if (typeof IntersectionObserver === 'undefined') return undefined;
+            if (!hasMoreAdminSessions || isAdminSessionsLoading || isAdminSessionsLoadingMore) return undefined;
+            const target = loadMoreRef.current;
+            if (!target) return undefined;
+
+            const observer = new IntersectionObserver((entries) => {
+                if (entries.some((entry) => entry.isIntersecting)) {
+                    loadMoreAdminSessions();
+                }
+            }, { root: null, rootMargin: '300px 0px', threshold: 0.01 });
+
+            observer.observe(target);
+            return () => observer.disconnect();
+        }, [
+            hasMoreAdminSessions,
+            isAdminSessionsLoading,
+            isAdminSessionsLoadingMore,
+            loadMoreAdminSessions
+        ]);
 
         // ── Loading ───────────────────────────────────────────────────────────────
         if (isAdminSessionsLoading)
@@ -16227,7 +16260,7 @@ const withAccessTokenHeader = (headers = {}) => {
             <div className="flex items-start justify-between gap-4">
                 <div>
                 <h2 className="text-xl font-semibold text-gray-900 tracking-tight">Активные сессии</h2>
-                <p className="text-sm text-gray-400 mt-0.5">{allRows.length} сессий · {totalUsers} пользователей</p>
+                <p className="text-sm text-gray-400 mt-0.5">{totalSessions} сессий · {totalUsers} пользователей</p>
                 </div>
                 <button onClick={fetchAdminSessions} disabled={isAdminSessionsLoading}
                 className="shrink-0 inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-gray-200 bg-white text-sm font-medium text-gray-600 shadow-sm hover:bg-gray-50 hover:border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
@@ -16367,7 +16400,7 @@ const withAccessTokenHeader = (headers = {}) => {
             </div>
 
             {/* ── Table ── */}
-            {totalUsers === 0 ? (
+            {totalSessions === 0 ? (
                 <div className="flex flex-col items-center justify-center py-20 gap-3 text-gray-400">
                 <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center">
                     <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -16566,6 +16599,20 @@ const withAccessTokenHeader = (headers = {}) => {
                             </tr>
                         );
                         })}
+                        {isAdminSessionsLoadingMore && (
+                        <tr>
+                            <td colSpan={8} className="px-4 py-4 text-center text-xs text-gray-400">
+                            Загрузка еще сессий…
+                            </td>
+                        </tr>
+                        )}
+                        {hasMoreAdminSessions && (
+                        <tr>
+                            <td colSpan={8} className="p-0">
+                            <div ref={loadMoreRef} className="h-2" />
+                            </td>
+                        </tr>
+                        )}
                     </tbody>
                     </table>
                 </div>
@@ -16574,8 +16621,10 @@ const withAccessTokenHeader = (headers = {}) => {
                 <div className="px-4 py-2.5 border-t border-gray-100 bg-gray-50/60 flex items-center justify-between">
                     <span className="text-xs text-gray-400">
                     {filtered.length === allRows.length
-                        ? `${allRows.length} сессий`
-                        : `${filtered.length} из ${allRows.length} сессий`}
+                        ? (hasMoreAdminSessions
+                            ? `Показано ${allRows.length} из ${totalSessions} сессий`
+                            : `${totalSessions} сессий`)
+                        : `${filtered.length} из ${allRows.length} загруженных (всего ${totalSessions})`}
                     {selected.size > 0 && (
                         <span className="ml-2 text-blue-600 font-medium">· {selected.size} выбрано</span>
                     )}
@@ -16667,8 +16716,18 @@ const withAccessTokenHeader = (headers = {}) => {
             const [selectedMonth, setSelectedMonth] = useState(() => getStoredValue('selectedMonth', currentMonth));
             const [users, setUsers] = useState([]);
             const [adminSessions, setAdminSessions] = useState([]);
+            const [adminSessionsSummary, setAdminSessionsSummary] = useState({
+                total_sessions: 0,
+                total_users: 0,
+                role_counts: { admin: 0, sv: 0, operator: 0 }
+            });
+            const [adminSessionsOffset, setAdminSessionsOffset] = useState(0);
+            const [adminSessionsHasMore, setAdminSessionsHasMore] = useState(false);
+            const [adminSessionsQuery, setAdminSessionsQuery] = useState('');
             const [isAdminSessionsLoading, setIsAdminSessionsLoading] = useState(false);
+            const [isAdminSessionsLoadingMore, setIsAdminSessionsLoadingMore] = useState(false);
             const [revokingSessionId, setRevokingSessionId] = useState('');
+            const adminSessionsRequestIdRef = useRef(0);
             const [showUserEditModal, setShowUserEditModal] = useState(false);
             const [userToEdit, setUserToEdit] = useState(null);
             const [svOperators, setSvOperators] = useState([]);
@@ -18999,26 +19058,86 @@ const withAccessTokenHeader = (headers = {}) => {
                 });
             };
 
-            const fetchAdminSessions = async () => {
+            const fetchAdminSessions = useCallback(async ({ reset = true, query } = {}) => {
                 if (!user || user.role !== 'admin') return;
-                setIsAdminSessionsLoading(true);
+
+                const normalizedQuery = typeof query === 'string' ? query.trim() : adminSessionsQuery;
+                const nextOffset = reset ? 0 : adminSessionsOffset;
+
+                if (!reset && (!adminSessionsHasMore || isAdminSessionsLoading || isAdminSessionsLoadingMore)) {
+                    return;
+                }
+
+                if (reset) {
+                    setIsAdminSessionsLoading(true);
+                    setIsAdminSessionsLoadingMore(false);
+                }
+                else setIsAdminSessionsLoadingMore(true);
+
+                const requestId = ++adminSessionsRequestIdRef.current;
                 try {
-                    const response = await axios.get(`${API_BASE_URL}/api/admin/sessions`, {
+                    const params = new URLSearchParams({
+                        limit: String(ADMIN_SESSIONS_PAGE_SIZE),
+                        offset: String(nextOffset)
+                    });
+                    if (normalizedQuery) params.set('q', normalizedQuery);
+
+                    const response = await axios.get(`${API_BASE_URL}/api/admin/sessions?${params.toString()}`, {
                         headers: { 'X-API-Key': user.apiKey, 'X-User-Id': user.id }
                     });
-                    const data = response.data;
-                    if (data.status === 'success' && isMounted.current) {
-                        setAdminSessions(Array.isArray(data.sessions) ? data.sessions : []);
-                    } else {
+                    const data = response.data || {};
+                    if (data.status === 'success' && isMounted.current && requestId === adminSessionsRequestIdRef.current) {
+                        const rows = Array.isArray(data.sessions) ? data.sessions : [];
+                        const summary = data.summary || {};
+                        const roleCounts = summary.role_counts || {};
+                        const pagination = data.pagination || {};
+
+                        setAdminSessions((prev) => (reset ? rows : [...prev, ...rows]));
+                        setAdminSessionsOffset(nextOffset + rows.length);
+                        setAdminSessionsHasMore(Boolean(pagination.has_more));
+                        setAdminSessionsQuery(normalizedQuery);
+                        setAdminSessionsSummary({
+                            total_sessions: Number(summary.total_sessions || 0),
+                            total_users: Number(summary.total_users || 0),
+                            role_counts: {
+                                admin: Number(roleCounts.admin || 0),
+                                sv: Number(roleCounts.sv || 0),
+                                operator: Number(roleCounts.operator || 0)
+                            }
+                        });
+                    } else if (data.status !== 'success') {
                         showToast(data.error || 'Failed to fetch active sessions', 'error');
                     }
                 } catch (err) {
                     console.error('Fetch admin sessions error:', err);
                     showToast(err.response?.data?.error || 'Failed to fetch active sessions', 'error');
                 } finally {
-                    if (isMounted.current) setIsAdminSessionsLoading(false);
+                    if (isMounted.current && requestId === adminSessionsRequestIdRef.current) {
+                        if (reset) setIsAdminSessionsLoading(false);
+                        else setIsAdminSessionsLoadingMore(false);
+                    }
                 }
-            };
+            }, [
+                user,
+                adminSessionsQuery,
+                adminSessionsOffset,
+                adminSessionsHasMore,
+                isAdminSessionsLoading,
+                isAdminSessionsLoadingMore
+            ]);
+
+            const refreshAdminSessions = useCallback(() => {
+                fetchAdminSessions({ reset: true });
+            }, [fetchAdminSessions]);
+
+            const searchAdminSessions = useCallback((query) => {
+                fetchAdminSessions({ reset: true, query });
+            }, [fetchAdminSessions]);
+
+            const loadMoreAdminSessions = useCallback(() => {
+                if (isAdminSessionsLoading || isAdminSessionsLoadingMore || !adminSessionsHasMore) return;
+                fetchAdminSessions({ reset: false });
+            }, [fetchAdminSessions, isAdminSessionsLoading, isAdminSessionsLoadingMore, adminSessionsHasMore]);
 
             const handleRevokeAdminSession = async (session) => {
                 if (!session?.session_id) return;
@@ -19042,7 +19161,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             await confirmLogout();
                             return;
                         }
-                        await fetchAdminSessions();
+                        await refreshAdminSessions();
                     } else {
                         showToast(data.error || 'Failed to revoke session', 'error');
                     }
@@ -20104,78 +20223,6 @@ const withAccessTokenHeader = (headers = {}) => {
                 (u.supervisor_name || '').toLowerCase().includes(searchQuery.toLowerCase())
             );
 
-            const groupedAdminSessions = useMemo(() => {
-                const usersById = {};
-                (adminSessions || []).forEach((item) => {
-                    const userId = item.user_id;
-                    if (!usersById[userId]) {
-                        usersById[userId] = {
-                            user_id: userId,
-                            user_name: item.user_name,
-                            user_role: item.user_role,
-                            user_login: item.user_login,
-                            avatar_url: item.avatar_url || null,
-                            supervisor_id: item.supervisor_id ?? null,
-                            supervisor_name: item.supervisor_name || null,
-                            sessions: []
-                        };
-                    }
-                    usersById[userId].sessions.push(item);
-                });
-
-                const sortUsers = (items) =>
-                    items
-                        .map((group) => ({
-                            ...group,
-                            sessions: (group.sessions || []).sort(
-                                (a, b) => new Date(b.last_seen_at || 0).getTime() - new Date(a.last_seen_at || 0).getTime()
-                            )
-                        }))
-                        .sort((a, b) => (a.user_name || '').localeCompare((b.user_name || ''), 'ru', { sensitivity: 'base' }));
-
-                const admins = [];
-                const supervisors = [];
-                const operatorsBySupervisor = {};
-
-                Object.values(usersById).forEach((group) => {
-                    const role = (group.user_role || '').toLowerCase();
-                    if (role === 'admin') {
-                        admins.push(group);
-                        return;
-                    }
-                    if (role === 'sv' || role === 'supervisor') {
-                        supervisors.push(group);
-                        return;
-                    }
-                    if (role === 'operator') {
-                        const supervisorKey = group.supervisor_id != null ? String(group.supervisor_id) : 'no_supervisor';
-                        if (!operatorsBySupervisor[supervisorKey]) {
-                            operatorsBySupervisor[supervisorKey] = {
-                                supervisor_id: group.supervisor_id,
-                                supervisor_name: group.supervisor_name || 'Без супервайзера',
-                                operators: []
-                            };
-                        }
-                        operatorsBySupervisor[supervisorKey].operators.push(group);
-                        return;
-                    }
-                    supervisors.push(group);
-                });
-
-                const operatorGroups = Object.values(operatorsBySupervisor)
-                    .map((group) => ({
-                        ...group,
-                        operators: sortUsers(group.operators || [])
-                    }))
-                    .sort((a, b) => (a.supervisor_name || '').localeCompare((b.supervisor_name || ''), 'ru', { sensitivity: 'base' }));
-
-                return {
-                    admins: sortUsers(admins),
-                    supervisors: sortUsers(supervisors),
-                    operatorGroups
-                };
-            }, [adminSessions]);
-
             const fetchProfileData = async () => {
                 setIsLoading(true);
                 
@@ -20906,9 +20953,9 @@ const withAccessTokenHeader = (headers = {}) => {
 
             useEffect(() => {
                 if (user?.role === 'admin' && view === 'admin_sessions') {
-                    fetchAdminSessions();
+                    refreshAdminSessions();
                 }
-            }, [user, view]);
+            }, [user, view, refreshAdminSessions]);
 
             if (isAuthInitializing) {
                 return (
@@ -21844,9 +21891,15 @@ const withAccessTokenHeader = (headers = {}) => {
                                 
                                 {view === 'admin_sessions' && (
                                 <SessionsPanel
-                                    groupedAdminSessions={groupedAdminSessions}
+                                    adminSessions={adminSessions}
+                                    adminSessionsSummary={adminSessionsSummary}
                                     isAdminSessionsLoading={isAdminSessionsLoading}
-                                    fetchAdminSessions={fetchAdminSessions}
+                                    isAdminSessionsLoadingMore={isAdminSessionsLoadingMore}
+                                    hasMoreAdminSessions={adminSessionsHasMore}
+                                    fetchAdminSessions={refreshAdminSessions}
+                                    loadMoreAdminSessions={loadMoreAdminSessions}
+                                    onSearchAdminSessions={searchAdminSessions}
+                                    initialSearch={adminSessionsQuery}
                                     revokingSessionId={revokingSessionId}
                                     handleRevokeAdminSession={handleRevokeAdminSession}
                                     formatDate={formatDate}

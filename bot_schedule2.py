@@ -1053,8 +1053,24 @@ def list_admin_sessions():
         if not requester or requester[3] != 'admin':
             return jsonify({"error": "Forbidden: only admins can access"}), 403
 
+        raw_limit = request.args.get('limit')
+        raw_offset = request.args.get('offset')
+        query_text = (request.args.get('q') or '').strip()
+
+        try:
+            limit = int(raw_limit) if raw_limit is not None else 100
+            offset = int(raw_offset) if raw_offset is not None else 0
+        except Exception:
+            return jsonify({"error": "Invalid pagination params"}), 400
+
+        if limit < 1 or limit > 500:
+            return jsonify({"error": "limit must be in range 1..500"}), 400
+        if offset < 0:
+            return jsonify({"error": "offset must be >= 0"}), 400
+
         current_session_id = _current_session_id_from_access_token()
-        sessions = db.list_all_active_sessions()
+        sessions = db.list_all_active_sessions(limit=limit, offset=offset, search=query_text)
+        summary = db.get_all_active_sessions_summary(search=query_text)
         serialized = []
         for item in sessions:
             serialized.append({
@@ -1079,7 +1095,23 @@ def list_admin_sessions():
                     else None
                 )
             })
-        return jsonify({"status": "success", "sessions": serialized}), 200
+
+        total_sessions = int(summary.get("total_sessions", 0))
+        returned = len(serialized)
+        has_more = (offset + returned) < total_sessions
+
+        return jsonify({
+            "status": "success",
+            "sessions": serialized,
+            "summary": summary,
+            "pagination": {
+                "limit": limit,
+                "offset": offset,
+                "returned": returned,
+                "has_more": has_more
+            },
+            "query": query_text
+        }), 200
     except Exception as e:
         logging.error(f"list_admin_sessions error: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500

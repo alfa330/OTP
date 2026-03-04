@@ -2570,33 +2570,68 @@ class Database:
                 for row in rows
             ]
 
-    def list_all_active_sessions(self):
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT
-                    us.session_id::text,
-                    us.user_id,
-                    u.name,
-                    u.role,
-                    u.login,
-                    u.supervisor_id,
-                    sv.name AS supervisor_name,
-                    u.avatar_bucket,
-                    u.avatar_blob_path,
-                    us.user_agent,
-                    us.ip_address,
-                    us.created_at,
-                    us.last_seen_at,
-                    us.expires_at,
-                    us.sensitive_data_unlocked,
-                    us.sensitive_data_unlocked_at
-                FROM user_sessions us
-                JOIN users u ON u.id = us.user_id
-                LEFT JOIN users sv ON sv.id = u.supervisor_id
-                WHERE us.revoked_at IS NULL
-                  AND us.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
-                ORDER BY u.name ASC, us.last_seen_at DESC, us.created_at DESC
+    def _build_active_sessions_where_clause(self, search: Optional[str] = None):
+        where_clauses = [
+            "us.revoked_at IS NULL",
+            "us.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')"
+        ]
+        params: List[Any] = []
+
+        search_text = (search or '').strip()
+        if search_text:
+            pattern = f"%{search_text}%"
+            where_clauses.append("""
+                (
+                    us.session_id::text ILIKE %s
+                    OR COALESCE(us.ip_address, '') ILIKE %s
+                    OR COALESCE(us.user_agent, '') ILIKE %s
+                    OR COALESCE(u.name, '') ILIKE %s
+                    OR COALESCE(u.login, '') ILIKE %s
+                    OR COALESCE(sv.name, '') ILIKE %s
+                )
             """)
+            params.extend([pattern, pattern, pattern, pattern, pattern, pattern])
+
+        return " AND ".join(where_clauses), params
+
+    def list_all_active_sessions(self, limit: Optional[int] = None, offset: int = 0, search: Optional[str] = None):
+        where_sql, params = self._build_active_sessions_where_clause(search=search)
+
+        query = f"""
+            SELECT
+                us.session_id::text,
+                us.user_id,
+                u.name,
+                u.role,
+                u.login,
+                u.supervisor_id,
+                sv.name AS supervisor_name,
+                u.avatar_bucket,
+                u.avatar_blob_path,
+                us.user_agent,
+                us.ip_address,
+                us.created_at,
+                us.last_seen_at,
+                us.expires_at,
+                us.sensitive_data_unlocked,
+                us.sensitive_data_unlocked_at
+            FROM user_sessions us
+            JOIN users u ON u.id = us.user_id
+            LEFT JOIN users sv ON sv.id = u.supervisor_id
+            WHERE {where_sql}
+            ORDER BY u.name ASC, us.last_seen_at DESC, us.created_at DESC
+        """
+
+        final_params = list(params)
+        if limit is not None:
+            query += " LIMIT %s"
+            final_params.append(max(1, int(limit)))
+        if offset:
+            query += " OFFSET %s"
+            final_params.append(max(0, int(offset)))
+
+        with self._get_cursor() as cursor:
+            cursor.execute(query, tuple(final_params))
             rows = cursor.fetchall()
             return [
                 {
@@ -2619,6 +2654,35 @@ class Database:
                 }
                 for row in rows
             ]
+
+    def get_all_active_sessions_summary(self, search: Optional[str] = None):
+        where_sql, params = self._build_active_sessions_where_clause(search=search)
+
+        query = f"""
+            SELECT
+                COUNT(*) AS total_sessions,
+                COUNT(DISTINCT us.user_id) AS total_users,
+                COUNT(*) FILTER (WHERE LOWER(COALESCE(u.role, '')) = 'admin') AS admin_sessions,
+                COUNT(*) FILTER (WHERE LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')) AS sv_sessions,
+                COUNT(*) FILTER (WHERE LOWER(COALESCE(u.role, '')) = 'operator') AS operator_sessions
+            FROM user_sessions us
+            JOIN users u ON u.id = us.user_id
+            LEFT JOIN users sv ON sv.id = u.supervisor_id
+            WHERE {where_sql}
+        """
+
+        with self._get_cursor() as cursor:
+            cursor.execute(query, tuple(params))
+            row = cursor.fetchone() or (0, 0, 0, 0, 0)
+            return {
+                "total_sessions": int(row[0] or 0),
+                "total_users": int(row[1] or 0),
+                "role_counts": {
+                    "admin": int(row[2] or 0),
+                    "sv": int(row[3] or 0),
+                    "operator": int(row[4] or 0)
+                }
+            }
 
     def get_call_evaluations(self, operator_id, month=None):
         """
