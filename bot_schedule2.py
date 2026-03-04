@@ -1065,6 +1065,7 @@ def list_admin_sessions():
                 "user_login": item["user_login"],
                 "supervisor_id": item["supervisor_id"],
                 "supervisor_name": item["supervisor_name"],
+                "avatar_url": _build_avatar_signed_url(item.get("avatar_bucket"), item.get("avatar_blob_path")),
                 "is_current": item["session_id"] == current_session_id,
                 "user_agent": item["user_agent"],
                 "ip_address": item["ip_address"],
@@ -3074,6 +3075,9 @@ def get_sv_data():
                 status = op.get("status")
                 rate = op.get("rate")
                 gender = op.get("gender")
+                avatar_url = op.get("avatar_url")
+                avatar_bucket = op.get("avatar_bucket")
+                avatar_blob_path = op.get("avatar_blob_path")
             else:
                 operator_id = op[0] if len(op) > 0 else None
                 operator_name = op[1] if len(op) > 1 else None
@@ -3085,6 +3089,9 @@ def get_sv_data():
                 status = op[7] if len(op) > 7 else None
                 rate = op[8] if len(op) > 8 else None
                 gender = op[9] if len(op) > 9 else None
+                avatar_url = None
+                avatar_bucket = op[11] if len(op) > 11 else None
+                avatar_blob_path = op[12] if len(op) > 12 else None
 
             # skip invalid rows
             if not operator_id:
@@ -3126,7 +3133,8 @@ def get_sv_data():
                 "scores_table_url": scores_table_url,
                 "status": status,
                 "rate": rate_val,
-                "gender": gender
+                "gender": gender,
+                "avatar_url": avatar_url or _build_avatar_signed_url(avatar_bucket, avatar_blob_path)
             })
 
         return jsonify(response_data), 200
