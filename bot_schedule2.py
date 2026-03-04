@@ -1768,6 +1768,96 @@ def admin_update_user():
     except Exception as e:
         logging.error(f"Error updating user: {e}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/api/admin/users/bulk_update', methods=['POST'])
+@require_api_key
+def admin_bulk_update_users():
+    try:
+        data = request.get_json() or {}
+        user_ids_raw = data.get('user_ids')
+        changes_raw = data.get('changes')
+
+        if not isinstance(user_ids_raw, list) or not user_ids_raw:
+            return jsonify({"error": "user_ids must be a non-empty list"}), 400
+        if not isinstance(changes_raw, dict) or not changes_raw:
+            return jsonify({"error": "changes must be a non-empty object"}), 400
+
+        requester_id = int(request.headers.get('X-User-Id'))
+        requester = db.get_user(id=requester_id)
+        if not requester or (requester[3] != 'admin' and requester[3] != 'sv'):
+            return jsonify({"error": "Only admins can update users"}), 403
+
+        user_ids = []
+        for raw_id in user_ids_raw:
+            try:
+                user_id = int(raw_id)
+            except (TypeError, ValueError):
+                return jsonify({"error": f"Invalid user id: {raw_id}"}), 400
+            if user_id not in user_ids:
+                user_ids.append(user_id)
+
+        allowed_fields = {'direction_id', 'supervisor_id', 'rate'}
+        unknown_fields = [field for field in changes_raw.keys() if field not in allowed_fields]
+        if unknown_fields:
+            return jsonify({"error": f"Unsupported fields: {', '.join(unknown_fields)}"}), 400
+
+        updates = {}
+        if 'direction_id' in changes_raw:
+            direction_value = changes_raw.get('direction_id')
+            if direction_value in [None, '']:
+                return jsonify({"error": "direction_id cannot be empty"}), 400
+            try:
+                updates['direction_id'] = int(direction_value)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid direction_id"}), 400
+
+        if 'supervisor_id' in changes_raw:
+            supervisor_value = changes_raw.get('supervisor_id')
+            if supervisor_value in [None, '']:
+                return jsonify({"error": "supervisor_id cannot be empty"}), 400
+            try:
+                updates['supervisor_id'] = int(supervisor_value)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid supervisor_id"}), 400
+
+        if 'rate' in changes_raw:
+            try:
+                rate_value = float(changes_raw.get('rate'))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Invalid rate format"}), 400
+            if rate_value not in [1.0, 0.75, 0.5]:
+                return jsonify({"error": "Invalid rate value"}), 400
+            updates['rate'] = rate_value
+
+        if not updates:
+            return jsonify({"error": "No valid changes provided"}), 400
+
+        updated_count = 0
+        failed_user_ids = []
+        for target_user_id in user_ids:
+            try:
+                update_ok = True
+                for field, value in updates.items():
+                    if not db.update_user(target_user_id, field, value, changed_by=requester_id):
+                        update_ok = False
+                        break
+                if update_ok:
+                    updated_count += 1
+                else:
+                    failed_user_ids.append(target_user_id)
+            except Exception:
+                logging.exception("Bulk update failed for user_id=%s", target_user_id)
+                failed_user_ids.append(target_user_id)
+
+        return jsonify({
+            "status": "success",
+            "updated_count": updated_count,
+            "failed_user_ids": failed_user_ids,
+            "applied_fields": list(updates.keys())
+        }), 200
+    except Exception as e:
+        logging.error(f"Error bulk updating users: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
     
 @app.route('/api/user/history', methods=['GET'])
 @require_api_key
