@@ -22450,75 +22450,75 @@ const withAccessTokenHeader = (headers = {}) => {
                                             />
                                             </div>
 
-                                            <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-4">
-                                                <div className="flex flex-col gap-3">
-                                                    <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-                                                        <div className="text-blue-900">
-                                                            Зажмите <span className="font-semibold">Ctrl</span> и кликните по строкам для мультивыбора.
-                                                            <span className="ml-2 font-semibold">Выбрано: {selectedManageUsersCount}</span>
-                                                        </div>
-                                                        {selectedManageUsersCount > 0 && (
+                                            {selectedManageUsersCount > 0 && (
+                                                <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-4">
+                                                    <div className="flex flex-col gap-3">
+                                                        <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                                                            <div className="text-blue-900">
+                                                                Зажмите <span className="font-semibold">Ctrl</span> и кликните по строкам для мультивыбора.
+                                                                <span className="ml-2 font-semibold">Выбрано: {selectedManageUsersCount}</span>
+                                                            </div>
                                                             <button
                                                                 onClick={clearManageUsersSelection}
                                                                 className="px-3 py-1.5 rounded-lg border border-blue-300 text-blue-800 hover:bg-blue-100 transition"
                                                             >
                                                                 Снять выбор
                                                             </button>
-                                                        )}
-                                                    </div>
+                                                        </div>
 
-                                                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                                                        <select
-                                                            value={bulkManageUsersChanges.supervisor_id}
-                                                            onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, supervisor_id: e.target.value }))}
-                                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white text-gray-900"
-                                                        >
-                                                            <option value="">Супервайзер: не менять</option>
-                                                            {availableSupervisors.map((sv) => (
-                                                                <option key={sv.id} value={sv.id}>
-                                                                    {sv.name}
-                                                                </option>
-                                                            ))}
-                                                        </select>
+                                                        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                                            <select
+                                                                value={bulkManageUsersChanges.supervisor_id}
+                                                                onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, supervisor_id: e.target.value }))}
+                                                                className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white text-gray-900"
+                                                            >
+                                                                <option value="">Супервайзер: не менять</option>
+                                                                {availableSupervisors.map((sv) => (
+                                                                    <option key={sv.id} value={sv.id}>
+                                                                        {sv.name}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
 
-                                                        <select
-                                                            value={bulkManageUsersChanges.direction_id}
-                                                            onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, direction_id: e.target.value }))}
-                                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white text-gray-900"
-                                                        >
-                                                            <option value="">Направление: не менять</option>
-                                                            {directions.map((dir) => (
-                                                                <option key={dir.id} value={dir.id}>
-                                                                    {dir.name}
-                                                                </option>
-                                                            ))}
-                                                        </select>
+                                                            <select
+                                                                value={bulkManageUsersChanges.direction_id}
+                                                                onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, direction_id: e.target.value }))}
+                                                                className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white text-gray-900"
+                                                            >
+                                                                <option value="">Направление: не менять</option>
+                                                                {directions.map((dir) => (
+                                                                    <option key={dir.id} value={dir.id}>
+                                                                        {dir.name}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
 
-                                                        <select
-                                                            value={bulkManageUsersChanges.rate}
-                                                            onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, rate: e.target.value }))}
-                                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white text-gray-900"
-                                                        >
-                                                            <option value="">Ставка: не менять</option>
-                                                            <option value="1">1.00</option>
-                                                            <option value="0.75">0.75</option>
-                                                            <option value="0.5">0.50</option>
-                                                        </select>
+                                                            <select
+                                                                value={bulkManageUsersChanges.rate}
+                                                                onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, rate: e.target.value }))}
+                                                                className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white text-gray-900"
+                                                            >
+                                                                <option value="">Ставка: не менять</option>
+                                                                <option value="1">1.00</option>
+                                                                <option value="0.75">0.75</option>
+                                                                <option value="0.5">0.50</option>
+                                                            </select>
 
-                                                        <button
-                                                            onClick={applyBulkManageUsersChanges}
-                                                            disabled={!canApplyBulkManageUsersChanges}
-                                                            className={`w-full px-4 py-2 rounded-lg text-white transition ${
-                                                                canApplyBulkManageUsersChanges
-                                                                    ? 'bg-blue-600 hover:bg-blue-700'
-                                                                    : 'bg-gray-300 cursor-not-allowed'
-                                                            }`}
-                                                        >
-                                                            {isBulkManageUsersSaving ? 'Сохраняю...' : 'Применить массово'}
-                                                        </button>
+                                                            <button
+                                                                onClick={applyBulkManageUsersChanges}
+                                                                disabled={!canApplyBulkManageUsersChanges}
+                                                                className={`w-full px-4 py-2 rounded-lg text-white transition ${
+                                                                    canApplyBulkManageUsersChanges
+                                                                        ? 'bg-blue-600 hover:bg-blue-700'
+                                                                        : 'bg-gray-300 cursor-not-allowed'
+                                                                }`}
+                                                            >
+                                                                {isBulkManageUsersSaving ? 'Сохраняю...' : 'Применить массово'}
+                                                            </button>
+                                                        </div>
                                                     </div>
                                                 </div>
-                                            </div>
+                                            )}
 
                                             {/* Группировка по супервайзерам */}
                                             {sortedSvNames.map((svName) => {
