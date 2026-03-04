@@ -16078,10 +16078,20 @@ const withAccessTokenHeader = (headers = {}) => {
         }, [adminSessionsSummary, allRows]);
 
         const deviceCounts = React.useMemo(() => {
+            const summaryDeviceCounts = adminSessionsSummary?.device_counts;
+            if (summaryDeviceCounts) {
+                return {
+                    desktop: Number(summaryDeviceCounts.desktop || 0),
+                    mobile: Number(summaryDeviceCounts.mobile || 0),
+                    tablet: Number(summaryDeviceCounts.tablet || 0),
+                    bot: Number(summaryDeviceCounts.bot || 0),
+                    unknown: Number(summaryDeviceCounts.unknown || 0)
+                };
+            }
             const c = { desktop: 0, mobile: 0, tablet: 0, bot: 0, unknown: 0 };
             allRows.forEach((r) => { const t = r.device?.type || 'unknown'; if (t in c) c[t]++; });
             return c;
-        }, [allRows]);
+        }, [adminSessionsSummary, allRows]);
 
         const totalSessions = Number(adminSessionsSummary?.total_sessions ?? allRows.length);
         const totalUsers = Number(adminSessionsSummary?.total_users ?? 0);
@@ -16100,6 +16110,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 return sortDir === 'asc' ? cmp : -cmp;
             });
         }, [allRows, roleFilter, deviceFilter, sortKey, sortDir]);
+        const isSearchLoading = isAdminSessionsLoading && Boolean(search.trim());
 
         // ── Selection helpers ────────────────────────────────────────────────────
         const visibleIds      = filtered.map((r) => r.session_id);
@@ -16331,7 +16342,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 { val: 'tablet',  label: 'Планшет',         icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5h3m-6.75 2.25h10.5a2.25 2.25 0 002.25-2.25v-15a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 4.5v15a2.25 2.25 0 002.25 2.25z"/></svg> },
                 { val: 'bot',     label: 'Боты',            icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21M6.75 19.5h10.5a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0017.25 4.5H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm5.25-6a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H12v-.008zm-3 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H9v-.008zm6 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H15v-.008z"/></svg> },
                 ].map(({ val, label, icon }) => {
-                const count = val === 'all' ? allRows.length : (deviceCounts[val] || 0);
+                const count = val === 'all' ? totalSessions : (deviceCounts[val] || 0);
                 if (val !== 'all' && count === 0) return null;
                 const active = deviceFilter === val;
                 return (
@@ -16440,7 +16451,19 @@ const withAccessTokenHeader = (headers = {}) => {
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-50">
-                        {filtered.length === 0 ? (
+                        {isSearchLoading && (
+                        <tr>
+                            <td colSpan={8} className="px-4 py-3 text-center">
+                            <span className="inline-flex items-center gap-2 text-xs text-gray-400">
+                                <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                                <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4" strokeLinecap="round"/>
+                                </svg>
+                                Поиск...
+                            </span>
+                            </td>
+                        </tr>
+                        )}
+                        {filtered.length === 0 && !isSearchLoading ? (
                         <tr>
                             <td colSpan={8} className="px-4 py-12 text-center text-sm text-gray-400">
                             Ничего не найдено{search && <> по запросу <span className="font-medium text-gray-600">«{search}»</span></>}
@@ -16719,7 +16742,8 @@ const withAccessTokenHeader = (headers = {}) => {
             const [adminSessionsSummary, setAdminSessionsSummary] = useState({
                 total_sessions: 0,
                 total_users: 0,
-                role_counts: { admin: 0, sv: 0, operator: 0 }
+                role_counts: { admin: 0, sv: 0, operator: 0 },
+                device_counts: { desktop: 0, mobile: 0, tablet: 0, bot: 0, unknown: 0 }
             });
             const [adminSessionsOffset, setAdminSessionsOffset] = useState(0);
             const [adminSessionsHasMore, setAdminSessionsHasMore] = useState(false);
@@ -19090,6 +19114,7 @@ const withAccessTokenHeader = (headers = {}) => {
                         const rows = Array.isArray(data.sessions) ? data.sessions : [];
                         const summary = data.summary || {};
                         const roleCounts = summary.role_counts || {};
+                        const deviceCounts = summary.device_counts || {};
                         const pagination = data.pagination || {};
 
                         setAdminSessions((prev) => (reset ? rows : [...prev, ...rows]));
@@ -19103,6 +19128,13 @@ const withAccessTokenHeader = (headers = {}) => {
                                 admin: Number(roleCounts.admin || 0),
                                 sv: Number(roleCounts.sv || 0),
                                 operator: Number(roleCounts.operator || 0)
+                            },
+                            device_counts: {
+                                desktop: Number(deviceCounts.desktop || 0),
+                                mobile: Number(deviceCounts.mobile || 0),
+                                tablet: Number(deviceCounts.tablet || 0),
+                                bot: Number(deviceCounts.bot || 0),
+                                unknown: Number(deviceCounts.unknown || 0)
                             }
                         });
                     } else if (data.status !== 'success') {

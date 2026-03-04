@@ -2658,22 +2658,59 @@ class Database:
     def get_all_active_sessions_summary(self, search: Optional[str] = None):
         where_sql, params = self._build_active_sessions_where_clause(search=search)
 
+        bot_expr = "ua ~* 'bot|crawl|spider|slurp|bingpreview|facebookexternalhit|linkedinbot|twitterbot'"
+        tablet_expr = (
+            "("
+            "ua ~* 'ipad|tablet|kindle|playbook|silk' "
+            "OR (ua ~* 'android' AND ua !~* 'mobile') "
+            "OR (ua ~* 'windows' AND ua !~* 'phone' AND ua ~* 'touch') "
+            "OR (ua ~* 'puffin' AND ua !~* 'ip|ap|wp')"
+            ")"
+        )
+        mobile_expr = "ua ~* 'mobi|android|iphone|ipod|blackberry|iemobile|opera mini|windows phone'"
+
         query = f"""
+            WITH filtered AS (
+                SELECT
+                    us.user_id,
+                    LOWER(COALESCE(u.role, '')) AS user_role,
+                    LOWER(COALESCE(us.user_agent, '')) AS ua
+                FROM user_sessions us
+                JOIN users u ON u.id = us.user_id
+                LEFT JOIN users sv ON sv.id = u.supervisor_id
+                WHERE {where_sql}
+            )
             SELECT
                 COUNT(*) AS total_sessions,
-                COUNT(DISTINCT us.user_id) AS total_users,
-                COUNT(*) FILTER (WHERE LOWER(COALESCE(u.role, '')) = 'admin') AS admin_sessions,
-                COUNT(*) FILTER (WHERE LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')) AS sv_sessions,
-                COUNT(*) FILTER (WHERE LOWER(COALESCE(u.role, '')) = 'operator') AS operator_sessions
-            FROM user_sessions us
-            JOIN users u ON u.id = us.user_id
-            LEFT JOIN users sv ON sv.id = u.supervisor_id
-            WHERE {where_sql}
+                COUNT(DISTINCT user_id) AS total_users,
+                COUNT(*) FILTER (WHERE user_role = 'admin') AS admin_sessions,
+                COUNT(*) FILTER (WHERE user_role IN ('sv', 'supervisor')) AS sv_sessions,
+                COUNT(*) FILTER (WHERE user_role = 'operator') AS operator_sessions,
+                COUNT(*) FILTER (WHERE ua = '') AS unknown_sessions,
+                COUNT(*) FILTER (WHERE {bot_expr}) AS bot_sessions,
+                COUNT(*) FILTER (
+                    WHERE ua <> ''
+                      AND NOT ({bot_expr})
+                      AND {tablet_expr}
+                ) AS tablet_sessions,
+                COUNT(*) FILTER (
+                    WHERE ua <> ''
+                      AND NOT ({bot_expr})
+                      AND NOT ({tablet_expr})
+                      AND {mobile_expr}
+                ) AS mobile_sessions,
+                COUNT(*) FILTER (
+                    WHERE ua <> ''
+                      AND NOT ({bot_expr})
+                      AND NOT ({tablet_expr})
+                      AND NOT ({mobile_expr})
+                ) AS desktop_sessions
+            FROM filtered
         """
 
         with self._get_cursor() as cursor:
             cursor.execute(query, tuple(params))
-            row = cursor.fetchone() or (0, 0, 0, 0, 0)
+            row = cursor.fetchone() or (0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
             return {
                 "total_sessions": int(row[0] or 0),
                 "total_users": int(row[1] or 0),
@@ -2681,6 +2718,13 @@ class Database:
                     "admin": int(row[2] or 0),
                     "sv": int(row[3] or 0),
                     "operator": int(row[4] or 0)
+                },
+                "device_counts": {
+                    "unknown": int(row[5] or 0),
+                    "bot": int(row[6] or 0),
+                    "tablet": int(row[7] or 0),
+                    "mobile": int(row[8] or 0),
+                    "desktop": int(row[9] or 0)
                 }
             }
 
