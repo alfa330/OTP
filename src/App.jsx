@@ -16048,6 +16048,7 @@ const withAccessTokenHeader = (headers = {}) => {
                 const device = parseUA(s.user_agent);
                 rows.push({ ...s, user_name: group.user_name, user_id: group.user_id,
                             user_role: group.user_role, user_login: group.user_login,
+                            avatar_url: s.avatar_url || group.avatar_url || null,
                             device, ...extra });
             });
             (groupedAdminSessions.admins      || []).forEach((g) => push(g));
@@ -16438,8 +16439,12 @@ const withAccessTokenHeader = (headers = {}) => {
                             {/* Пользователь */}
                             <td className="px-3 py-3">
                                 <div className="flex items-center gap-2.5">
-                                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-gray-200 to-gray-300 flex items-center justify-center text-gray-600 text-xs font-bold shrink-0">
-                                    {(row.user_name || 'U').charAt(0).toUpperCase()}
+                                <div className="w-8 h-8 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-xs font-bold shrink-0">
+                                    {row.avatar_url ? (
+                                        <img src={row.avatar_url} alt={row.user_name || 'avatar'} className="h-full w-full object-cover" />
+                                    ) : (
+                                        (row.user_name || 'U').charAt(0).toUpperCase()
+                                    )}
                                 </div>
                                 <div className="min-w-0">
                                     <div className="font-medium text-gray-800 text-sm truncate leading-tight">
@@ -20109,6 +20114,7 @@ const withAccessTokenHeader = (headers = {}) => {
                             user_name: item.user_name,
                             user_role: item.user_role,
                             user_login: item.user_login,
+                            avatar_url: item.avatar_url || null,
                             supervisor_id: item.supervisor_id ?? null,
                             supervisor_name: item.supervisor_name || null,
                             sessions: []
@@ -21294,7 +21300,13 @@ const withAccessTokenHeader = (headers = {}) => {
                                     aria-expanded={showSidebarAccountDropdown}
                                     aria-haspopup="menu"
                                 >
-                                    <FaIcon className="fas fa-cog"></FaIcon>
+                                    <span className="h-7 w-7 rounded-full overflow-hidden border border-white/40 bg-blue-500 flex items-center justify-center text-[11px] font-semibold text-white shrink-0">
+                                        {user?.avatar_url ? (
+                                            <img src={user.avatar_url} alt={user?.name || 'avatar'} className="h-full w-full object-cover" />
+                                        ) : (
+                                            (user?.name || 'U').charAt(0).toUpperCase()
+                                        )}
+                                    </span>
                                     <span className="sidebar-text ml-2">Аккаунт</span>
 
                                     {/* Стрелка появляется только при hover */}
@@ -22019,7 +22031,18 @@ const withAccessTokenHeader = (headers = {}) => {
 
                                                         return (
                                                             <tr key={op.id ?? `${dirName}-${index}`} className="hover:bg-gray-50 transition-colors duration-200">
-                                                            <td className="px-6 py-4 whitespace-nowrap">{op.name}</td>
+                                                            <td className="px-6 py-4">
+                                                                <div className="flex items-center gap-3 min-w-0">
+                                                                    <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
+                                                                        {op.avatar_url ? (
+                                                                            <img src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
+                                                                        ) : (
+                                                                            (op.name || 'U').charAt(0).toUpperCase()
+                                                                        )}
+                                                                    </div>
+                                                                    <span className="truncate">{op.name}</span>
+                                                                </div>
+                                                            </td>
                                                             <td className={`px-6 py-4 whitespace-nowrap ${getCallCountColor(callCount, expectedCalls)}`}>{callCount}</td>
                                                             <td className="px-6 py-4 whitespace-nowrap">
                                                                 <span className={getScoreColor(op.avg_score)}>
@@ -22782,7 +22805,18 @@ const withAccessTokenHeader = (headers = {}) => {
                                                         {/* Операторы в группе */}
                                                         {grouped[dirName].map((op) => (
                                                         <tr key={op.id} className="hover:bg-gray-50 transition-colors duration-200">
-                                                            <td className="px-6 py-4 text-left truncate">{op.name}</td>
+                                                            <td className="px-6 py-4 text-left">
+                                                                <div className="flex items-center gap-3 min-w-0">
+                                                                    <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
+                                                                        {op.avatar_url ? (
+                                                                            <img src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
+                                                                        ) : (
+                                                                            (op.name || 'U').charAt(0).toUpperCase()
+                                                                        )}
+                                                                    </div>
+                                                                    <span className="truncate">{op.name}</span>
+                                                                </div>
+                                                            </td>
 
                                                             <td className="px-6 py-4 text-left">
                                                             {renderEmployeeStatusBadge(op.status)}
@@ -23041,7 +23075,18 @@ const withAccessTokenHeader = (headers = {}) => {
                                                     const callCount = parseInt(op.call_count) || 0;
                                                     return (
                                                         <tr key={op.id ?? `${dirName}-${idx}`} className="hover:bg-gray-50 transition-colors duration-200">
-                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{op.name}</td>
+                                                        <td className="px-6 py-4 text-sm text-gray-900">
+                                                            <div className="flex items-center gap-3 min-w-0">
+                                                                <div className="h-9 w-9 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-xs font-semibold text-white shrink-0">
+                                                                    {op.avatar_url ? (
+                                                                        <img src={op.avatar_url} alt={op.name || 'avatar'} className="h-full w-full object-cover" />
+                                                                    ) : (
+                                                                        (op.name || 'U').charAt(0).toUpperCase()
+                                                                    )}
+                                                                </div>
+                                                                <span className="truncate">{op.name}</span>
+                                                            </div>
+                                                        </td>
 
                                                         <td className={`px-6 py-4 whitespace-nowrap text-sm ${getCallCountColor(callCount, svData.expected_calls || 5)}`}>
                                                             {callCount}

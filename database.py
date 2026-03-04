@@ -2581,6 +2581,8 @@ class Database:
                     u.login,
                     u.supervisor_id,
                     sv.name AS supervisor_name,
+                    u.avatar_bucket,
+                    u.avatar_blob_path,
                     us.user_agent,
                     us.ip_address,
                     us.created_at,
@@ -2605,13 +2607,15 @@ class Database:
                     "user_login": row[4],
                     "supervisor_id": row[5],
                     "supervisor_name": row[6],
-                    "user_agent": row[7],
-                    "ip_address": row[8],
-                    "created_at": row[9],
-                    "last_seen_at": row[10],
-                    "expires_at": row[11],
-                    "sensitive_data_unlocked": bool(row[12]),
-                    "sensitive_data_unlocked_at": row[13]
+                    "avatar_bucket": row[7],
+                    "avatar_blob_path": row[8],
+                    "user_agent": row[9],
+                    "ip_address": row[10],
+                    "created_at": row[11],
+                    "last_seen_at": row[12],
+                    "expires_at": row[13],
+                    "sensitive_data_unlocked": bool(row[14]),
+                    "sensitive_data_unlocked_at": row[15]
                 }
                 for row in rows
             ]
