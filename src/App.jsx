@@ -21300,14 +21300,14 @@ const withAccessTokenHeader = (headers = {}) => {
                                     aria-expanded={showSidebarAccountDropdown}
                                     aria-haspopup="menu"
                                 >
-                                    <span className="h-7 w-7 rounded-full overflow-hidden border border-white/40 bg-blue-500 flex items-center justify-center text-[11px] font-semibold text-white shrink-0">
+                                    <span className="sidebar-avatar border border-white/40 bg-blue-500 flex items-center justify-center text-[10px] font-semibold text-white shrink-0">
                                         {user?.avatar_url ? (
                                             <img src={user.avatar_url} alt={user?.name || 'avatar'} className="h-full w-full object-cover" />
                                         ) : (
                                             (user?.name || 'U').charAt(0).toUpperCase()
                                         )}
                                     </span>
-                                    <span className="sidebar-text ml-2">Аккаунт</span>
+                                    <span className="sidebar-text">Аккаунт</span>
 
                                     {/* Стрелка появляется только при hover */}
                                     <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>

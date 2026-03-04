@@ -137,6 +137,14 @@
       height: 18px;
       min-width: 18px;
     }
+    .sidebar button > .sidebar-avatar {
+      flex: 0 0 18px;
+      width: 18px;
+      height: 18px;
+      min-width: 18px;
+      border-radius: 9999px;
+      overflow: hidden;
+    }
     .main-content {
       margin-left: 256px;
       transition: margin-left 0.3s ease;
