@@ -21086,7 +21086,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                 <img src="https://iili.io/Kfw7PQp.png" alt="Site Icon" className="w-10 h-10 object-contain"/>
                               </span>
                             </h1>
-                            <ul className="space-y-2 flex-1 overflow-y-auto min-h-0 sidebar-menu-scroll">
+                            <ul className="space-y-2 flex-1 overflow-y-auto overflow-x-hidden min-h-0 sidebar-menu-scroll">
                                 {user.role === 'admin' && (
                                     <>
                                         <li>
