@@ -21300,7 +21300,7 @@ const withAccessTokenHeader = (headers = {}) => {
                                     aria-expanded={showSidebarAccountDropdown}
                                     aria-haspopup="menu"
                                 >
-                                    <span className="sidebar-avatar border border-white/40 bg-blue-500 flex items-center justify-center text-[11px] font-semibold text-white shrink-0">
+                                    <span className="sidebar-avatar border border-white/40 bg-blue-500 flex items-center justify-center text-xs font-semibold text-white shrink-0">
                                         {user?.avatar_url ? (
                                             <img src={user.avatar_url} alt={user?.name || 'avatar'} className="h-full w-full object-cover" />
                                         ) : (
