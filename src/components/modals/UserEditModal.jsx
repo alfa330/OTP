@@ -22,9 +22,9 @@ const DISMISSAL_REASON_OPTIONS = [
     'По семейным обстоятельствам'
 ];
 
-const AVATAR_MAX_DIMENSION = 512;
-const AVATAR_TARGET_BYTES = 180 * 1024;
-const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+const AVATAR_MAX_DIMENSION = 128;
+const AVATAR_TARGET_BYTES = 40 * 1024;
+const AVATAR_MAX_BYTES = 512 * 1024;
 const AVATAR_CROP_PREVIEW_SIZE = 256;
 const AVATAR_MIN_ZOOM = 1;
 const AVATAR_MAX_ZOOM_CAP = 6;
@@ -196,6 +196,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const avatarCropDragRef = React.useRef(null);
     const [avatarPreviewUrl, setAvatarPreviewUrl] = useState("");
     const [avatarUploadFile, setAvatarUploadFile] = useState(null);
+    const [avatarOriginalFile, setAvatarOriginalFile] = useState(null);
     const [avatarRemoveRequested, setAvatarRemoveRequested] = useState(false);
     const [avatarError, setAvatarError] = useState("");
     const [isAvatarProcessing, setIsAvatarProcessing] = useState(false);
@@ -287,6 +288,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         closeAvatarCropEditor();
         setAvatarPreviewUrl((base.avatar_url || '').trim());
         setAvatarUploadFile(null);
+        setAvatarOriginalFile(null);
         setAvatarRemoveRequested(false);
         setAvatarError("");
         setIsAvatarProcessing(false);
@@ -425,6 +427,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 throw new Error("Аватар слишком большой после сжатия");
             }
             setAvatarUploadFile(compressedAvatar);
+            setAvatarOriginalFile(avatarCropState.sourceFile);
             setAvatarRemoveRequested(false);
             applyAvatarPreviewFromFile(compressedAvatar);
             closeAvatarCropEditor();
@@ -440,6 +443,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         closeAvatarCropEditor();
         setAvatarPreviewUrl("");
         setAvatarUploadFile(null);
+        setAvatarOriginalFile(null);
         setAvatarRemoveRequested(true);
         setAvatarError("");
         if (avatarInputRef.current) avatarInputRef.current.value = '';
@@ -469,6 +473,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setActiveTab("data");
         setAvatarPreviewUrl("");
         setAvatarUploadFile(null);
+        setAvatarOriginalFile(null);
         setAvatarRemoveRequested(false);
         setAvatarError("");
         setIsAvatarProcessing(false);
@@ -545,6 +550,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         const result = await onSave({
             ...editedUser,
             avatar_file: avatarUploadFile || null,
+            avatar_original_file: avatarUploadFile ? (avatarOriginalFile || null) : null,
             avatar_remove: !!avatarRemoveRequested
         }); // ожидаем, что onSave возвращает результат от бэка при создании
 
@@ -629,7 +635,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 <div className="min-w-0 flex-1">
                     <div className="text-sm font-medium text-slate-800">Аватар</div>
                     <div className="text-xs text-slate-500">
-                        JPEG/PNG/WebP. Квадратная обрезка + зум, затем авто-сжатие до ~180 KB (512x512).
+                        JPEG/PNG/WebP. Квадратная обрезка + зум, затем авто-сжатие до ~40 KB (128x128).
                     </div>
                     <div className="mt-2 flex flex-wrap gap-2">
                         <label className={`inline-flex cursor-pointer items-center rounded-md px-3 py-1.5 text-xs font-medium ${avatarDisabled ? 'bg-slate-300 text-slate-600 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>

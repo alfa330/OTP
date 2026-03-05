@@ -622,8 +622,14 @@ TASK_MAX_FILES = 10
 TASK_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 TASK_ATTACHMENTS_UPLOAD_FOLDER = (os.getenv('TASK_ATTACHMENTS_UPLOAD_FOLDER') or 'TaskAttachments/').strip()
 AVATAR_MAX_UPLOAD_BYTES = int(os.getenv('AVATAR_MAX_UPLOAD_BYTES', str(2 * 1024 * 1024)))
-AVATAR_SIGNED_URL_TTL_SECONDS = int(os.getenv('AVATAR_SIGNED_URL_TTL_SECONDS', str(12 * 60 * 60)))
+AVATAR_MAX_ORIGINAL_UPLOAD_BYTES = int(os.getenv('AVATAR_MAX_ORIGINAL_UPLOAD_BYTES', str(10 * 1024 * 1024)))
+AVATAR_SIGNED_URL_TTL_SECONDS = int(os.getenv('AVATAR_SIGNED_URL_TTL_SECONDS', str(24 * 60 * 60)))
+AVATAR_SIGNED_URL_CACHE_MAX_ITEMS = int(os.getenv('AVATAR_SIGNED_URL_CACHE_MAX_ITEMS', '20000'))
+AVATAR_SIGNED_URL_CACHE_MIN_REMAINING_SECONDS = int(os.getenv('AVATAR_SIGNED_URL_CACHE_MIN_REMAINING_SECONDS', '60'))
 AVATAR_UPLOAD_FOLDER = (os.getenv('AVATAR_UPLOAD_FOLDER') or 'AvatarUploads/').strip()
+AVATAR_THUMBNAIL_SUFFIX = (os.getenv('AVATAR_THUMBNAIL_SUFFIX') or '128').strip() or '128'
+AVATAR_SIGNED_URL_CACHE = {}
+AVATAR_SIGNED_URL_CACHE_LOCK = threading.Lock()
 TASK_TAG_LABELS = {
     'task': 'Задача',
     'problem': 'Проблема',
@@ -636,32 +642,88 @@ def _build_avatar_signed_url(bucket_name, blob_path):
     blob_path = (blob_path or '').strip()
     if not bucket_name or not blob_path:
         return None
+    cache_key = (bucket_name, blob_path)
+    now_ts = time.time()
+    with AVATAR_SIGNED_URL_CACHE_LOCK:
+        cached = AVATAR_SIGNED_URL_CACHE.get(cache_key)
+        if cached and cached.get('expires_at', 0) > (now_ts + AVATAR_SIGNED_URL_CACHE_MIN_REMAINING_SECONDS):
+            return cached.get('url')
+        if cached:
+            AVATAR_SIGNED_URL_CACHE.pop(cache_key, None)
     try:
         gcs_client = get_gcs_client()
         bucket = gcs_client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
-        return blob.generate_signed_url(
+        signed_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(seconds=AVATAR_SIGNED_URL_TTL_SECONDS),
             method="GET"
         )
+        expires_at = now_ts + AVATAR_SIGNED_URL_TTL_SECONDS
+        with AVATAR_SIGNED_URL_CACHE_LOCK:
+            AVATAR_SIGNED_URL_CACHE[cache_key] = {
+                "url": signed_url,
+                "expires_at": expires_at
+            }
+            if len(AVATAR_SIGNED_URL_CACHE) > AVATAR_SIGNED_URL_CACHE_MAX_ITEMS:
+                stale_keys = [k for k, v in AVATAR_SIGNED_URL_CACHE.items() if v.get('expires_at', 0) <= now_ts]
+                for stale_key in stale_keys:
+                    AVATAR_SIGNED_URL_CACHE.pop(stale_key, None)
+                overflow = len(AVATAR_SIGNED_URL_CACHE) - AVATAR_SIGNED_URL_CACHE_MAX_ITEMS
+                if overflow > 0:
+                    oldest_keys = sorted(
+                        AVATAR_SIGNED_URL_CACHE.items(),
+                        key=lambda item: item[1].get('expires_at', 0)
+                    )[:overflow]
+                    for oldest_key, _ in oldest_keys:
+                        AVATAR_SIGNED_URL_CACHE.pop(oldest_key, None)
+        return signed_url
     except Exception as e:
         logging.warning(f"Failed to build avatar signed URL for bucket={bucket_name}: {e}")
         return None
 
 
-def _build_avatar_blob_path(user_id, source_filename):
-    upload_folder = AVATAR_UPLOAD_FOLDER.strip('/')
-    upload_prefix = f"{upload_folder}/" if upload_folder else ""
-    safe_name = secure_filename(source_filename or "") or "avatar.webp"
+def _sanitize_avatar_extension(source_filename, fallback='.webp'):
+    safe_name = secure_filename(source_filename or "")
     extension = os.path.splitext(safe_name)[1].lower()
     if not extension or not re.match(r'^\.[a-z0-9]{1,10}$', extension):
-        extension = '.webp'
-    return (
-        f"{upload_prefix}avatars/{int(user_id)}/"
-        f"{datetime.utcnow().strftime('%Y/%m/%d')}/"
-        f"{uuid.uuid4().hex}{extension}"
-    )
+        return fallback
+    return extension
+
+
+def _build_avatar_blob_paths(user_id, thumbnail_filename, original_filename=None):
+    upload_folder = AVATAR_UPLOAD_FOLDER.strip('/')
+    upload_prefix = f"{upload_folder}/" if upload_folder else ""
+    thumbnail_ext = _sanitize_avatar_extension(thumbnail_filename, '.webp')
+    original_ext = _sanitize_avatar_extension(original_filename or thumbnail_filename, thumbnail_ext)
+    date_prefix = datetime.utcnow().strftime('%Y/%m/%d')
+    random_id = uuid.uuid4().hex
+    base_prefix = f"{upload_prefix}avatars/{int(user_id)}/{date_prefix}/{random_id}"
+    return {
+        "thumbnail_path": f"{base_prefix}_{AVATAR_THUMBNAIL_SUFFIX}{thumbnail_ext}",
+        "original_path": f"{base_prefix}_original{original_ext}"
+    }
+
+
+def _delete_avatar_blobs(bucket_name, *blob_paths):
+    bucket_name = (bucket_name or '').strip()
+    unique_paths = []
+    for item in blob_paths:
+        path = (item or '').strip()
+        if path and path not in unique_paths:
+            unique_paths.append(path)
+    if not bucket_name or not unique_paths:
+        return
+    try:
+        client = get_gcs_client()
+        bucket = client.bucket(bucket_name)
+    except Exception:
+        return
+    for blob_path in unique_paths:
+        try:
+            bucket.blob(blob_path).delete()
+        except Exception:
+            pass
 
 
 def _resolve_avatar_target_user(requester, requester_id, target_user_id):
@@ -1411,12 +1473,8 @@ def manage_user_avatar():
 
             prev_bucket = (previous_avatar.get('avatar_bucket') or '').strip()
             prev_blob_path = (previous_avatar.get('avatar_blob_path') or '').strip()
-            if prev_bucket and prev_blob_path:
-                try:
-                    client = get_gcs_client()
-                    client.bucket(prev_bucket).blob(prev_blob_path).delete()
-                except Exception:
-                    pass
+            prev_original_blob_path = (previous_avatar.get('avatar_original_blob_path') or '').strip()
+            _delete_avatar_blobs(prev_bucket, prev_blob_path, prev_original_blob_path)
 
             updated_avatar = db.get_user_avatar_storage(target_user_id) or {}
             return jsonify({
@@ -1441,6 +1499,23 @@ def manage_user_avatar():
         if not content_type.startswith('image/'):
             return jsonify({"error": "Only image files are allowed"}), 400
 
+        original_file_storage = request.files.get('avatar_original')
+        original_bytes = avatar_bytes
+        original_content_type = content_type
+        original_filename = file_storage.filename
+        if original_file_storage and original_file_storage.filename:
+            candidate_original_bytes = original_file_storage.read() or b''
+            if not candidate_original_bytes:
+                return jsonify({"error": "Uploaded original avatar is empty"}), 400
+            if len(candidate_original_bytes) > AVATAR_MAX_ORIGINAL_UPLOAD_BYTES:
+                return jsonify({"error": f"Original avatar exceeds {AVATAR_MAX_ORIGINAL_UPLOAD_BYTES // 1024} KB limit"}), 400
+            candidate_original_content_type = (original_file_storage.mimetype or '').strip().lower()
+            if not candidate_original_content_type.startswith('image/'):
+                return jsonify({"error": "Only image files are allowed for original avatar"}), 400
+            original_bytes = candidate_original_bytes
+            original_content_type = candidate_original_content_type
+            original_filename = original_file_storage.filename
+
         bucket_name = (
             os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_AVATARS')
             or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS')
@@ -1450,35 +1525,37 @@ def manage_user_avatar():
         if not bucket_name:
             return jsonify({"error": "Avatar bucket is not configured"}), 500
 
-        blob_path = _build_avatar_blob_path(target_user_id, file_storage.filename)
+        avatar_blob_paths = _build_avatar_blob_paths(target_user_id, file_storage.filename, original_filename)
+        blob_path = avatar_blob_paths['thumbnail_path']
+        original_blob_path = avatar_blob_paths['original_path']
         gcs_client = get_gcs_client()
         gcs_bucket = gcs_client.bucket(bucket_name)
         blob = gcs_bucket.blob(blob_path)
         blob.cache_control = "public, max-age=31536000, immutable"
         blob.upload_from_string(avatar_bytes, content_type=content_type)
+        original_blob = gcs_bucket.blob(original_blob_path)
+        original_blob.cache_control = "private, max-age=0, no-cache"
+        original_blob.upload_from_string(original_bytes, content_type=original_content_type)
 
         saved_avatar = db.set_user_avatar(
             user_id=target_user_id,
             bucket_name=bucket_name,
             blob_path=blob_path,
+            original_blob_path=original_blob_path,
             content_type=content_type,
             file_size=len(avatar_bytes)
         )
         if not saved_avatar:
-            try:
-                gcs_bucket.blob(blob_path).delete()
-            except Exception:
-                pass
+            _delete_avatar_blobs(bucket_name, blob_path, original_blob_path)
             return jsonify({"error": "Failed to save avatar metadata"}), 500
 
         prev_bucket = (previous_avatar.get('avatar_bucket') or '').strip()
         prev_blob_path = (previous_avatar.get('avatar_blob_path') or '').strip()
-        if prev_bucket and prev_blob_path and (prev_bucket != bucket_name or prev_blob_path != blob_path):
-            try:
-                client = get_gcs_client()
-                client.bucket(prev_bucket).blob(prev_blob_path).delete()
-            except Exception:
-                pass
+        prev_original_blob_path = (previous_avatar.get('avatar_original_blob_path') or '').strip()
+        is_same_thumbnail = prev_bucket == bucket_name and prev_blob_path == blob_path
+        is_same_original = prev_bucket == bucket_name and prev_original_blob_path == original_blob_path
+        if prev_bucket and (not is_same_thumbnail or not is_same_original):
+            _delete_avatar_blobs(prev_bucket, prev_blob_path, prev_original_blob_path)
 
         return jsonify({
             "status": "success",
@@ -1486,7 +1563,8 @@ def manage_user_avatar():
             "target_user_id": target_user[0],
             "avatar_url": _build_avatar_signed_url(saved_avatar.get("avatar_bucket"), saved_avatar.get("avatar_blob_path")),
             "avatar_updated_at": saved_avatar.get("avatar_updated_at"),
-            "avatar_file_size": saved_avatar.get("avatar_file_size")
+            "avatar_file_size": saved_avatar.get("avatar_file_size"),
+            "avatar_original_file_size": len(original_bytes)
         }), 200
     except Exception as e:
         logging.error(f"Error in /api/user/avatar: {e}", exc_info=True)
