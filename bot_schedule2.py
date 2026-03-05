@@ -154,6 +154,7 @@ def _get_user_payload(user):
     avatar_bucket = None
     avatar_blob_path = None
     avatar_updated_at = None
+    gender = None
     role = None
     user_id = None
     name = None
@@ -164,9 +165,15 @@ def _get_user_payload(user):
         name = user[2]
         telegram_id = user[1]
         if len(user) >= 20:
+            gender = user[13]
             avatar_bucket = user[15]
             avatar_blob_path = user[16]
             avatar_updated_at = user[19]
+        elif len(user) >= 17:
+            gender = user[16]
+            avatar_bucket = user[11]
+            avatar_blob_path = user[12]
+            avatar_updated_at = user[15]
         elif len(user) >= 16:
             avatar_bucket = user[11]
             avatar_blob_path = user[12]
@@ -176,6 +183,7 @@ def _get_user_payload(user):
         user_id = user.get("id")
         name = user.get("name")
         telegram_id = user.get("telegram_id")
+        gender = user.get("gender")
         avatar_bucket = user.get("avatar_bucket")
         avatar_blob_path = user.get("avatar_blob_path")
         avatar_updated_at = user.get("avatar_updated_at")
@@ -184,6 +192,7 @@ def _get_user_payload(user):
         "id": user_id,
         "name": name,
         "telegram_id": telegram_id,
+        "gender": gender,
         "avatar_url": _build_avatar_signed_url(avatar_bucket, avatar_blob_path),
         "avatar_updated_at": avatar_updated_at.isoformat() if hasattr(avatar_updated_at, "isoformat") else avatar_updated_at
     }

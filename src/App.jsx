@@ -18397,7 +18397,8 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                                 role: data.role,
                                 id: data.id,
                                 name: data.name,
-                                telegram_id: data.telegram_id
+                                telegram_id: data.telegram_id,
+                                gender: data.gender
                             };
                             setUser(sessionUser);
                         }
@@ -20267,7 +20268,8 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                             role: data.role,
                             id: data.id,
                             name: data.name,
-                            telegram_id: data.telegram_id
+                            telegram_id: data.telegram_id,
+                            gender: data.gender
                         };
                         setUser(sessionUser);
                         setLogin('');

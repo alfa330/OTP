@@ -2334,7 +2334,7 @@ class Database:
     def get_user_by_login(self, login):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, telegram_id, name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url, scores_table_url, avatar_bucket, avatar_blob_path, avatar_content_type, avatar_file_size, avatar_updated_at
+                SELECT id, telegram_id, name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url, scores_table_url, avatar_bucket, avatar_blob_path, avatar_content_type, avatar_file_size, avatar_updated_at, gender
                 FROM users WHERE login = %s
             """, (login,))
             return cursor.fetchone()
