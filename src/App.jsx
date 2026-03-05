@@ -5833,6 +5833,51 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                     isBlacklist: !!(found.isBlacklist ?? found.is_blacklist)
                 } : null;
             };
+            const plannerServerDateRange = useMemo(() => {
+                const baseDate = (currentDate instanceof Date && !Number.isNaN(currentDate.getTime()))
+                    ? new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate())
+                    : new Date();
+
+                if (viewMode === 'week') {
+                    const start = weekStart(baseDate);
+                    const end = addDays(start, 6);
+                    return {
+                        startDate: todayDateStr(start),
+                        endDate: todayDateStr(end)
+                    };
+                }
+
+                if (viewMode === 'month') {
+                    const start = startOfMonth(baseDate);
+                    const end = endOfMonth(baseDate);
+                    return {
+                        startDate: todayDateStr(start),
+                        endDate: todayDateStr(end)
+                    };
+                }
+
+                const day = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate());
+                return {
+                    startDate: todayDateStr(day),
+                    endDate: todayDateStr(day)
+                };
+            }, [currentDate, viewMode]);
+            const paginatePlannerDates = useCallback((direction = 1) => {
+                const step = Number(direction) >= 0 ? 1 : -1;
+                setCurrentDate(prevDate => {
+                    const src = (prevDate instanceof Date && !Number.isNaN(prevDate.getTime()))
+                        ? prevDate
+                        : new Date();
+                    const base = new Date(src.getFullYear(), src.getMonth(), src.getDate());
+                    if (viewMode === 'month') {
+                        return new Date(base.getFullYear(), base.getMonth() + step, 1);
+                    }
+                    if (viewMode === 'week') {
+                        return new Date(base.getFullYear(), base.getMonth(), base.getDate() + (step * 7));
+                    }
+                    return new Date(base.getFullYear(), base.getMonth(), base.getDate() + step);
+                });
+            }, [viewMode]);
 
             // Восстановление выбранной даты/фильтров/режима после перезагрузки
             useEffect(() => {
@@ -5932,11 +5977,18 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
             useEffect(() => {
                 if (!user) return;
                 if (user?.role === 'operator') return;
+                const rangeStart = plannerServerDateRange?.startDate;
+                const rangeEnd = plannerServerDateRange?.endDate;
+                if (!rangeStart || !rangeEnd) return;
                 let cancelled = false;
                 const loadSchedules = async () => {
                     try {
                         setIsLoading(true);
-                        const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators`, {
+                        const qs = new URLSearchParams({
+                            start_date: rangeStart,
+                            end_date: rangeEnd
+                        });
+                        const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators?${qs.toString()}`, {
                             credentials: 'include',
                             headers: withAccessTokenHeader()
                         });
@@ -5982,7 +6034,7 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
 
                 loadSchedules();
                 return () => { cancelled = true; };
-            }, [user, initialOperators]);
+            }, [user, initialOperators, plannerServerDateRange?.startDate, plannerServerDateRange?.endDate]);
 
             useEffect(() => {
                 if (!user) return;
@@ -7035,7 +7087,13 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
             };
 
             const reloadPlannerSchedulesFromServer = async () => {
-                const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators`, {
+                const rangeStart = plannerServerDateRange?.startDate;
+                const rangeEnd = plannerServerDateRange?.endDate;
+                const qs = new URLSearchParams();
+                if (rangeStart) qs.set('start_date', rangeStart);
+                if (rangeEnd) qs.set('end_date', rangeEnd);
+                const query = qs.toString();
+                const response = await fetch(`${API_BASE_URL}/api/work_schedules/operators${query ? `?${query}` : ''}`, {
                     credentials: 'include',
                     headers: withAccessTokenHeader()
                 });
@@ -9490,12 +9548,12 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                                     </div>
                                     {operatorSelfTab === 'schedule' && (
                                         <div className="flex gap-2 items-center self-stretch sm:self-auto justify-between sm:justify-start">
-                                            <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-left"></FaIcon></button>
+                                            <button onClick={() => paginatePlannerDates(-1)} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-left"></FaIcon></button>
                                             <div className="flex-1 sm:flex-none px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-center leading-tight">
                                                 <div className="text-[11px] uppercase tracking-wide text-slate-500">{formatWeekdayRu(currentDate, 'short')}</div>
                                                 <div className="text-sm font-semibold text-slate-900">{formatDateRuDayMonth(currentDate)}</div>
                                             </div>
-                                            <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-right"></FaIcon></button>
+                                            <button onClick={() => paginatePlannerDates(1)} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-right"></FaIcon></button>
                                         </div>
                                     )}
                                 </div>
@@ -11263,9 +11321,9 @@ const AvatarImage = ({ src, alt, className, loading = 'lazy', fetchPriority = 'a
                             </div>
                             </>
                         )}
-                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1))} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-left"></FaIcon></button>
+                        <button onClick={() => paginatePlannerDates(-1)} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-left"></FaIcon></button>
                         <div className="text-sm">{currentDate.toLocaleDateString()}</div>
-                        <button onClick={() => setCurrentDate((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1))} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-right"></FaIcon></button>
+                        <button onClick={() => paginatePlannerDates(1)} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-right"></FaIcon></button>
                         </div>
                     </div>
 
