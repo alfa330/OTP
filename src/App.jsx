@@ -5633,6 +5633,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const breakReminderNotifiedRef = useRef(new Map());
             const plannerLoadedMonthKeysRef = useRef(new Set());
             const plannerLoadingMonthKeysRef = useRef(new Set());
+            const normalizedInitialOperatorsRef = useRef(normalizedInitialOperators);
             const editTimelineScrollRef = useRef(null);
             const editTimelineStatusNodeMapRef = useRef(new Map());
             const editJournalScrollRef = useRef(null);
@@ -5850,11 +5851,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const endDate = String(period?.endDate || period?.end_date || '');
                 return `fallback:${statusCode}:${startDate}:${endDate}:${idx}`;
             }, []);
+            useEffect(() => {
+                normalizedInitialOperatorsRef.current = normalizedInitialOperators;
+            }, [normalizedInitialOperators]);
             const mergePlannerOperatorsFromServer = useCallback((serverOperators = []) => {
                 const serverMap = new Map((serverOperators || []).map(op => [plannerOperatorIdKey(op?.id), op]));
                 setOperators(prevOps => {
+                    const seedOperators = (normalizedInitialOperatorsRef.current && normalizedInitialOperatorsRef.current.length)
+                        ? normalizedInitialOperatorsRef.current
+                        : serverOperators;
                     const base = mergePlannerOperators(
-                        (normalizedInitialOperators && normalizedInitialOperators.length) ? normalizedInitialOperators : serverOperators,
+                        seedOperators,
                         prevOps
                     );
                     const merged = base.map(op => {
@@ -5901,7 +5908,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
                     return merged;
                 });
-            }, [normalizedInitialOperators, plannerOperatorIdKey, plannerStatusPeriodMergeKey]);
+            }, [plannerOperatorIdKey, plannerStatusPeriodMergeKey]);
             const fetchPlannerSchedulesByMonths = useCallback(async (monthKeys = [], { force = false, signal } = {}) => {
                 if (!user?.id || user?.role === 'operator') return null;
                 const uniqueMonthKeys = Array.from(new Set(
